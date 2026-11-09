@@ -91,6 +91,38 @@
                    (harness-compose-stack--argv (harness-compose-stack-get 'test-stack)
                                                 "ps" "--format" "json")))))
 
+(ert-deftest harness-stacks-profiles-follow-a-setting ()
+  "A profile function is asked for each command, so a setting picks the service."
+  (harness-stacks-test--stacks
+    (let ((choice "first"))
+      (harness-define-compose-stack 'test-stack
+        :label "Test stack"
+        :directory "/tmp/test-stack"
+        :project "test-project"
+        :profiles (lambda () (list choice))
+        :all-profiles '("first" "second"))
+      (should (equal '("docker" "compose" "-p" "test-project"
+                       "-f" "/tmp/test-stack/docker-compose.yml"
+                       "--profile" "first"
+                       "ps" "--format" "json")
+                     (harness-compose-stack--argv (harness-compose-stack-get 'test-stack)
+                                                  "ps" "--format" "json")))
+      (setq choice "second")
+      (should (equal '("docker" "compose" "-p" "test-project"
+                       "-f" "/tmp/test-stack/docker-compose.yml"
+                       "--profile" "second"
+                       "up" "-d")
+                     (harness-compose-stack--argv (harness-compose-stack-get 'test-stack)
+                                                  "up" "-d")))
+      ;; Stopping enables every profile the stack can run, so a service
+      ;; another selection started goes too.
+      (should (equal '("docker" "compose" "-p" "test-project"
+                       "-f" "/tmp/test-stack/docker-compose.yml"
+                       "--profile" "first" "--profile" "second"
+                       "down")
+                     (harness-compose-stack--stop-argv
+                      (harness-compose-stack-get 'test-stack) "down"))))))
+
 (ert-deftest harness-stacks-up ()
   "Starting a stack runs compose up in the background, then asks its state."
   (harness-stacks-test--stacks
@@ -157,6 +189,30 @@
                        (car calls)))
         (should (eq 'stopped (plist-get answer :state)))
         (should (equal "Stopped" (plist-get answer :detail)))))))
+
+(ert-deftest harness-stacks-down-every-profile ()
+  "Stopping a stack enables every profile it can run, not only the selected one.
+Compose removes the profile services a command enables, so a down that
+named only the new selection would leave the old one running."
+  (harness-stacks-test--stacks
+    (let (calls)
+      (harness-define-compose-stack 'test-stack
+        :label "Test stack"
+        :directory "/tmp/test-stack"
+        :project "test-project"
+        :profiles (lambda () '("second"))
+        :all-profiles '("first" "second"))
+      (cl-letf (((symbol-function 'harness-compose-stack-available-p) (lambda () t))
+                ((symbol-function 'harness-stacks--run)
+                 (lambda (argv _env callback)
+                   (push argv calls)
+                   (funcall callback (cons 0 "")))))
+        (harness-compose-stack-down 'test-stack)
+        (should (equal '("docker" "compose" "-p" "test-project"
+                         "-f" "/tmp/test-stack/docker-compose.yml"
+                         "--profile" "first" "--profile" "second"
+                         "down")
+                       (car calls)))))))
 
 (ert-deftest harness-stacks-status-json ()
   "Compose ps JSON says how many services run, and whether one is still starting."

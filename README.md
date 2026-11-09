@@ -261,9 +261,10 @@ A non-comprehensive list of all the different functionality offered by modules s
   - Closing a session: `PREFIX x` closes any, `C-c M-k` at the end of a chat's keys; a BTW closes as its `[close]` does
 - [Voice dictation and spoken replies](docs/voice.md) (`ui-voice`, optional)
   - WAV push-to-talk with local/configurable transcription and synthesis, editable compose text, quick voice chat and explicit interruption
-  - Providers with a `wav` or `live` capability: WAV dictation, ChatGPT Live over the API, a local whisper.cpp and Kokoro pipeline, the scripted fixture or a custom sidecar
+  - Providers with a `wav` or `live` capability: WAV dictation, ChatGPT Live over the API, a local whisper.cpp or Parakeet and Kokoro pipeline, the scripted fixture or a custom sidecar
   - Live voice keeps the audio path in a JSON-lines sidecar and delegates to the chat, with an animated stage line, a styled transcript, mute, playback interruption and separate work cancellation
-  - Effort levels (low, medium, high) pick the local whisper model and the provider's own fragments
+  - Local speech models switched by name: whisper tiny, base or small through the effort levels, or NVIDIA Parakeet 0.6B (English or 25 European languages) through sherpa-onnx; the setup page shows the model, its engine and its download size
+  - Effort levels (low, medium, high) pick the whisper model that `auto` runs and the provider's own fragments
   - [Voice audio backends](docs/voice-audio.md): PipeWire, PulseAudio, ALSA or ffmpeg, newest first, with failover
   - [Realtime voice research](docs/voice-realtime.md): GPT-Live, backchannels, delegation, the sidecar protocol and open-source pipelines
   - [The voice pipeline in the client](docs/voice-pipeline-visualization.md): the level before the filter, the bursts it kept, transcript, turn and speaker, from the real events, in the voice screen and in a compact form a buddy can show
@@ -271,7 +272,7 @@ A non-comprehensive list of all the different functionality offered by modules s
   - Docker over its socket or rootless Podman, chosen automatically or by hand; a stack never calls either directly
   - A module or plugin declares the services it needs; the harness starts and stops the stack and joins its network to the harness server's
   - Each stack has its own network and publishes random loopback ports, so 8080 never collides
-  - Bundled `voice-local` stack: whisper.cpp for speech to text and Kokoro for text to speech, each on a random loopback port the local provider reads
+  - Bundled `voice-local` stack: whisper.cpp or Parakeet for speech to text and Kokoro for text to speech, each on a random loopback port the local provider reads; one compose profile per speech engine
 - Sticky compose box (`ui-sticky-compose`)
   - A chat window scrolled away from its compose box draws a compact copy of it in its mode line while you compose
   - The start and end of the draft, its lines and attachments, and a button that jumps back to the box

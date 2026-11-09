@@ -19,7 +19,7 @@ model providers have capabilities of their own:
 | --- | --- | --- |
 | `wav` (the default) | `wav` | Local push-to-talk dictation and spoken replies |
 | `chatgpt` | `live` | GPT-Live over the API, delegating work to this chat |
-| `unmute` | `live` | A local pipeline: whisper.cpp for speech to text and Kokoro for text to speech |
+| `unmute` | `live` | A local pipeline: whisper.cpp or Parakeet for speech to text and Kokoro for text to speech |
 | `fixture` | `live` | The scripted sidecar: the whole loop without a microphone, key or model |
 | `custom` | `live` | Any sidecar in `harness-voice-live-command` |
 
@@ -142,7 +142,7 @@ to, so the harness agent still runs the workspace.
 ### Local pipeline
 
 `unmute` runs `scripts/harness-voice-live-unmute`, a local pipeline around two
-OpenAI-compatible endpoints: whisper.cpp for speech to text, and Kokoro for
+OpenAI-compatible endpoints: a speech model for speech to text, and Kokoro for
 text to speech. It records with an energy voice detector, posts each utterance
 to the speech-to-text endpoint, delegates the text, and posts the answer to the
 text-to-speech endpoint for playback. No hosted model and no API key are
@@ -150,7 +150,7 @@ involved; audio goes only to the loopback addresses below unless changed.
 
 ```elisp
 (setq harness-voice-provider 'unmute
-      ;; nil: the running voice-local stack's whisper.cpp service
+      ;; nil: the running voice-local stack's service for the selected model
       harness-voice-unmute-stt-url nil
       ;; nil: the running voice-local stack's Kokoro service
       harness-voice-unmute-tts-url nil
@@ -159,10 +159,10 @@ involved; audio goes only to the loopback addresses below unless changed.
 ```
 
 Speech to text defaults to the `voice-local` stack: the provider reads the
-random loopback port the stack published for whisper.cpp and posts to its
-`/inference` route, so nothing has to be copied by hand. Set
-`harness-voice-unmute-stt-url` to point at a whisper.cpp server you run
-yourself.
+random loopback port the stack published for the selected speech model and
+posts to its `/inference` route, so nothing has to be copied by hand. Set
+`harness-voice-unmute-stt-url` to point at a whisper.cpp or Parakeet server you
+run yourself.
 
 Text to speech defaults to the same stack's `tts` service: Kokoro-FastAPI's CPU
 image, whose `/v1/audio/speech` route takes the OpenAI request shape and
@@ -175,8 +175,9 @@ setup list says `Text to speech endpoint unset`. The sidecar resamples the
 reply WAV -- Kokoro and OpenAI answer at 24 kHz -- to the pipeline's 16 kHz
 before playback, so speech keeps its speed and pitch.
 
-A whisper.cpp server (see below) and a Piper server with the same request shape
-work too, so the local provider needs no particular speech service. The sidecar
+A whisper.cpp server (see below), the bundled Parakeet server and a Piper
+server with the same request shape work too, so the local provider needs no
+particular speech service. The sidecar
 records and plays through the same audio backend as the WAV recorder. The
 energy detector is not acoustic echo cancellation: use headphones when the
 speaker is open. The microphone keeps being read while a reply plays, in blocks
@@ -187,16 +188,44 @@ nor hides the first word of a person speaking over it.
 [Why capture and playback are paced this way](design/live-voice-capture-pacing.md)
 has the measurements and the tests.
 
-The local stack in `scripts/stacks/voice-local/` runs whisper.cpp and
+#### Speech models
+
+The local stack in `scripts/stacks/voice-local/` runs one speech model and
 Kokoro-FastAPI in containers on a network of its own, each published on a
 random loopback port; `M-x harness-stacks` starts both
 ([compose stacks](stacks.md)) on the
-[selected container runtime](container-runtime.md). `harness-voice-effort`
-picks the whisper model the stack loads:
+[selected container runtime](container-runtime.md).
+
+`harness-voice-stt-model` picks the speech model:
+
+| Model | Engine | Download | Notes |
+| --- | --- | --- | --- |
+| `auto` (the default) | whisper.cpp | 75–466 MB | Follows `harness-voice-effort`: `ggml-tiny.en.bin`, `ggml-base.en.bin` or `ggml-small.en.bin` |
+| `whisper-tiny-en`, `whisper-base-en`, `whisper-small-en` | whisper.cpp | 75 MB, 142 MB, 466 MB | English; the effort presets, chosen outright |
+| `parakeet-0.6b` | sherpa-onnx | 650 MB | NVIDIA Parakeet TDT 0.6B v2, English, punctuation and case |
+| `parakeet-0.6b-v3` | sherpa-onnx | 650 MB | Parakeet TDT 0.6B v3, 25 European languages, punctuation and case |
+
+![The voice setup list: the local pipeline with Parakeet 0.6B selected, its
+sherpa-onnx engine and 650 MB download, and a running local stack](media/voice-setup.png)
+
+`M-x harness-voice-setup` shows the choice as a **Speech to text** line under
+the local stack, with the model's engine and download size and a `[Change]`
+control; `M-x harness-voice-select-stt-model` is the same list from anywhere.
+Selecting a model stops a running live session -- its sidecar holds the
+previous endpoint -- and restarts a running stack, so exactly one speech
+engine runs beside Kokoro. The first Parakeet start builds its small image and
+downloads the model into the stack's volume; the container log names the URL
+and the unpack. `PARAKEET_MODEL_URL` points at a mirror, and
+`HARNESS_PARAKEET_IMAGE` at another locally built image.
+
+The whisper model the effort presets choose is still the one `auto` runs:
 **low** is `ggml-tiny.en.bin`, **medium** (the default) is
 `ggml-base.en.bin`, and **high** is `ggml-small.en.bin`. The setup list has the
-same three buttons. A provider that declares no fragments passes none; the
-local stack still uses the level for its whisper model.
+same three buttons. With a model chosen, the level changes only a provider's
+own fragments, never the model. A provider that declares no fragments passes
+none; with no model chosen, the local stack uses the level for its whisper
+model, and changing it restarts a running stack the way the model choice
+does.
 
 ### Scripted fixture and custom sidecars
 
@@ -334,7 +363,9 @@ bundled `scripts/harness-voice-live-fixture` is a working small sidecar for
 tests and demonstrations; it emits a scripted transcript and one delegation, so
 it needs no speech service.
 
-## Local transcription with whisper.cpp
+## Local transcription
+
+### whisper.cpp
 
 Install [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and download a
 model following its instructions. A small model such as `base.en` is a useful
@@ -386,6 +417,31 @@ headers. Another HTTP speech service needs a compatible endpoint or a small
 wrapper of its own. An explicit remote `--url` uploads microphone audio there;
 use HTTPS and the service's appropriate authentication rather than putting a
 credential in this helper's URL.
+
+### Parakeet
+
+The stack's `parakeet` service is the bundled alternative:
+`scripts/stacks/voice-local/parakeet/server.py`, a standard-library HTTP server
+around one [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) Parakeet model,
+on the CPU. It answers whisper.cpp's `/inference` as well as the OpenAI
+`/v1/audio/transcriptions` route, both taking a multipart `file` and returning
+`{"text": "..."}`, so `scripts/harness-voice-stt` and the local sidecar read it
+without a change. `harness-voice-stt-model` selects it, as above; by hand:
+
+```sh
+docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local \
+    --profile parakeet up -d
+port=$(docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local \
+    --profile parakeet port parakeet 8081)
+python3 scripts/harness-voice-stt recording.wav --url "http://127.0.0.1:$port/inference"
+```
+
+The server loads `PARAKEET_MODEL` from the `parakeet-models` volume and
+downloads it from the sherpa-onnx releases on first start, unless
+`PARAKEET_DOWNLOAD=0`. NVIDIA's Parakeet TDT 0.6B weights are CC-BY-4.0; the
+int8 ONNX conversions are the sherpa-onnx project's. The English v2 model is
+`parakeet-0.6b`, and `parakeet-0.6b-v3` covers 25 European languages. Both
+answer with punctuation and case.
 
 ## Local speech with Piper or eSpeak NG
 
@@ -534,11 +590,12 @@ is installed automatically:
 | [Moshi](https://github.com/kyutai-labs/moshi) | Local full-duplex speech-text model; it is its own dialogue brain, needs a suitable GPU and has no harness backend bridge out of the box. |
 | [Kyutai Unmute](https://github.com/kyutai-labs/unmute) | Local streaming STT, text LLM and TTS; turn-based, and needs Linux/WSL, x86-64 and enough VRAM. |
 
-For the WAV command contract, there are lower-latency local engines worth
-wrapping; none is installed automatically:
+For the WAV command contract, local engines beyond the bundled ones are worth
+wrapping; none of these is installed automatically:
 
 | Project | Fit and tradeoff |
 | --- | --- |
+| [Parakeet TDT 0.6B](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) via [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | Bundled: `parakeet-0.6b` and `parakeet-0.6b-v3` in `harness-voice-stt-model`, served by the stack's `parakeet` service. English or 25 European languages, punctuation and case, CPU, CC-BY-4.0 weights. |
 | [Moonshine](https://moonshine-voice.readthedocs.io/en/latest/using/transcription/) | Local streaming transcription with provisional/final events; a future alternative to completed-WAV STT. A wrapper is needed for the command contract. |
 | [Pocket TTS](https://github.com/kyutai-labs/pocket-tts), [Kokoro](https://github.com/hexgrad/kokoro) | Local TTS alternatives for a custom adapter; check checkpoint/voice licenses and runtime requirements. |
 
@@ -559,6 +616,19 @@ python3 -B test/harness-voice-stt-test.py
 They check the multipart/UTF-8 contract, missing/malformed/empty results, HTTP
 errors, request timeout, invalid input, proxy bypass and redirect refusal. The
 Emacs voice tests cover the UI lifecycle separately.
+
+The Parakeet server's tests need Python 3 only as well; no model, network or
+microphone is used:
+
+```sh
+python3 -B test/harness-voice-parakeet-test.py
+```
+
+They check the routes, multipart boundaries, the WAV widths and stereo
+downmix, the refusals, a model download from a `file://` archive and a refused
+archive that leaves its destination. The ERT suite runs them with the rest.
+Set `PARAKEET_TEST_MODEL` to a downloaded model directory to transcribe its own
+test WAV with the real recognizer.
 
 The live protocol tests need Python 3, a microphone is not used:
 

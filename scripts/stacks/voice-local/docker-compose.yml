@@ -1,17 +1,30 @@
-# Local voice stack: whisper.cpp for speech to text and Kokoro for text
-# to speech.  The harness's `stacks' module starts it (`M-x
-# harness-stacks'), or run it by hand:
+# Local voice stack: whisper.cpp or NVIDIA Parakeet for speech to text,
+# and Kokoro for text to speech.  The harness's `stacks' module starts
+# it (`M-x harness-stacks'), the voice setup list starts and stops it,
+# or run it by hand with one speech model enabled:
 #
-#   docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local up -d
+#   docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local \
+#     --profile whisper up -d
+#   docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local \
+#     --profile parakeet up -d
 #
 # The stack gets a container network of its own, and each service a
-# random loopback port, so two stacks never fight over 8080 or 8880.
-# The harness's local voice provider reads the whisper service's random
-# port for speech to text and the tts service's for text to speech.
+# random loopback port, so two stacks never fight over 8080, 8081 or
+# 8880.  The harness's local voice provider reads the selected model's
+# service for speech to text and the tts service's for text to speech.
+#
+# `whisper' and `parakeet' are profile services: exactly one speech
+# model runs.  `tts' has no profile and always starts.  Stopping needs
+# every profile the stack ran with (`--profile whisper --profile
+# parakeet down'), which the harness does for its selected model.
 name: ${COMPOSE_PROJECT_NAME:-voice-local}
 
 services:
   whisper:
+    # whisper.cpp's server, loaded with one ggml model.  The harness's
+    # effort presets pick tiny, base or small; a model chosen by name
+    # picks its own.
+    profiles: ["whisper"]
     image: ${HARNESS_WHISPER_IMAGE:-ghcr.io/ggml-org/whisper.cpp:main}
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     environment:
@@ -22,6 +35,30 @@ services:
     ports:
       # An empty host port lets the runtime pick a free one.
       - "127.0.0.1::8080"
+    restart: unless-stopped
+    networks:
+      - voice
+
+  parakeet:
+    # The bundled Parakeet server (sherpa-onnx, CPU).  One int8 model
+    # directory from the sherpa-onnx model zoo; PARAKEET_MODEL names it
+    # and the server downloads it into the volume on first start.
+    profiles: ["parakeet"]
+    build:
+      context: ./parakeet
+    image: ${HARNESS_PARAKEET_IMAGE:-harness-voice-parakeet:2.0.1}
+    environment:
+      PARAKEET_MODEL: ${PARAKEET_MODEL:-sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8}
+      PARAKEET_FEATURE_DIM: ${PARAKEET_FEATURE_DIM:-80}
+      PARAKEET_THREADS: ${PARAKEET_THREADS:-4}
+      PARAKEET_DOWNLOAD: ${PARAKEET_DOWNLOAD:-1}
+      # A mirror of the sherpa-onnx model releases; empty keeps the
+      # default in server.py.
+      PARAKEET_MODEL_URL: ${PARAKEET_MODEL_URL:-}
+    volumes:
+      - parakeet-models:/models
+    ports:
+      - "127.0.0.1::8081"
     restart: unless-stopped
     networks:
       - voice
@@ -44,6 +81,7 @@ services:
 
 volumes:
   whisper-models:
+  parakeet-models:
 
 networks:
   voice:

@@ -11,12 +11,14 @@ Podman.
 
 (harness-define-compose-stack 'voice-local
   :label "Local voice"
-  :doc "whisper.cpp for speech to text and Kokoro for text to speech, on loopback."
+  :doc "whisper.cpp or Parakeet for speech to text and Kokoro for text to speech, on loopback."
   :directory (expand-file-name "scripts/stacks/voice-local" harness-directory)
   :project "voice-local"
   :network "voice"
-  :endpoints '((whisper 8080) (tts 8880))
-  :env (lambda () '(("WHISPER_MODEL" . "ggml-base.en.bin"))))
+  :endpoints '((whisper 8080) (parakeet 8081) (tts 8880))
+  :profiles #'harness-voice-stack-profiles
+  :all-profiles '("whisper" "parakeet")
+  :env #'harness-voice-stack-env)
 ```
 
 | Key | Meaning |
@@ -25,7 +27,8 @@ Podman.
 | `:project` | The compose project name (the id by default) |
 | `:network` | The compose network the stack's services join, one per stack |
 | `:endpoints` | Service name to its container port; the published loopback port is discovered |
-| `:profiles` | Compose profiles every command enables, for services behind one |
+| `:profiles` | Compose profiles every command enables, for services behind one; a list, or a function returning one for each command |
+| `:all-profiles` | Every profile the stack can use, enabled by `down` so another selection's services go too |
 | `:env` | A function returning extra environment variables for the stack's commands |
 
 ## Starting and stopping
@@ -34,7 +37,7 @@ Podman.
 | --- | --- |
 | `M-x harness-stacks` (or `M-x harness-compose-stacks`) | The stacks page: runtime, state, endpoints, `[Start]` and `[Stop]` |
 | `M-x harness-compose-stack-up` | `RUNTIME compose -p PROJECT -f FILE up -d`, then join the network |
-| `M-x harness-compose-stack-down` | `RUNTIME compose -p PROJECT -f FILE down` |
+| `M-x harness-compose-stack-down` | `RUNTIME compose -p PROJECT -f FILE --profile … down`, with every profile the stack can use |
 | `M-x harness-compose-stack-status` | `running`, `starting`, `stopped` or `error`, with a one-line detail |
 
 Commands are argv lists, never shell snippets, and run in the stack's
@@ -69,30 +72,40 @@ network counts as success.
 
 | Service | Image | Port | What |
 | --- | --- | --- | --- |
-| `whisper` | `ghcr.io/ggml-org/whisper.cpp:main` | container 8080, random loopback | whisper-server, its model in a named volume |
+| `whisper` | `ghcr.io/ggml-org/whisper.cpp:main` | container 8080, random loopback | whisper-server, its model in a named volume; profile `whisper` |
+| `parakeet` | built from `parakeet/Dockerfile` (`sherpa-onnx`) | container 8081, random loopback | Parakeet TDT 0.6B over `/inference`, its model in a named volume; profile `parakeet` |
 | `tts` | `ghcr.io/remsky/kokoro-fastapi-cpu:v0.8.2` | container 8880, random loopback | Kokoro-FastAPI, an OpenAI-compatible `/v1/audio/speech` route on the CPU |
 
 ```sh
-docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local up -d
+docker compose -f scripts/stacks/voice-local/docker-compose.yml -p voice-local \
+    --profile whisper up -d
 ```
 
 The harness starts it from the voice setup list (**Local voice stack**,
-`[Start]`), or from `M-x harness-stacks`; `[Start]` runs whisper.cpp and
-Kokoro together. Both images are published, so the stack starts without
-a local build, a GPU or a key. The first pull is the large part of a
-first start, and Kokoro needs about twenty seconds to load its model.
+`[Start]`), or from `M-x harness-stacks`. Whisper and Parakeet are
+profile services, so exactly one speech model runs beside Kokoro, and
+the voice setup page's **Speech to text** choice names the profile. A
+by-hand `up` names one: `--profile whisper` or `--profile parakeet`.
+Kokoro's image is published; a first Parakeet start builds its small
+image and downloads a 460 MB model into the stack's volume. The first
+pull, that build and Kokoro's twenty-second model load are the large
+part of a first start.
 
 The `unmute` voice provider takes its speech-to-text URL from the
-running stack's whisper.cpp service, so the random port is never typed
-by hand, and its text-to-speech URL from the stack's `tts` service, or
-from `harness-voice-unmute-tts-url` when you point it at a service of
-your own. The whisper model is the one `harness-voice-effort` picks:
+running stack's service for the selected model, so the random port is
+never typed by hand, and its text-to-speech URL from the stack's `tts`
+service, or from `harness-voice-unmute-tts-url` when you point it at a
+service of your own. With `harness-voice-stt-model` at `auto`, the
+whisper model is the one `harness-voice-effort` picks:
 `ggml-tiny.en.bin` at **low**, `ggml-base.en.bin` at **medium**,
-`ggml-small.en.bin` at **high**. `harness-voice-unmute-voice` names the
-Kokoro voice (`af_heart` by default); `DEFAULT_VOICE` in the stack does
-the same. The whisper and Kokoro image tags are overridable with
-`HARNESS_WHISPER_IMAGE` and `HARNESS_TTS_IMAGE`; see the stack's README
-for the CPU and GPU cases and for a service of your own.
+`ggml-small.en.bin` at **high**; `parakeet-0.6b` and
+`parakeet-0.6b-v3` are the Parakeet models, as
+[voice.md](voice.md#speech-models) describes. `harness-voice-unmute-voice`
+names the Kokoro voice (`af_heart` by default); `DEFAULT_VOICE` in the
+stack does the same. The images are overridable with
+`HARNESS_WHISPER_IMAGE`, `HARNESS_PARAKEET_IMAGE` and `HARNESS_TTS_IMAGE`;
+see the stack's README for the CPU and GPU cases and for a service of
+your own.
 
 The stack is a plugin: the voice module requires `harness-stacks` when it is
 there, registers its stack, and shows the state in its setup list. A client
@@ -103,14 +116,20 @@ says what the runtime still needs, such as `Socket unavailable ·
 ## What is verified
 
 The registry, command construction, status parsing, dynamic port discovery,
-the network join, the endpoints and the page's copy are covered by
-`lisp/modules/harness-stacks-test.el` without a daemon. The runtime seam is covered by
+the network join, the endpoints, the profile function, the all-profile `down`
+and the page's copy are covered by `lisp/modules/harness-stacks-test.el`
+without a daemon. The runtime seam is covered by
 `lisp/modules/harness-container-runtime-test.el`. The compose files are checked with
 `compose config`, which shows the empty published ports and the per-stack
-network. A real stack on Docker was run by hand: it published a random loopback
+network, and with each profile to show the services it enables. A real stack
+on Docker was run by hand: it published a random loopback
 port, answered through it, and a probe container reached its service by name
 over the stack's network. The bundled voice stack was started through the
 module the same way: whisper.cpp transcribed its `jfk.wav` sample, and
 Kokoro's CPU image answered `/health` and an OpenAI-shaped
-`/v1/audio/speech` request on its random loopback port. Pulling the speech
-images and running the models is not part of the suite.
+`/v1/audio/speech` request on its random loopback port. The Parakeet server's
+routes, WAV decoding and model download are covered without Docker by
+`test/harness-voice-parakeet-test.py`, and were run against the real
+`sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8` model outside the image. Pulling
+the speech images, building the Parakeet image and running the models in
+containers is not part of the suite.

@@ -27,6 +27,17 @@
 ;; command dispatches on `harness-voice-capability', never on the
 ;; provider's name: a new provider with an existing capability needs no
 ;; change in the chat, the tools or the permission panels.
+;;
+;; The local pipeline's speech-to-text model is a choice of its own.
+;; A model is registered with `harness-define-voice-stt-model': a
+;; label, the runtime that serves it, the compose service and profile
+;; that run it, and the stack environment that loads it.
+;; `harness-voice-stt-model' names the one in use -- `auto' follows
+;; `harness-voice-effort' and runs whisper.cpp, while a chosen model
+;; runs its own engine, such as NVIDIA Parakeet through sherpa-onnx.
+;; The voice setup page lists the choice under **Speech to text**, and
+;; switching stops a live session and restarts a running stack so the
+;; microphone and the loaded model never move under a conversation.
 
 ;;; Code:
 
@@ -145,8 +156,8 @@ the push-to-talk path rather than sending audio somewhere unexpected."
 A provider is registered with `harness-define-voice-provider'; it
 declares a capability, `wav' or `live', and the command that runs it.
 The bundled providers are `wav' (local push-to-talk dictation), `chatgpt'
-(GPT-Live over the API), `unmute' (a local whisper.cpp and Kokoro
-pipeline), `fixture' (the scripted sidecar) and `custom'
+(GPT-Live over the API), `unmute' (a local whisper.cpp or Parakeet
+and Kokoro pipeline), `fixture' (the scripted sidecar) and `custom'
 (`harness-voice-live-command').
 `M-x harness-voice-select-provider' lists them with their capability and
 what each still needs.  This is client configuration, not a safe
@@ -186,6 +197,201 @@ between two providers."
   (harness-voice-setup--refresh)
   (message "Voice provider · %s" (harness-voice-provider-label provider))
   provider)
+
+;;;; Local speech models
+
+(defvar harness-voice-stt-models (make-hash-table :test 'eq)
+  "Local speech model id -> plist of :id, :label, :engine, :doc, :size,
+:service, :path, :profile and :env.")
+
+(cl-defun harness-define-voice-stt-model (id &key label engine doc size service path
+                                             profile env)
+  "Register local speech-to-text model ID.
+LABEL names it in the UI and ENGINE the runtime that serves it, such
+as `whisper.cpp' or `sherpa-onnx'.  DOC explains it and SIZE is its
+approximate download.  SERVICE is the `voice-local' stack's service
+that runs it, PATH the route it answers on, and PROFILE the compose
+profile that service starts under.  ENV is the stack environment that
+loads it, an alist of names and values such as
+\(\(\"WHISPER_MODEL\" . \"ggml-base.en.bin\")).
+Defining ID again replaces it."
+  (puthash id (list :id id
+                    :label (or label (symbol-name id))
+                    :engine engine
+                    :doc doc
+                    :size size
+                    :service (or service 'whisper)
+                    :path (or path "inference")
+                    :profile (or profile "whisper")
+                    :env env)
+           harness-voice-stt-models)
+  id)
+
+(defun harness-voice-stt-model-get (id)
+  "Return the record of local speech model ID, or nil."
+  (and id (gethash id harness-voice-stt-models)))
+
+(defun harness-voice-stt-model-label (id)
+  "Return the label of local speech model ID, or its name."
+  (or (plist-get (harness-voice-stt-model-get id) :label) (format "%s" id)))
+
+(defun harness-voice-stt-model-ids ()
+  "Return the registered local speech model ids, by label."
+  (let (ids)
+    (maphash (lambda (id _record) (push id ids)) harness-voice-stt-models)
+    (sort ids (lambda (a b)
+                (string< (harness-voice-stt-model-label a)
+                         (harness-voice-stt-model-label b))))))
+
+(defcustom harness-voice-stt-model 'auto
+  "The local speech-to-text model this client uses.
+`auto' follows `harness-voice-effort' and runs whisper.cpp's tiny, base
+or small model.  Any other value names a model registered with
+`harness-define-voice-stt-model', such as `parakeet-0.6b', which runs
+NVIDIA Parakeet TDT 0.6B through sherpa-onnx.  The selected model picks
+which service of the `voice-local' stack runs and which model it loads.
+`M-x harness-voice-select-stt-model' lists them with their engine and
+download size.  An unknown value falls back to the effort preset, so a
+stale setting keeps a working local model.  This is client
+configuration, not a safe directory-local option."
+  :type '(restricted-sexp :match-alternatives (symbolp))
+  :group 'harness-voice)
+
+(defconst harness-voice-effort-models
+  '((low . whisper-tiny-en)
+    (medium . whisper-base-en)
+    (high . whisper-small-en))
+  "The local speech model each effort level names.")
+
+(defun harness-voice-effort-model (&optional effort)
+  "Return the local speech model id EFFORT names, or nil."
+  (cdr (assq (or effort harness-voice-effort) harness-voice-effort-models)))
+
+(defun harness-voice-stt-model-chosen-p ()
+  "Non-nil when a speech model was chosen rather than left to the effort preset."
+  (and harness-voice-stt-model
+       (not (eq harness-voice-stt-model 'auto))
+       (harness-voice-stt-model-get harness-voice-stt-model)))
+
+(defun harness-voice-stt-model-resolved ()
+  "Return the record of the local speech model in use.
+A chosen model is used as it stands; `auto' and an unknown id follow
+`harness-voice-effort', so a stale setting keeps a working local model."
+  (or (harness-voice-stt-model-chosen-p)
+      (harness-voice-stt-model-get (harness-voice-effort-model))
+      (harness-voice-stt-model-get 'whisper-base-en)))
+
+(defun harness-voice-stt-model-name (&optional record)
+  "Return the label of local speech model RECORD, or of the one in use."
+  (plist-get (or record (harness-voice-stt-model-resolved)) :label))
+
+(defun harness-voice-stt-model-choice (id)
+  "Return the one-line choice text for local speech model ID.
+`auto' names the model the effort level picks, since that is what it
+runs now."
+  (let* ((auto (eq id 'auto))
+         (record (if auto
+                     (harness-voice-stt-model-get
+                      (or (harness-voice-effort-model) 'whisper-base-en))
+                   (harness-voice-stt-model-get id)))
+         (parts (if auto
+                    (list "Effort preset" (plist-get record :label)
+                          (plist-get record :size))
+                  (list (plist-get record :label) (plist-get record :engine)
+                        (plist-get record :size)))))
+    (string-join (delq nil parts) " · ")))
+
+(defun harness-voice-read-stt-model ()
+  "Read a local speech model, showing the engine and the download size."
+  (let* ((choices (cons (cons (harness-voice-stt-model-choice 'auto) 'auto)
+                        (mapcar (lambda (id)
+                                  (cons (harness-voice-stt-model-choice id) id))
+                                (harness-voice-stt-model-ids))))
+         (answer (completing-read "Speech to text model: " choices nil t)))
+    (cdr (assoc answer choices))))
+
+(defun harness-voice--insert-stt-model ()
+  "Insert the local speech model line under the stack line."
+  (when (and (harness-voice--stack-id) (featurep 'harness-stacks))
+    (let* ((chosen (harness-voice-stt-model-chosen-p))
+           (record (harness-voice-stt-model-resolved))
+           (parts (if chosen
+                      (list (plist-get record :label) (plist-get record :engine)
+                            (plist-get record :size))
+                    (list "Effort preset" (plist-get record :label)
+                          (plist-get record :size)))))
+      (insert (propertize "Speech to text" 'face 'harness-label-face)
+              "  "
+              (propertize (string-join (delq nil parts) " · ")
+                          'face 'default
+                          'help-echo (or (plist-get record :doc) "Speech model"))
+              "  "
+              (harness-ui-string-action
+               (propertize "[Change]" 'face 'button
+                           'help-echo "Speech to text model")
+               #'harness-voice-select-stt-model)
+              "\n"))))
+
+(defun harness-voice--stack-running-p ()
+  "Non-nil when the selected provider's stack reports running."
+  (let ((id (harness-voice--stack-id)))
+    (and id (featurep 'harness-stacks)
+         (eq 'running (plist-get (harness-compose-stack-status id) :state)))))
+
+(defun harness-voice--restart-stack ()
+  "Restart the selected provider's stack so its new model loads.
+Compose recreates a service whose environment changed, but a profile
+switch needs the old service stopped first: `down' enables every
+profile the stack can use, so the previous engine's container goes with
+it."
+  (let ((id (harness-voice--stack-id)))
+    (when (and id (featurep 'harness-stacks) (harness-voice--stack-running-p))
+      (message "Local voice stack · restarting")
+      (harness-compose-stack-down
+       id (lambda (state)
+            (if (eq 'stopped (plist-get state :state))
+                (harness-compose-stack-up
+                 id (lambda (state)
+                      (message "Local voice stack · %s" (harness-voice--stack-result state))
+                      (harness-voice-setup--refresh)))
+              ;; The previous engine may still run: an up over it would
+              ;; leave two speech services on one stack.
+              (message "Local voice stack · %s" (harness-voice--stack-result state))
+              (harness-voice-setup--refresh)))))))
+
+(defun harness-voice-select-stt-model (&optional model)
+  "Select local speech-to-text MODEL for this client, prompting when nil.
+A running live session ends first, so the sidecar is not left with the
+previous model's endpoint.  A stack that runs restarts when the model
+it would load changes, since compose has to recreate the speech service
+with the new engine and model."
+  (interactive)
+  (unless model
+    (setq model (harness-voice-read-stt-model)))
+  (unless (or (eq model 'auto) (harness-voice-stt-model-get model))
+    (user-error "Unknown speech model · %s" model))
+  (let ((previous (harness-voice-stt-model-resolved)))
+    (when (and (fboundp 'harness-voice-live--active-p)
+               (harness-voice-live--active-p))
+      (harness-voice-live-stop))
+    (setq harness-voice-stt-model model)
+    (unless (eq previous (harness-voice-stt-model-resolved))
+      (harness-voice--restart-stack))
+    (harness-voice-setup--refresh)
+    (message "Speech to text · %s" (harness-voice-stt-model-name))
+    model))
+
+;;;; Stack wiring
+
+(defun harness-voice-stack-profiles ()
+  "Return the compose profile of the selected local speech model."
+  (list (or (plist-get (harness-voice-stt-model-resolved) :profile) "whisper")))
+
+(defun harness-voice-stack-env ()
+  "Return the stack environment that loads the selected speech model.
+Only the selected model's service runs, but compose interpolates every
+service of the file, so the other engine keeps its compose default."
+  (copy-sequence (plist-get (harness-voice-stt-model-resolved) :env)))
 
 ;;;; What a provider needs
 
@@ -314,6 +520,7 @@ state would keep saying a running service is missing."
           (insert " · " (propertize reason 'face 'harness-failure-face)))
         (insert "\n")))
     (harness-voice--insert-stack)
+    (harness-voice--insert-stt-model)
     (harness-voice--insert-audio)
     (insert "\n"
             (propertize "Effort" 'face 'harness-label-face)
@@ -444,24 +651,30 @@ in the echo area instead of only the word `error'."
           (harness-voice-setup--refresh)))))
 
 (defun harness-voice-select-effort (effort)
-  "Select voice EFFORT and redraw an open setup list."
+  "Select voice EFFORT and redraw an open setup list.
+With `harness-voice-stt-model' at `auto' the effort level picks the
+speech model, so a running stack restarts when that model changes; a
+chosen model leaves the level to the provider's own fragments only."
   (interactive (list (intern (completing-read "Voice effort: "
                                               '("low" "medium" "high") nil t))))
-  (setq harness-voice-effort effort)
+  (let ((previous (harness-voice-stt-model-resolved)))
+    (setq harness-voice-effort effort)
+    (unless (eq previous (harness-voice-stt-model-resolved))
+      (harness-voice--restart-stack)))
   (harness-voice-setup--refresh)
   (message "Voice effort · %s" (capitalize (symbol-name effort)))
   effort)
 
-;;;; The bundled providers
+;;;; Effort and the sidecars
 
 (defcustom harness-voice-effort 'medium
   "How much compute a voice provider may spend.
 `low' picks the smallest, most quantized models, for a laptop on
 battery; `medium' balances size and quality; `high' picks the largest
 models a provider offers.  Providers declare their own fragments (see
-`harness-define-voice-provider'), and the local stack picks its
-whisper.cpp model from the same setting; a provider that declares no
-fragments passes none."
+`harness-define-voice-provider'), and with `harness-voice-stt-model'
+left at `auto' the local stack picks its whisper.cpp model from the
+same setting; a provider that declares no fragments passes none."
   :type '(choice (const :tag "Low · fastest" low)
                  (const :tag "Medium · balanced" medium)
                  (const :tag "High · best" high))
@@ -474,11 +687,13 @@ fragments passes none."
     (cdr (assq harness-voice-effort efforts))))
 
 (defun harness-voice-whisper-model (&optional effort)
-  "Return the whisper.cpp model file for EFFORT, or the current one."
-  (pcase (or effort harness-voice-effort)
-    ('low "ggml-tiny.en.bin")
-    ('high "ggml-small.en.bin")
-    (_ "ggml-base.en.bin")))
+  "Return the whisper.cpp model file for EFFORT, or the current one.
+These are the files `auto' in `harness-voice-stt-model' runs at that
+effort; the registered whisper models hold the same names."
+  (let* ((record (or (harness-voice-stt-model-get (harness-voice-effort-model effort))
+                     (harness-voice-stt-model-get 'whisper-base-en)))
+         (env (plist-get record :env)))
+    (or (cdr (assoc "WHISPER_MODEL" env)) "ggml-base.en.bin")))
 
 (defcustom harness-voice-live-command nil
   "Command running a custom live voice sidecar.
@@ -520,9 +735,11 @@ text is appended to that prompt."
 
 (defcustom harness-voice-unmute-stt-url nil
   "Speech-to-text endpoint the local voice provider posts WAV files to.
-Nil uses the running `voice-local' stack's whisper.cpp service, whose
-random loopback port needs no copying; set it to point at a service you
-run yourself, such as whisper.cpp's `/inference'."
+Nil uses the running `voice-local' stack's service for the selected
+speech model: whisper.cpp's `/inference' under the effort presets, or
+the Parakeet server's `/inference' for `parakeet-0.6b'.  The stack's
+random loopback port needs no copying.  Set it to point at a service
+you run yourself, such as whisper.cpp's `/inference'."
   :type '(choice (const :tag "The local stack" nil) string)
   :group 'harness-voice)
 
@@ -564,12 +781,20 @@ Raise it in a noisy room, lower it for a quiet microphone."
   (and (featurep 'harness-stacks)
        (harness-compose-stack-endpoint 'voice-local service path)))
 
+(defun harness-voice-unmute--stt-endpoint ()
+  "Return the running stack's URL for the selected speech model, or nil."
+  (let ((record (harness-voice-stt-model-resolved)))
+    (and record
+         (harness-voice-unmute--endpoint (plist-get record :service)
+                                         (plist-get record :path)))))
+
 (defun harness-voice-unmute--stt-url ()
   "Return the local provider's speech-to-text URL, or signal.
-The bundled stack's whisper.cpp service answers `/inference'."
+The bundled stack's whisper.cpp and Parakeet services both answer
+`/inference'; the selected model names which one runs."
   (or harness-voice-unmute-stt-url
-      (harness-voice-unmute--endpoint 'whisper "inference")
-      (user-error "Local voice stack · not running")))
+      (harness-voice-unmute--stt-endpoint)
+      (user-error "Speech to text service · not running")))
 
 (defun harness-voice-unmute--tts-url ()
   "Return the local provider's text-to-speech URL, or signal.
@@ -580,22 +805,22 @@ The bundled stack's Kokoro service answers the OpenAI speech route."
 
 (defun harness-voice-unmute-need ()
   "Return why the local provider cannot run, or nil.
-Speech to text comes from the running stack's whisper.cpp service;
-text to speech from `harness-voice-unmute-tts-url' or the stack's
-Kokoro service.  The reason is one line, for the setup list."
+Speech to text comes from the running stack's service for the selected
+model; text to speech from `harness-voice-unmute-tts-url' or the
+stack's Kokoro service.  The reason is one line, for the setup list."
   (or (unless (or harness-voice-unmute-stt-url
-                  (harness-voice-unmute--endpoint 'whisper "inference"))
-        "Local voice stack · not running")
+                  (harness-voice-unmute--stt-endpoint))
+        "Speech to text service · not running")
       (unless (or harness-voice-unmute-tts-url
                   (harness-voice-unmute--endpoint 'tts "v1/audio/speech"))
         "Text to speech endpoint unset")))
 
 (defun harness-voice-unmute-command ()
   "Return the argv list running the bundled local pipeline sidecar.
-Speech to text comes from the running `voice-local' stack's whisper.cpp
-service unless `harness-voice-unmute-stt-url' names a service of your
-own; text to speech from `harness-voice-unmute-tts-url' or the stack's
-Kokoro service."
+Speech to text comes from the running `voice-local' stack's service for
+the selected speech model unless `harness-voice-unmute-stt-url' names a
+service of your own; text to speech from `harness-voice-unmute-tts-url'
+or the stack's Kokoro service."
   (list "python3" (harness-voice--script "harness-voice-live-unmute")
         "--stt-url" (harness-voice-unmute--stt-url)
         "--tts-url" (harness-voice-unmute--tts-url)
@@ -619,6 +844,63 @@ the reason names the programs that would make it work."
   (or (harness-ui-media-audio-missing 'capture)
       (harness-ui-media-audio-missing 'playback)))
 
+;;;; The bundled models
+
+;; `auto' runs these three, one per effort level.  Each names the ggml
+;; file whisper.cpp's image downloads into its volume.
+(harness-define-voice-stt-model 'whisper-tiny-en
+  :label "Whisper tiny (English)"
+  :engine "whisper.cpp"
+  :size "75 MB"
+  :doc "whisper.cpp tiny.en · fastest, least accurate, battery-friendly."
+  :service 'whisper
+  :profile "whisper"
+  :env '(("WHISPER_MODEL" . "ggml-tiny.en.bin")))
+
+(harness-define-voice-stt-model 'whisper-base-en
+  :label "Whisper base (English)"
+  :engine "whisper.cpp"
+  :size "142 MB"
+  :doc "whisper.cpp base.en · the default CPU trade-off."
+  :service 'whisper
+  :profile "whisper"
+  :env '(("WHISPER_MODEL" . "ggml-base.en.bin")))
+
+(harness-define-voice-stt-model 'whisper-small-en
+  :label "Whisper small (English)"
+  :engine "whisper.cpp"
+  :size "466 MB"
+  :doc "whisper.cpp small.en · slower on CPU, better with accents."
+  :service 'whisper
+  :profile "whisper"
+  :env '(("WHISPER_MODEL" . "ggml-small.en.bin")))
+
+;; Parakeet runs on the stack's own small image (sherpa-onnx on the
+;; CPU).  Both models share the service; the environment names the model
+;; directory and its feature width, which v3 sets to 128.  The server
+;; downloads the directory into the parakeet volume on first start.
+(harness-define-voice-stt-model 'parakeet-0.6b
+  :label "Parakeet 0.6B (English)"
+  :engine "sherpa-onnx"
+  :size "650 MB"
+  :doc "NVIDIA Parakeet TDT 0.6B, int8 ONNX · English, punctuation and case, fast on CPU."
+  :service 'parakeet
+  :profile "parakeet"
+  :env '(("PARAKEET_MODEL" . "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8")
+         ("PARAKEET_FEATURE_DIM" . "80")))
+
+(harness-define-voice-stt-model 'parakeet-0.6b-v3
+  :label "Parakeet 0.6B v3 (multilingual)"
+  :engine "sherpa-onnx"
+  :size "650 MB"
+  :doc "NVIDIA Parakeet TDT 0.6B v3, int8 ONNX · 25 European languages, punctuation and case."
+  :service 'parakeet
+  :profile "parakeet"
+  :env '(("PARAKEET_MODEL" . "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8")
+         ("PARAKEET_FEATURE_DIM" . "128")))
+
+;;;; The bundled providers
+
 (harness-define-voice-provider 'wav
   :label "WAV dictation"
   :capability 'wav
@@ -638,7 +920,7 @@ the reason names the programs that would make it work."
 (harness-define-voice-provider 'unmute
   :label "Local pipeline"
   :capability 'live
-  :doc "Local whisper.cpp and Kokoro speech pipeline · no hosted model, no key."
+  :doc "Local whisper.cpp or Parakeet speech to text and Kokoro text to speech · no hosted model, no key."
   :command #'harness-voice-unmute-command
   :needs '(harness-voice--audio-need harness-voice-unmute-need)
   :stack 'voice-local)
@@ -651,18 +933,20 @@ the reason names the programs that would make it work."
   :needs '((executable "python3")))
 
 (when (featurep 'harness-stacks)
-  ;; whisper.cpp and Kokoro both run on the CPU and have published
-  ;; images, so the stack starts them together and the local provider
-  ;; needs no endpoint typed by hand.
+  ;; whisper.cpp, the Parakeet server and Kokoro all run on the CPU, so
+  ;; the stack carries them and the local provider needs no endpoint
+  ;; typed by hand.  The speech services sit behind their own profiles,
+  ;; so exactly the selected model's engine runs beside Kokoro.
   (harness-define-compose-stack 'voice-local
     :label "Local voice"
-    :doc "whisper.cpp for speech to text and Kokoro for text to speech, on loopback."
+    :doc "whisper.cpp or Parakeet for speech to text and Kokoro for text to speech, on loopback."
     :directory (expand-file-name "scripts/stacks/voice-local" harness-directory)
     :project "voice-local"
     :network "voice"
-    :endpoints '((whisper 8080) (tts 8880))
-    :env (lambda ()
-           (list (cons "WHISPER_MODEL" (harness-voice-whisper-model))))))
+    :endpoints '((whisper 8080) (parakeet 8081) (tts 8880))
+    :profiles #'harness-voice-stack-profiles
+    :all-profiles '("whisper" "parakeet")
+    :env #'harness-voice-stack-env))
 
 (harness-define-voice-provider 'custom
   :label "Custom sidecar"

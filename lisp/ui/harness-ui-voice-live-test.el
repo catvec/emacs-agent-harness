@@ -334,9 +334,9 @@ which used to leave the line reading Off after a rejected Start."
                              (buffer-substring-no-properties (point-min) (point-max))))
       (harness-voice-live--start-here)
       (should (eq harness-voice-live--state 'failed))
-      (should (equal "Local voice stack · not running"
+      (should (equal "Speech to text service · not running"
                      harness-voice-live--error))
-      (should (equal (concat " Live · Failed · [Start] · Local voice stack"
+      (should (equal (concat " Live · Failed · [Start] · Speech to text service"
                              " · not running · [Transcript] · [Setup]")
                      (substring-no-properties (harness-voice-live--controls))))
       (should (string-search "Live · Failed"

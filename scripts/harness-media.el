@@ -3475,6 +3475,27 @@ No microphone or speech service is used for the documentation picture."
         (with-current-buffer buffer (harness-voice-mode -1))
         (harness-call 'session/delete (buffer-local-value 'harness-ui-session-id buffer))))))
 
+(defun harness-media-shot-voice-setup ()
+  "The voice setup list: the local pipeline, its Parakeet model and the stack.
+The stack state is scripted and no container runtime, model or microphone
+is used for the documentation picture."
+  (let ((harness-voice-provider 'unmute)
+        (harness-voice-stt-model 'parakeet-0.6b)
+        (harness-voice-effort 'medium))
+    (cl-letf (((symbol-function 'harness-compose-stack-status)
+               (lambda (id &optional callback)
+                 (let ((state '(:state running :detail "2 of 2 services"
+                                :ports (("whisper" (8080 . 32768))
+                                        ("parakeet" (8081 . 32769))
+                                        ("tts" (8880 . 32770))))))
+                   (puthash id state harness-stacks--states)
+                   (when callback (funcall callback state))
+                   state)))
+              ((symbol-function 'harness-ui-media-audio-backend)
+               (lambda (&optional _) '(pipewire "PipeWire" "pw-record" "pw-play"))))
+      (harness-media--view #'harness-voice-setup nil 20))
+    (harness-media--capture "voice-setup")))
+
 (defun harness-media--voice-pipeline-session ()
   "Feed one scripted session through the live voice pipeline's handlers.
 The events are the sidecar protocol's own with fixture values: no
@@ -4978,6 +4999,7 @@ names."
     ("chat-queue" . harness-media-shot-chat-queue)
     ("prompt-region" . harness-media-shot-prompt-region)
     ("voice" . harness-media-shot-voice)
+    ("voice-setup" . harness-media-shot-voice-setup)
     ("voice-pipeline" . harness-media-shot-voice-pipeline)
     ("voice-pipeline-details" . harness-media-shot-voice-pipeline-details)
     ("voice-pipeline-compose" . harness-media-shot-voice-pipeline-compose)

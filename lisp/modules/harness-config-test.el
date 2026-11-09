@@ -571,10 +571,12 @@ A misspelt name would quietly drop a setting from the settings page."
                        harness-config-sections)))))
 
 (ert-deftest harness-config-model-options-name-models ()
-  "Every option holding models says so in its type, with `:names'.
+  "Every option holding model ids says so in its type, with `:names'.
 The settings page then offers the models the providers list, rather
 than a text field, whose typo would go unnoticed.  Customize and the
-widget library ignore the property."
+widget library ignore the property.  An option holding an id from a
+local registry -- the voice pipeline's speech model, a symbol -- names
+no provider model and has a picker of its own, so it is left out."
   (require 'wid-edit)
   (let (found)
     (dolist (dir '("lisp" "lisp/modules" "lisp/ui"))
@@ -588,8 +590,10 @@ widget library ignore the property."
             (let* ((form (read (current-buffer)))
                    (type (eval (plist-get (nthcdr 4 form) :type) t)))
               ;; A switch named after models, such as whether to list
-              ;; them (`harness-deepseek-list-models'), holds none.
-              (unless (eq type 'boolean)
+              ;; them (`harness-deepseek-list-models'), holds none; a
+              ;; symbol from a local registry names no provider model.
+              (unless (or (eq type 'boolean)
+                          (eq (car-safe type) 'restricted-sexp))
                 (push (nth 1 form) found)
                 (should (memq :names (flatten-tree type)))
                 ;; The type takes the option's value as before.

@@ -356,35 +356,39 @@ text-to-speech service; the setup list asks again before it renders."
     (should (equal "ggml-small.en.bin" (harness-voice-whisper-model)))))
 
 (ert-deftest harness-ui-voice-providers-local-stack ()
-  "The local provider points at the bundled compose stack and its effort."
+  "The local provider points at the bundled compose stack and its model."
   (skip-unless (featurep 'harness-stacks))
   (should (eq 'voice-local (plist-get (harness-voice-provider-get 'unmute) :stack)))
-  (should (equal "Local whisper.cpp and Kokoro speech pipeline · no hosted model, no key."
+  (should (equal "Local whisper.cpp or Parakeet speech to text and Kokoro text to speech · no hosted model, no key."
                  (plist-get (harness-voice-provider-get 'unmute) :doc)))
   (should (equal "af_heart" harness-voice-unmute-voice))
   (let ((stack (harness-compose-stack-get 'voice-local)))
     (should stack)
     (should (equal "voice-local" (plist-get stack :project)))
-    (should (equal "whisper.cpp for speech to text and Kokoro for text to speech, on loopback."
+    (should (equal "whisper.cpp or Parakeet for speech to text and Kokoro for text to speech, on loopback."
                    (plist-get stack :doc)))
     (should (equal '(8080) (cdr (assq 'whisper (plist-get stack :endpoints)))))
+    (should (equal '(8081) (cdr (assq 'parakeet (plist-get stack :endpoints)))))
     (should (equal '(8880) (cdr (assq 'tts (plist-get stack :endpoints)))))
     (should-not (assq 'unmute (plist-get stack :endpoints)))
-    ;; No profile: both services have published images, so a start
-    ;; runs whisper.cpp and Kokoro together.
-    (should-not (plist-get stack :profiles))
+    ;; One speech model runs beside Kokoro: the profiles follow the
+    ;; selection, and stopping removes both engines' profiles.
+    (should (equal '("whisper") (harness-compose-stack--profiles stack)))
+    (should (equal '("whisper" "parakeet") (plist-get stack :all-profiles)))
     (dolist (case '((low . "ggml-tiny.en.bin") (medium . "ggml-base.en.bin")
                     (high . "ggml-small.en.bin")))
-      (let ((harness-voice-effort (car case)))
-        (should (equal (cdr case)
-                       (cdr (assoc "WHISPER_MODEL"
-                                   (funcall (plist-get stack :env))))))))))
+      (let ((harness-voice-effort (car case))
+            (harness-voice-stt-model 'auto))
+        (should (equal (cdr case) (harness-voice-whisper-model)))
+        (should (equal (list (cons "WHISPER_MODEL" (cdr case)))
+                       (harness-voice-stack-env)))))))
 
 (ert-deftest harness-ui-voice-providers-local-stack-urls ()
   "The local provider reads speech to text and text to speech from the running stack."
   (skip-unless (featurep 'harness-stacks))
   (let ((harness-voice-unmute-stt-url nil)
         (harness-voice-unmute-tts-url nil)
+        (harness-voice-stt-model 'auto)
         (calls nil))
     (cl-letf (((symbol-function 'harness-compose-stack-endpoint)
                (lambda (id service path)
@@ -406,6 +410,38 @@ text-to-speech service; the setup list asks again before it renders."
       (should (equal '((voice-local whisper "inference")
                        (voice-local tts "v1/audio/speech"))
                      (delete-dups (nreverse calls)))))
+    ;; A Parakeet model moves speech to text to the parakeet service,
+    ;; on the same route, so the sidecar needs no new argument.
+    (let ((harness-voice-unmute-stt-url nil)
+          (harness-voice-unmute-tts-url nil)
+          (harness-voice-stt-model 'parakeet-0.6b)
+          (calls nil))
+      (cl-letf (((symbol-function 'harness-compose-stack-endpoint)
+                 (lambda (id service path)
+                   (push (list id service path) calls)
+                   (pcase service
+                     ('parakeet (format "http://127.0.0.1:32769/%s" path))
+                     ('tts (format "http://127.0.0.1:32770/%s" path))))))
+        (let ((command (harness-voice-unmute-command)))
+          (should (equal "http://127.0.0.1:32769/inference"
+                         (cadr (member "--stt-url" command))))
+          (should (equal "http://127.0.0.1:32770/v1/audio/speech"
+                         (cadr (member "--tts-url" command)))))
+        (should (equal '((voice-local parakeet "inference")
+                         (voice-local tts "v1/audio/speech"))
+                       (nreverse calls)))
+        (should-not (harness-voice-unmute-need))))
+    ;; The stack runs only the selected speech service, so its absence
+    ;; is a missing model, not a missing stack.
+    (let ((harness-voice-unmute-stt-url nil)
+          (harness-voice-unmute-tts-url nil)
+          (harness-voice-stt-model 'parakeet-0.6b))
+      (cl-letf (((symbol-function 'harness-compose-stack-endpoint)
+                 (lambda (_id service _path)
+                   (when (eq service 'tts)
+                     "http://127.0.0.1:32770/v1/audio/speech"))))
+        (should (equal "Speech to text service · not running"
+                       (harness-voice-unmute-need)))))
     ;; A configured URL works without a stack.
     (let ((harness-voice-unmute-stt-url "http://127.0.0.1:9000/stt")
           (harness-voice-unmute-tts-url "http://127.0.0.1:9000/tts"))
@@ -421,13 +457,13 @@ text-to-speech service; the setup list asks again before it renders."
           (harness-voice-unmute-tts-url nil))
       (cl-letf (((symbol-function 'harness-compose-stack-endpoint)
                  (lambda (&rest _) nil)))
-        (should (equal "Local voice stack · not running" (harness-voice-unmute-need)))
-        (should (equal "Local voice stack · not running"
+        (should (equal "Speech to text service · not running" (harness-voice-unmute-need)))
+        (should (equal "Speech to text service · not running"
                        (error-message-string
                         (should-error (harness-voice-unmute-command)
                                       :type 'user-error))))))
-    ;; Speech to text from whisper.cpp is not enough: text to speech is
-    ;; its own service and is named when it is missing.
+    ;; The selected speech service is not enough: text to speech is its
+    ;; own service and is named when it is missing.
     (let ((harness-voice-unmute-stt-url nil)
           (harness-voice-unmute-tts-url nil))
       (cl-letf (((symbol-function 'harness-compose-stack-endpoint)
@@ -472,6 +508,279 @@ text-to-speech service; the setup list asks again before it renders."
                  (harness-voice--stack-result
                   '(:state error :detail "pull access denied for kyutai/unmute"))))
   (should (equal "error" (harness-voice--stack-result '(:state error)))))
+
+;;;; Local speech models
+
+(ert-deftest harness-ui-voice-providers-stt-models ()
+  "The bundled speech models name their engine, size and stack service."
+  (should (equal '("Parakeet 0.6B (English)" "Parakeet 0.6B v3 (multilingual)"
+                   "Whisper base (English)" "Whisper small (English)"
+                   "Whisper tiny (English)")
+                 (mapcar #'harness-voice-stt-model-label
+                         (harness-voice-stt-model-ids))))
+  (let ((parakeet (harness-voice-stt-model-get 'parakeet-0.6b)))
+    (should (equal "Parakeet 0.6B (English)" (plist-get parakeet :label)))
+    (should (equal "sherpa-onnx" (plist-get parakeet :engine)))
+    (should (equal "650 MB" (plist-get parakeet :size)))
+    (should (eq 'parakeet (plist-get parakeet :service)))
+    (should (equal "inference" (plist-get parakeet :path)))
+    (should (equal "parakeet" (plist-get parakeet :profile)))
+    (should (equal '(("PARAKEET_MODEL" . "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8")
+                     ("PARAKEET_FEATURE_DIM" . "80"))
+                   (plist-get parakeet :env))))
+  (should (equal '(("PARAKEET_MODEL" . "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8")
+                   ("PARAKEET_FEATURE_DIM" . "128"))
+                 (plist-get (harness-voice-stt-model-get 'parakeet-0.6b-v3) :env)))
+  (dolist (case '((whisper-tiny-en . "ggml-tiny.en.bin")
+                  (whisper-base-en . "ggml-base.en.bin")
+                  (whisper-small-en . "ggml-small.en.bin")))
+    (let ((record (harness-voice-stt-model-get (car case))))
+      (should (equal "whisper.cpp" (plist-get record :engine)))
+      (should (eq 'whisper (plist-get record :service)))
+      (should (equal "whisper" (plist-get record :profile)))
+      (should (equal (cdr case) (cdr (assoc "WHISPER_MODEL" (plist-get record :env))))))))
+
+(ert-deftest harness-ui-voice-providers-stt-model-selection ()
+  "Auto follows the effort level, a chosen model wins, a stale id falls back."
+  (let ((harness-voice-stt-model 'auto))
+    (dolist (case '((low . whisper-tiny-en) (medium . whisper-base-en)
+                    (high . whisper-small-en)))
+      (let ((harness-voice-effort (car case)))
+        (should (eq (cdr case) (plist-get (harness-voice-stt-model-resolved) :id)))
+        (should (equal (harness-voice-stt-model-label (cdr case))
+                       (harness-voice-stt-model-name)))
+        (should-not (harness-voice-stt-model-chosen-p)))))
+  (let ((harness-voice-stt-model 'parakeet-0.6b)
+        (harness-voice-effort 'low))
+    (should (eq 'parakeet-0.6b (plist-get (harness-voice-stt-model-resolved) :id)))
+    (should (harness-voice-stt-model-chosen-p))
+    (should (equal "Parakeet 0.6B (English)" (harness-voice-stt-model-name))))
+  (let ((harness-voice-stt-model 'no-such-speech-model)
+        (harness-voice-effort 'high))
+    (should (eq 'whisper-small-en (plist-get (harness-voice-stt-model-resolved) :id))))
+  (let ((harness-voice-stt-model nil)
+        (harness-voice-effort 'medium))
+    (should (eq 'whisper-base-en (plist-get (harness-voice-stt-model-resolved) :id)))))
+
+(ert-deftest harness-ui-voice-providers-stt-model-stack ()
+  "The chosen model picks the stack's profile, service and environment."
+  (skip-unless (featurep 'harness-stacks))
+  (let ((harness-voice-stt-model 'parakeet-0.6b-v3)
+        (stack (harness-compose-stack-get 'voice-local)))
+    (should (equal '("parakeet") (harness-compose-stack--profiles stack)))
+    (should (equal '("--profile" "parakeet" "up" "-d")
+                   (member "--profile" (harness-compose-stack--argv stack "up" "-d"))))
+    (should (equal '("--profile" "whisper" "--profile" "parakeet" "down")
+                   (member "--profile" (harness-compose-stack--stop-argv stack "down"))))
+    (should (equal '(("PARAKEET_MODEL" . "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8")
+                     ("PARAKEET_FEATURE_DIM" . "128"))
+                   (harness-voice-stack-env)))
+    (should (eq 'parakeet (plist-get (harness-voice-stt-model-resolved) :service))))
+  (let ((harness-voice-stt-model 'whisper-small-en))
+    (should (equal '("whisper") (harness-voice-stack-profiles)))
+    (should (equal '(("WHISPER_MODEL" . "ggml-small.en.bin"))
+                   (harness-voice-stack-env))))
+  (let ((harness-voice-stt-model 'auto)
+        (harness-voice-effort 'low))
+    (should (equal '("whisper") (harness-voice-stack-profiles)))
+    (should (equal '(("WHISPER_MODEL" . "ggml-tiny.en.bin"))
+                   (harness-voice-stack-env)))))
+
+(ert-deftest harness-ui-voice-providers-stt-model-choice-copy ()
+  "A model choice names its engine and download; auto names its effort model."
+  (let ((harness-voice-effort 'medium))
+    (should (equal "Effort preset · Whisper base (English) · 142 MB"
+                   (harness-voice-stt-model-choice 'auto))))
+  (should (equal "Parakeet 0.6B (English) · sherpa-onnx · 650 MB"
+                 (harness-voice-stt-model-choice 'parakeet-0.6b)))
+  (should (equal "Whisper tiny (English) · whisper.cpp · 75 MB"
+                 (harness-voice-stt-model-choice 'whisper-tiny-en))))
+
+(ert-deftest harness-ui-voice-providers-stt-model-select ()
+  "Selecting a model keeps it, stops a live session and restarts the stack."
+  (skip-unless (featurep 'harness-stacks))
+  (let ((harness-voice-stt-model 'auto)
+        (harness-voice-provider 'unmute)
+        (harness-voice-effort 'medium)
+        (stops 0)
+        (restarts nil))
+    (cl-letf (((symbol-function 'harness-voice-live--active-p) (lambda () t))
+              ((symbol-function 'harness-voice-live-stop) (lambda () (cl-incf stops)))
+              ((symbol-function 'harness-voice-setup--refresh) (lambda () nil))
+              ((symbol-function 'harness-voice--stack-running-p) (lambda () t))
+              ((symbol-function 'harness-compose-stack-down)
+               (lambda (id callback)
+                 (push (list 'down id) restarts)
+                 (funcall callback '(:state stopped))))
+              ((symbol-function 'harness-compose-stack-up)
+               (lambda (id callback)
+                 (push (list 'up id) restarts)
+                 (funcall callback '(:state running :detail "2 of 2 services")))))
+      ;; A different model stops the session and restarts the stack.
+      (harness-voice-select-stt-model 'parakeet-0.6b)
+      (should (eq 'parakeet-0.6b harness-voice-stt-model))
+      (should (= 1 stops))
+      (should (equal '((down voice-local) (up voice-local)) (nreverse restarts)))
+      ;; Another model does the same.
+      (setq restarts nil)
+      (harness-voice-select-stt-model 'whisper-base-en)
+      (should (eq 'whisper-base-en harness-voice-stt-model))
+      (should (= 2 stops))
+      (should (equal '((down voice-local) (up voice-local)) (nreverse restarts)))
+      ;; `auto' at the medium effort resolves to the same model: the
+      ;; session still ends, but nothing reloads.
+      (setq restarts nil)
+      (harness-voice-select-stt-model 'auto)
+      (should (eq 'auto harness-voice-stt-model))
+      (should (= 3 stops))
+      (should-not restarts)
+      ;; An unknown model is refused before anything changes.
+      (should (equal "Unknown speech model · no-such-model"
+                     (error-message-string
+                      (should-error (harness-voice-select-stt-model 'no-such-model)
+                                    :type 'user-error))))
+      (should (eq 'auto harness-voice-stt-model))
+      (should (= 3 stops)))))
+
+(ert-deftest harness-ui-voice-providers-stt-model-restart-keeps-the-old-engine ()
+  "A stop that fails leaves the stack alone instead of starting a second engine."
+  (skip-unless (featurep 'harness-stacks))
+  (let ((harness-voice-stt-model 'auto)
+        (harness-voice-provider 'unmute)
+        (harness-voice-effort 'medium)
+        (ups 0))
+    (cl-letf (((symbol-function 'harness-voice-live--active-p) (lambda () nil))
+              ((symbol-function 'harness-voice-setup--refresh) (lambda () nil))
+              ((symbol-function 'harness-voice--stack-running-p) (lambda () t))
+              ((symbol-function 'harness-compose-stack-down)
+               (lambda (_id callback)
+                 (funcall callback '(:state error :detail "pull access denied"))))
+              ((symbol-function 'harness-compose-stack-up)
+               (lambda (_id _callback) (cl-incf ups))))
+      (harness-voice-select-stt-model 'parakeet-0.6b)
+      (should (eq 'parakeet-0.6b harness-voice-stt-model))
+      (should (zerop ups)))))
+
+(ert-deftest harness-ui-voice-providers-effort-restarts-the-auto-model ()
+  "The effort level restarts a running stack only when it picks a new model."
+  (skip-unless (featurep 'harness-stacks))
+  (let ((harness-voice-stt-model 'auto)
+        (harness-voice-provider 'unmute)
+        (harness-voice-effort 'medium)
+        (restarts 0))
+    (cl-letf (((symbol-function 'harness-voice-setup--refresh) (lambda () nil))
+              ((symbol-function 'harness-voice--restart-stack) (lambda () (cl-incf restarts))))
+      (harness-voice-select-effort 'high)
+      (should (= 1 restarts))
+      (should (eq 'high harness-voice-effort))
+      ;; A chosen model does not change when the effort level does.
+      (setq harness-voice-stt-model 'parakeet-0.6b)
+      (harness-voice-select-effort 'low)
+      (should (= 1 restarts))
+      (should (eq 'low harness-voice-effort)))))
+
+(ert-deftest harness-ui-voice-providers-setup-stt-model-copy ()
+  "The setup list names the speech model under the stack, with its change control."
+  (skip-unless (featurep 'harness-stacks))
+  (let ((harness-voice-providers (make-hash-table :test 'eq))
+        (harness-voice-provider 'local)
+        (harness-voice-stt-model 'parakeet-0.6b)
+        (harness-voice-effort 'medium)
+        (harness-stacks--states (make-hash-table :test 'eq))
+        (harness-container-runtimes (make-hash-table :test 'eq)))
+    (harness-define-voice-provider 'local
+      :label "Local pipeline" :capability 'live :command '("true")
+      :stack 'voice-local)
+    (cl-letf (((symbol-function 'harness-ui-media-audio-backend)
+               (lambda (&optional _) '(pipewire "PipeWire" "pw-record" "pw-play")))
+              ((symbol-function 'harness-compose-stack-status)
+               (lambda (id &optional callback)
+                 (let ((state '(:state running :detail "2 of 2 services"
+                                :ports (("whisper" (8080 . 32768))
+                                        ("parakeet" (8081 . 32769))
+                                        ("tts" (8880 . 32770))))))
+                   (puthash id state harness-stacks--states)
+                   (when callback (funcall callback state))
+                   state))))
+      (with-temp-buffer
+        (harness-voice-setup--insert)
+        (let ((text (buffer-substring-no-properties (point-min) (point-max)))
+              (full (buffer-substring (point-min) (point-max))))
+          (should (string-match-p
+                   "^Speech to text  Parakeet 0.6B (English) · sherpa-onnx · 650 MB  \\[Change\\]$"
+                   text))
+          (should (string-match-p "^Local voice stack  ● running  \\[Stop\\]$" text))
+          (should (equal "NVIDIA Parakeet TDT 0.6B, int8 ONNX · English, punctuation and case, fast on CPU."
+                         (get-text-property
+                          (string-match "Parakeet 0.6B (English)" full)
+                          'help-echo full)))
+          (should (equal "Speech to text model"
+                         (get-text-property
+                          (string-match "\\[Change\\]" full) 'help-echo full)))))
+      (let ((harness-voice-stt-model 'auto))
+        (with-temp-buffer
+          (harness-voice-setup--insert)
+          (let ((text (buffer-substring-no-properties (point-min) (point-max)))
+                (full (buffer-substring (point-min) (point-max))))
+            (should (string-match-p
+                     "^Speech to text  Effort preset · Whisper base (English) · 142 MB  \\[Change\\]$"
+                     text))
+            (should (equal "whisper.cpp base.en · the default CPU trade-off."
+                           (get-text-property
+                            (string-match "Effort preset" full)
+                            'help-echo full)))))))))
+
+(ert-deftest harness-ui-voice-providers-stt-model-not-for-wav ()
+  "A provider with no local stack has no speech model line."
+  (let ((harness-voice-providers (make-hash-table :test 'eq))
+        (harness-voice-provider 'plain))
+    (harness-define-voice-provider 'plain
+      :label "Plain voice" :capability 'wav :command '("true"))
+    (with-temp-buffer
+      (harness-voice-setup--insert)
+      (should-not (string-match-p "Speech to text"
+                                  (buffer-substring-no-properties (point-min) (point-max)))))))
+
+(ert-deftest harness-ui-voice-providers-stt-model-define-replaces ()
+  "Defining a speech model again replaces its record."
+  (let ((harness-voice-stt-models (make-hash-table :test 'eq)))
+    (harness-define-voice-stt-model 'test-model :label "One" :engine "engine")
+    (should (equal "One" (harness-voice-stt-model-label 'test-model)))
+    (should (equal '(test-model) (harness-voice-stt-model-ids)))
+    (harness-define-voice-stt-model 'test-model :label "Two" :engine "other"
+                                    :service 'parakeet :profile "parakeet")
+    (should (equal "Two" (harness-voice-stt-model-label 'test-model)))
+    (should (eq 'parakeet (plist-get (harness-voice-stt-model-get 'test-model) :service)))
+    (should (equal "parakeet" (plist-get (harness-voice-stt-model-get 'test-model) :profile)))
+    (should (equal "inference" (plist-get (harness-voice-stt-model-get 'test-model) :path)))
+    (should-not (harness-voice-stt-model-get 'no-such-model))))
+
+(ert-deftest harness-ui-voice-providers-parakeet-self-test ()
+  "The Parakeet server checks its routes without a model or a microphone."
+  (unless (executable-find "python3")
+    (ert-skip "Python 3 unavailable"))
+  (let ((file (expand-file-name "scripts/stacks/voice-local/parakeet/server.py"
+                                harness-test-root)))
+    (should (file-exists-p file))
+    (with-temp-buffer
+      (let ((status (call-process "python3" nil t nil "-B" file "--self-test")))
+        (should (eql 0 status))
+        (should (string-match-p "self-test ok" (buffer-string)))))))
+
+(ert-deftest harness-ui-voice-providers-parakeet-python-suite ()
+  "Run the Parakeet server's Python tests, which need no model or network."
+  (unless (executable-find "python3")
+    (ert-skip "Python 3 unavailable"))
+  (let ((buffer (generate-new-buffer " *parakeet tests*"))
+        (default-directory (file-name-as-directory harness-test-root)))
+    (unwind-protect
+        (let ((status (call-process (executable-find "python3") nil buffer nil
+                                    "test/harness-voice-parakeet-test.py")))
+          (with-current-buffer buffer
+            (unless (eql 0 status)
+              (ert-fail (format "Parakeet tests exited %s:\n%s"
+                                status (buffer-string))))))
+      (kill-buffer buffer))))
 
 (provide 'harness-ui-voice-providers-test)
 ;;; harness-ui-voice-providers-test.el ends here

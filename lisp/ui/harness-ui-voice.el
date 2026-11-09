@@ -16,10 +16,17 @@
 ;; The live capability runs a JSON-lines sidecar that owns the
 ;; microphone, speaker and speech model, while Emacs keeps the captions,
 ;; the agent turn and every permission decision.  The bundled live
-;; providers are ChatGPT Live (GPT-Live over the API), a local whisper.cpp
-;; and Kokoro pipeline and a scripted fixture; a sidecar delegation becomes a
-;; normal prompt in the chat, and assistant text streams back as
-;; commentary.  Audio never crosses the control pipe.
+;; providers are ChatGPT Live (GPT-Live over the API), a local
+;; whisper.cpp or Parakeet and Kokoro pipeline, and a scripted fixture;
+;; a sidecar delegation becomes a normal prompt in the chat, and
+;; assistant text streams back as commentary.  Audio never crosses the
+;; control pipe.
+;;
+;; The local pipeline's speech-to-text model is a choice of its own
+;; (`harness-voice-stt-model'), listed on the voice setup page: the
+;; effort presets' whisper models, or NVIDIA Parakeet 0.6B through
+;; sherpa-onnx.  Switching stops a live session and restarts the local
+;; stack with the selected engine.
 ;;
 ;; Commands are argv lists, never shell snippets.  WAV transcription prints
 ;; UTF-8 text; synthesis reads UTF-8 text on stdin and writes a WAV.  An

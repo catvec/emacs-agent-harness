@@ -12,24 +12,32 @@
 ;;
 ;;   (harness-define-compose-stack 'voice-local
 ;;     :label "Local voice"
-;;     :doc "whisper.cpp for speech to text and Kokoro for text to speech, on loopback."
+;;     :doc "whisper.cpp or Parakeet and Kokoro, on loopback."
 ;;     :directory (expand-file-name "scripts/stacks/voice-local" harness-directory)
 ;;     :project "voice-local"
 ;;     :network "voice"
-;;     :endpoints '((whisper 8080) (tts 8880))
+;;     :endpoints '((whisper 8080) (parakeet 8081) (tts 8880))
+;;     :profiles #'harness-voice-stack-profiles
+;;     :all-profiles '("whisper" "parakeet")
 ;;     :env (lambda () '(("WHISPER_MODEL" . "ggml-base.en.bin"))))
 ;;
 ;; The stack's services publish their ports on loopback with no fixed
 ;; host port, so two stacks never fight over 8080: the runtime picks a
 ;; free loopback port, and `harness-compose-stack-endpoint' reads the
-;; published one from `compose ps'.  When the harness server runs in a
-;; container instead -- a development container, a CI box -- the
-;; container is attached to the stack's network with the runtime's
-;; `network connect', so the server reaches the services by name too.
-;; `HARNESS_SERVER_CONTAINER' names that container; without it, a
-;; process inside a container finds itself by `/.dockerenv' and
-;; `HOSTNAME'.  The compose network's real name is the project's,
-;; `PROJECT_NETWORK' (compose prefixes it), unless
+;; published one from `compose ps'.  A stack whose services run behind
+;; compose profiles declares them with :profiles -- a list, or a
+;; function returning one when a setting selects the service, as a
+;; speech model does -- and the same profiles are enabled on every
+;; command.  :all-profiles names every profile the stack can use, for
+;; `down': stopping must remove what another selection started, and
+;; compose only removes the profiles a command enables.  When the
+;; harness server runs in a container instead -- a development
+;; container, a CI box -- the container is attached to the stack's
+;; network with the runtime's `network connect', so the server reaches
+;; the services by name too.  `HARNESS_SERVER_CONTAINER' names that
+;; container; without it, a process inside a container finds itself by
+;; `/.dockerenv' and `HOSTNAME'.  The compose network's real name is
+;; the project's, `PROJECT_NETWORK' (compose prefixes it), unless
 ;; `HARNESS_STACK_NETWORK' names it outright.
 ;;
 ;; Commands run as argv lists, never through a shell, and every command
@@ -54,7 +62,7 @@
 
 (defvar harness-compose-stacks (make-hash-table :test 'eq)
   "Compose stack id -> plist of :id, :label, :doc, :directory, :file,
-:project, :network, :endpoints, :profiles and :env.")
+:project, :network, :endpoints, :profiles, :all-profiles and :env.")
 
 (defvar harness-stacks--states (make-hash-table :test 'eq)
   "Compose stack id -> the last state plist seen for it.")
@@ -65,7 +73,7 @@
 ;;;; Registry
 
 (cl-defun harness-define-compose-stack (id &key label doc directory file project network
-                                           endpoints profiles env)
+                                           endpoints profiles all-profiles env)
   "Register compose stack ID.
 LABEL and DOC describe it.  DIRECTORY holds the compose file FILE
 \(docker-compose.yml by default).  PROJECT is the compose project name,
@@ -74,9 +82,13 @@ ENDPOINTS maps a service name to its container port, (SERVICE PORT),
 and the published loopback port is discovered from the runtime; the
 old (SERVICE HOST-PORT . CONTAINER-PORT) still names a fixed port.
 PROFILES names the compose profiles every command enables, so a service
-behind one starts and stops with the stack.  ENV is a function
-returning an alist of extra environment variables for the stack's
-commands, such as a model size.  Defining ID again replaces it."
+behind one starts and stops with the stack; a function returning that
+list is called for each command, so a setting can choose the service.
+ALL-PROFILES names every profile the stack can use, for `down': the
+stack's other selections are removed too, since compose removes only
+the profiles a command enables.  ENV is a function returning an alist
+of extra environment variables for the stack's commands, such as a
+model size.  Defining ID again replaces it."
   (puthash id (list :id id
                     :label (or label (symbol-name id))
                     :doc doc
@@ -86,6 +98,7 @@ commands, such as a model size.  Defining ID again replaces it."
                     :network network
                     :endpoints endpoints
                     :profiles profiles
+                    :all-profiles all-profiles
                     :env env)
            harness-compose-stacks)
   id)
@@ -118,15 +131,37 @@ commands, such as a model size.  Defining ID again replaces it."
     (when (functionp env) (setq env (funcall env)))
     (mapcar (lambda (pair) (format "%s=%s" (car pair) (cdr pair))) env)))
 
+(defun harness-compose-stack--profiles (stack)
+  "Return the compose profiles STACK enables on a command.
+A function in the stack record is called, so a setting can select the
+service, as the local voice model selects its speech engine."
+  (let ((profiles (plist-get stack :profiles)))
+    (if (functionp profiles) (funcall profiles) profiles)))
+
+(defun harness-compose-stack--compose-argv (stack profiles arguments)
+  "Return STACK's compose command with PROFILES, then ARGUMENTS."
+  (funcall #'harness-container-runtime-compose-argv
+           (harness-compose-stack--file stack)
+           (plist-get stack :project)
+           profiles
+           arguments))
+
 (defun harness-compose-stack--argv (stack &rest arguments)
   "Return the runtime's compose command of STACK, then ARGUMENTS.
 The stack's profiles are enabled on every command: a profile service
 must start, report its state and stop with the rest."
-  (funcall #'harness-container-runtime-compose-argv
-           (harness-compose-stack--file stack)
-           (plist-get stack :project)
-           (plist-get stack :profiles)
-           arguments))
+  (harness-compose-stack--compose-argv
+   stack (harness-compose-stack--profiles stack) arguments))
+
+(defun harness-compose-stack--stop-argv (stack &rest arguments)
+  "Return STACK's compose command with every profile it can use, then ARGUMENTS.
+Stopping must remove what another selection started: compose removes
+only the profiles a command enables, so a service enabled under a
+different profile would otherwise keep running unseen."
+  (let ((all (plist-get stack :all-profiles)))
+    (when (functionp all) (setq all (funcall all)))
+    (harness-compose-stack--compose-argv
+     stack (or all (harness-compose-stack--profiles stack)) arguments)))
 
 (defun harness-compose-stack-available-p ()
   "Non-nil when the selected container runtime and its compose plugin work."
@@ -396,16 +431,20 @@ server's, if the server runs in a container."
                               :detail (or (harness-stacks--one-line (cdr reply))
                                           "Compose failed")))))
            (harness-compose-stack--remember id state)
-           (when callback (funcall callback state)))))))))
+           (when callback (funcall callback state))))
+       t)))))
 
-(defun harness-stacks--command (stack arguments callback)
+(defun harness-stacks--command (stack arguments callback &optional every-profile)
   "Run STACK's compose command with ARGUMENTS, reporting to CALLBACK.
+EVERY-PROFILE enables all the profiles the stack can use, for `down'.
 A command that runs longer than `harness-stacks--timeout' is reported,
 not killed: a first pull can be slow without being wrong."
   (let* ((label (harness-compose-stack--label (plist-get stack :id)))
          (timer (run-at-time harness-stacks--timeout nil
                              (lambda () (message "Compose stack · still running · %s" label)))))
-    (harness-stacks--run (apply #'harness-compose-stack--argv stack arguments)
+    (harness-stacks--run (if every-profile
+                             (apply #'harness-compose-stack--stop-argv stack arguments)
+                           (apply #'harness-compose-stack--argv stack arguments))
                          (harness-compose-stack--env-pairs stack)
                          (lambda (reply)
                            (when (timerp timer) (cancel-timer timer))

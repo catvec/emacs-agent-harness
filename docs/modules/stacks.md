@@ -22,24 +22,32 @@ so Docker and rootless Podman are the same to a stack.
 
   (harness-define-compose-stack 'voice-local
     :label "Local voice"
-    :doc "whisper.cpp for speech to text and Kokoro for text to speech, on loopback."
+    :doc "whisper.cpp or Parakeet and Kokoro, on loopback."
     :directory (expand-file-name "scripts/stacks/voice-local" harness-directory)
     :project "voice-local"
     :network "voice"
-    :endpoints '((whisper 8080) (tts 8880))
+    :endpoints '((whisper 8080) (parakeet 8081) (tts 8880))
+    :profiles #'harness-voice-stack-profiles
+    :all-profiles '("whisper" "parakeet")
     :env (lambda () '(("WHISPER_MODEL" . "ggml-base.en.bin"))))
 
 The stack's services publish their ports on loopback with no fixed
 host port, so two stacks never fight over 8080: the runtime picks a
 free loopback port, and `harness-compose-stack-endpoint` reads the
-published one from `compose ps`.  When the harness server runs in a
-container instead -- a development container, a CI box -- the
-container is attached to the stack's network with the runtime's
-`network connect`, so the server reaches the services by name too.
-`HARNESS_SERVER_CONTAINER` names that container; without it, a
-process inside a container finds itself by `/.dockerenv` and
-`HOSTNAME`.  The compose network's real name is the project's,
-`PROJECT_NETWORK` (compose prefixes it), unless
+published one from `compose ps`.  A stack whose services run behind
+compose profiles declares them with :profiles -- a list, or a
+function returning one when a setting selects the service, as a
+speech model does -- and the same profiles are enabled on every
+command.  :all-profiles names every profile the stack can use, for
+`down`: stopping must remove what another selection started, and
+compose only removes the profiles a command enables.  When the
+harness server runs in a container instead -- a development
+container, a CI box -- the container is attached to the stack's
+network with the runtime's `network connect`, so the server reaches
+the services by name too.  `HARNESS_SERVER_CONTAINER` names that
+container; without it, a process inside a container finds itself by
+`/.dockerenv` and `HOSTNAME`.  The compose network's real name is
+the project's, `PROJECT_NETWORK` (compose prefixes it), unless
 `HARNESS_STACK_NETWORK` names it outright.
 
 Commands run as argv lists, never through a shell, and every command
