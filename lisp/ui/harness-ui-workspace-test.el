@@ -815,3 +815,114 @@ line above the box, where the person types, does not."
       (let ((thread (car (plist-get harness-ui-workspace--data :threads))))
         (should (equal "running" (plist-get thread :episode-status)))
         (should (equal "waiting" (plist-get (plist-get thread :activity) :phase)))))))
+
+
+;;;; Typing in the compose box
+
+;; The box's letters must type.  A sparse major mode map that keeps
+;; `special-mode-map' as its parent would bind them to `undefined'
+;; (its `[remap self-insert-command]'), and the key would report
+;; "undefined" instead of inserting: the box's keys are
+;; `harness-compose-map', and the tests below drive the real command
+;; loop, as a keyboard does, rather than calling `insert'.
+
+(defun harness-ui-workspace-test--type (keys)
+  "Type KEYS in the selected window's buffer, through the command loop.
+KEYS is a string of characters as typed, a space included: `kbd'
+would read a space as the separator between key descriptions, so
+only named keys go through it, at the call site."
+  (execute-kbd-macro keys))
+
+(defmacro harness-ui-workspace-test-typing (&rest body)
+  "Show a rendered workspace in the selected window, then run BODY.
+The command loop dispatches to the selected window's buffer, so the
+workspace has to be the one it shows."
+  (declare (indent 0))
+  `(harness-ui-workspace-test-with
+     (let ((buf (generate-new-buffer " *workspace typing*")))
+       (unwind-protect
+           (save-window-excursion
+             (set-window-buffer (selected-window) buf)
+             (with-current-buffer buf
+               (harness-ui-workspace-test-render)
+               (goto-char harness-compose-end)
+               ,@body))
+         (when (buffer-live-p buf) (kill-buffer buf))))))
+
+(ert-deftest harness-ui-workspace-compose-letters-type ()
+  "Every printable key types into an empty box instead of signalling."
+  (harness-ui-workspace-test-typing
+    ;; A letter, the letters that are a board's or a view's elsewhere,
+    ;; space, and the punctuation that opens a help page in a view.
+    (harness-ui-workspace-test--type "abc")
+    (harness-ui-workspace-test--type "q")
+    (harness-ui-workspace-test--type "g")
+    (harness-ui-workspace-test--type "?")
+    (harness-ui-workspace-test--type " ")
+    (harness-ui-workspace-test--type ",.!")
+    (should (equal "abcqg? ,.!" (harness-compose-text)))
+    (should (harness-compose-in-p))))
+
+(ert-deftest harness-ui-workspace-compose-letters-type-into-a-draft ()
+  "Letters append to a draft the box already holds, and it survives."
+  (harness-ui-workspace-test-typing
+    (let ((inhibit-read-only t))
+      (harness-compose-insert "Draft"))
+    (goto-char harness-compose-end)
+    (harness-ui-workspace-test--type " more")
+    (should (equal "Draft more" (harness-compose-text)))))
+
+(ert-deftest harness-ui-workspace-compose-newline-keeps-lines ()
+  "RET opens a line in the box, and the letters go on typing."
+  (harness-ui-workspace-test-typing
+    (harness-ui-workspace-test--type "one")
+    (harness-ui-workspace-test--type (kbd "RET"))
+    (harness-ui-workspace-test--type "two")
+    (should (equal "one\ntwo" (harness-compose-text)))))
+
+(ert-deftest harness-ui-workspace-compose-types-from-outside-the-box ()
+  "A letter typed outside the box still types into it."
+  (harness-ui-workspace-test-typing
+    (goto-char (point-min))
+    (should-not (harness-compose-in-p))
+    (harness-ui-workspace-test--type "away")
+    (should (equal "away" (harness-compose-text)))
+    (should (harness-compose-in-p))))
+
+(ert-deftest harness-ui-workspace-compose-keys-are-the-box-keys ()
+  "The mode's map takes its letters from the box's map, not special-mode's."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-mode)
+      (should (eq harness-compose-map (keymap-parent harness-ui-workspace-mode-map)))
+      (should-not (eq special-mode-map (keymap-parent harness-ui-workspace-mode-map)))
+      ;; The chords the workspace adds still act on the workspace.
+      (should (eq 'harness-ui-workspace-send (key-binding (kbd "C-c C-c"))))
+      (should (eq 'harness-ui-workspace-refresh (key-binding (kbd "C-c w g"))))
+      (should (eq 'harness-compose-newline (key-binding (kbd "RET")))))))
+
+(ert-deftest harness-ui-workspace-compose-redraw-keeps-the-draft ()
+  "A redraw keeps the draft and point, so typing goes on where it was."
+  (harness-ui-workspace-test-typing
+    (harness-ui-workspace-test--type "matte tile")
+    (let ((before (point)))
+      (cl-letf (((symbol-function 'harness-compose-fetch-completions) #'ignore))
+        (harness-ui-workspace--render))
+      (should (equal "matte tile" (harness-compose-text)))
+      (should (= before (point)))
+      (harness-ui-workspace-test--type "!")
+      (should (equal "matte tile!" (harness-compose-text))))))
+
+(ert-deftest harness-ui-workspace-compose-send-keeps-its-key ()
+  "C-c C-c sends what was typed, with no insert call in between."
+  (harness-ui-workspace-test-typing
+    (let (sent)
+      (harness-ui-workspace-test--type "Ship it")
+      (cl-letf (((symbol-function 'harness-ui-call)
+                 (lambda (method params callback &optional _on-error)
+                   (push (list method params) sent)
+                   (funcall callback nil)))
+                ((symbol-function 'harness-compose-fetch-completions) #'ignore))
+        (harness-ui-workspace-test--type (kbd "C-c C-c")))
+      (should (equal "_harness/workspace/prompt" (caar sent)))
+      (should (string-match-p "Ship it" (plist-get (cadar sent) :text))))))

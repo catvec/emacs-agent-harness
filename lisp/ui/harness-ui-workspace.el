@@ -67,6 +67,10 @@
 
 (defvar harness-ui-workspace-mode-map
   (let ((map (make-sparse-keymap)))
+    ;; The compose box's keys (RET newline, C-c C-a, C-y pasting images).
+    ;; Not `special-mode-map', whose letters would eat typing in the box:
+    ;; a parent set here is the one `define-derived-mode' keeps.
+    (set-keymap-parent map harness-compose-map)
     (define-key map (kbd "C-c C-c") #'harness-ui-workspace-send)
     (define-key map (kbd "C-c C-k") #'harness-ui-workspace-clear)
     (define-key map (kbd "C-c w n") #'harness-ui-workspace-new-thread)
