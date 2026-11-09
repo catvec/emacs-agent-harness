@@ -23,6 +23,16 @@ needs (`:needs`).  `harness-container-runtime-available-p` runs its
 version command, so a backend whose daemon or compose provider is
 missing reports why instead of failing deep in a process.
 
+Every command runs with pipes, in the directory its caller names, and
+returns its exit status and both streams.  A compose provider decides
+what to do by what its own stdin and stdout are: `make-process` with
+Emacs's default connection type hands it a pseudo-terminal where a
+shell gives it a pipe, and a provider that reads its standard input
+(`-f -`, a prompt) then waits for a terminal that never answers.  The
+pipes are also what makes a failure legible: the provider's own
+stderr comes back with the status, instead of the terminal's line
+editing mixing it into the progress it draws.
+
 The Docker socket is not assumed to be at one path: Docker's own
 DOCKER_HOST wins, else /var/run/docker.sock, else /run/docker.sock --
 a sandbox often shows the last one, and mounting the socket under

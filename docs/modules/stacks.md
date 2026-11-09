@@ -2,7 +2,7 @@
 
 # stacks
 
-Compose stacks that modules and plugins declare: start, stop, state, dynamic ports and the harness server's network.
+Compose stacks that modules and plugins declare: start, stop, state, dynamic ports, the harness server's network, and the log of each stack's last command.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-stacks.el](../../lisp/modules/harness-stacks.el)
@@ -61,7 +61,9 @@ own UI.
 
 ### Commands
 
+- `harness-compose-stack-log` — Show the last command run for compose stack ID, and its whole output.
 - `harness-compose-stacks` — Show the compose stacks, their state and their start and stop controls.
 - `harness-stacks` — Show the compose stacks that modules and plugins declare.
+- `harness-stacks-log-refresh` — Draw the log of the stack this buffer shows.
 - `harness-stacks-refresh` — Ask the container runtime again for every stack's state.
 

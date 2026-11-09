@@ -14,6 +14,16 @@
 ;; version command, so a backend whose daemon or compose provider is
 ;; missing reports why instead of failing deep in a process.
 ;;
+;; Every command runs with pipes, in the directory its caller names, and
+;; returns its exit status and both streams.  A compose provider decides
+;; what to do by what its own stdin and stdout are: `make-process' with
+;; Emacs's default connection type hands it a pseudo-terminal where a
+;; shell gives it a pipe, and a provider that reads its standard input
+;; (`-f -', a prompt) then waits for a terminal that never answers.  The
+;; pipes are also what makes a failure legible: the provider's own
+;; stderr comes back with the status, instead of the terminal's line
+;; editing mixing it into the progress it draws.
+;;
 ;; The Docker socket is not assumed to be at one path: Docker's own
 ;; DOCKER_HOST wins, else /var/run/docker.sock, else /run/docker.sock --
 ;; a sandbox often shows the last one, and mounting the socket under
@@ -246,14 +256,18 @@ was found somewhere other than its declared path."
 
 ;;;; Running commands
 
-(defun harness-container-runtime--exec (argv &optional env)
-  "Run ARGV with ENV, returning (EXIT-CODE . OUTPUT).
+(defun harness-container-runtime--exec (argv &optional env directory)
+  "Run ARGV with ENV in DIRECTORY, returning (EXIT-CODE . OUTPUT).
 The program is never run through a shell; a missing program is exit
-127 with a one-line reason rather than a signal."
+127 with a one-line reason rather than a signal.  Standard output and
+standard error are captured together, as the provider wrote them: the
+reason a compose command failed is the provider's own line, before the
+runtime's wrapper around it."
   (if (not (executable-find (car argv)))
       (cons 127 (format "%s: not found" (car argv)))
     (with-temp-buffer
       (let* ((process-environment (append env process-environment))
+             (default-directory (or directory default-directory))
              (status (condition-case err
                          (apply #'call-process (car argv) nil t nil (cdr argv))
                        (file-missing
@@ -264,34 +278,60 @@ The program is never run through a shell; a missing program is exit
                         1))))
         (cons status (buffer-string))))))
 
-(defun harness-container-runtime-exec (argv &optional env)
-  "Run ARGV on the selected runtime, with ENV, returning (EXIT . OUTPUT)."
+(defun harness-container-runtime-exec (argv &optional env directory)
+  "Run ARGV on the selected runtime, with ENV, in DIRECTORY.
+Return (EXIT . OUTPUT)."
   (harness-container-runtime--exec
-   argv (append env (harness-container-runtime--env))))
+   argv (append env (harness-container-runtime--env)) directory))
 
-(defun harness-container-runtime-run (argv env callback)
-  "Run ARGV asynchronously with ENV; CALLBACK gets (EXIT . OUTPUT).
-The command can pull images for minutes, so it never blocks Emacs."
-  (let ((buffer (generate-new-buffer " *harness-container-runtime*"))
-        (process-environment (append env (harness-container-runtime--env)
-                                     process-environment)))
+(defun harness-container-runtime-run (argv env callback &optional directory)
+  "Run ARGV asynchronously with ENV in DIRECTORY; CALLBACK gets (EXIT . OUTPUT).
+The command can pull images for minutes, so it never blocks Emacs.  It
+gets pipes rather than the pseudo-terminal Emacs would otherwise give
+it (see the commentary), and both streams reach the output in the order
+the command wrote them."
+  (let* ((buffer (generate-new-buffer " *harness-container-runtime*"))
+         (stderr-buffer (generate-new-buffer " *harness-container-runtime-stderr*"))
+         (default-directory (or directory default-directory))
+         (process-environment (append env (harness-container-runtime--env)
+                                      process-environment))
+         (stderr (make-pipe-process
+                  :name "harness-container-runtime-stderr"
+                  :buffer stderr-buffer
+                  :noquery t
+                  :filter (lambda (_process chunk)
+                            (when (buffer-live-p buffer)
+                              (with-current-buffer buffer
+                                (goto-char (point-max))
+                                (insert chunk))))))
+         (finished
+          (lambda (exit)
+            ;; The provider's last line may still be in flight: its
+            ;; standard error is a pipe of its own, read a moment after
+            ;; the process ends.
+            (when (process-live-p stderr)
+              (accept-process-output stderr 0.2))
+            (let ((output (with-current-buffer buffer (buffer-string))))
+              (when (process-live-p stderr) (delete-process stderr))
+              (when (buffer-live-p stderr-buffer) (kill-buffer stderr-buffer))
+              (when (buffer-live-p buffer) (kill-buffer buffer))
+              (funcall callback (cons exit output))))))
     (condition-case err
         (make-process
          :name "harness-container-runtime"
          :command argv
          :buffer buffer
+         :stderr stderr
+         :connection-type 'pipe
          :coding 'utf-8-unix
          :noquery t
          :sentinel (lambda (process _event)
                      (when (memq (process-status process) '(exit signal))
-                       (let ((exit (process-exit-status process))
-                             (output (with-current-buffer (process-buffer process)
-                                       (buffer-string))))
-                         (when (buffer-live-p (process-buffer process))
-                           (kill-buffer (process-buffer process)))
-                         (funcall callback (cons exit output))))))
+                       (funcall finished (process-exit-status process)))))
       (error
-       (kill-buffer buffer)
+       (when (process-live-p stderr) (delete-process stderr))
+       (when (buffer-live-p stderr-buffer) (kill-buffer stderr-buffer))
+       (when (buffer-live-p buffer) (kill-buffer buffer))
        (funcall callback (cons 127 (error-message-string err)))))))
 
 (defun harness-container-runtime-command (&optional id)

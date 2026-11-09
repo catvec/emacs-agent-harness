@@ -37,6 +37,14 @@
 ;;   `speech/stop'        stop it
 ;;   `speech/transcribe'  {audio: BASE64 WAV} -> (:text TEXT)
 ;;   `speech/synthesize'  {text: TEXT} -> (:audio BASE64 WAV)
+;;   `speech/log'         the exact command the stack last ran, where,
+;;                        its exit status and its whole output, as text
+;;
+;; A stack that fails says so in `speech/status': `:detail' and
+;; `:reason' name the exit status and the provider's own reason, and
+;; `:command', `:directory' and `:exit' carry the rest for a client that
+;; wants to show it.  The whole of it is `speech/log', which is the
+;; stack's own log (`M-x harness-compose-stack-log').
 ;;
 ;; The last two are the sharing: a client sends its audio on the
 ;; connection it already has, the harness posts it to the service on
@@ -263,27 +271,46 @@ instead, and the reason says so rather than leaving it unexplained."
                          (t 'error))
             :detail detail))))
 
+(defun harness-speech--stack-command ()
+  "Return the last command the pipeline's stack ran, or nil."
+  (and (eq (harness-speech--backend) 'stack)
+       (harness-compose-stack-last-command harness-speech-local-stack)))
+
 (defun harness-speech--reason (state detail)
   "Return the one line to show for pipeline STATE and DETAIL, or nil.
-Nothing is said of a running pipeline: a client shows that it runs."
+Nothing is said of a running pipeline: a client shows that it runs.
+The cause is not cut: the part past a width is what says what failed,
+and it is what a client reads to act.  A view that must fit one row
+truncates for its own width, where the width is known, and `speech/log'
+has the whole of it."
   (pcase state
     ('running nil)
-    ('error (format "Local voice pipeline · %s · %s" (harness-speech--word state) detail))
+    ('error (format "Local voice pipeline · %s · %s"
+                    (harness-speech--word state) detail))
     (_ (format "Local voice pipeline · %s" (harness-speech--word state)))))
 
 (defun harness-speech--describe (state detail)
-  "Return the status plist of the pipeline, in STATE with DETAIL."
-  (let ((status (list :state (symbol-name state)
-                      :detail detail
-                      :backend (symbol-name (harness-speech--backend))
-                      :stt-url (harness-speech--stt-url)
-                      :tts-url (harness-speech--tts-url)
-                      :voice harness-speech-local-voice
-                      :model (and (eq (harness-speech--backend) 'stack)
-                                  harness-speech-local-whisper)
-                      :local t
-                      :reason (harness-speech--reason state detail)
-                      :updated (float-time))))
+  "Return the status plist of the pipeline, in STATE with DETAIL.
+The plist names the stack's last command (`:command', its exact argv
+list), where it ran (`:directory'), its exit status (`:exit') and the
+stack's log buffer (`:log'), so a client can say what failed and offer
+the whole of it without asking again."
+  (let* ((command (harness-speech--stack-command))
+         (status (list :state (symbol-name state)
+                       :detail detail
+                       :backend (symbol-name (harness-speech--backend))
+                       :stt-url (harness-speech--stt-url)
+                       :tts-url (harness-speech--tts-url)
+                       :voice harness-speech-local-voice
+                       :model (and (eq (harness-speech--backend) 'stack)
+                                   harness-speech-local-whisper)
+                       :local t
+                       :command (plist-get command :argv)
+                       :directory (plist-get command :directory)
+                       :exit (plist-get command :exit)
+                       :log (and command harness-speech-local-stack)
+                       :reason (harness-speech--reason state detail)
+                       :updated (float-time))))
     (setq harness-speech--status status)
     status))
 
@@ -632,9 +659,20 @@ Return a promise of (:audio BASE64 :mime \"audio/wav\")."
 It holds `:state' (running, starting, stopped or error), `:detail' (a
 one-line explanation), `:backend' (stack or command), `:stt-url' and
 `:tts-url' (where the services answer, for a client that may reach
-them), `:voice', `:model', `:local' and `:reason' (the one line a
-client shows when it cannot be used, or nil)."
+them), `:voice', `:model', `:local', `:reason' (the one line a client
+shows when it cannot be used, or nil), and, for a pipeline that runs
+as the stack, `:command' (the exact argv list last run), `:directory'
+\(where it ran), `:exit' (its exit status, nil while it runs) and
+`:log' (whose log `speech/log' returns)."
   (harness-speech-local-status))
+
+(harness-defmethod speech/log ()
+  "Return the last command of the local pipeline, and its whole output.
+The text is the exact argv list as a shell command line, the directory
+it ran in, the environment it added, its exit status and everything it
+wrote on both streams: what a failed start is read from, since the
+one-line `:reason' can hold only the cause.  Nil when nothing ran."
+  (harness-compose-stack-log-text harness-speech-local-stack))
 
 (harness-defmethod speech/start ()
   "Start the local pipeline and return its status; `speech/changed' follows."

@@ -79,6 +79,7 @@ on completion, interruption, failure, buffer death and shutdown.
 
 ### Hooks it adds to
 
+- `delete-frame-functions` → `harness-voice-live--frame-deleted`
 - `harness-compose-controls-functions` → `harness-voice--controls`
 - `harness-ui-event-functions` → `harness-voice--on-event`
 - `harness-ui-media-recording-blocked-p-functions` → `harness-voice--recording-p`

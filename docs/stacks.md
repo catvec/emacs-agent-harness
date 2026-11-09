@@ -39,12 +39,78 @@ Podman.
 | `M-x harness-compose-stack-up` | `RUNTIME compose -p PROJECT -f FILE up -d`, then join the network |
 | `M-x harness-compose-stack-down` | `RUNTIME compose -p PROJECT -f FILE --profile … down`, with every profile the stack can use |
 | `M-x harness-compose-stack-status` | `running`, `starting`, `stopped` or `error`, with a one-line detail |
+| `M-x harness-compose-stack-log` | The last command the stack ran, where, its exit status and its whole output |
 
 Commands are argv lists, never shell snippets, and run in the stack's
 directory. A missing runtime is one line in the state: `Executable unavailable ·
 docker` for a CLI that is not installed, `Socket unavailable · /var/run/docker.sock`
 for a Docker daemon the harness cannot reach. The stacks page names the selected
 runtime and `[Change]` opens the runtime page.
+
+## When a command fails
+
+A command runs with pipes, not with the pseudo-terminal Emacs would
+otherwise give a process, and its standard output and standard error are
+kept as it wrote them. Its exit status and its output are remembered as the
+stack's last command (`harness-compose-stack-last-command`), whether it
+started the stack, stopped it or only asked its state.
+
+The state's detail is the exit status and the reason: `exit 1 · Error: no
+image found in manifest list for architecture "arm64"`. The reason is the
+line that says what went wrong, and a runtime's own wrapper is skipped:
+`podman compose` runs an external provider (`/opt/homebrew/bin/podman-compose`
+from Homebrew, say), and when the provider fails podman ends its output with
+one line naming that provider, its whole argv and the exit status. That line
+is the last and the least it says; the provider's own complaint came before
+it, and it is what the detail keeps.
+
+The reason is never cut to a width. The reason a command failed is what the
+detail is for, and cutting it where it passes some column is what made the
+failure unreadable in the first place — `exit 1 · Error: executing
+/opt/homebrew/bin/podman-compose -p voice-local -f /Users/… up: exit status
+1` is the wrapper line, and shortening it leaves neither the reason nor the
+command. Progress before the reason is still dropped, and a runtime's
+control sequences with it; what stays is the line that says what failed,
+whole.
+
+On the stacks page a failed stack puts that line under its row, indented
+with the endpoints, and the row itself keeps `[Start]` and `[Log]` where
+they are: a reason long enough to push them off the row would be a row
+whose buttons move with every message. A short detail — `2 of 2 services`,
+`No services` — stays on its row, where it says the state. A client of its
+own truncates for the width it knows, and the tooltip and the log carry the
+whole of it.
+
+`[Log]` on the stacks page — `M-x harness-compose-stack-log` — shows the
+whole of it: the exact argv as a shell command line, the directory it ran in,
+the environment the stack added, the exit status and every line of output.
+The same log is `speech/log` for the voice pipeline, and
+`harness-speech--describe` carries the command, the directory and the exit
+status in `speech/status` for a client that wants to say what failed.
+
+### Compose providers that differ
+
+Docker Compose and podman-compose are not the same program, and a stack that
+runs on one can fail on the other. Two differences the harness handles for
+both:
+
+- **The working directory.** Docker Compose reads the file's own directory as
+  the project's; podman-compose reads the directory its command runs in.
+  Running every command in the stack's directory makes the file's relative
+  volumes and build contexts mean the same thing to either (`:directory` of
+  the stack record).
+- **Standard input and output.** A provider decides what to do by what its
+  own streams are. Emacs gives `make-process` a pseudo-terminal unless it is
+  told not to, and the harness tells it not to, so a provider that reads its
+  standard input -- `-f -`, a prompt -- sees the end of the input it was given
+  instead of waiting for a terminal that never answers.
+
+What neither runtime can do is run an image that has no build for the
+machine's architecture: the whisper.cpp image is published for `linux/amd64`
+only, and an Apple-silicon podman machine is `linux/arm64`, so its pull fails
+with `no image found in manifest list for architecture "arm64", variant "v8",
+OS "linux"`. The reason then names exactly that, and `HARNESS_WHISPER_IMAGE`
+takes an image built for the machine instead.
 
 ## The network
 
@@ -120,10 +186,16 @@ line says what it still needs, such as `Socket unavailable ·
 ## What is verified
 
 The registry, command construction, status parsing, dynamic port discovery,
-the network join, the endpoints, the profile function, the all-profile `down`
-and the page's copy are covered by `lisp/modules/harness-stacks-test.el`
-without a daemon. The runtime seam is covered by
-`lisp/modules/harness-container-runtime-test.el`. The compose files are checked with
+the network join, the endpoints, the profile function, the all-profile `down`,
+the page's copy, the log and the reason a failed command reports are covered by
+`lisp/modules/harness-stacks-test.el` without a daemon. It holds a
+podman-shaped failure verbatim — the provider's own error, then podman's
+wrapper line naming `/opt/homebrew/bin/podman-compose` and its argv — and
+asserts the exact detail and the exact log. The runtime seam is covered by
+`lisp/modules/harness-container-runtime-test.el`, which runs a real command
+through the asynchronous runner and asserts that it gets pipes rather than a
+terminal, runs in the directory it was given, and reports both streams and a
+nonzero status. The compose files are checked with
 `compose config`, which shows the empty published ports and the per-stack
 network, and with each profile to show the services it enables. A real stack
 on Docker was run by hand: it published a random loopback

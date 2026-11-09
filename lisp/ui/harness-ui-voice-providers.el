@@ -656,11 +656,21 @@ The harness says it in `:reason', so every client names the same cause."
   "Insert the harness's local voice pipeline: its state and its controls.
 The pipeline runs on the harness server, as a child of it, so a client on
 a phone has dictation and spoken replies without whisper.cpp, Kokoro or
-docker of its own."
+docker of its own.  `[Details]' opens the log of the compose command the
+pipeline last ran, which the harness server keeps and `speech/log' sends."
   (let* ((status (harness-voice-pipeline-status-cached))
          (state (harness-voice-pipeline-state))
          (detail (or (plist-get status :detail) "Local voice pipeline"))
-         (running (eq state 'running)))
+         (running (eq state 'running))
+         (control (if running
+                      (harness-ui-string-action
+                       (propertize "[Stop]" 'face 'button
+                                   'help-echo "Local voice pipeline · stop")
+                       #'harness-voice-pipeline-stop)
+                    (harness-ui-string-action
+                     (propertize "[Start]" 'face 'button
+                                 'help-echo "Local voice pipeline · start")
+                     #'harness-voice-pipeline-start))))
     (insert "\n"
             (propertize "Pipeline" 'face 'harness-label-face)
             "  "
@@ -673,15 +683,14 @@ docker of its own."
                         'face (harness-voice-pipeline-face state)
                         'help-echo detail)
             "  "
-            (if running
-                (harness-ui-string-action
-                 (propertize "[Stop]" 'face 'button
-                             'help-echo "Local voice pipeline · stop")
-                 #'harness-voice-pipeline-stop)
-              (harness-ui-string-action
-               (propertize "[Start]" 'face 'button
-                           'help-echo "Local voice pipeline · start")
-               #'harness-voice-pipeline-start))
+            control
+            (if (plist-get status :command)
+                (concat "  "
+                        (harness-ui-string-action
+                         (propertize "[Details]" 'face 'button
+                                     'help-echo "Local voice pipeline · command and output")
+                         #'harness-voice-pipeline-log))
+              "")
             "\n")))
 
 (defun harness-voice--pipeline-result (status)
@@ -703,8 +712,8 @@ the echo area instead of only the word `failed'."
 
 (defun harness-voice-pipeline-receive (status)
   "Take in STATUS, the pipeline's state as the harness reported it.
-The setup list redraws, so [Start] and [Stop] follow the one pipeline
-every client shares."
+The setup list redraws, so [Start], [Stop] and [Details] follow the one
+pipeline every client shares."
   (setq harness-voice-pipeline-status status)
   (harness-voice-setup--refresh))
 
@@ -714,6 +723,26 @@ The answer is drawn when it arrives, see `harness-voice-pipeline-receive'."
   (interactive)
   (harness-ui-call "_harness/speech/status" nil #'harness-voice-pipeline-receive
                    (lambda (_err) nil)))
+
+(defun harness-voice-pipeline-log ()
+  "Show the command the pipeline last ran, and its whole output.
+The harness server keeps the log, next to the stack it started, and
+answers `speech/log' with it: a client on another machine reads the
+server's log, not a file of its own."
+  (interactive)
+  (harness-ui-call
+   "_harness/speech/log" nil
+   (lambda (text)
+     (let ((buffer (get-buffer-create "*harness voice pipeline log*")))
+       (with-current-buffer buffer
+         (let ((inhibit-read-only t))
+           (special-mode)
+           (erase-buffer)
+           (insert (or text "No command\n"))
+           (goto-char (point-min))))
+       (pop-to-buffer buffer)))
+   (lambda (err)
+     (message "Local voice pipeline · %s" (harness-error-message err)))))
 
 (defun harness-voice-pipeline-start ()
   "Start the harness server's local voice pipeline, for every client."

@@ -102,6 +102,7 @@ asks a container runtime for anything."
            (harness-speech-local-stt-url nil)
            (harness-speech-local-tts-url nil)
            (harness-stacks--states (make-hash-table :test 'eq))
+           (harness-stacks--commands (make-hash-table :test 'eq))
            (harness-speech--status nil))
        ,@body)))
 
@@ -200,6 +201,60 @@ asks a container runtime for anything."
         (should (equal "error" (plist-get answer :state)))
         (should (equal "Local voice pipeline · failed · Runtime unavailable · Docker"
                        (plist-get answer :reason)))))))
+
+(ert-deftest harness-speech-stack-failure-names-the-cause-and-the-command ()
+  "A failed start names the provider's own reason, its exit status and its command.
+Podman's `compose' ends its output with a line that names its provider
+and the whole argv and says only that it exited nonzero; the reason is
+the provider's line before it.  The pipeline's one line keeps the
+reason and the status, and the status plist carries the command, where
+it ran and the exit status, so a client can show what actually failed."
+  (harness-speech-test-with-stack
+    (let ((harness-stacks--stacks (make-hash-table :test 'eq))
+          answer)
+      (harness-define-compose-stack 'voice-local
+        :label "Local voice pipeline"
+        :directory "/Users/noah/documents/ai/emacs-agent-harness/scripts/stacks/voice-local"
+        :project "voice-local"
+        :endpoints '((whisper 8080) (parakeet 8081) (tts 8880))
+        :profiles (lambda () (list (or (harness-speech--stt-profile) "whisper"))))
+      (cl-letf (((symbol-function 'harness-compose-stack-available-p) (lambda () t))
+                ((symbol-function 'harness-stacks--run)
+                 (lambda (_argv _env callback &optional _directory)
+                   (funcall callback
+                            (cons 1 (concat
+                                     ">>>> Executing external compose provider \"/opt/homebrew/bin/podman-compose\". <<<<\n"
+                                     "\n"
+                                     "Error: no image found in manifest list for architecture \"arm64\", variant \"v8\", OS \"linux\"\n"
+                                     "Error: executing /opt/homebrew/bin/podman-compose -p voice-local -f /Users/noah/documents/ai/emacs-agent-harness/scripts/stacks/voice-local/docker-compose.yml --profile whisper up -d: exit status 1\n"))))))
+        (setq answer (harness-call 'speech/start))
+        (should (equal "error" (plist-get answer :state)))
+        (should (equal (concat "Local voice pipeline · failed · exit 1 · "
+                               "Error: no image found in manifest list for architecture "
+                               "\"arm64\", variant \"v8\", OS \"linux\"")
+                       (plist-get answer :reason)))
+        ;; The command the state names is the exact argv that ran, profiles
+        ;; and all: the same one the stack would build for its runtime.
+        (should (equal (harness-compose-stack--argv
+                        (harness-compose-stack-get 'voice-local) "up" "-d")
+                       (plist-get answer :command)))
+        (should (equal '("docker" "compose" "-p" "voice-local" "-f"
+                         "/Users/noah/documents/ai/emacs-agent-harness/scripts/stacks/voice-local/docker-compose.yml"
+                         "--profile" "whisper" "up" "-d")
+                       (plist-get answer :command)))
+        (should (equal "/Users/noah/documents/ai/emacs-agent-harness/scripts/stacks/voice-local"
+                       (plist-get answer :directory)))
+        (should (eql 1 (plist-get answer :exit)))
+        (should (eq 'voice-local (plist-get answer :log)))
+        ;; The whole of it is the log the client asks for, not a line.
+        (let ((log (harness-call 'speech/log)))
+          (should (string-prefix-p
+                   (concat "docker compose -p voice-local -f "
+                           "/Users/noah/documents/ai/emacs-agent-harness/scripts/stacks/voice-local/docker-compose.yml"
+                           " --profile whisper up -d\n")
+                   log))
+          (should (string-match-p "Exit  1\n" log))
+          (should (string-match-p "no image found in manifest list" log)))))))
 
 (ert-deftest harness-speech-stack-stop-says-stopped ()
   "Stopping is a state of its own, whatever the runtime says afterwards."

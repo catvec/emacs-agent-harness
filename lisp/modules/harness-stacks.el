@@ -67,6 +67,31 @@
 (defvar harness-stacks--states (make-hash-table :test 'eq)
   "Compose stack id -> the last state plist seen for it.")
 
+(defvar harness-stacks--commands (make-hash-table :test 'eq)
+  "Compose stack id -> the last command run for it.
+A plist of `:argv' (the exact argv list), `:directory' (where it ran),
+`:env' (the variables added), `:exit' (its exit status, or nil while it
+runs), `:output' (both streams as it wrote them) and `:at' (when it
+ended).  `M-x harness-compose-stack-log' shows it whole.")
+
+(defvar harness-stacks--failures (make-hash-table :test 'eq)
+  "Compose stack id -> the start or stop that last failed for it.
+The record is as `harness-stacks--commands' holds one.  It is kept
+until a later start or stop succeeds, so a state query that finds
+nothing running does not turn a failed start into a stopped stack and
+lose the reason: the failure stays what the page shows, and the log it
+opens is the command that failed.")
+
+(defconst harness-stacks--runtime-wrapper-patterns
+  '("\\`Error: executing .*: exit status -?[0-9]+\\'"
+    "\\`Error: executing .*: signal: [a-z0-9]+\\'")
+  "Lines that report only that the runtime's compose provider failed.
+Podman's `compose' is a thin wrapper around an external provider, such
+as `/opt/homebrew/bin/podman-compose', and when the provider fails it
+prints one line naming the provider and its whole argv, with the exit
+status.  That line is the last the output holds and the least it says:
+the provider's own error came before it.")
+
 (defvar harness-stacks--timeout 600
   "Seconds a runtime's compose up may take before the harness notes it.")
 
@@ -121,9 +146,19 @@ model size.  Defining ID again replaces it."
 
 ;;;; Commands
 
+(defun harness-stacks--directory (stack)
+  "Return the directory of STACK, where its compose commands run.
+A compose file names its volumes and build contexts relative to itself,
+and a provider resolves them from the directory the command runs in:
+Docker Compose from the file, podman-compose from its own working
+directory.  Running in the stack's directory is what makes the file's
+relative paths mean the same thing to both."
+  (or (plist-get stack :directory)
+      default-directory))
+
 (defun harness-compose-stack--file (stack)
   "Return the compose file of STACK."
-  (expand-file-name (plist-get stack :file) (plist-get stack :directory)))
+  (expand-file-name (plist-get stack :file) (harness-stacks--directory stack)))
 
 (defun harness-compose-stack--env-pairs (stack)
   "Return STACK's extra environment as a list of KEY=VALUE strings."
@@ -190,31 +225,121 @@ terminal; none of it belongs in a one-line state."
   (let ((case-fold-search t))
     (string-match-p
      (concat "error\\|failed\\|denied\\|unavailable\\|not found"
-             "\\|cannot\\|no such\\|unknown")
+             "\\|cannot\\|no such\\|unknown\\|traceback\\|exception")
      line)))
 
+(defun harness-stacks--wrapper-line-p (line)
+  "Non-nil when LINE says only that the runtime's compose provider failed.
+Podman's `compose' wraps an external provider, and its last line names
+that provider and its argv and nothing else; the provider's own reason
+came before it."
+  (let ((case-fold-search nil))
+    (cl-some (lambda (pattern) (string-match-p pattern line))
+             harness-stacks--runtime-wrapper-patterns)))
+
+(defun harness-stacks--reason-line (lines)
+  "Return the line of LINES that best says why a command failed.
+LINES are non-empty lines, trimmed, in the order the command wrote
+them.  A wrapper line -- the runtime saying its provider exited
+nonzero -- is the last line and the least informative, so the last line
+that reads like a failure and is not one wins; failing that, the first
+so that a provider which prints its complaint first is still heard; and
+when nothing reads like a failure, the last line is what is left."
+  (let ((errors (seq-filter #'harness-stacks--error-line-p lines)))
+    (or (car (last (seq-remove #'harness-stacks--wrapper-line-p errors)))
+        (car (seq-remove #'harness-stacks--wrapper-line-p errors))
+        (car (last lines)))))
+
 (defun harness-stacks--one-line (text)
-  "Return TEXT as one short line, without a trailing newline.
-A failed compose command writes progress before the reason, so the last
-line that reads like a failure is kept; when none does, the last
-non-empty line is.  Nil means there was no line to show."
+  "Return TEXT as the one line that says why a command failed.
+A failed compose command writes progress before the reason, so the
+line that reads like the reason is kept (see
+`harness-stacks--reason-line').  Nothing is cut: there is no width a
+reason may be shortened to, since the part past it is what says what
+failed.  A display that must fit one row truncates for its own width,
+where the width is known, and `M-x harness-compose-stack-log' has the
+whole of it.  Nil means there was no line to show."
   (let* ((clean (harness-stacks--strip-controls text))
          (lines (seq-remove #'string-empty-p
-                            (mapcar #'string-trim (split-string clean "\n"))))
-         (error-line (car (last (seq-filter #'harness-stacks--error-line-p lines))))
-         (line (or error-line (car (last lines)))))
-    (when line
-      (if (> (length line) 160) (concat (substring line 0 157) "...") line))))
+                            (mapcar #'string-trim (split-string clean "\n")))))
+    (harness-stacks--reason-line lines)))
 
-(defun harness-stacks--exec (argv &optional env)
-  "Run runtime ARGV, with ENV, and return (EXIT-CODE . OUTPUT)."
-  (harness-container-runtime-exec argv env))
+(defun harness-stacks--status-line (exit text)
+  "Return the words for a failed command with EXIT and its output TEXT.
+The exit status is part of the reason: a provider that exits 0 while
+the runtime prints an error is a different problem from one that
+exits 1, and a client cannot tell them apart from the words alone."
+  (let ((reason (harness-stacks--one-line text)))
+    (cond ((and exit reason (not (eq exit 0)))
+           (format "exit %d · %s" exit reason))
+          (reason reason)
+          (exit (format "exit %d" exit))
+          (t "Compose failed"))))
 
-(defun harness-stacks--run (argv env callback)
-  "Run runtime ARGV asynchronously, with ENV; CALLBACK gets (EXIT . OUTPUT).
+(defun harness-stacks--quoted-argv (argv)
+  "Return the shell command line that runs ARGV as it is."
+  (mapconcat #'shell-quote-argument argv " "))
+
+(defun harness-stacks--command-remember (id argv env exit output
+                                            &optional directory kind)
+  "Remember the command just run for stack ID, and return the record.
+ARGV is its exact argv list, ENV the variables added to it, EXIT its
+exit status, OUTPUT both streams, DIRECTORY where it ran, and KIND
+`start', `stop' or `query' what it was asked to do.  A start or stop
+that fails is kept as the stack's failure; one that succeeds clears it,
+and a query changes neither, since a query that finds nothing running
+is not a stack that started."
+  (let ((record (list :argv (append argv nil)
+                      :directory (or directory default-directory)
+                      :env (append env nil)
+                      :exit exit
+                      :output (or output "")
+                      :kind kind
+                      :at (float-time))))
+    (puthash id record harness-stacks--commands)
+    (when (and (memq kind '(start stop)) (numberp exit))
+      (if (eql exit 0)
+          (remhash id harness-stacks--failures)
+        (puthash id record harness-stacks--failures)))
+    record))
+
+(defun harness-compose-stack-last-command (id)
+  "Return the last command run for compose stack ID, or nil.
+The plist holds `:argv', `:directory', `:env', `:exit', `:output',
+`:kind' and `:at', as `harness-stacks--commands' describes."
+  (and id (gethash id harness-stacks--commands)))
+
+(defun harness-compose-stack-last-failure (id)
+  "Return the start or stop of compose stack ID that last failed, or nil.
+The record is the one `harness-compose-stack-last-command' describes.
+It is kept until a later start or stop succeeds, so the reason a start
+failed outlives the state queries that follow it."
+  (and id (gethash id harness-stacks--failures)))
+
+(defun harness-stacks--run (argv env callback &optional directory)
+  "Run runtime ARGV with ENV in DIRECTORY; CALLBACK gets (EXIT . OUTPUT).
 The compose command can pull images for minutes, so it never blocks
 Emacs; the harness reports it when it ends."
-  (harness-container-runtime-run argv env callback))
+  (harness-container-runtime-run argv env callback directory))
+
+(defun harness-stacks--exec (argv &optional env directory)
+  "Run runtime ARGV, with ENV, in DIRECTORY, and return (EXIT-CODE . OUTPUT)."
+  (harness-container-runtime-exec argv env directory))
+
+(defun harness-stacks--exec-for-stack (stack &rest arguments)
+  "Ask STACK's runtime about it with ARGUMENTS; return (EXIT . OUTPUT).
+The command runs in the stack's directory, with its environment, and
+is remembered as the stack's last command; a query is not a start, so
+it neither sets nor clears the stack's failure."
+  (let* ((argv (apply #'harness-compose-stack--argv stack arguments))
+         (env (harness-compose-stack--env-pairs stack))
+         (directory (harness-stacks--directory stack))
+         (reply (harness-stacks--exec argv env directory)))
+    (harness-stacks--command-remember (plist-get stack :id) argv env
+                                      (car reply) (cdr reply) directory
+                                      'query)
+    reply))
+
 
 ;;;; State
 
@@ -234,8 +359,13 @@ The value is a plist: `:state' is `running', `starting', `stopped' or
     state))
 
 (defun harness-compose-stack--query (id)
-  "Ask the container runtime for the state of compose stack ID."
-  (let ((stack (harness-compose-stack-get id)))
+  "Ask the container runtime for the state of compose stack ID.
+A start or stop that failed, and that nothing has succeeded since, is
+the state, whatever the services now do: a failed start is not a
+stopped stack, and its reason stays until the next start or stop
+succeeds."
+  (let ((stack (harness-compose-stack-get id))
+        (failure (harness-compose-stack-last-failure id)))
     (cond
      ((null stack)
       (list :state 'error :detail (format "Unknown compose stack · %s" id)))
@@ -244,12 +374,19 @@ The value is a plist: `:state' is `running', `starting', `stopped' or
             :detail (or (harness-compose-stack--runtime-reason)
                         "Runtime unavailable")))
      (t
-      (let ((reply (harness-stacks--exec
-                    (harness-compose-stack--argv stack "ps" "--format" "json")
-                    (harness-compose-stack--env-pairs stack))))
-        (if (eql 0 (car reply))
-            (harness-compose-stack--parse-ps (cdr reply))
-          (harness-compose-stack--parse-ps-quiet stack)))))))
+      (let* ((reply (harness-stacks--exec-for-stack stack "ps" "--format" "json"))
+             (state (if (eql 0 (car reply))
+                        (harness-compose-stack--parse-ps (cdr reply))
+                      (harness-compose-stack--parse-ps-quiet stack))))
+        (if (and failure (not (harness-compose-stack--up-p state)))
+            (harness-stacks--failed-state id (plist-get failure :output))
+          state))))))
+
+(defun harness-compose-stack--up-p (state)
+  "Non-nil when STATE, a state plist, is a stack that runs.
+A stack that is starting runs: something it started is on its way, so
+a failure before it is no longer what the stack is."
+  (memq (plist-get state :state) '(running starting)))
 
 (defun harness-compose-stack--parse-ps (output)
   "Return the state plist described by the runtime's compose ps OUTPUT.
@@ -270,6 +407,8 @@ the services, so an endpoint needs no second call."
       (list :state 'running :detail (harness-compose-stack--services-detail running total)
             :ports ports))
      ((zerop running)
+      ;; Nothing runs: unless a start or stop failed and nothing has
+      ;; succeeded since, in which case that is what the stack is.
       (list :state 'stopped :detail (format "0 of %d services" total) :ports ports))
      (t (list :state 'starting :detail (harness-compose-stack--services-detail running total)
               :ports ports)))))
@@ -341,13 +480,11 @@ version; both are read."
 
 (defun harness-compose-stack--parse-ps-quiet (stack)
   "Ask for the service ids of STACK when its JSON listing failed."
-  (let ((reply (harness-stacks--exec
-                (harness-compose-stack--argv stack "ps" "-q")
-                (harness-compose-stack--env-pairs stack))))
+  (let ((reply (harness-stacks--exec-for-stack stack "ps" "-q")))
     (cond
      ((not (eql 0 (car reply)))
       (list :state 'error
-            :detail (or (harness-stacks--one-line (cdr reply)) "Compose failed")))
+            :detail (harness-stacks--status-line (car reply) (cdr reply))))
      ((string-empty-p (string-trim (cdr reply)))
       (list :state 'stopped :detail "No services"))
      (t (list :state 'running
@@ -400,9 +537,7 @@ server's, if the server runs in a container."
                                                               network-error))))
                      (harness-compose-stack--remember id state)
                      (when callback (funcall callback state)))))
-           (let ((state (list :state 'error
-                              :detail (or (harness-stacks--one-line (cdr reply))
-                                          "Compose failed"))))
+           (let ((state (harness-stacks--failed-state id (cdr reply))))
              (harness-compose-stack--remember id state)
              (when callback (funcall callback state))))))))))
 
@@ -427,28 +562,51 @@ server's, if the server runs in a container."
        (lambda (reply)
          (let ((state (if (eql 0 (car reply))
                           (list :state 'stopped :detail "Stopped")
-                        (list :state 'error
-                              :detail (or (harness-stacks--one-line (cdr reply))
-                                          "Compose failed")))))
+                        (harness-stacks--failed-state id (cdr reply)))))
            (harness-compose-stack--remember id state)
            (when callback (funcall callback state))))
-       t)))))
+       t 'stop)))))
 
-(defun harness-stacks--command (stack arguments callback &optional every-profile)
+(defun harness-stacks--failed-state (id output)
+  "Return the error state of stack ID after a command wrote OUTPUT.
+The detail keeps the exit status beside the provider's own reason, so a
+client shows what failed as well as which command did (see
+`harness-compose-stack--log-record')."
+  (list :state 'error
+        :detail (harness-stacks--status-line
+                 (plist-get (harness-compose-stack--log-record id) :exit)
+                 output)))
+
+(defun harness-stacks--command (stack arguments callback &optional every-profile kind)
   "Run STACK's compose command with ARGUMENTS, reporting to CALLBACK.
 EVERY-PROFILE enables all the profiles the stack can use, for `down'.
-A command that runs longer than `harness-stacks--timeout' is reported,
-not killed: a first pull can be slow without being wrong."
-  (let* ((label (harness-compose-stack--label (plist-get stack :id)))
+KIND is `start' or `stop'.  A command that runs longer than
+`harness-stacks--timeout' is reported, not killed: a first pull can be
+slow without being wrong.  The command runs in the stack's directory
+with pipes, and its argv, directory, environment, exit status and whole
+output are kept as the stack's last command when it ends; failing, it
+is kept as the stack's failure too."
+  (let* ((kind (or kind 'start))
+         (label (harness-compose-stack--label (plist-get stack :id)))
+         (argv (if every-profile
+                   (apply #'harness-compose-stack--stop-argv stack arguments)
+                 (apply #'harness-compose-stack--argv stack arguments)))
+         (env (harness-compose-stack--env-pairs stack))
+         (directory (harness-stacks--directory stack))
          (timer (run-at-time harness-stacks--timeout nil
                              (lambda () (message "Compose stack · still running · %s" label)))))
-    (harness-stacks--run (if every-profile
-                             (apply #'harness-compose-stack--stop-argv stack arguments)
-                           (apply #'harness-compose-stack--argv stack arguments))
-                         (harness-compose-stack--env-pairs stack)
+    ;; The command is recorded before it runs, so a failure that never
+    ;; comes back still names what was run and where.  It is not yet a
+    ;; failure: the last one stays until this one ends.
+    (harness-stacks--command-remember (plist-get stack :id) argv env nil "" directory kind)
+    (harness-stacks--run argv env
                          (lambda (reply)
                            (when (timerp timer) (cancel-timer timer))
-                           (funcall callback reply)))))
+                           (harness-stacks--command-remember
+                            (plist-get stack :id) argv env
+                            (car reply) (cdr reply) directory kind)
+                           (funcall callback reply))
+                         directory)))
 
 ;;;; Networks
 
@@ -540,6 +698,94 @@ its (CONTAINER-PORT . PUBLISHED-PORT) pairs; SERVICE is a symbol."
                          ports)))
     (cdr (assq container (cdr entry)))))
 
+;;;; The log of a stack's last command
+
+(defun harness-stacks--log-buffer-name (id)
+  "Return the name of the log buffer of compose stack ID."
+  (format "*harness stack log: %s*" id))
+
+(defvar harness-stacks-log-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "g") #'harness-stacks-log-refresh)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Key map of `harness-stacks-log-mode'.")
+
+(define-derived-mode harness-stacks-log-mode special-mode "Stack Log"
+  "Major mode of a compose stack's command log.
+It shows the last command the stack ran, where it ran, the environment
+it added, its exit status and its whole output, as written.  After a
+failed start or stop it shows that one: the reason a start failed is
+what the log is opened for, and the state queries that followed it are
+not."
+  (setq truncate-lines nil)
+  (buffer-disable-undo))
+
+(defun harness-compose-stack--log-record (id)
+  "Return the command record of compose stack ID that its log shows.
+A start or stop that failed is the one, until one succeeds; otherwise
+it is the last command run."
+  (or (harness-compose-stack-last-failure id)
+      (harness-compose-stack-last-command id)))
+
+(defun harness-compose-stack-log-text (id)
+  "Return the log of compose stack ID, as text.
+The command comes first, as the shell line that runs it, then where it
+ran, the environment it added, its exit status and its output.  A start
+or stop that failed is the command shown, until one succeeds.  Nil when
+the stack has run no command."
+  (when-let* ((record (harness-compose-stack--log-record id)))
+    (let ((exit (plist-get record :exit))
+          (output (or (plist-get record :output) "")))
+      (concat
+       (format "%s\n" (harness-stacks--quoted-argv (plist-get record :argv)))
+       (format "Directory  %s\n" (plist-get record :directory))
+       (if (plist-get record :env)
+           (format "Environment  %s\n"
+                   (mapconcat #'identity (plist-get record :env) " "))
+         "")
+       (format "Exit  %s\n"
+               (cond ((numberp exit)
+                      (if (eql exit 0) "0" (format "%d" exit)))
+                     (t "running")))
+       "\n"
+       (harness-stacks--strip-controls output)
+       (unless (or (string-empty-p output) (string-suffix-p "\n" output))
+         "\n")))))
+
+(defun harness-stacks-log-refresh ()
+  "Draw the log of the stack this buffer shows."
+  (interactive)
+  (let ((id (get-text-property (point-min) 'harness-stack-id)))
+    (when id
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (or (harness-compose-stack-log-text id) "No command\n"))
+        (goto-char (point-min))))))
+
+;;;###autoload
+(defun harness-compose-stack-log (id)
+  "Show the last command run for compose stack ID, and its whole output.
+That is the exact argv list, where it ran, the environment added to it,
+its exit status and everything it wrote, on both streams: what the
+one-line state cannot hold and a failure is read from."
+  (interactive
+   (list (intern (completing-read "Compose stack: "
+                                  (mapcar #'symbol-name (harness-compose-stack-ids))
+                                  nil t))))
+  (unless (harness-compose-stack-get id)
+    (user-error "Unknown compose stack · %s" id))
+  (let ((buffer (get-buffer-create (harness-stacks--log-buffer-name id))))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (harness-stacks-log-mode)
+        (erase-buffer)
+        (insert (or (harness-compose-stack-log-text id) "No command\n"))
+        (goto-char (point-min))
+        (put-text-property (point-min) (point-max) 'harness-stack-id id)))
+    (pop-to-buffer buffer)))
+
 ;;;; The stacks page
 
 (defvar harness-stacks-mode-map
@@ -625,9 +871,12 @@ its (CONTAINER-PORT . PUBLISHED-PORT) pairs; SERVICE is a symbol."
                                 ('running 'success)
                                 ('error 'error)
                                 (_ 'shadow)))
-            "  "
-            (propertize detail 'face 'shadow)
             "  ")
+    ;; A short detail -- "2 of 2 services" -- says the state on its row.
+    ;; A failed command's reason goes below it, whole: see the end of
+    ;; this function.
+    (when (not (eq kind 'error))
+      (insert (propertize detail 'face 'shadow) "  "))
     (let ((action (if running
                       (lambda (_button) (harness-compose-stack-down id #'harness-stacks--redraw))
                     (lambda (_button) (harness-compose-stack-up id #'harness-stacks--redraw)))))
@@ -638,7 +887,22 @@ its (CONTAINER-PORT . PUBLISHED-PORT) pairs; SERVICE is a symbol."
        'help-echo (if running
                       "Compose stack · stop"
                     "Compose stack · start")))
+    (when (harness-compose-stack--log-record id)
+      (insert "  ")
+      (insert-text-button
+       "[Log]"
+       'action (lambda (_button) (harness-compose-stack-log id))
+       'follow-link t
+       'help-echo "Compose stack · last command and output"))
     (insert "\n")
+    ;; A failed command's reason is on a line of its own, below the row
+    ;; and its controls: it is what the page is read for, and a reason
+    ;; long enough to push the controls off the row would be a row whose
+    ;; buttons move with the message.  Nothing of it is cut.
+    (when (eq kind 'error)
+      (insert "      "
+              (propertize detail 'face 'shadow)
+              "\n"))
     (dolist (entry (plist-get stack :endpoints))
       (insert "      "
               (propertize (format "%s · %s" (car entry)
@@ -648,10 +912,19 @@ its (CONTAINER-PORT . PUBLISHED-PORT) pairs; SERVICE is a symbol."
               "\n"))))
 
 (defun harness-stacks--redraw (&optional _state)
-  "Redraw the stacks page, when a window shows it."
+  "Redraw the stacks page, when a window shows it, and any stack's log."
   (when (get-buffer-window "*harness stacks*")
     (with-current-buffer "*harness stacks*"
-      (harness-stacks--render))))
+      (harness-stacks--render)))
+  (dolist (id (harness-compose-stack-ids))
+    (let ((buffer (get-buffer (harness-stacks--log-buffer-name id))))
+      (when (and (buffer-live-p buffer) (get-buffer-window buffer))
+        (with-current-buffer buffer
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert (or (harness-compose-stack-log-text id) "No command\n"))
+            (goto-char (point-min))
+            (put-text-property (point-min) (point-max) 'harness-stack-id id)))))))
 
 (defun harness-stacks-refresh ()
   "Ask the container runtime again for every stack's state."
@@ -667,7 +940,7 @@ its (CONTAINER-PORT . PUBLISHED-PORT) pairs; SERVICE is a symbol."
   (harness-compose-stack--forget-availability))
 
 (harness-define-module 'stacks
-  :doc "Compose stacks that modules and plugins declare: start, stop, state, dynamic ports and the harness server's network."
+  :doc "Compose stacks that modules and plugins declare: start, stop, state, dynamic ports, the harness server's network, and the log of each stack's last command."
   :init #'harness-stacks--init)
 
 (provide 'harness-stacks)

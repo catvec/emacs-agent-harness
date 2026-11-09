@@ -242,7 +242,7 @@
     (setq harness-container-runtime 'podman)
     (let (argv)
       (cl-letf (((symbol-function 'harness-container-runtime--exec)
-                 (lambda (command &optional _env)
+                 (lambda (command &optional _env _directory)
                    (setq argv command)
                    (cons 0 ""))))
         (should (equal (cons 0 "")
@@ -288,7 +288,52 @@
        '("harness-no-such-program") nil
        (lambda (value) (setq reply value)))
       (harness-test-wait (lambda () reply) 5 "missing runtime command")
-      (should (eql 127 (car reply))))))
+      (should (eql 127 (car reply))))
+    ;; Standard error comes back with standard output, every line of it,
+    ;; and nothing of the process machinery is added.  Each stream is a
+    ;; pipe of its own, so only the lines are certain, not their order.
+    (let (reply)
+      (harness-container-runtime-run
+       '("sh" "-c" "printf 'first\\n'; printf 'second\\n' >&2; printf 'third\\n'")
+       nil
+       (lambda (value) (setq reply value)))
+      (harness-test-wait (lambda () reply) 5 "runtime command streams")
+      (should (eql 0 (car reply)))
+      (should (equal '("first" "second" "third")
+                     (sort (split-string (cdr reply) "\n" t) #'string<))))
+    ;; A nonzero status is kept, with what the command said.
+    (let (reply)
+      (harness-container-runtime-run
+       '("sh" "-c" "printf 'Error: no such image\\n' >&2; exit 125") nil
+       (lambda (value) (setq reply value)))
+      (harness-test-wait (lambda () reply) 5 "runtime command failure")
+      (should (equal (cons 125 "Error: no such image\n") reply)))))
+
+(ert-deftest harness-container-runtime-run-is-not-a-terminal ()
+  "A command the runner starts gets pipes, and the directory it is given.
+Emacs gives `make-process' a pseudo-terminal unless it is told not to,
+and a compose provider that is handed one waits on it where a shell
+would give it pipes.  The command also runs where its caller says, not
+in whichever buffer the command was typed in."
+  (harness-container-runtime-test--runtimes
+    (let ((directory (make-temp-file "harness-runtime-dir" t)))
+      (unwind-protect
+          (let (reply)
+            (harness-container-runtime-run
+             '("sh" "-c" "if test -t 0 || test -t 1 || test -t 2; then echo tty; else echo pipe; fi; pwd")
+             nil
+             (lambda (value) (setq reply value))
+             directory)
+            (harness-test-wait (lambda () reply) 5 "runtime command pipes")
+            (should (equal (concat "pipe\n" (file-truename directory) "\n")
+                           (cdr reply))))
+        (delete-directory directory t)))
+    ;; The synchronous runner reads both streams too, and reports the status.
+    (let ((reply (harness-container-runtime-exec
+                  '("sh" "-c" "printf 'out\\n'; printf 'err\\n' >&2; exit 1")
+                  nil default-directory)))
+      (should (eql 1 (car reply)))
+      (should (equal "out\nerr\n" (cdr reply))))))
 
 (ert-deftest harness-container-runtime-page-copy ()
   "The page shows the automatic choice, each backend and the socket."

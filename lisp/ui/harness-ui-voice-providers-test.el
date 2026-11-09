@@ -296,6 +296,51 @@ worked out: the pipeline is the server's."
                              (if (equal (nth 2 case) "[Stop]") "Stop" "Start"))
                      (buffer-substring-no-properties (point-min) (point-max))))))))))
 
+(ert-deftest harness-ui-voice-providers-setup-pipeline-details ()
+  "A pipeline that has run a command offers its log, and only then.
+The control appears once the harness names the command, and its tooltip
+is a noun phrase like the rest of the line."
+  (let ((harness-voice-pipeline-status
+         (list :state "error" :detail "exit 1 · no such image"
+               :command '("podman" "compose" "-p" "voice-local" "up" "-d")
+               :exit 1)))
+    (with-temp-buffer
+      (harness-voice--insert-pipeline)
+      (should (equal (concat "\n"
+                             (propertize "Pipeline" 'face 'harness-label-face)
+                             "  "
+                             (propertize "✕ failed" 'face 'harness-failure-face
+                                         'help-echo "exit 1 · no such image")
+                             "  [Start]  [Details]\n")
+                     (buffer-string)))
+      (goto-char (point-min))
+      (search-forward "[Details]")
+      (should (equal "Local voice pipeline · command and output"
+                     (get-text-property (match-beginning 0) 'help-echo)))))
+  (let ((harness-voice-pipeline-status '(:state "stopped" :detail "Stopped")))
+    (with-temp-buffer
+      (harness-voice--insert-pipeline)
+      (should-not (string-search "[Details]" (buffer-string))))))
+
+(ert-deftest harness-ui-voice-providers-pipeline-log ()
+  "The details control asks the harness for the log and shows what it sent."
+  (let (asked)
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (method params callback &optional _error)
+                 (push (list method params) asked)
+                 (funcall callback "podman compose up -d\nExit  1\nno such image\n"))))
+      (unwind-protect
+          (save-window-excursion
+            (harness-voice-pipeline-log)
+            (should (equal '(("_harness/speech/log" nil)) asked))
+            (with-current-buffer "*harness voice pipeline log*"
+              (should (derived-mode-p 'special-mode))
+              (should buffer-read-only)
+              (should (equal "podman compose up -d\nExit  1\nno such image\n"
+                             (buffer-substring-no-properties (point-min) (point-max))))))
+        (when (get-buffer "*harness voice pipeline log*")
+          (kill-buffer "*harness voice pipeline log*"))))))
+
 (ert-deftest harness-ui-voice-providers-setup-pipeline-tooltips ()
   "The pipeline line's state carries the harness's detail as its tooltip."
   (let ((harness-voice-pipeline-status

@@ -172,7 +172,7 @@ and supervisor load only when they are named.
 | [skills](skills.md) |  | [tools](tools.md) | Skill discovery (SKILL.md directories), search, loading and prompt index. |
 | [small](small.md) | by default |  | One-off model calls the harness makes on its own, tried again like a step of a turn when they fail transiently. |
 | [speech](speech.md) |  | [stacks](stacks.md) | The local speech service the harness runs for its clients: the whisper.cpp and Kokoro pipeline as the harness server's child, its state and endpoints, and transcription and synthesis over ACP so a phone needs no speech model. |
-| [stacks](stacks.md) |  |  | Compose stacks that modules and plugins declare: start, stop, state, dynamic ports and the harness server's network. |
+| [stacks](stacks.md) |  |  | Compose stacks that modules and plugins declare: start, stop, state, dynamic ports, the harness server's network, and the log of each stack's last command. |
 | [store](store.md) | by default |  | JSON, JSONL and SQLite persistence under the state directory. |
 | [supervisor](supervisor.md) | when named | [session](session.md), [agent](agent.md), [tools](tools.md), [readonly](readonly.md) | Supervisor mode: sessions that plan and delegate, enforced by the harness. |
 | [tasks](tasks.md) |  | [store](store.md), [project](project.md), [session](session.md), [agent](agent.md) | Task mode: one session per task, through review and the merge queue, with a limit of tasks at once per project, started by priority. |
@@ -454,6 +454,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `completion-at-point-functions` |  | [ui-compose](ui-compose.md) |
 | `compose-quote-insert-hook` | `compose-quote.el` | [ui-compose](ui-compose.md) |
 | `dbus-event-error-functions` | `harness-notifications-desktop.el` | `harness-notifications-desktop.el` |
+| `delete-frame-functions` |  | [ui-voice](ui-voice.md) |
 | `ediff-after-quit-hook-internal` |  | [ui-patch-review](ui-patch-review.md) |
 | `ediff-select-hook` |  | [ui-patch-review](ui-patch-review.md) |
 | `emacs-startup-hook` |  | [ui](ui.md) |

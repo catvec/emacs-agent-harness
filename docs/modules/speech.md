@@ -44,6 +44,14 @@ Clients reach the pipeline over ACP:
   `speech/stop`        stop it
   `speech/transcribe`  {audio: BASE64 WAV} -> (:text TEXT)
   `speech/synthesize`  {text: TEXT} -> (:audio BASE64 WAV)
+  `speech/log`         the exact command the stack last ran, where,
+                       its exit status and its whole output, as text
+
+A stack that fails says so in `speech/status`: `:detail` and
+`:reason` name the exit status and the provider's own reason, and
+`:command`, `:directory` and `:exit` carry the rest for a client that
+wants to show it.  The whole of it is `speech/log`, which is the
+stack's own log (`M-x harness-compose-stack-log`).
 
 The last two are the sharing: a client sends its audio on the
 connection it already has, the harness posts it to the service on
@@ -57,6 +65,7 @@ sidecar does.  `speech/changed` carries the state whenever it moves.
 
 ### Methods
 
+- `speech/log` — Return the last command of the local pipeline, and its whole output.
 - `speech/start` — Start the local pipeline and return its status; `speech/changed` follows.
 - `speech/status` — Return the local pipeline's status plist.
 - `speech/stop` — Stop the local pipeline and return its status; `speech/changed` follows.
@@ -75,13 +84,13 @@ sidecar does.  `speech/changed` carries the state whenever it moves.
 ### Options
 
 - `harness-speech-autostart` — Non-nil starts the local pipeline with the harness.
-- `harness-speech-local-whisper` — The whisper.cpp model file the bundled stack transcribes with.
 - `harness-speech-local-startup-timeout` — Seconds a started pipeline gets to answer before it reads as failed.
 - `harness-speech-local-stt-command` — Command the harness runs for speech to text, or nil for its stack.
 - `harness-speech-local-stt-url` — URL the speech-to-text command serves, or nil for the stack.
 - `harness-speech-local-tts-command` — Command the harness runs for text to speech, or nil for its stack.
 - `harness-speech-local-tts-url` — URL the text-to-speech command serves, or nil for the stack.
 - `harness-speech-local-voice` — The voice the local pipeline speaks with.
+- `harness-speech-local-whisper` — The whisper.cpp model file the bundled stack transcribes with.
 - `harness-speech-request-timeout` — Seconds one transcription or synthesis request may take.
 
 ## Uses
