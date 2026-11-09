@@ -1338,6 +1338,13 @@ the limits.
 | ![The voice screen on a live provider: Live at the top, the call listening](screenshots/voice-live.png) | ![The voice screen on a wide screen: the orb, the transcript and the controls in one column](screenshots/voice-wide.png) |
 
 ## Workspace
+The `Workspace` tab has a `Graph` page beside `Memory`: it reads the
+current thread's Logseq page through `knowledge/graph`, shows its
+identity and state (the thread's summary and next action among them),
+the nodes on it and the pages that link it back.  A node opens with its
+children, a linked page opens by name, and Back returns to the view
+before it.  The page only reads the graph; the harness and the user's
+editor write it.
 
 A `Workspace` tab appears beside Sessions when the harness advertises
 `workspace/*` (`HarnessCapabilities.workspace`, and `workspaceComputer` for the

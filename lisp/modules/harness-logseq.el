@@ -180,19 +180,39 @@ Nil and blank become `Untitled'."
   "Return TEXT as one line, its whitespace runs made single spaces."
   (replace-regexp-in-string "[[:space:]\n\r\t]+" " " (string-trim (or text ""))))
 
+(defun harness-logseq--block-lines (text)
+  "Return TEXT as the lines of one Logseq block.
+Carriage returns become newlines, trailing whitespace goes, and leading
+and trailing blank lines are dropped.  Blank lines between words stay,
+as empty lines: a block keeps its paragraphs, quotes and code."
+  (let* ((text (replace-regexp-in-string "\r\n?" "\n" (or text "")))
+         (lines (mapcar (lambda (line)
+                          (replace-regexp-in-string "[ \t]+\\'" "" line))
+                        (split-string text "\n")))
+         (start 0)
+         (end (length lines)))
+    (while (and (< start end) (string-blank-p (nth start lines)))
+      (setq start (1+ start)))
+    (while (and (> end start) (string-blank-p (nth (1- end) lines)))
+      (setq end (1- end)))
+    (cl-subseq lines start end)))
+
 (defun harness-logseq-render-block (text &optional properties)
   "Return TEXT as a Logseq bullet with PROPERTIES, an alist, under it.
-TEXT becomes the bullet's first line; PROPERTIES follow as
+The first line of TEXT is the bullet; its other lines become the
+indented continuation lines Logseq reads as the same block, so code,
+quotes and paragraphs keep their shape.  PROPERTIES follow as
 `key:: value' lines.  A block with no text is a properties block, which
 Logseq allows and which carries a page's identity."
-  (let* ((text (harness-logseq--one-line text))
-         (head (if (string-empty-p text) "-" (concat "- " text)))
+  (let* ((lines (harness-logseq--block-lines text))
+         (head (if (null lines) "-" (concat "- " (car lines))))
+         (rest (mapconcat (lambda (line) (concat "\n  " line)) (cdr lines) ""))
          (props (mapconcat (lambda (pair)
                              (when (and (car pair) (cdr pair))
                                (format "\n  %s:: %s" (car pair)
                                        (harness-logseq--one-line (cdr pair)))))
                            properties "")))
-    (concat head props "\n")))
+    (concat head rest props "\n")))
 
 ;;;; Parsing
 
@@ -215,50 +235,111 @@ bullet too: pages carry their identity in one."
   (when (string-match "\\`[ \t]*\\([A-Za-z][A-Za-z0-9_-]*\\)::[ \t]*\\(.*\\)\\'" line)
     (cons (match-string 1 line) (string-trim (match-string 2 line)))))
 
+(defun harness-logseq--continuation (line indent)
+  "Return LINE without the two spaces a block's continuation adds, at INDENT.
+A continuation line sits two spaces past its bullet; whatever further
+indentation it has is the content's own, such as code."
+  (let ((strip (min (length line) (+ indent 2))))
+    (cl-subseq line strip)))
+
+(defun harness-logseq--parse-continuation (line current number)
+  "Add continuation LINE of block CURRENT, which is line NUMBER.
+A blank LINE is a paragraph break inside the block."
+  (when current
+    (if (string-blank-p line)
+        (setf (plist-get current :text)
+              (concat (plist-get current :text) "\n"))
+      (setf (plist-get current :text)
+            (concat (plist-get current :text) "\n"
+                    (harness-logseq--continuation
+                     line (plist-get current :indent)))))
+    (setf (plist-get current :end-line) number)))
+
 (defun harness-logseq-parse-blocks (content)
   "Return the blocks in CONTENT, oldest first.
 Each block is a plist with `:title' (its bullet's text), `:text' (the
-title and its continuation lines, one line), `:properties' (an alist),
-`:line' (1-based) and `:indent'.  Property lines before the first
-bullet are kept as that block's properties, so a page's identity does
-not depend on where its first bullet is."
+title and its continuation lines, kept apart by newlines),
+`:properties' (an alist), `:line' and `:end-line' (1-based, the last
+line of the block and of the children under it) and `:indent'.  A
+fenced code block is text, even where a line of it looks like a bullet
+or a property.  Property lines before the first bullet are kept as that
+block's properties, so a page's identity does not depend on where its
+first bullet is."
   (let ((lines (split-string (or content "") "\n"))
-        (number 0) (current nil) (blocks nil) (page-props nil))
+        (number 0) (current nil) (blocks nil) (page-props nil)
+        (fence nil))
     (dolist (line lines)
       (setq number (1+ number))
-      (cond
-       ((harness-logseq--bullet line)
-        (when current (push current blocks))
-        (let ((title (string-trim (harness-logseq--bullet line))))
-          (setq current (list :line number
-                              :indent (harness-logseq--indent line)
-                              :title title
-                              :text title
-                              :properties nil))))
-       ((harness-logseq--property line)
-        (let ((pair (harness-logseq--property line)))
-          (if current
-              (setf (plist-get current :properties)
-                    (append (plist-get current :properties) (list pair)))
-            (setq page-props (append page-props (list pair))))))
-       ((and current (not (string-blank-p line)))
-        (let ((continuation (string-trim line)))
-          (setf (plist-get current :text)
-                (string-trim (concat (plist-get current :text) " " continuation)))))))
+      (let* ((trimmed (string-trim line))
+             (fence-line (and (string-match "\\`\\(```+\\|~~~+\\)" trimmed)
+                              (match-string 1 trimmed))))
+        (cond
+         ((and fence (not fence-line))
+          (harness-logseq--parse-continuation line current number))
+         ((and fence fence-line)
+          (setq fence nil)
+          (harness-logseq--parse-continuation line current number))
+         (fence-line
+          (setq fence fence-line)
+          (harness-logseq--parse-continuation line current number))
+         ((harness-logseq--bullet line)
+          (when current (push current blocks))
+          (let ((title (string-trim (harness-logseq--bullet line))))
+            (when (string-match "\\`\\(```+\\|~~~+\\)" title)
+              (setq fence (match-string 1 title)))
+            (setq current (list :line number
+                                :indent (harness-logseq--indent line)
+                                :end-line number
+                                :title title
+                                :text title
+                                :properties nil))))
+         ((harness-logseq--property line)
+          (let ((pair (harness-logseq--property line)))
+            (if current
+                (progn
+                  (setf (plist-get current :properties)
+                        (append (plist-get current :properties) (list pair)))
+                  (setf (plist-get current :end-line) number))
+              (setq page-props (append page-props (list pair))))))
+         ((and current (string-blank-p line)
+               (> (harness-logseq--indent line) (plist-get current :indent)))
+          ;; A blank line indented under the bullet is a paragraph break
+          ;; in it; one at the left margin separates blocks.
+          (harness-logseq--parse-continuation line current number))
+         ((and current (not (string-blank-p line)))
+          (harness-logseq--parse-continuation line current number)))))
     (when current (push current blocks))
     (setq blocks (nreverse blocks))
+    ;; A block's end covers the blocks indented under it, so removing a
+    ;; parent removes its children with it.
+    (let ((index 0))
+      (while (< index (length blocks))
+        (let* ((block (nth index blocks))
+               (indent (plist-get block :indent))
+               (end (1+ index)))
+          (while (and (< end (length blocks))
+                      (> (plist-get (nth end blocks) :indent) indent))
+            (setq end (1+ end)))
+          (when (> end (1+ index))
+            (setf (plist-get block :end-line)
+                  (plist-get (nth (1- end) blocks) :end-line)))
+          (setq index (1+ index)))))
     (when page-props
       (if blocks
           (setf (plist-get (car blocks) :properties)
                 (append page-props (plist-get (car blocks) :properties)))
-        (push (list :line 0 :indent 0 :title "" :text ""
+        (push (list :line 0 :end-line 0 :indent 0 :title "" :text ""
                     :properties page-props)
               blocks)))
     (mapcar (lambda (block)
               (list :title (or (plist-get block :title) "")
-                    :text (string-trim (or (plist-get block :text) ""))
+                    :text (replace-regexp-in-string
+                           "[ \t\n]+\\'" ""
+                           (or (plist-get block :text) ""))
                     :properties (plist-get block :properties)
                     :line (plist-get block :line)
+                    :end-line (max (or (plist-get block :line) 1)
+                                   (or (plist-get block :end-line) 1))
                     :indent (plist-get block :indent)))
             blocks)))
 
@@ -639,6 +720,36 @@ never a result."
           :pages-directory (file-directory-p pages)
           :journals-directory (file-directory-p journals)
           :writable (and (file-directory-p root) (file-writable-p root)))))
+
+(harness-defmethod logseq/block-remove (page id &optional opts)
+  "Remove block ID from PAGE in the graph at OPTS' `:root'.
+ID is the block's `id' property, or its 1-based line for a block
+without one.  The block's properties and the blocks indented under it
+go with it.  Return the block removed, or nil when PAGE or ID is not
+there; nothing is written then."
+  (let* ((root (harness-logseq-root (plist-get opts :root)))
+         (name (harness-logseq-page-name page))
+         (file (if (string-match-p "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\'" name)
+                   (harness-logseq-journal-file name root)
+                 (harness-logseq-page-file name root)))
+         (content (harness-read-file file)))
+    (when content
+      (let ((block (cl-find-if
+                    (lambda (candidate)
+                      (or (equal (harness-logseq--block-id candidate name) id)
+                          (equal (format "%s" (plist-get candidate :line))
+                                 (format "%s" id))))
+                    (harness-logseq-parse-blocks content))))
+        (when block
+          (let* ((lines (split-string content "\n"))
+                 (from (max 0 (1- (plist-get block :line))))
+                 (to (min (length lines) (plist-get block :end-line)))
+                 (kept (append (cl-subseq lines 0 from) (cl-subseq lines to)))
+                 (text (mapconcat #'identity kept "\n")))
+            (when (string-suffix-p "\n" content)
+              (setq text (concat text "\n")))
+            (harness-write-file-atomically file text)
+            block))))))
 
 (harness-defmethod logseq/page (name &optional opts)
   "Return page NAME of the graph at OPTS' `:root', or nil.

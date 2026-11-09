@@ -293,8 +293,11 @@ A non-comprehensive list of all the different functionality offered by modules s
   - A `Workspace` tab in the Flutter client (a thread rail and a computer desk on a desktop, sheets on a phone), with a concept rail prototype and a real VNC screen
   - A local computer of its own: a private Xvfb display, a window manager, x11vnc, a noVNC page and a Firefox profile, started and handed over from the desk or `C-c w c` ([the computer](docs/workspace-computer.md))
   - A `Memory` screen in the Flutter client for the graph's notes and recall search, and a smaller `Resources` page for browser data, wallet and bounded authorizations ([the model](docs/workspace-resources.md))
+  - A `Graph` page in the Flutter client and a `*Workspace Graph*` buffer in Emacs show the current thread's Logseq page, its nodes with their tags, links and properties, and the pages that link back to it
+  - The agent writes what a turn settled with `knowledge_write`, in that turn: a decision, a fact, a commitment or an open loop, on the thread's page with its provenance, and nothing on a turn that settled nothing; a nightly dream maintains every page, removes duplicate notes and writes a `Dreams/<date>` report, and `knowledge/dream` runs it now, as a dry run or with a report page
+  - `knowledge_search` ranks by the words matched and by recency, and by meaning when `harness-workspace-knowledge-embedding-model` names an embedding model (`mode: semantic`)
   - Enable with `(harness-enable-modules :features workspace :ui ui-workspace)`; open with `M-x harness-workspace` or `C-c h Y`
-  - Dreaming, the Logseq CLI for DB graphs, the container backend, routines and voice are the staged design: [the design](docs/workspace-mode.md), [the implementation contract](docs/workspace-mode-implementation.md)
+  - The Logseq CLI and its DB graphs, the persistent index and its vectors, the dream's review UI, the container backend, routines and voice are the staged design: [the design](docs/workspace-mode.md), [the implementation contract](docs/workspace-mode-implementation.md)
 
 # Workspace mode (first slice)
 
@@ -304,10 +307,12 @@ live stretch is an ordinary session whose fresh brief comes from the
 workspace's Logseq knowledge graph, so context clears by topic rather
 than by compacting one window forever.  The first slice implements the
 chat, threads, episodes, routing, the brief, the Logseq markdown graph
-and its knowledge tools, the Emacs workspace buffer, a local computer
-with a real VNC screen and Firefox profile, and the Flutter client's
-`Workspace` tab and its `Resources` page.  Memories stay for small
-behavioral notes; knowledge belongs in the graph.  The full design is
+and its knowledge tools the agent writes its own notes with, the nightly
+dream, semantic recall over the graph, the Emacs workspace buffer and its graph
+explorer, a local computer with a real VNC screen and Firefox profile,
+and the Flutter client's `Workspace` tab, its `Graph` page and its
+`Resources` page.  Memories stay for small behavioral notes; knowledge
+belongs in the graph.  The full design is
 in [docs/workspace-mode.md](docs/workspace-mode.md); the modules,
 methods, events, UI copy, tests and staged plan are in
 [docs/workspace-mode-implementation.md](docs/workspace-mode-implementation.md);
@@ -317,10 +322,10 @@ notes is in
 the computer's decision and its `local` boundary are in
 [docs/workspace-computer.md](docs/workspace-computer.md).
 
-The scribe and dream, the Logseq CLI and its DB graphs, the embedding
-index, the container backend, the wallet broker behind the client's
-`Resources` page, routines and voice are not implemented yet; they are
-the staged remainder of the design.
+The Logseq CLI and its DB graphs, the persistent embedding index, the
+dream's review UI, the container backend, the wallet broker behind the
+client's `Resources` page, routines and voice are not implemented yet;
+they are the staged remainder of the design.
 
 # Private commit attribution
 

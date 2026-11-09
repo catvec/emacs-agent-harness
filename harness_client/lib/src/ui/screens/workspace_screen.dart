@@ -31,6 +31,7 @@ import '../widgets/vnc_takeover.dart';
 import '../widgets/workspace_graph.dart';
 import 'memory_screen.dart';
 import 'resources_screen.dart';
+import 'workspace_graph_screen.dart';
 import 'voice_screen.dart';
 
 /// The persistent workspace: one chat over threads, its memory, and the
@@ -411,6 +412,21 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
     );
   }
 
+  Future<void> _openGraph() async {
+    final workspace = _controller?.current;
+    if (workspace == null) return;
+    await Navigator.of(context).push(
+      harnessRoute(
+        context,
+        (context) => WorkspaceGraphScreen(
+          app: widget.app,
+          workspace: workspace,
+          threadId: _controller?.activeThread?.id,
+        ),
+      ),
+    );
+  }
+
   Future<void> _openResources() async {
     final workspace = _controller?.current;
     if (workspace == null) return;
@@ -466,6 +482,11 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
             icon: Icons.auto_awesome_outlined,
             label: 'Memory',
             onPressed: _openMemory,
+          ),
+          HarnessIconButton(
+            icon: Icons.hub_outlined,
+            label: 'Graph',
+            onPressed: _openGraph,
           ),
           HarnessIconButton(
             key: const ValueKey('computer-header'),

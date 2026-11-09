@@ -2,14 +2,17 @@
 
 Design note, November 2026.  **First slice implemented.**  The core
 chat, threads, episodes, routing, the brief, the Logseq markdown
-knowledge graph with its `knowledge_*` tools, the Emacs workspace
-buffer and the local computer with a real VNC screen are implemented
-in `workspace`, `workspace-knowledge`, `logseq`, `workspace-box` and
-`ui-workspace`.  The Logseq CLI and its DB graphs, the index, the
-scribe and dream, the container backend, routines and voice are still
-the staged design below.  This page is the design for the
-whole mode: a persistent workspace chat with a long-term memory, a
-computer of its own, and the whole harness underneath it.  The module contracts, UI copy, tests and staged plan
+knowledge graph with its `knowledge_*` tools, the agent's own notes,
+the nightly dream, semantic recall, the Emacs workspace buffer with its graph
+explorer, the Flutter client's `Graph` page and the local computer with
+a real VNC screen are implemented in `workspace`,
+`workspace-knowledge`, `logseq`, `workspace-box`, `ui-workspace` and
+`harness_client`.  The Logseq CLI and its DB graphs, the persistent
+index and its vectors, the dream's review UI, the container backend,
+routines and voice are still the staged design below.  This page is
+the design for the whole mode: a persistent workspace chat with a
+long-term memory, a computer of its own, and the whole harness
+underneath it.  The module contracts, UI copy, tests and staged plan
 are on the [implementation page](workspace-mode-implementation.md).
 The mode borrows the shape of two products -- OpenClaw's agent
 workspace and OpenAI's dots -- but it is built from this harness's
@@ -22,8 +25,9 @@ like a single conversation.  The harness decides whether the message
 continues the current thread, revives an older one, or starts a new
 one; when it starts a new one it gives the model a fresh, small context
 built from a Logseq graph instead of making it carry a compacted
-transcript forever.  A background scribe and a nightly *dream* keep
-that graph true.  The workspace has a persistent sandbox -- its own
+transcript forever.  The agent writes what a turn settles with
+`knowledge_write` while it still has the turn, and a nightly *dream*
+keeps the graph true.  The workspace has a persistent sandbox -- its own
 desktop, browser and toolchain -- which the agent can use, the user can
 take over, and which survives across conversations.  Everything the
 harness can already do (tasks, worktrees, the merge queue, sub-agents,
@@ -68,14 +72,14 @@ the chat, so the same mode can run a life and run a task board.
 | What is the user-facing unit? | A **workspace**: a named, long-lived assistant with a home directory, a Logseq graph, a set of threads, a task board and a computer.  A user can have several (`Home`, `Work`, a project's). |
 | What is the chat? | A **timeline** of messages and events, stitched from many ordinary harness sessions and shown as one scroll.  It survives restarts. |
 | How does context clear? | A **thread** is a topic.  Each live stretch of a thread is an **episode**, an ordinary session.  A topic shift, a long context, or a long gap ends the episode; the next message starts a new one from a **brief**, not from a compacted transcript.  The old episode stays searchable. |
-| How does it pick a topic back up? | A router (heuristics first, a cheap model when ambiguous) chooses *continue*, *revive* or *new*, and the memory layer builds the brief from the thread's Logseq page, its linked pages, recent decisions and open tasks. |
+| How does it pick a topic back up? | A message is ranked against each thread's title, summary and last messages, the way a search engine ranks documents; the ranking chooses *continue*, *revive* or *new*, and no model is asked unless an embedding model is configured to rerank a close call.  The memory layer builds the brief from the thread's Logseq page, its linked pages, recent decisions and open tasks. |
 | What is the memory? | A local **Logseq graph** is the source of truth: a markdown graph (`$LOGSEQ_HOME`, else `~/logseq`) in the first slice, a DB graph through the CLI in the full design.  A SQLite index adds full-text search, int8 embeddings and the link graph; it is a rebuildable cache, never the authority.  The harness's **memories** are only small behavioral notes and never the workspace's knowledge. |
-| How is memory kept true? | A cheap **scribe** writes durable notes after turns; a **curator** maintains thread pages; a **dream** consolidates the day's notes, updates every page that needs it, finds contradictions and duplicates, and leaves a reviewable report.  Nothing durable is written without provenance. |
+| How is memory kept true? | The agent writes a durable note in the turn that settled it (`knowledge_write`); the user edits the same pages in Logseq; a nightly **dream** brings every thread page's state up to date, removes a note written twice, and leaves a reviewable report.  Nothing durable is written without provenance, and nothing reads a finished turn with a second model. |
 | What is the computer? | A persistent **box** with its own home, desktop (Xvfb + x11vnc + noVNC), browser profile, toolchains and servers.  The first implementation is the `local` backend: its own display and process tree on this machine, not a container; the status says `local display and process`, and the rootless-container backend remains the stronger design.  The agent has broad rights inside the box, the user can take over over VNC and return control, and host mounts are explicit. |
 | How does it work on non-code work? | The workspace root is an ordinary project; task mode already works outside git.  Daily-life tasks, routines, notes, decisions, people and projects all live in the graph; the box is where the results are used. |
 | How does voice fit? | A call attaches to a thread.  Live voice delegates each utterance to `workspace/prompt`; replies stream back to speech.  Voice turns are ordinary chat turns marked `voice`. |
 | Where does it run? | In the harness process, with the UI in Emacs and the ACP client (Flutter) as a remote front end.  The box is a separate sandbox; the memory graph is local. |
-| What is the implementation status? | The core chat, threads, episodes, the Logseq markdown knowledge graph and its tools, the Emacs UI, a workspace computer and its VNC screen are implemented; the Logseq CLI and DB graphs, the index, dreaming, the container backend, routines and voice are staged.  See the [implementation page](workspace-mode-implementation.md) and [the computer](workspace-computer.md). |
+| What is the implementation status? | The core chat, threads, episodes, the Logseq markdown knowledge graph and its tools, the agent's notes and the nightly dream, semantic recall, the Emacs UI with its graph explorer, the Flutter client's `Graph` page, a workspace computer and its VNC screen are implemented; the Logseq CLI and DB graphs, the persistent index and its vectors, the dream's review UI, the container backend, routines and voice are staged.  See the [implementation page](workspace-mode-implementation.md) and [the computer](workspace-computer.md). |
 
 ## Why this mode
 
@@ -110,7 +114,7 @@ obvious ideas:
 | Idea | OpenClaw | dots | Here |
 |---|---|---|---|
 | The agent has a home | Workspace files (`MEMORY.md`, `USER.md`, daily notes), bootstrap files, skills | Its own cloud computer and browser | A workspace root with artifacts, skills and projects, a separate Logseq graph, and a persistent box |
-| Memory is curated, not a transcript | Short-term recall, promotion, `DREAMS.md`, memory search (hybrid keyword + vector), active memory | Saved notes about preferences, decisions and ongoing work, separate from chat history | Logseq graph with block provenance, a hybrid index, a scribe and a dream |
+| Memory is curated, not a transcript | Short-term recall, promotion, `DREAMS.md`, memory search (hybrid keyword + vector), active memory | Saved notes about preferences, decisions and ongoing work, separate from chat history | Logseq graph with block provenance, a hybrid index, an agent that writes its own notes and a dream |
 | One assistant across entry points | Channels (Slack, Telegram, ...) reach the same agent | The same dot in ChatGPT, Slack, Teams and calls | One timeline reached from Emacs, the Flutter client and voice; later a messaging bridge |
 | Work continues between conversations | Automations, heartbeats, sub-agents | Background agents, tasks between conversations, wake-ups | Threads, episodes, routines, tasks and sub-agents; the harness keeps working when the UI is closed |
 | The computer is visible | Browser control, nodes | **Take over** / **Return control**, browser sign-in, cloud computer | A desk panel with screenshots, a full noVNC session, CDP browser tools, takeover and return control |
@@ -124,7 +128,7 @@ obvious ideas:
   decision is a page that links to a project, a person, a thread and a
   journal day; retrieving the thread brings the decision with it.
 - **Every durable write has provenance.**  A memory block records the
-  session and node that taught it, when, and how sure the scribe was.
+  session and node that taught it, and when it was learned.
   The user's own edits in Logseq outrank anything the agent wrote.
 - **The work goes through task mode.**  The workspace can talk about a
   task, but the task still gets its own session, worktree, review and
@@ -394,36 +398,27 @@ goes.  The decision is cheap and explainable.
      thread or the task's thread;
    - a gap longer than the idle limit, which forces a new episode in
      the same thread.
-2. **Similarity, still local.**  Embed the message and compare it with
-   the thread summaries and the last turns of the live episode.  A
-   clear margin picks that thread; a clear distance from every thread
-   suggests a new one.  This is the same hybrid machinery as memory
-   search, with no model call.
-3. **The router model, only when ambiguous.**  A simple-tier model gets
-   a compact state: the current thread's title and summary, the
-   pinned and recently used threads, the active episode's last three
-   messages, the project and its active tasks, and the user's line.  It
-   answers JSON only:
-
-   ```json
-   {"action": "continue",
-    "thread": "th-…",
-    "title": "Kitchen renovation",
-    "project": "/home/me/workspace",
-    "confidence": 0.86,
-    "recall": ["countertop", "Stone Co", "quote"]}
-   ```
-
-   `continue` uses the live episode; `revive` parks it and starts a new
-   episode in the named thread; `new` starts a new thread; `split`
-   starts a new thread and leaves the old one live (the user asked for
-   a separate line of work).  A confidence below
-   `harness-workspace-router-threshold` means *continue*: a wrong split
-   is more annoying than a slightly long thread.  A router that fails,
-   times out or answers nonsense also means *continue*.
-4. **Name it.**  A new thread's name comes from the naming model, as a
-   session's does; the title can be edited.  The router's title is only
-   a fallback.
+2. **Ranking, still local.**  Each thread is a small document: its
+   title, its summary and next action, and its last
+   `harness-workspace-router-recent` messages.  The message is ranked
+   against those documents as a search engine ranks one: the share of
+   the message's content words a thread holds, a rarer word weighing
+   more (an IDF over the workspace's passages), and a word in the title
+   counting three times one in a message.  A thread at or above
+   `harness-workspace-router-threshold` is the message's subject;
+   another thread takes it only when it leads the current one by
+   `harness-workspace--router-margin`; three words of its own that no
+   thread holds start a thread.  No model is asked: the ranking is
+   [the search machinery](workspace-topic-routing.md#what-a-message-is-routed-by)
+   over words, not a judge.
+3. **Meaning, when an embedding model is configured.**  The same score
+   is lifted by the cosine of the message and each thread's digest.
+   It needs `harness-workspace-knowledge-embedding-model`; without one
+   the words decide alone.  With one, `what shade suits the wall?` stays
+   in the tile thread, where the words alone would have split it.
+4. **Name it.**  A new thread's name is the message with its cue and
+   its separator removed (`new topic: taxes` is `taxes`), cut short by
+   `harness-workspace--title`; the title can be edited.
 
 The message appears at once in the timeline as a pending bubble, with
 a small `Routing…` activity; when the episode is chosen, the bubble
@@ -479,10 +474,10 @@ invent.  A recall failure never blocks the turn; it is a hint
   `Merge`, `Rename`, `Pin`, `Park`, `Done`.  These are actions on the
   timeline, not on a hidden router.
 - **Correct the memory.**  Open a recalled page from the brief card,
-  edit it in Logseq, or ask the agent to `remember`, `update` or
-  `forget` something.  The memory browser (see the UI section of the
-  [implementation page](workspace-mode-implementation.md)) shows what
-  the scribe wrote and where it came from.
+  edit it in Logseq, or ask the agent to write or correct a note.  The
+  graph explorer (see the UI section of the [implementation
+  page](workspace-mode-implementation.md)) shows what the agent wrote,
+  and where it came from.
 - **Correct the episode.**  `Episode` opens the ordinary session
   behind the thread: its full transcript, its model, its context, its
   tools.  The user can read, fork, compact or delete it like any
@@ -546,8 +541,8 @@ that has none.
 
 A **BTW** side conversation remains private to its channel: it is a
 separate session with `kind 'btw`, it is not written to the timeline
-unless the user says `Add to thread`, and the scribe does not read it
-by default.  This is the escape hatch for "answer this without putting
+unless the user says `Add to thread`, and it is not captured in the
+graph.  This is the escape hatch for "answer this without putting
 it in my life log".
 
 Messages from a voice call are marked `voice`; messages from another
@@ -647,9 +642,9 @@ A small example of how the pieces meet; none of it is a special case.
   open.  It sends a short chat card and a notification.
 - **08:10.**  "The quote is 200 over; ask for the template date."
   The router keeps it in the kitchen thread.  The agent updates
-  `Threads/Kitchen renovation`, writes a decision note and sends the
-  fabricator an email in the box -- after the user approves the send.
-  The scribe writes the commitment to `People/Stone Co`.
+  `Threads/Kitchen renovation`, writes a decision note, writes the
+  commitment to `People/Stone Co`, and sends the fabricator an email in
+  the box -- after the user approves the send.
 - **09:30.**  "Get the memory task merged."  The workspace reads the
   task, summarizes the report and the open review threads, and waits
   for the user to verify.  The user does; the merge queue finishes; the
@@ -891,9 +886,9 @@ embedding in the background -- so the next search can find the text
 even while its vector is still being made.  A write that fails is
 retried once with a backoff, and a `graph locked` or a worker revision
 mismatch is retried after a `server restart`; after that it is reported
-to the caller and the dream/scribe, which can queue it for later.  There is no second writer
-in the workspace; the user editing in Logseq is the only other writer,
-and Logseq's own lock is the boundary.
+to the caller and the dream, which can queue it for later.  There is no
+second writer in the workspace; the user editing in Logseq is the only
+other writer, and Logseq's own lock is the boundary.
 
 **Reads and caching**
 
@@ -1030,9 +1025,9 @@ are part of the index's `meta`; a change rebuilds the vectors.
 - blocks the redaction layer masked, and the secret sources themselves.
 
 The index does not become a second copy of every transcript.  It
-indexes the distilled memory, plus the thread summaries the curator
-writes.  That is smaller, more stable and more useful than a vector
-index of everything ever said.
+indexes the distilled memory, plus each thread's state.  That is
+smaller, more stable and more useful than a vector index of everything
+ever said.
 
 ### Retrieval
 
@@ -1128,103 +1123,89 @@ exists).  When it is off, the deterministic pipeline is the brief.
 
 ### Memory tools
 
-The workspace agent gets five tools.  The scribe writes with them, the
-librarian and the dream read with them, and the module applies the
-dream's batch, so there is one write path.
+The workspace agent gets four knowledge tools, and it is the writer
+that uses them.  They are the workspace's, not the harness's
+`memory_save` / `memory_search`, which keep the small behavioral notes
+and are offered in both kinds of session.
 
 | Tool | What it does | Safety |
 |---|---|---|
-| `memory_search` | the retrieval above: query, mode, filters (`page`, `tag`, `project`, `thread`, `status`, `since`), limit, budget; returns cards with `:why` | read-only |
-| `memory_get` | a page or block by name or UUID, with children and backlinks, depth-limited | read-only |
-| `memory_write` | append a block, create a page, update a block or a property; links in the text; provenance filled by the module | asks when it would overwrite a block the user edited; refuses a declared secret, masks a known value |
-| `memory_forget` | delete or redact a block/page, and remove it from the index | asks the user in every mode; records the deletion |
-| `memory_status` | index state, last sync, last dream, pending review, counts, model, graph health | read-only |
+| `knowledge_search` | the retrieval above: query, `mode: semantic`, `thread`, `all`, limit; returns the matching blocks with their page | read-only |
+| `knowledge_read` | one page of the graph by name, its blocks newest last | read-only |
+| `knowledge_write` | append a note block to the thread's page, or to a page the agent names, with the link and the provenance the module fills | refuses a declared secret and masks a known value |
+| `knowledge_status` | blocks, pages, the graph root and when it last changed | read-only |
 
-`memory_write` is deliberately small:
+`knowledge_write` is deliberately small:
 
 ```json
-{"op": "append",
- "page": "Journal/2026-11-06",
- "text": "14:20 [[Threads/Kitchen renovation]] Chose quartz ...",
- "properties": {"source-session": "s-…", "source-node": "n-…"},
- "confidence": 0.9}
+{"text": "Chose quartz for the countertop.",
+ "page": "Threads/Kitchen renovation"}
 ```
 
-It validates the page and property names, fills `learned-at`, checks
-for a duplicate block (same page, same normalized text, within a day)
-and returns the block's UUID and a `:duplicate-of` when it found one.
-An `update` carries `:expected-hash`; if the block changed since the
-agent read it, the write is refused with the new hash, and the agent
-re-reads.  This is optimistic concurrency, and it is what keeps a
-scribe and a user edit from silently overwriting each other.
+The module fills `id`, `workspace`, `workspace-id`, `role:: note`,
+`source-session`, `source-node` and `learned-at`, and writes the block
+as a bullet with its continuation lines.  The tool checks the target
+page for the same statement first, so asking twice writes it once, and
+a write that fails is reported to the agent, which can retry or say so.
 
-`memory_write` refuses a value that is a declared secret and masks a
-value the redaction layer knows, replacing it with its placeholder and
-saying so.  A block tagged `#Private` is not indexed and not recalled
-by the brief; the user can still read it in Logseq.  A page that
-becomes private is purged from the index at the next sync, not only
-from future writes.
+The knowledge write masks a value the secrets module knows, replacing it
+with its placeholder, so a declared secret never reaches the graph.  A
+block tagged `#Private` is not recalled by the brief; the user can still
+read it in Logseq.
 
 ### Writing memory
 
-There are four writers, each with a different job and a different
-budget.
+There are three writers, each with a different job: the agent, the user
+and the dream.
 
-#### The scribe
+#### The agent
 
-After a turn ends, a **scribe** reads the turn and writes what is worth
-keeping.  It is a cheap model (the simple tier of the workspace's
-provider, unless `harness-workspace-scribe-model` says otherwise), it
-has `memory_search`, `memory_get` and `memory_write`, and it has no
-shell and no task tools.  It runs as a background session of kind
-`workspace-scribe`, hidden from the session list by default, so its
-prompt, tools, cost and choices are inspectable and it can be stopped;
-it never appears as a chat.
-
-The scribe's rule is: **durable, sourced, linked, short.**
+The agent writes in its turn, with `knowledge_write`, when the turn
+settled something worth keeping.  It is the one writer that has the
+conversation in front of it, so it is the one that decides — no second
+model reads the turn afterwards.  The rule it is given is **durable,
+sourced, linked, short**:
 
 - durable: a preference, a decision, a commitment, a fact about a
   person/project, an open loop, a correction.  Not "the user said
-  hello", not the assistant's reasoning, not a tool's output;
-- sourced: every block names `source-session` and `source-node`;
-- linked: a block links to the thread page and to the page it is
-  about (`[[Decisions/...]]`, `[[People/...]]`, `[[Projects/...]]`);
-- short: one sentence per block, at most
-  `harness-workspace-scribe-blocks` (6) per turn.
+  hello", not its own reasoning, not a tool's output;
+- sourced: the module fills `source-session` and `source-node` from the
+  tool call, so the block names the turn that taught it;
+- linked: the block goes on the thread's page, or on a page the agent
+  names (`Projects/…`, `People/…`, `Preferences`), and links the
+  pages it is about;
+- short: one statement per block.  A turn that decided nothing writes
+  nothing, and most turns do.
 
 It searches before it writes.  A preference that already exists is
-updated, not duplicated; a decision that contradicts an older one
-either supersedes it (with the user's words as the source) or is
-written as an open question, never as a silent replacement.  A turn
-where the user said "remember" or "don't forget" gets an immediate
-write; an ordinary turn may be batched.
+updated, not duplicated; a decision that contradicts an older one is
+written as the new one with the old one named, never as a silent
+replacement.  Its own `knowledge_status` call says what the graph holds
+and when it last changed.
 
-**When it runs.**  The scribe is not on every turn by default.  The
-turn's `:meta` decides:
+**Why not a background scribe.**  An earlier draft of this design had
+one: a cheap model that read each finished turn and its page and wrote
+notes, a summary and a next action.  It was built and then removed.
+It repeated a job the agent had just done with more context, it cost a
+call per turn, it wrote a summary and an action on turns that settled
+nothing (so trivia accumulated and the thread's state drifted), and the
+page it read grew with every note it wrote, so each turn's prompt was
+larger than the last.  The decision and its alternatives are in [the
+knowledge graph note](workspace-knowledge-graph.md#who-writes-a-note)
+and [its own note](design/no-per-turn-scribe.md).
 
-- immediately when the user says remember/forget/decide/always/never,
-  or the turn contains a task creation, a review decision, a merge or
-  a routine change;
-- otherwise every `harness-workspace-scribe-every` (4) turns, or when
-  the episode ends, whichever comes first;
-- never for a BTW or a private aside.
-
-This keeps the cost near one cheap call per few turns instead of one
-per turn, while a "remember this" is never deferred.
-
-#### The curator
+#### The curator (staged)
 
 Every `harness-workspace-curate-every` (10) turns, or when a thread is
-parked, a **curator** updates the thread page: the goal if it changed,
-the status, the next action, the open loops, the decisions, the last
-episodes and the last-touched date.  It does not rewrite the
-transcript and does not create a new page unless the thread has none.
-It uses `memory_get` and `memory_write`; when the next action is
-genuinely ambiguous it records the ambiguity as an open loop and, if
-it matters, posts one question card, without blocking the thread.
-
-The curator is what makes a revived thread cheap: its page is already
-a brief.
+parked, a **curator** would update the thread page: the goal if it
+changed, the status, the next action, the open loops, the decisions, the
+last episodes and the last-touched date.  It would not rewrite the
+transcript and not create a new page unless the thread has none; when
+the next action were genuinely ambiguous it would record the ambiguity
+as an open loop, without blocking the thread.  This is staged, not
+implemented: the page's state is brought up to date today by
+`knowledge/thread-touch`, which the workspace calls when a thread's
+status, summary or next action changes.
 
 #### The task linker
 
@@ -1249,8 +1230,8 @@ result into the project page's "what changed" section.
 #### The user
 
 The user is a writer too.  They can edit the graph in Logseq, add a
-block in `Inbox`, or reply to the agent's `memory_write` with a
-correction.  User edits are the highest trust.  The scribe sees a
+block in `Inbox`, or reply to the agent's `knowledge_write` with a
+correction.  User edits are the highest trust.  The agent sees a
 correction and appends, not overwrites.  The dream treats a user-edited
 block as settled unless a newer user edit contradicts it.
 
@@ -1262,37 +1243,34 @@ share target in the Flutter client.
 
 ### Provenance, correction and forgetting
 
-Every agent-written block carries its source.  The UI's memory browser
-shows the block, its page, when it was learned, the confidence and a
-link to the session and node that taught it (which opens the transcript
-at that node).  This is the answer to "why do you think that?".
+Every agent-written block carries its source.  The graph explorer shows
+the block, its page, when it was learned and the session and node that
+taught it.  This is the answer to "why do you think that?".
 
-**Correction.**  A user can select a memory card and choose `Correct`:
-the chat opens a draft that quotes the block and asks for the corrected
-wording.  The scribe writes a new block with `supersedes::` and
+**Correction.**  A user can quote a block back into the chat and ask
+for the corrected wording.  The agent writes a new block with `supersedes::` and
 `source-session::`; the old block is marked `superseded-by::` and its
 status becomes `superseded`.  Retrieval prefers the new one and still
 shows the old one when asked for history.  Nothing is silently
 rewritten.
 
-**Forgetting.**  `memory_forget` deletes the block or page from Logseq
-and then removes it from the index (rows, FTS segments, chunks and
-vectors).  Deleting a page asks the user in every permission mode; the
-tool reports what it removed.  A redaction (the secrets module) is
-different: it replaces a value with a placeholder and rebuilds the
-index rows, following the same rules as `session/search-redact`.  A
-user who deletes a block in Logseq is trusted; the next sync removes it
-from the index too.
+**Forgetting.**  Forgetting is the user's, in Logseq: deleting a block
+or a page there is the deletion, and the next search reads what is left.
+There is no `knowledge_forget` tool in this slice (see [the knowledge
+graph note](workspace-knowledge-graph.md#what-is-not-here-yet)); a
+redaction (the secrets module) is different, and replaces a value with a
+placeholder instead.
 
 **Private pages.**  A page with the property `private:: true` (or a
-`#Private` tag) is never embedded, never recalled by the brief and
-never read by the scribe.  The user can still open it in Logseq.  This
-is for the things one does not want a model to bring up by accident.
+`#Private` tag) is not embedded and not recalled by the brief (stage 1's
+index; `harness-workspace-knowledge-private-tag` names the tag).  The
+user can still open it in Logseq.  This is for the things one does not
+want a model to bring up by accident.
 
-**Secrets.**  The scribe and the curator run with the secrets module's
-masking filter on their output, and `memory_write` refuses a value that
-the redaction layer would mask.  A credential belongs in a secret
-source or the box's login flow, never in the graph.
+**Secrets.**  The knowledge write masks a value the secrets module
+knows before the block reaches the graph, and a tool result that cannot
+be checked is withheld.  A credential belongs in a secret source or the
+box's login flow, never in the graph.
 
 ### Privacy and trust
 
@@ -1306,9 +1284,9 @@ The graph is personal.  The design's defaults follow that:
 - embeddings go only to the model the user chose.  A local embedding
   model keeps the text local; a hosted one sends it to that provider,
   under the policy's allowed models and the corporate-mode rule;
-- the dream and the scribe see transcripts; their prompts are recorded
-  as background sessions (`workspace-scribe`, `workspace-dream`), so
-  the user can read what was sent;
+- the agent writes the graph from its own session, so what reached the
+  graph is in a transcript the user can read; the dream reads the
+  graph's pages and asks no model;
 - the box never mounts the graph's SQLite file directly; it reads
   memory through the workspace tools, so a compromised command in the
   box cannot rewrite the graph behind the index's back.
@@ -1319,7 +1297,7 @@ The graph is personal.  The design's defaults follow that:
 |---|---|
 | Logseq graph missing | `Knowledge · unavailable`; chat and tasks still work; no writes; setup button |
 | Graph missing | Offer to create or attach; the chat works with session search only until then |
-| Logseq worker stale or locked | `logseq/server restart`, retry once; the memory write is queued and the scribe is told |
+| Logseq worker stale or locked | `logseq/server restart`, retry once; the memory write is queued and retried, and a write that still fails is reported to the agent |
 | Index corrupt | Delete and rebuild; the graph is untouched; searches say `Memory · indexing` |
 | Embedding model absent or over quota | Keyword-only search; `Memory · keyword`; the brief still works; vectors catch up later |
 | Recall timeout | Use the first-pass cards and say `Recall · partial`; the agent can call `memory_search` |
@@ -1332,17 +1310,17 @@ degrades; the chat answers; the failure is visible.
 
 ### Cost and performance
 
-- The scribe is the largest new cost: one simple-tier call per few
-  turns, with a bounded transcript slice.  The design budgets
-  `harness-workspace-knowledge-budget` (a dollar amount per workspace per
-  day, or a share of the plan) and pauses the scribe (not the chat) when
-  it is spent.
+- A note costs no extra call: the agent writes it inside the turn it
+  was already answering, and a turn that writes nothing costs nothing
+  more.  A per-turn extraction would have been the largest new cost,
+  which is one reason it is not here.
 - Embeddings are batched and cached by hash.  The index is local; the
   cost is the provider's embedding price, once per changed chunk.
 - The dream is a nightly medium-tier job with a cap on operations and
   tokens; it is the second largest cost.
-- The router is one small call only when the local signals are
-  ambiguous.  The common case is free.
+- Routing is local: an IDF ranking over the conversation's own words.
+  With an embedding model configured it also embeds one small digest
+  per thread, cached by text; without one, routing is free.
 - The brief is budgeted at 24k tokens by default.  A revived thread
   starts smaller than a compacted 200k transcript, and its stable
   prefix can be cached through a thread seed.
@@ -1393,11 +1371,12 @@ it is loaded; without it, the workspace's own idle time says so.
 Dreams are serialized per workspace.  A dream that is already running
 is joined, not started twice.  A dream is an ordinary session of kind
 `workspace-dream`, hidden with the other background kinds by default;
-it has a model, a cost and a transcript, and it can be stopped.  The scribe, the curator, the librarian
-and the dream are **background sessions**, not one-call internal
-records: they use tools, so they run the ordinary agent loop with a
-narrow tool allowlist and a short context.  The router is one model
-call and is recorded as an internal session.
+it has a model, a cost and a transcript, and it can be stopped.  The
+curator and the librarian (both staged) are **background sessions**, not
+one-call internal records: they use tools, so they would run the
+ordinary agent loop with a narrow tool allowlist and a short context.  The router is not a job: it
+ranks the threads' own words locally, and the meaning blend calls
+`knowledge/nearest`, whose vectors are cached by text.
 
 ### The phases
 
@@ -1667,8 +1646,8 @@ The applied operations are below the diary; the merge is a review card.
 - **Back up first.**  `graph backup create` before every apply.  The
   backup covers the graph database; the workspace's artifacts have
   their own backup path.
-- **One writer.**  The dream uses the same write queue as the scribe;
-  no other memory write runs during an apply batch.
+- **One writer.**  The dream uses the graph's write queue; no other
+  memory write runs during an apply batch.
 - **Hashes, not hope.**  Every update names the block's expected hash.
 - **Idempotent.**  An operation id is written with the block, so a
   retry cannot duplicate it.
@@ -2244,13 +2223,12 @@ wait for a build.
 ### Voice and memory
 
 Voice turns are text in the transcript once the sidecar transcribes
-them, so the scribe, the curator and the dream treat them like any
-other turn.  The memory records `channel:: voice`; the UI shows a
+them, so the agent and the dream treat them like any other turn.  The memory records `channel:: voice`; the UI shows a
 microphone.  Audio itself is not stored by the harness unless the user
 attaches it; a local provider keeps it local, a hosted provider sends
 it to its service, and the voice UI says which.  A call can be marked
-`private`; its episode is tagged so the scribe, the router and the
-dream skip it, and its turns stay out of memory.  The default is to
+`private`; its episode is tagged so the graph capture skips it, and its
+turns stay out of memory.  The default is to
 remember, because the point is continuity.
 
 ### Call-back and presence

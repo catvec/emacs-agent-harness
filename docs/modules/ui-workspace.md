@@ -36,6 +36,11 @@ session behind the thread when the user wants the full transcript.
 - `harness-ui-workspace-computer-start` — Start the workspace computer.
 - `harness-ui-workspace-computer-stop` — Stop the workspace computer.
 - `harness-ui-workspace-computer-take-over` — Give the reviewer control of the workspace computer.
+- `harness-ui-workspace-graph` — Show the Logseq graph of THREAD in WORKSPACE, or of the current one.
+- `harness-ui-workspace-graph-back` — Show the view before this one.
+- `harness-ui-workspace-graph-open` — Open the node or page at point.
+- `harness-ui-workspace-graph-refresh` — Read the graph again.
+- `harness-ui-workspace-graph-workspace` — Show the workspace chat of this graph.
 - `harness-ui-workspace-new-thread` — Create a new thread and compose into it.
 - `harness-ui-workspace-open-board` — Open the task board of this workspace.
 - `harness-ui-workspace-open-episode` — Open the ordinary session behind the selected thread.
@@ -53,6 +58,7 @@ session behind the thread when the user wants the full transcript.
 - `computer/list` ([computers](computers.md))
 - `computer/release-control` ([computers](computers.md))
 - `computer/take-control` ([computers](computers.md))
+- `knowledge/graph` ([workspace-knowledge](workspace-knowledge.md))
 - `knowledge/status` ([workspace-knowledge](workspace-knowledge.md))
 - `workspace/cancel` ([workspace](workspace.md))
 - `workspace/create` ([workspace](workspace.md))

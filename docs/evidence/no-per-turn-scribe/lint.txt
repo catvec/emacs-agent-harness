@@ -1,0 +1,33 @@
+
+In harness-elisp-load-snapshot:
+lisp/harness-elisp.el:287:10: Warning: Unused lexical variable ‘read-eval’
+
+In harness-snapshot--filter-env:
+lisp/harness-snapshot.el:207:2: Warning: docstring wider than 80 characters
+
+In harness-snapshot-slice:
+lisp/harness-snapshot.el:708:2: Warning: docstring wider than 80 characters
+
+In toplevel form:
+lisp/modules/harness-commit-attribution.el:249:12: Warning: custom-declare-variable ‘harness-commit-attribution-retention-days’ docstring wider than 80 characters
+
+In harness-tasks--shutdown:
+lisp/modules/harness-tasks.el:7058:2: Warning: docstring wider than 80 characters
+
+In toplevel form:
+lisp/modules/harness-tools-shell.el:481:11: Warning: defconst ‘harness-tools-shell--snapshot-options’ docstring wider than 80 characters
+
+In harness-chat--activity-overlay:
+lisp/ui/harness-ui-chat.el:6234:2: Warning: docstring wider than 80 characters
+
+In harness-ui-tasks--setting-button:
+lisp/ui/harness-ui-tasks.el:3348:2: Warning: docstring wider than 80 characters
+
+In harness-ui-tasks--setting-target:
+lisp/ui/harness-ui-tasks.el:3794:2: Warning: docstring wider than 80 characters
+
+In harness-ui-tasks-start:
+lisp/ui/harness-ui-tasks.el:5510:2: Warning: docstring wider than 80 characters
+
+In harness-ui-tasks-queue:
+lisp/ui/harness-ui-tasks.el:5530:2: Warning: docstring wider than 80 characters

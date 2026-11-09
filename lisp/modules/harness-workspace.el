@@ -22,11 +22,12 @@
 ;; workspace has moved on.  The module subscribes to the sessions' node
 ;; and turn events to grow the timeline and the thread summary.
 ;;
-;; Routing is deliberately conservative.  An explicit thread, an explicit
-;; `/new', the only live episode, a thread title in the message, or the
-;; last thread when nothing says otherwise; a topic marker makes a new
-;; thread.  A model router can be added later without changing the shape
-;; of `workspace/prompt'.
+;; Routing is deliberately conservative and local.  An explicit thread,
+;; an explicit `/new', a thread title in the message, or the last thread
+;; when nothing says otherwise; a topic marker makes a new thread, and a
+;; thread is a small document the message is ranked against by the words
+;; each holds, so a thread that holds none of a message never keeps it.
+;; No model is asked to place a message.
 
 ;;; Code:
 
@@ -37,6 +38,7 @@
 (require 'harness-store)
 (require 'harness-session)
 (require 'harness-agent)
+(require 'harness-small)
 (require 'harness-project)
 
 (defvar harness-state-directory)
@@ -437,6 +439,14 @@ Return the thread record."
         (and (> harness-workspace-episode-turns 0)
              (>= turns harness-workspace-episode-turns)))))
 
+(defun harness-workspace--thread-idle-p (thread)
+  "Non-nil when THREAD's live episode has been idle past the configured hours."
+  (let ((hours harness-workspace-thread-idle-hours)
+        (live (plist-get thread :live)))
+    (and live (> hours 0)
+         (> (- (harness-workspace--now) (or (plist-get thread :last-at) 0))
+            (* 3600 hours)))))
+
 (defun harness-workspace--park (workspace thread &optional why)
   "Park THREAD of WORKSPACE, leaving its episode open and its transcript whole.
 WHY is kept in the thread's summary for the next brief."
@@ -642,6 +652,9 @@ rest of a streamed answer is written to the node."
                  (format "Project: %s" (or (plist-get thread :project) (plist-get workspace :root)))
                  (and summary (not (string-blank-p summary))
                       (format "Thread state:\n%s" (string-trim summary)))
+                 (let ((next (plist-get thread :next-action)))
+                   (and (stringp next) (not (string-blank-p next))
+                        (format "Next action: %s" (string-trim next))))
                  (and tasks (format "Work:\n%s" tasks))
                  (and recent
                       (format "Recent:\n%s"
@@ -669,83 +682,491 @@ rest of a streamed answer is written to the node."
 
 ;;;; Routing
 
+;; A message goes to a thread, and a topic switch starts a new one.  The
+;; decision is local and asks no model: each thread is a small document
+;; made of its title, its summary and its last messages, and a message is
+;; ranked against them as a query is ranked against documents.  A
+;; thread's score is the share of the message's own words it holds, a
+;; rarer word weighing more and a word in the title three times one in a
+;; message.  A message whose words no thread holds starts a new thread,
+;; and anything else stays where the person was writing, because a wrong
+;; split is more annoying than a slightly long thread.  With an embedding
+;; model configured, the threads' meanings re-rank a close call.
+
+(defcustom harness-workspace-router-threshold 0.2
+  "How much of a message a thread must hold to be its topic.
+The score is the share of the message's content words a thread's title,
+summary and last messages hold, from 0 to 1.  A rarer word counts more
+than a common one, a word in the title counts three times one in a
+message, and a word repeated in one place counts a little more.  At or
+above this share the thread is about the message; below it a message
+with new words of its own may start a new thread."
+  :type 'number
+  :group 'harness-workspace)
+
+(defcustom harness-workspace-router-recent 6
+  "Messages of a thread the router reads for its words."
+  :type 'integer
+  :group 'harness-workspace)
+
+(defcustom harness-workspace-router-semantic t
+  "Whether an embedding model re-ranks a close routing call.
+When non-nil and `harness-workspace-knowledge-embedding-model' names a
+model, the message and each thread's digest are embedded, and a thread
+the words do not separate is placed by meaning.  Nil keeps routing to
+words alone.  Without an embedding model no model is asked."
+  :type 'boolean
+  :group 'harness-workspace)
+
+(defcustom harness-workspace-router-timeout 2
+  "Seconds the semantic re-rank may take before the words decide."
+  :type 'number
+  :group 'harness-workspace)
+
+(defconst harness-workspace--stop-words
+  '("a" "about" "after" "again" "against" "all" "also" "am" "an" "and" "any" "are" "as"
+    "at" "be" "because" "been" "before" "being" "below" "between" "both" "but" "by"
+    "can" "could" "did" "do" "does" "doing" "done" "down" "during" "each" "few" "for"
+    "from" "further" "get" "got" "had" "has" "have" "having" "he" "her" "here" "hers"
+    "him" "his" "how" "i" "if" "in" "into" "is" "it" "its" "just" "let" "lets" "like"
+    "me" "more" "most" "my" "no" "nor" "not" "now" "of" "off" "on" "once" "only" "or"
+    "other" "our" "ours" "out" "over" "own" "please" "same" "she" "should" "so" "some"
+    "such" "than" "that" "the" "their" "theirs" "them" "then" "there" "these" "they"
+    "this" "those" "through" "to" "too" "under" "until" "up" "very" "was" "we" "were"
+    "what" "when" "where" "which" "while" "who" "whom" "why" "will" "with" "would"
+    "you" "your" "yours")
+  "Words that say nothing about a topic.
+A thread is found by the words a person would name it with, so these
+are left out of the router's scores and its freshness test.")
+
 (defconst harness-workspace--topic-cues
-  '("new topic" "different topic" "another topic" "unrelated" "switch to"
-    "start over" "something else" "on another note" "separate thread")
-  "Words that start a new thread when no thread title matches.")
+  '("new topic" "different topic" "another topic" "change the subject"
+    "change of subject" "change topic" "different subject" "unrelated"
+    "separate thread" "start over" "start a new thread" "new thread"
+    "on another note" "off topic" "switching topics" "switch topics"
+    "let's switch" "lets switch" "move on to" "moving on" "moving on to"
+    "new conversation" "fresh start")
+  "Phrases that say the subject changed.
+A phrase with a thread's name in the same message names that thread
+instead (`switch to the kitchen thread').")
 
-(defun harness-workspace--tokens (text)
-  "Return the meaningful words of TEXT, lowercased."
-  (let (out)
-    (dolist (word (split-string (downcase (or text "")) "[^[:alnum:]_]+" t))
-      (when (>= (length word) 3) (push word out)))
-    (delete-dups (nreverse out))))
+(defun harness-workspace--topic-title (text)
+  "Return TEXT as a thread title, without the phrase that announced it.
+\"new topic: taxes\" is titled \"taxes\"; a message with no such
+phrase keeps its words."
+  (let ((title (string-trim (or text "")))
+        (case-fold-search t))
+    (dolist (cue harness-workspace--topic-cues)
+      (when (string-match-p (concat "\\`\\s-*" (regexp-quote cue) "\\b") title)
+        (setq title (string-trim
+                     (replace-regexp-in-string
+                      (concat "\\`\\s-*" (regexp-quote cue)
+                              "\\(?:\\s-*[:·—–-]\\s-*\\|\\s-+\\)")
+                      "" title)))))
+    (if (string-blank-p title) (string-trim (or text "")) title)))
 
-(defun harness-workspace--thread-score (thread text)
-  "Return how many words of TEXT name THREAD."
-  (let* ((haystack (downcase (concat (or (plist-get thread :title) "") " "
-                                     (or (plist-get thread :summary) "") " "
-                                     (or (plist-get thread :project) ""))))
-         (tokens (harness-workspace--tokens text)))
-    (cl-loop for token in tokens
-             count (string-match-p (regexp-quote token) haystack))))
+(defconst harness-workspace--soft-cues
+  '("what about" "how about" "by the way" "speaking of" "separately"
+    "another thing" "one more thing" "quick question" "new question"
+    "on a different note" "different question" "change of plan")
+  "Phrases that often start another topic.
+They only start a new thread when the current thread's words do not
+explain the rest of the message (`what about the countertop?' in the
+kitchen thread stays there).")
 
-(defun harness-workspace--best-thread (workspace text &optional except)
-  "Return the thread of WORKSPACE that TEXT names best, or nil.
+(defconst harness-workspace--continuation-words
+  '("again" "also" "and" "another" "but" "continue" "elaborate" "expand"
+    "explain" "further" "longer" "more" "next" "previous" "rewrite"
+    "shorter" "so" "still" "summarize" "summarise" "then" "this" "those"
+    "tweak" "update")
+  "Words that tie a message to what came before it.")
+
+(defun harness-workspace--words (text)
+  "Return the words of TEXT, lowercased."
+  (split-string (downcase (or text "")) "[^[:alnum:]_'-]+" t))
+
+(defun harness-workspace--content-words (text)
+  "Return the distinct words of TEXT that say something about its topic."
+  (delete-dups
+   (cl-remove-if (lambda (word)
+                   (or (< (length word) 3)
+                       (member word harness-workspace--stop-words)))
+                 (harness-workspace--words text))))
+
+(defun harness-workspace--term-counts (text)
+  "Return a hash of TEXT's content words and how often each occurs."
+  (let ((counts (make-hash-table :test 'equal)))
+    (dolist (word (harness-workspace--words text))
+      (when (and (>= (length word) 3)
+                 (not (member word harness-workspace--stop-words)))
+        (puthash word (1+ (gethash word counts 0)) counts)))
+    counts))
+
+(defconst harness-workspace--route-fields
+  '((title . 3.0) (summary . 2.0) (message . 1.0))
+  "How much a word in each part of a thread counts toward its score.
+A title names the topic, a summary states it, and a message may only
+pass through it.")
+
+(defun harness-workspace--phrase-p (phrases text)
+  "Non-nil when TEXT holds one of PHRASES as whole words."
+  (let ((text (downcase (or text ""))))
+    (cl-some (lambda (phrase)
+               (string-match-p
+                (concat "\\(?:\\`\\|[^[:alnum:]]\\)"
+                        (regexp-quote phrase)
+                        "\\(?:\\'\\|[^[:alnum:]]\\)")
+                text))
+             phrases)))
+
+(defun harness-workspace--mentions-p (text title)
+  "Non-nil when TEXT names the thread called TITLE.
+That is the whole title in the text, or two thirds of its own words, at
+least two of them."
+  (let ((text (downcase (or text "")))
+        (title (string-trim (downcase (or title "")))))
+    (or (and (not (string-empty-p title))
+             (string-match-p (regexp-quote title) text))
+        (let ((words (harness-workspace--content-words title)))
+          (and (>= (length words) 2)
+               (let ((hits (cl-count-if
+                            (lambda (word)
+                              (string-match-p
+                               (concat "\\b" (regexp-quote word) "\\b") text))
+                            words)))
+                 (and (>= hits 2) (>= (/ hits (float (length words))) 0.6))))))))
+
+(defun harness-workspace--named-thread (workspace text &optional except)
+  "Return the thread of WORKSPACE that TEXT names, or nil.
 EXCEPT is a thread id to leave out."
-  (let (best best-score)
+  (cl-find-if (lambda (thread)
+                (and (not (equal (plist-get thread :id) except))
+                     (harness-workspace--mentions-p text (plist-get thread :title))))
+              (plist-get workspace :threads)))
+
+(defun harness-workspace--route-index (workspace)
+  "Return the passages of WORKSPACE's threads, and the words they use.
+The answer is `(:passages PASSAGES :df HASH :count N :digests HASH)'.
+A passage is a plist of `:thread' (an id), `:field' (`title', `summary'
+or `message'), `:text' and `:counts', its content words.  DF maps a word
+to the number of passages that hold it, and DIGESTS maps a thread id to
+the text its meaning is read from: its title, state and newest message."
+  (let ((recent (make-hash-table :test 'equal))
+        (digests (make-hash-table :test 'equal))
+        (passages nil))
+    (dolist (entry (harness-workspace--timeline-internal (plist-get workspace :id)))
+      (when (and (eq (harness-workspace--entry-kind entry) 'message)
+                 (plist-get entry :thread))
+        (let ((text (harness-workspace--entry-text entry)))
+          (unless (string-blank-p text)
+            (push text (gethash (plist-get entry :thread) recent))))))
     (dolist (thread (plist-get workspace :threads))
-      (unless (equal (plist-get thread :id) except)
-        (let ((score (harness-workspace--thread-score thread text)))
-          (when (and (> score 0) (or (null best-score) (> score best-score)))
-            (setq best thread best-score score)))))
+      (let* ((id (plist-get thread :id))
+             (summary (string-trim
+                       (mapconcat #'identity
+                                  (delq nil (list (plist-get thread :summary)
+                                                  (plist-get thread :next-action)))
+                                  "\n")))
+             (messages (seq-take (gethash id recent) harness-workspace-router-recent))
+             (parts (append (delq nil (list (plist-get thread :title)
+                                            (plist-get thread :summary)
+                                            (plist-get thread :next-action)))
+                            (seq-take messages 1))))
+        (puthash id (string-trim (mapconcat #'identity parts "\n")) digests)
+        (dolist (passage (append
+                          (list (list :thread id :field 'title
+                                      :text (or (plist-get thread :title) "")))
+                          (unless (string-blank-p summary)
+                            (list (list :thread id :field 'summary :text summary)))
+                          (mapcar (lambda (text)
+                                    (list :thread id :field 'message :text text))
+                                  messages)))
+          (push (plist-put passage :counts
+                           (harness-workspace--term-counts (plist-get passage :text)))
+                passages))))
+    (let ((df (make-hash-table :test 'equal)))
+      (dolist (passage passages)
+        (let (seen)
+          (maphash (lambda (word _) (push word seen)) (plist-get passage :counts))
+          (dolist (word seen)
+            (puthash word (1+ (gethash word df 0)) df))))
+      (list :passages passages :df df :count (length passages) :digests digests))))
+
+(defun harness-workspace--route-idf (index word)
+  "Return the weight of WORD in INDEX.
+A word no passage holds weighs like one a single passage holds, so a
+message full of new words is not judged against a corpus that keeps
+growing."
+  (let* ((n (plist-get index :count))
+         (df (max 1 (gethash word (plist-get index :df) 0))))
+    (if (< n 1)
+        0.0
+      (log (1+ (/ (- n df 0.5) (+ df 0.5)))))))
+
+(defun harness-workspace--route-match (index word thread)
+  "Return how strongly WORD names THREAD in INDEX, from 0 to 3.
+A word in the title counts three times one in a message; a word
+repeated in one passage grows sublinearly and never past the field's
+weight."
+  (let ((best 0.0))
+    (dolist (passage (plist-get index :passages))
+      (when (equal (plist-get passage :thread) thread)
+        (let ((count (gethash word (plist-get passage :counts) 0)))
+          (when (> count 0)
+            (setq best (max best (* (alist-get (plist-get passage :field)
+                                                harness-workspace--route-fields)
+                                    (1+ (log count)))))))))
+    (min 3.0 best)))
+
+(defun harness-workspace--route-score (index text thread)
+  "Return how much of TEXT's subject THREAD holds in INDEX, from 0 to 1.
+TEXT's content words are weighed by how rare they are in the workspace,
+and the score is the share of that weight THREAD holds, a word in its
+title worth three and one in a message worth one."
+  (let ((words (harness-workspace--term-counts text))
+        (total 0.0) (held 0.0))
+    (maphash (lambda (word _)
+               (let ((weight (harness-workspace--route-idf index word)))
+                 (cl-incf total weight)
+                 (cl-incf held (* weight (harness-workspace--route-match
+                                          index word thread)))))
+             words)
+    (if (<= total 0) 0.0 (min 1.0 (/ held (* 3.0 total))))))
+
+(defun harness-workspace--route-scores (index text threads)
+  "Return an alist of THREAD and how much of TEXT's subject it holds."
+  (mapcar (lambda (thread)
+            (cons thread (harness-workspace--route-score
+                          index text (plist-get thread :id))))
+          threads))
+
+(defun harness-workspace--route-score-of (scores thread)
+  "Return THREAD's score in SCORES, or 0."
+  (or (cdr (assq thread scores)) 0.0))
+
+(defun harness-workspace--route-best (scores current)
+  "Return (THREAD . SCORE) of the thread SCORES ranks highest, CURRENT aside.
+Only a thread with a title is weighed.  CURRENT is left out because
+the message is first weighed against it, and a message that fits it
+never reaches this."
+  (let (best)
+    (dolist (pair scores)
+      (let ((thread (car pair)))
+        (unless (or (eq thread current)
+                    (string-blank-p (or (plist-get thread :title) "")))
+          (when (and (> (cdr pair) 0)
+                     (or (null best) (> (cdr pair) (cdr best))))
+            (setq best pair)))))
     best))
 
-(defun harness-workspace--cue-p (text)
-  "Non-nil when TEXT says it is a new topic."
-  (let ((text (downcase (or text ""))))
-    (cl-some (lambda (cue) (string-match-p (regexp-quote cue) text))
-             harness-workspace--topic-cues)))
+(defun harness-workspace--route-held-p (index text thread)
+  "Non-nil when THREAD holds any of TEXT's content words in INDEX."
+  (let (held)
+    (maphash (lambda (word _)
+               (unless held
+                 (when (> (harness-workspace--route-match index word thread) 0)
+                   (setq held t))))
+             (harness-workspace--term-counts text))
+    held))
+
+(defun harness-workspace--fresh-p (index text thread)
+  "Non-nil when TEXT is a subject THREAD has not used at all.
+It must hold at least three content words of its own, none of them in
+the thread, and none of the words that tie a message to the one before
+it."
+  (and thread
+       (>= (hash-table-count (harness-workspace--term-counts text)) 3)
+       (not (harness-workspace--phrase-p harness-workspace--continuation-words text))
+       (not (harness-workspace--route-held-p index text (plist-get thread :id)))))
+
+(defconst harness-workspace--router-margin 0.1
+  "How far another thread's score must lead the current one's to take a message.
+A margin keeps a message that fits both threads about as well in the
+thread the person was just writing in.")
+
+(defconst harness-workspace--router-meaning-weight 0.5
+  "How far a thread's meaning may lift its word score, from 0 to 1.
+The meaning score is a cosine; the lift is a share of what the word
+score leaves open, so meaning can place a thread the words did not, and
+cannot undo the words of a clear match.")
+
+(defun harness-workspace--router-meaning (index text scores)
+  "Return SCORES with each thread's meaning blended in, or nil.
+Asks the knowledge module for the cosine of TEXT and each thread's
+digest when `harness-workspace-router-semantic' is on and an embedding
+model is configured.  Nil keeps the words' own scores."
+  (when (and harness-workspace-router-semantic
+             (harness-method-exists-p 'knowledge/nearest)
+             (bound-and-true-p harness-workspace-knowledge-embedding-model))
+    (let ((threads (mapcar #'car scores)))
+      (when-let* ((meanings
+                   (condition-case err
+                       (harness-call
+                        'knowledge/nearest
+                        text
+                        (mapcar (lambda (thread)
+                                  (gethash (plist-get thread :id)
+                                           (plist-get index :digests)))
+                                threads)
+                        harness-workspace-router-timeout)
+                     (error
+                      (harness-log 'warn "workspace router: meaning failed: %s"
+                                   (error-message-string err))
+                      nil))))
+        (cl-loop for thread in threads
+                 for meaning in meanings
+                 collect (cons thread
+                               (let ((score (cdr (assq thread scores))))
+                                 (if (numberp meaning)
+                                     (+ score (* harness-workspace--router-meaning-weight
+                                                 (max 0.0 meaning)
+                                                 (- 1.0 score)))
+                                   score))))))))
+
+(defun harness-workspace--route-by-score (index text current scores)
+  "Return (THREAD ACTION WHY) for TEXT, ranked by SCORES.
+The current thread keeps a message it holds above the threshold; another
+thread takes one it holds much better, or one the current thread holds
+nothing of; a subject no thread holds starts a thread; anything else
+stays where the person was writing."
+  (let* ((held (harness-workspace--route-score-of scores current))
+         (best (harness-workspace--route-best scores current)))
+    (cond
+     ((and current (> held harness-workspace-router-threshold))
+      (list current 'continue 'ranked))
+     ((and best
+           (>= (cdr best) harness-workspace-router-threshold)
+           (> (cdr best) (+ held harness-workspace--router-margin)))
+      (let ((thread (car best)))
+        (list thread (if (plist-get thread :live) 'continue 'revive) 'ranked)))
+     ((harness-workspace--fresh-p index text current)
+      (list nil 'new 'fresh))
+     ;; A message the current thread holds nothing of does not continue
+     ;; it, even when a continuation word ties it to the turn before it:
+     ;; it goes to a thread that holds some of it, when one does.
+     ((and current best
+           (not (harness-workspace--route-held-p
+                 index text (plist-get current :id))))
+      (let ((thread (car best)))
+        (list thread (if (plist-get thread :live) 'continue 'revive) 'ranked)))
+     (t (list current 'continue 'ranked)))))
+
+(defun harness-workspace--route-other (scores current)
+  "Return the thread SCORES ranks highest above the threshold, CURRENT aside."
+  (let ((best (harness-workspace--route-best scores current)))
+    (when (and best (>= (cdr best) harness-workspace-router-threshold))
+      (car best))))
+
+(defun harness-workspace--force-continue-p (opts)
+  "Non-nil when OPTS name `:force-continue', JSON or not.
+A client that sends the words instead of the option says `/continue'."
+  (or (harness-json-true-p (plist-get opts :force-continue))
+      (and (stringp (plist-get opts :command))
+           (member (downcase (plist-get opts :command)) '("/continue" "continue")))))
 
 (defun harness-workspace--route (workspace text opts)
-  "Return (THREAD . ACTION) for TEXT in WORKSPACE.
-ACTION is `continue', `revive' or `new'.  OPTS may name `:thread',
-`:force-new' or `:force-continue'."
-  (let* ((requested (plist-get opts :thread))
-         (current (when-let* ((id (plist-get workspace :last-thread)))
-                    (harness-workspace--thread workspace id)))
-         (named (harness-workspace--best-thread
-                 workspace text
-                 (and current (plist-get current :id))))
-         (live (and current (plist-get current :live))))
+  "Return (THREAD ACTION WHY) for TEXT in WORKSPACE.
+ACTION is `continue', `revive' or `new'; WHY says what it was decided
+from: `explicit', `command', `named', `cue', `selected', `first',
+`ranked' or `fresh'.  THREAD is nil for a new thread.  OPTS may name
+`:thread' (a preference: the thread a client has selected),
+`:force-thread' (a binding: that thread whatever the message says),
+`:force-continue', `:force-new' and `:command'."
+  (let* ((requested (or (plist-get opts :force-thread) (plist-get opts :thread)))
+         (forced (and requested (harness-workspace--thread workspace requested)))
+         (_ (when (and (plist-get opts :force-thread) (null forced))
+              (signal 'harness-error
+                      (list (format "No thread %s" (plist-get opts :force-thread))))))
+         (current (and (plist-get workspace :last-thread)
+                       (harness-workspace--thread workspace (plist-get workspace :last-thread))))
+         (named (harness-workspace--named-thread
+                 workspace text (and current (plist-get current :id))))
+         (live (and current (plist-get current :live)))
+         ;; A bound thread and a message that says continue are hard
+         ;; signals: neither a cue nor another thread's name overrides
+         ;; the client that asked for it.
+         (hard (or (harness-workspace--force-continue-p opts)
+                   (plist-get opts :force-thread)
+                   (string-match-p "\\`/continue\\(?:[ \t\n]\\|\\'\\)" text)))
+         (index (harness-workspace--route-index workspace))
+         (scores (harness-workspace--route-scores
+                  index text (plist-get workspace :threads)))
+         (held (harness-workspace--route-score-of scores current))
+         (words (hash-table-count (harness-workspace--term-counts text)))
+         (decide
+          (cond
+           ;; A client that binds the thread, or a message that says
+           ;; continue: no other signal overrides it.
+           ((and hard (or forced current))
+            (let ((thread (or forced current)))
+              (list thread (if (plist-get thread :live) 'continue 'revive) 'explicit)))
+           ((harness-json-true-p (plist-get opts :force-new))
+            (list nil 'new 'command))
+           ((string-match-p "\\`/new\\(?:[ \t\n]\\|\\'\\)" text)
+            (list nil 'new 'command))
+           ;; A thread named in the message is its subject, even when
+           ;; the message is phrased as a switch to it.
+           (named (list named 'revive 'named))
+           ;; A phrase that says the subject changed.
+           ((harness-workspace--phrase-p harness-workspace--topic-cues text)
+            (list nil 'new 'cue))
+           ;; A client's selected thread, when it is not the thread the
+           ;; last message went to: the person picked it.
+           ((and forced (not (equal (plist-get forced :id)
+                                    (and current (plist-get current :id)))))
+            (list forced (if (plist-get forced :live) 'continue 'revive) 'selected))
+           ;; "What about X?": the current thread keeps it when X is its;
+           ;; an older thread it clearly names takes it; otherwise the
+           ;; phrase is a new subject.
+           ((harness-workspace--phrase-p harness-workspace--soft-cues text)
+            (let* ((ranked (or (harness-workspace--router-meaning index text scores)
+                               scores))
+                   (held (harness-workspace--route-score-of ranked current))
+                   (other (harness-workspace--route-other ranked current)))
+              (cond
+               ;; The thread that holds the message best takes it, even
+               ;; the current one, when it holds it at all: `what about
+               ;; the countertop?' in the kitchen thread stays there.
+               ((and current (> held 0)
+                     (or (null other)
+                         (> held (harness-workspace--route-score-of ranked other))))
+                (list current 'continue 'ranked))
+               (other
+                (list other (if (plist-get other :live) 'continue 'revive) 'ranked))
+               (t (list nil 'new 'cue)))))
+           ((null current)
+            (list nil 'new 'first))
+           ;; A turn in flight takes a message that belongs to it; only
+           ;; a clearly different subject starts another thread.
+           ((and live (harness-workspace--session-running-p live)
+                 (or (< words 3) (> held 0)))
+            (list current 'continue 'ranked))
+           ;; Everything else is what the scores say.
+           (t (harness-workspace--route-by-score
+               index text current
+               (or (harness-workspace--router-meaning index text scores)
+                   scores)))))
+         (action (cadr decide))
+         (thread (car decide))
+         (why (nth 2 decide)))
     (cond
-     ((and requested (harness-workspace--thread workspace requested))
-      (let ((thread (harness-workspace--thread workspace requested)))
-        (cons thread (if (plist-get thread :live) 'continue 'revive))))
-     ((harness-json-true-p (plist-get opts :force-new))
-      (cons nil 'new))
-     ((string-match-p "\\`/new\\(?:[ \t\n]\\|\\'\\)" text)
-      (cons nil 'new))
-     ((and current live (harness-workspace--session-running-p live)
-           (not (harness-json-true-p (plist-get opts :force-new))))
-      (cons current 'continue))
-     ((harness-workspace--cue-p text)
-      (cons nil 'new))
-     ((and named (> (harness-workspace--thread-score named text) 1))
-      (cons named 'revive))
-     ((and current live
-           (let ((last (or (plist-get current :last-at) 0)))
-             (> (- (harness-workspace--now) last)
-                (* 3600 harness-workspace-thread-idle-hours))))
-      (cons current 'revive))
-     ((and current live)
-      (if (harness-workspace--episode-too-long-p live)
-          (cons current 'revive)
-        (cons current 'continue)))
-     (current
-      (cons current 'revive))
+     ((eq action 'new)
+      (list nil 'new why))
+     ((null thread)
+      (list current 'continue why))
+     ((and current (equal (plist-get thread :id) (plist-get current :id)))
+      (list current
+            (if (and live
+                     (or (harness-workspace--episode-too-long-p live)
+                         (harness-workspace--thread-idle-p current)))
+                'revive
+              'continue)
+            why))
+     ((plist-get thread :live)
+      (list thread 'continue why))
      (t
-      (cons nil 'new)))))
+      (list thread 'revive why)))))
+
 
 ;;;; Session events
 
@@ -1094,19 +1515,25 @@ nothing is charged or declined, the answer is `:status
 
 (harness-defmethod workspace/prompt (id text &optional opts)
   "Send TEXT to workspace ID and return the turn's promise.
-OPTS may name `:thread', `:force-new' or `:channel'.  The workspace
-routes TEXT to the thread's live episode, starts a new episode in the
-thread, or starts a new thread.  A new episode is given a brief first."
+OPTS may name `:thread' (the thread a client has selected: a
+preference), `:force-thread' (a binding: that thread whatever the
+message says), `:force-continue', `:force-new', `:command' and
+`:channel'.  The workspace routes TEXT to the thread's live episode,
+starts a new episode in the thread, or starts a new thread.  A new
+episode is given a brief first."
   (unless (and (stringp text) (not (string-blank-p text)))
     (signal 'harness-error (list "Empty workspace message")))
   (let* ((workspace (harness-workspace--get id))
-         (clean (replace-regexp-in-string "\\`/new\\(?:[ \t\n]+\\|\\'\\)" "" text))
+         (clean (replace-regexp-in-string
+                 "\\`/\\(?:new\\|continue\\)\\(?:[ \t\n]+\\|\\'\\)" "" text))
          (clean (if (string-blank-p clean) "New thread" clean))
          (route (harness-workspace--route workspace text opts))
          (thread (car route))
-         (action (cdr route)))
+         (action (cadr route))
+         (why (nth 2 route)))
     (when (eq action 'new)
-      (setq thread (harness-workspace--new-thread workspace clean)))
+      (setq thread (harness-workspace--new-thread
+                    workspace (harness-workspace--topic-title clean))))
     (let* ((live (plist-get thread :live))
            (long (and live (harness-workspace--episode-too-long-p live)))
            (new-episode-p (or (eq action 'new) (eq action 'revive) (null live))))
@@ -1133,6 +1560,7 @@ thread, or starts a new thread.  A new episode is given a brief first."
              (list :kind 'brief
                    :thread (plist-get thread :id)
                    :episode session
+                   :why why
                    :text brief
                    :tokens (ceiling (/ (length brief) 4.0))))))
         (harness-emit 'workspace/thread-changed id thread)
@@ -1203,7 +1631,7 @@ OPTS may name `:limit', `:before' (an index), `:thread', `:kinds'."
   (let* ((workspace (harness-workspace--get id))
          (found (harness-workspace--thread workspace thread)))
     (unless found (signal 'harness-error (list (format "No thread %s" thread))))
-    (dolist (key '(:title :status :pinned :project :summary))
+    (dolist (key '(:title :status :pinned :project :summary :next-action))
       (when (plist-member plist key)
         (setf (plist-get found key) (plist-get plist key))))
     (harness-workspace--put-thread workspace found)
@@ -1337,8 +1765,8 @@ Only an episode gets them; a normal session is unchanged."
         prompt
       (concat prompt
               "\n\nWorkspace: you are the user's persistent workspace.  The user sees one chat; threads are the topics inside it.  "
-              "Your knowledge is the user's Logseq graph: use knowledge_search for anything the brief did not give you, and knowledge_write when the user asks you to remember, when a decision is made, or when a commitment or open loop is created.  "
-              "Write one concise block per piece of knowledge and cite the pages you used as [[Page]].  Never claim to remember something you did not retrieve.  "
+              "Your knowledge is the user's Logseq graph: use knowledge_search for anything the brief did not give you, and knowledge_write when the user asks you to remember, when a decision is made, or when a commitment or open loop is created.  When the words of the brief do not match, knowledge_search's mode semantic finds blocks by meaning once an embedding model is set.  "
+              "Write one concise block per piece of knowledge and cite the pages you used as [[Page]].  Write only when the turn settled something worth keeping -- a decision, a fact, a commitment, an open loop -- and write nothing on a turn that settled nothing, which is most of them.  Never claim to remember something you did not retrieve.  "
               (when (harness-tool-get "memory_save")
                 "The memory tools are not for knowledge: memory_save is only for small behavioral notes about how the user wants work done.  ")
               "Work that must outlive this conversation, touch a repository, be reviewed, or run in parallel belongs on the task board; use task_list, task_submit and task_control for it.  "

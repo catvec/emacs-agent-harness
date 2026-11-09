@@ -79,20 +79,22 @@ order they were spawned, whatever order the hash table visits them in.")
 (defvar harness-tools-agent--children (make-hash-table :test 'equal)
   "Child session id -> what a spawn_agent call knows of a running child.
 A plist (:parent PARENT-ID :name NAME :worktree PATH :branch BRANCH
-:result RESULT :unwatch STOP :stopped WHY :adopted ADOPTED).  A child's
-call has always returned, since it started; RESULT is what the child's
-first turn ended with, nil while it runs.  The entry stays until the
-child is done with everything it has going on, so a parent counts it as
-work it still runs (`harness-tools-agent--outstanding') and a child
-that registered a wait is not reported as finished when its turn merely
-ended; STOP, when there is one, stops the note under the child's
-spawn_agent call (`harness-tools-agent--watch-child').  WHY is there
+:result RESULT :unwatch STOP :stopped WHY :order N :adopted
+ADOPTED).  A child's call has always returned, since it started;
+RESULT is what the child's first turn ended with, nil while it runs.
+The entry stays until the child is done with everything it has going
+on, so a parent counts it as work it still runs
+(`harness-tools-agent--outstanding') and a child that registered a wait
+is not reported as finished when its turn merely ended; STOP, when
+there is one, stops the note under the child's spawn_agent call
+(`harness-tools-agent--watch-child').  WHY is there
 once the parent's outstanding work was stopped and took the child's
 with it (`harness-tools-agent--stop-outstanding'): the reason, or t
 without one.  A child so stopped is reported as cancelled, whatever its
 last turn said.  ADOPTED is non-nil for a child this harness took back
 from one that stopped before reporting it (`harness-tools-agent--adopt'):
-whichever of its turns ends next reports it.
+whichever of its turns ends next reports it.  ORDER is the child's place
+in the order it was spawned, which names sub-agents as they spawned.
 
 Each entry is kept in the child's record too, as `:report-to' in its
 `ext' (`harness-tools-agent--remember'), so that it outlives the

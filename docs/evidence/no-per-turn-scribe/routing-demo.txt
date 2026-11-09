@@ -1,0 +1,50 @@
+
+=== words alone
+
+The tile is matte.
+  => (a new thread)  new/first
+
+And the grout is warm grey.
+    The tile is matte.                     0.000
+  => The tile is matte.  continue/ranked
+
+My sister's wedding is in June.
+    The tile is matte.                     0.000
+  => (a new thread)  new/fresh
+
+The tile colour is still undecided.
+    My sister's wedding is in June.        0.000
+    The tile is matte.                     0.196
+  => The tile is matte.  continue/ranked
+
+What about the wedding?
+    The tile is matte.                     0.000
+    My sister's wedding is in June.        1.000
+  => My sister's wedding is in June.  continue/ranked
+
+threads: ("My sister's wedding is in June." "The tile is matte.")
+
+=== words, and a paraphrase placed by meaning
+
+The tile is matte.
+  => (a new thread)  new/first
+
+And the grout is warm grey.
+    The tile is matte.                     0.217
+  => The tile is matte.  continue/ranked
+
+My sister's wedding is in June.
+    The tile is matte.                     0.059
+  => (a new thread)  new/fresh
+
+The tile colour is still undecided.
+    My sister's wedding is in June.        0.049
+    The tile is matte.                     0.347
+  => The tile is matte.  continue/ranked
+
+What about the wedding?
+    The tile is matte.                     0.088
+    My sister's wedding is in June.        1.000
+  => My sister's wedding is in June.  continue/ranked
+
+threads: ("My sister's wedding is in June." "The tile is matte.")

@@ -22,7 +22,11 @@
 (defvar harness-workspace-knowledge--pages)
 (defvar harness-workspace-knowledge--pending)
 (defvar harness-workspace-knowledge--status-cache)
+(defvar harness-workspace-knowledge--vectors)
 (defvar harness-workspace-knowledge--subscribed)
+(defvar harness-workspace-knowledge-dream)
+(defvar harness-workspace-knowledge-dream-report)
+(defvar harness-workspace-knowledge--dream-timer)
 
 (declare-function harness-session--load-all "harness-session" ())
 
@@ -53,6 +57,8 @@
            (harness-naming-auto nil)
            (harness-workspace-episode-context 0.6)
            (harness-workspace-episode-turns 120)
+           (harness-workspace-knowledge-dream nil)
+           (harness-workspace-knowledge-dream-report nil)
            (harness-logseq-directory (expand-file-name "graph/" dir))
            (default-directory dir))
        ;; The module subscribes only while this is nil, and the bus is
@@ -69,6 +75,9 @@
        (clrhash harness-workspace-knowledge--pages)
        (clrhash harness-workspace-knowledge--pending)
        (clrhash harness-workspace-knowledge--status-cache)
+       ;; The vectors are cached by model and text, and a test's fake
+       ;; model must not read the last test's answer for the same text.
+       (clrhash harness-workspace-knowledge--vectors)
        (harness-add-filter 'permission/decide
                            (lambda (_details next &rest _)
                              (funcall next (list :behavior 'allow)))
@@ -374,6 +383,186 @@ so a client names the model before the first message."
           (should (file-exists-p (harness-logseq-page-file page
                                                           harness-logseq-directory))))))))
 
+(ert-deftest harness-workspace-a-turn-asks-no-second-model ()
+  "A workspace turn is one model call: the agent's own.
+No pass reads the finished turn again, so two turns cost two requests,
+a note is on the graph only when the agent writes it with
+`knowledge_write', and a next action a client set is left alone."
+  (harness-workspace-test-with
+    (let* ((requests 0)
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (cl-incf requests)
+              ;; Answer as the demo would, with no override in the way.
+              (let ((harness-provider-demo-script-override nil))
+                (harness-provider-demo--script request))))
+           (workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (let* ((thread (harness-workspace-test-graph-thread id))
+             (thread-id (plist-get thread :id)))
+        (harness-call 'workspace/thread/update id thread-id
+                      :next-action "Wait for the Stone Co sample.")
+        (harness-call 'workspace/prompt id "The grout is warm grey.")
+        (harness-workspace-test-wait-for
+         (lambda () (= 2 (length (harness-workspace-test-assistant-messages id)))))
+        (harness-workspace-test-wait-idle (plist-get (harness-workspace-test-graph-thread id) :live))
+        ;; One request per turn, the agent's: nothing follows it.
+        (should (= 2 requests))
+        ;; The agent wrote no note, so the graph has none: the turns are
+        ;; the journal's captures.
+        (should-not (cl-find-if
+                     (lambda (block)
+                       (equal "note" (cdr (assoc "role" (plist-get block :properties)))))
+                     (plist-get (harness-call 'knowledge/page
+                                              id (plist-get thread :page))
+                                :blocks)))
+        (should (cl-find-if (lambda (block)
+                              (string-match-p "matte" (plist-get block :text)))
+                            (harness-call 'knowledge/search id "matte")))
+        ;; A next action a client set is not overwritten by a turn.
+        (should (equal "Wait for the Stone Co sample."
+                       (plist-get (harness-call 'workspace/thread id thread-id)
+                                  :next-action)))))))
+
+(ert-deftest harness-workspace-a-note-is-written-once ()
+  "Writing the same statement twice leaves one block, and answers with it."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (thread (harness-call 'workspace/thread/create id "Kitchen renovation"))
+           (thread-id (plist-get thread :id))
+           (page (plist-get thread :page))
+           (first (harness-call 'knowledge/write id thread-id 'note
+                                "The grout is warm grey."
+                                (list :session "s-1" :node "n-1")))
+           ;; The same statement with its whitespace runs and case moved.
+           (again (harness-call 'knowledge/write id thread-id 'note
+                                "  the grout  is warm grey. "
+                                (list :session "s-2" :node "n-2")))
+           (other (harness-call 'knowledge/write id thread-id 'note
+                                "The tile is matte."
+                                (list :session "s-3" :node "n-3")))
+           (blocks (plist-get (harness-call 'knowledge/page id page) :blocks)))
+      (should (equal (plist-get first :id) (plist-get again :id)))
+      (should-not (equal (plist-get first :id) (plist-get other :id)))
+      (should (= 2 (length (cl-remove-if
+                            (lambda (block) (string-blank-p (plist-get block :text)))
+                            blocks))))
+      (should (= 1 (cl-count-if
+                    (lambda (block) (string-match-p "grout" (plist-get block :text)))
+                    blocks)))
+      ;; The first copy keeps the turn that taught it.
+      (should (equal "s-1" (cdr (assoc "source-session"
+                                       (plist-get first :properties))))))))
+
+(ert-deftest harness-workspace-a-note-holds-no-secret ()
+  "A statement the secrets module would mask is written masked, not whole."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (thread (harness-call 'workspace/thread/create id "Kitchen renovation"))
+           (thread-id (plist-get thread :id))
+           (page (plist-get thread :page))
+           (value "sk-live-0123456789abcdef")
+           (block (progn
+                    (cl-letf (((symbol-function 'harness-secrets-mask-text)
+                               (lambda (text)
+                                 (cons (replace-regexp-in-string
+                                        (regexp-quote value) "[redacted: key a1b2]" text)
+                                       nil))))
+                      (harness-call 'knowledge/write id thread-id 'note
+                                    (format "The vendor key is %s." value)
+                                    (list :session "s-1")))))
+           (text (harness-read-file
+                  (harness-logseq-page-file page harness-logseq-directory))))
+      (should (plist-get block :id))
+      (should-not (string-match-p (regexp-quote value) text))
+      (should (string-match-p "redacted: key" text)))))
+
+(ert-deftest harness-workspace-dream-keeps-one-note-and-refreshes-the-page ()
+  "The dream removes a duplicate note, writes the page's state and reports it."
+  (harness-workspace-test-with
+    (let* ((harness-workspace-knowledge-dream-report t)
+           (workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (thread (harness-call 'workspace/thread/create id "Notes"))
+           (thread-id (plist-get thread :id))
+           (page (plist-get thread :page)))
+      (harness-call 'knowledge/write id thread-id 'note "The grout is warm grey."
+                    (list :session "s-1" :node "n-1"))
+      ;; The write path keeps one copy, so the duplicate is put on the page
+      ;; the way an older graph or a hand edit would leave it.
+      (harness-call 'logseq/page-add page "The grout is warm grey."
+                    (list :root harness-logseq-directory
+                          :properties (list (cons "workspace-id" id)
+                                            (cons "role" "note"))))
+      (harness-call 'knowledge/write id thread-id 'note "The tile is matte."
+                    (list :session "s-3" :node "n-3"))
+      (harness-call 'workspace/thread/update id thread-id
+                    :summary "The kitchen renovation is underway."
+                    :next-action "Wait for the Stone Co sample.")
+      ;; A dry run reports the duplicate and writes nothing.
+      (let ((report (harness-call 'knowledge/dream id (list :dry-run t))))
+        (should (= 1 (plist-get report :removed)))
+        (should (plist-get report :dry-run))
+        (should (= 2 (cl-count-if
+                      (lambda (block) (string-match-p "grout" (plist-get block :text)))
+                      (plist-get (harness-call 'knowledge/page id page) :blocks)))))
+      ;; The run itself keeps the first note, the other note and the page state.
+      (let ((report (harness-call 'knowledge/dream id)))
+        (should (= 1 (plist-get report :removed)))
+        (should (= 1 (plist-get report :pages)))
+        (should (plist-get report :report-page)))
+      (let* ((blocks (plist-get (harness-call 'knowledge/page id page) :blocks))
+             (content (harness-read-file (harness-logseq-page-file page harness-logseq-directory))))
+        (should (= 1 (cl-count-if
+                      (lambda (block) (string-match-p "grout" (plist-get block :text)))
+                      blocks)))
+        (should (cl-find-if (lambda (block) (string-match-p "tile" (plist-get block :text)))
+                            blocks))
+        (should (string-match-p "summary:: The kitchen renovation is underway" content))
+        (should (string-match-p "next-action:: Wait for the Stone Co sample" content)))
+      (let ((report-page (expand-file-name
+                          (format "pages/Dreams/%s.md" (format-time-string "%Y-%m-%d"))
+                          harness-logseq-directory)))
+        (should (file-exists-p report-page))
+        (let ((content (harness-read-file report-page)))
+          (should (string-match-p "Dream over Home" content))
+          (should (string-match-p "removed a duplicate note" content))
+          (should (string-match-p "Notes" content))))
+      ;; A second dream finds nothing and writes no second report.
+      (let ((report (harness-call 'knowledge/dream id)))
+        (should (= 0 (plist-get report :removed)))
+        (should-not (plist-get report :report-page))))))
+
+(ert-deftest harness-workspace-dream-is-scheduled-once-a-day ()
+  "The nightly dream is due at the configured hour, records its run and repeats."
+  (harness-workspace-test-with
+    (let* ((harness-workspace-knowledge-dream 'auto)
+           (workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (today (format-time-string "%Y-%m-%d")))
+      ;; The next dream is within the day and in the future.
+      (let ((next (harness-workspace-knowledge--next-dream-time)))
+        (should (> next (float-time)))
+        (should (<= (- next (float-time)) 86401)))
+      ;; A workspace dreamed today is left alone; one dreamed before runs.
+      (harness-workspace-knowledge--dream-record id "2000-01-01")
+      (should (equal "2000-01-01"
+                     (cdr (assoc id (harness-workspace-knowledge--dreams)))))
+      (harness-workspace-knowledge--dream-tick)
+      (should (equal today (cdr (assoc id (harness-workspace-knowledge--dreams)))))
+      (should (timerp harness-workspace-knowledge--dream-timer))
+      ;; A second tick keeps the record and writes no second report.
+      (let ((dreams (harness-workspace-knowledge--dreams)))
+        (harness-workspace-knowledge--dream-tick)
+        (should (equal dreams (harness-workspace-knowledge--dreams))))
+      (cancel-timer harness-workspace-knowledge--dream-timer)
+      (setq harness-workspace-knowledge--dream-timer nil))))
+
 (ert-deftest harness-workspace-survives-a-restart ()
   "A workspace, its threads and its knowledge survive a fresh load."
   (harness-workspace-test-with
@@ -448,6 +637,58 @@ so a client names the model before the first message."
                    (regexp-quote "The grout is warm grey.")
                    (harness-read-file (harness-logseq-page-file page
                                                                harness-logseq-directory)))))))))
+
+(ert-deftest harness-workspace-semantic-search-ranks-by-meaning ()
+  "With an embedding model, the semantic mode ranks by meaning and the tool takes it."
+  (harness-workspace-test-with
+    (harness-register-method
+     'provider/embed
+     (lambda (_model texts &optional _opts)
+       (harness-resolved
+        (list :vectors (mapcar (lambda (text)
+                                 (let ((text (downcase text)))
+                                   (list (if (string-match-p
+                                              "grout\|grey\|warm\|shade\|colour\|color"
+                                              text)
+                                             1.0 0.0)
+                                         (if (string-match-p "tile\|matte\|finish" text)
+                                             1.0 0.0))))
+                               texts)
+              :usage (list :input 1)))))
+    (let* ((harness-workspace-knowledge-embedding-model "test:embed")
+           (workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (let* ((thread (car (plist-get (harness-call 'workspace/get id) :threads)))
+             (thread-id (plist-get thread :id))
+             (session (plist-get thread :live)))
+        (harness-call 'knowledge/write id thread-id 'note "The grout is warm grey."
+                      (list :session "s-1" :node "n-1"))
+        (harness-call 'knowledge/write id thread-id 'note "The tile is matte."
+                      (list :session "s-2" :node "n-2"))
+        ;; No word matches "shade"; the meaning does.
+        (should-not (harness-call 'knowledge/search id "shade"
+                                  (list :thread thread-id)))
+        (let ((by-meaning (harness-test-await
+                           (harness-call 'knowledge/search id "shade"
+                                         (list :semantic t :thread thread-id)))))
+          (should (equal "The grout is warm grey."
+                         (plist-get (car by-meaning) :text))))
+        ;; The tool's semantic mode answers with the same block.
+        (let ((answer (harness-test-await
+                       (harness-workspace-knowledge--tool-search
+                        '(:query "shade" :mode "semantic")
+                        (list :session-id session)))))
+          (should-not (plist-get answer :is-error))
+          (should (string-match-p "grout is warm grey" (plist-get answer :content))))
+        ;; Without a model, the mode says what is missing instead of guessing.
+        (let ((harness-workspace-knowledge-embedding-model nil))
+          (should-error (harness-call 'knowledge/search id "shade"
+                                      (list :semantic t :thread thread-id))
+                        :type 'harness-error))
+        (harness-workspace-test-wait-idle session)))))
 
 (ert-deftest harness-workspace-resources-answer-what-the-computer-has ()
   "The resources methods exist and never carry a value; without a running
@@ -581,10 +822,12 @@ the target's timeline."
                             recall))
         (should (>= (plist-get status :notes) 1))
         (let ((content (harness-read-file file)))
-          ;; The block is a Logseq bullet with provenance and a thread link.
+          ;; The block is a Logseq bullet with provenance, and a note:
+          ;; a block on its own thread's page does not link the page.
           (should (string-match-p "^- The grout is warm grey" content))
           (should (string-match-p "workspace-id:: " content))
-          (should (string-match-p (regexp-quote (format "thread:: [[%s]]" page)) content))
+          (should (string-match-p "role:: note" content))
+          (should-not (string-match-p "thread:: " content))
           (should (string-match-p "source-session:: s-test" content))
           (should-not (string-match-p "^#\|^---" content)))))))
 
@@ -782,3 +1025,420 @@ the method catalogue offers the aliases the app checks for."
                             found)))
       (let ((status (harness-acp--call-extension "memory/status" (list :workspace id))))
         (should (>= (plist-get status :notes) 2))))))
+
+(ert-deftest harness-workspace-an-idle-thread-starts-a-new-episode ()
+  "A live thread idle past `harness-workspace-thread-idle-hours' is revived."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (let* ((thread (harness-workspace-test-graph-thread id))
+             (internal (harness-workspace--thread
+                        (harness-workspace--get id) (plist-get thread :id))))
+        ;; The episode was live, but the person came back much later.
+        (setf (plist-get internal :last-at)
+              (- (harness-workspace--now)
+                 (* 3600 (1+ harness-workspace-thread-idle-hours))))
+        (harness-workspace--save (harness-workspace--get id))
+        (harness-call 'workspace/prompt id "And the grout is light.")
+        (harness-workspace-test-wait-for
+         (lambda () (= 2 (length (harness-workspace-test-assistant-messages id)))))
+        (let* ((thread (car (plist-get (harness-call 'workspace/get id) :threads)))
+               (dividers (cl-remove-if-not
+                          (lambda (entry)
+                            (eq (harness-workspace--entry-kind entry) 'divider))
+                          (harness-call 'workspace/timeline id))))
+          (should (= 2 (length (plist-get thread :episodes))))
+          (should (equal "revived"
+                         (format "%s" (plist-get (car (last dividers)) :reason)))))))))
+
+(ert-deftest harness-workspace-slash-continue-keeps-the-thread ()
+  "`/continue' keeps the message in the current thread, whatever it says."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (harness-workspace-test-wait-idle
+       (plist-get (car (plist-get (harness-call 'workspace/get id) :threads)) :live))
+      ;; The words alone would start a thread: the cue says so.
+      (harness-call 'workspace/prompt id
+                    "/continue new topic: my sister's wedding is in June")
+      (harness-workspace-test-wait-for
+       (lambda () (= 2 (length (harness-workspace-test-assistant-messages id)))))
+      (should (= 1 (length (plist-get (harness-call 'workspace/get id) :threads)))))))
+
+
+(ert-deftest harness-workspace-selected-thread-does-not-bind-a-new-topic ()
+  "The thread a client selected is a preference: a topic cue still splits."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (thread (harness-call 'workspace/thread/create id "Kitchen renovation")))
+      (harness-call 'workspace/prompt id "The tile is matte."
+                    (list :thread (plist-get thread :id)))
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (harness-workspace-test-wait-idle
+       (plist-get (harness-call 'workspace/thread id (plist-get thread :id)) :live))
+      (harness-call 'workspace/prompt id "new topic: taxes"
+                    (list :thread (plist-get thread :id)))
+      (harness-workspace-test-wait-for
+       (lambda () (= 2 (length (plist-get (harness-call 'workspace/get id) :threads)))))
+      (let ((threads (plist-get (harness-call 'workspace/get id) :threads)))
+        (should (= 2 (length threads)))
+        (should (member "taxes" (mapcar (lambda (thread) (plist-get thread :title)) threads)))))))
+
+
+(ert-deftest harness-workspace-force-thread-keeps-the-message-there ()
+  "\`:force-thread' binds the thread whatever the message says."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (thread (harness-call 'workspace/thread/create id "Kitchen renovation")))
+      (harness-call 'workspace/prompt id "new topic: taxes"
+                    (list :force-thread (plist-get thread :id)))
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (let ((view (harness-call 'workspace/get id)))
+        (should (= 1 (length (plist-get view :threads))))
+        (should (equal (plist-get thread :id)
+                       (plist-get (car (plist-get view :threads)) :id)))))))
+
+
+(ert-deftest harness-workspace-a-switch-to-a-named-thread-revives-it ()
+  "\"Switch to the kitchen renovation\" goes to that thread, not a new one."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (kitchen (harness-call 'workspace/thread/create id "Kitchen renovation")))
+      (harness-call 'workspace/prompt id "The tile is matte."
+                    (list :thread (plist-get kitchen :id)))
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (harness-workspace-test-wait-idle
+       (plist-get (harness-call 'workspace/thread id (plist-get kitchen :id)) :live))
+      (harness-call 'workspace/prompt id "new topic: taxes"
+                    (list :thread (plist-get kitchen :id)))
+      (harness-workspace-test-wait-for
+       (lambda () (= 2 (length (plist-get (harness-call 'workspace/get id) :threads)))))
+      (harness-call 'workspace/prompt id "Switch to the kitchen renovation.")
+      (harness-workspace-test-wait-for
+       (lambda ()
+         (let ((view (harness-call 'workspace/get id)))
+           (and (= 2 (length (plist-get view :threads)))
+                (equal (plist-get kitchen :id) (plist-get view :last-thread))))))
+      (should (= 2 (length (plist-get (harness-call 'workspace/get id) :threads)))))))
+
+
+(ert-deftest harness-workspace-a-fresh-subject-starts-a-thread ()
+  "Three new words with nothing of the thread's in them start a new thread."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (harness-workspace-test-wait-idle
+       (plist-get (car (plist-get (harness-call 'workspace/get id) :threads)) :live))
+      (harness-call 'workspace/prompt id "My sister's wedding is in June.")
+      (harness-workspace-test-wait-for
+       (lambda () (= 2 (length (plist-get (harness-call 'workspace/get id) :threads)))))
+      (should (= 2 (length (plist-get (harness-call 'workspace/get id) :threads)))))))
+
+
+(ert-deftest harness-workspace-a-message-for-an-older-thread-goes-back-to-it ()
+  "A message whose words belong to an older thread revives it."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (kitchen (harness-call 'workspace/thread/create id
+                                  "Kitchen renovation plans for spring"))
+           (kitchen-id (plist-get kitchen :id)))
+      (harness-call 'workspace/prompt id
+                    "The kitchen renovation plans need a new sink."
+                    (list :force-thread kitchen-id))
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (harness-workspace-test-wait-idle
+       (plist-get (harness-call 'workspace/thread id kitchen-id) :live))
+      (harness-call 'workspace/prompt id "new topic: the tax return for last year")
+      (harness-workspace-test-wait-for
+       (lambda () (= 2 (length (plist-get (harness-call 'workspace/get id) :threads)))))
+      (harness-workspace-test-wait-idle
+       (plist-get (car (plist-get (harness-call 'workspace/get id) :threads)) :live))
+      ;; The words are the kitchen thread's, though the message names no
+      ;; thread: it goes back there rather than starting a third.
+      (harness-call 'workspace/prompt id "The kitchen renovation budget is tight.")
+      (harness-workspace-test-wait-for
+       (lambda () (equal kitchen-id
+                         (plist-get (harness-call 'workspace/get id) :last-thread))))
+      (should (equal kitchen-id
+                     (plist-get (harness-call 'workspace/get id) :last-thread)))
+      (should (= 2 (length (plist-get (harness-call 'workspace/get id) :threads)))))))
+
+
+(ert-deftest harness-workspace-a-continuation-keeps-the-thread ()
+  "A message tied to the one before it, or about the thread, keeps it."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (harness-workspace-test-wait-idle
+       (plist-get (car (plist-get (harness-call 'workspace/get id) :threads)) :live))
+      (harness-call 'workspace/prompt id "And the grout is light.")
+      (harness-workspace-test-wait-for
+       (lambda () (= 2 (length (harness-workspace-test-assistant-messages id)))))
+      (should (= 1 (length (plist-get (harness-call 'workspace/get id) :threads))))
+      (harness-call 'workspace/prompt id "What about the tile colour?")
+      (harness-workspace-test-wait-for
+       (lambda () (= 3 (length (harness-workspace-test-assistant-messages id)))))
+      (should (= 1 (length (plist-get (harness-call 'workspace/get id) :threads)))))))
+
+
+(ert-deftest harness-workspace-ranker-places-a-message-by-its-words ()
+  "The router ranks a message against the threads' own words, with no model.
+A title's word outweighs a passing one, a subject no thread holds starts
+a thread, and a message another thread holds goes back to it."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (kitchen (harness-call 'workspace/thread/create id "Kitchen renovation"))
+           (taxes (harness-call 'workspace/thread/create id "Tax return")))
+      (harness-workspace--append
+       workspace
+       (list :kind 'message :thread (plist-get kitchen :id)
+             :role 'user :text "The sink is leaking under the window."))
+      (harness-workspace--append
+       workspace
+       (list :kind 'message :thread (plist-get taxes :id)
+             :role 'user :text "The tax return for last year is filed."))
+      ;; Creating a thread saved a newer record than the one in hand.
+      (setq workspace (harness-workspace--get id))
+      (setf (plist-get workspace :last-thread) (plist-get taxes :id))
+      (harness-workspace--save workspace)
+      (let* ((workspace (harness-call 'workspace/get id))
+             (route (lambda (text) (harness-workspace--route workspace text nil))))
+        ;; A message about the kitchen goes back to that thread.
+        (let ((answer (funcall route "The kitchen counter needs sealing.")))
+          (should (equal (plist-get kitchen :id) (plist-get (car answer) :id)))
+          (should (eq 'revive (cadr answer)))
+          (should (eq 'ranked (nth 2 answer))))
+        ;; A message about the current thread's own subject keeps it.
+        (let ((answer (funcall route "The tax return is filed.")))
+          (should (equal (plist-get taxes :id) (plist-get (car answer) :id)))
+          (should (eq 'continue (cadr answer))))
+        ;; Three words no thread holds start a thread.
+        (let ((answer (funcall route "My sister's wedding is in June.")))
+          (should-not (car answer))
+          (should (eq 'new (cadr answer)))
+          (should (eq 'fresh (nth 2 answer))))
+        ;; A soft cue naming another thread's subject goes there.
+        (let ((answer (funcall route "What about the sink?")))
+          (should (equal (plist-get kitchen :id) (plist-get (car answer) :id))))
+        ;; A soft cue about nothing any thread holds starts one.
+        (let ((answer (funcall route "What about lunch?")))
+          (should-not (car answer))
+          (should (eq 'cue (nth 2 answer))))
+        ;; A soft cue the current thread hardly holds goes to the thread
+        ;; that holds it, not to the thread the person was writing in.
+        (setf (plist-get workspace :last-thread) (plist-get taxes :id))
+        (harness-workspace--save workspace)
+        (let* ((workspace (harness-call 'workspace/get id))
+               (answer (harness-workspace--route workspace "What about the sink?" nil)))
+          (should (equal (plist-get kitchen :id) (plist-get (car answer) :id))))
+        ;; A continuation word does not tie a message to a thread that
+        ;; holds none of it: the thread that holds its subject takes it.
+        (let ((answer (funcall route "The tax colour is still undecided.")))
+          (should (equal (plist-get taxes :id) (plist-get (car answer) :id)))
+          (should (eq 'continue (cadr answer))))))))
+
+
+(ert-deftest harness-workspace-router-meaning-places-a-paraphrase ()
+  "With an embedding model, a thread the words do not match is found by meaning.
+Another meaning still starts a thread."
+  (harness-workspace-test-with
+    (harness-register-method
+     'provider/embed
+     (lambda (_model texts &optional _opts)
+       (harness-resolved
+        (list :vectors
+              (mapcar (lambda (text)
+                        (let ((text (downcase text)))
+                          (cond
+                           ((string-match-p "tile\\|grout\\|shade\\|matte\\|colour\\|finish\\|warm" text)
+                            (list 1.0 0.0 0.0))
+                           ((string-match-p "wedding\\|sister\\|june" text)
+                            (list 0.0 1.0 0.0))
+                           ;; Nothing shares a direction with either topic.
+                           (t (list 0.0 0.0 1.0)))))
+                      texts)
+              :usage (list :input 1)))))
+    (let* ((harness-workspace-knowledge-embedding-model "test:embed")
+           (workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (harness-workspace-test-wait-idle
+       (plist-get (car (plist-get (harness-call 'workspace/get id) :threads)) :live))
+      ;; No word of the message is the thread's; the meaning is.
+      (harness-call 'workspace/prompt id "What shade of grout suits the wall?")
+      (harness-workspace-test-wait-for
+       (lambda () (= 2 (length (harness-workspace-test-assistant-messages id)))))
+      (should (= 1 (length (plist-get (harness-call 'workspace/get id) :threads))))
+      ;; A different meaning starts a thread.
+      (harness-call 'workspace/prompt id "My sister's wedding is in June.")
+      (harness-workspace-test-wait-for
+       (lambda () (= 2 (length (plist-get (harness-call 'workspace/get id) :threads)))))
+      (should (= 2 (length (plist-get (harness-call 'workspace/get id) :threads)))))))
+
+
+;;;; The graph explorer
+
+(defun harness-workspace-test-graph-thread (id)
+  "Return the live thread of workspace ID after its turn."
+  (let ((thread (car (plist-get (harness-call 'workspace/get id) :threads))))
+    (harness-workspace-test-wait-idle (plist-get thread :live))
+    (car (plist-get (harness-call 'workspace/get id) :threads))))
+
+(ert-deftest harness-workspace-knowledge-graph-explorer-reads-the-thread ()
+  "The explorer answers the thread's page, its notes and its captures.
+The page's identity bullet is not a node; the conversation's journal
+captures link the page and are its backlinks."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id
+                    "The tile is matte. Ask [[Stone Co]] for a sample.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (let* ((thread (harness-workspace-test-graph-thread id))
+             (thread-id (plist-get thread :id)))
+        (harness-call 'knowledge/write id thread-id 'assistant
+                      "The grout is warm grey. Ask [[Stone Co]] again.")
+        (let* ((graph (harness-call 'knowledge/graph id (list :thread thread-id)))
+               (page (plist-get graph :page))
+               (blocks (plist-get graph :blocks))
+               (note (cl-find-if (lambda (block)
+                                   (string-match-p "warm grey"
+                                                   (plist-get block :text)))
+                                 blocks))
+               (backlink-texts (mapcar (lambda (block) (plist-get block :text))
+                                       (plist-get graph :backlinks))))
+          (should (equal "ready" (plist-get graph :status)))
+          (should (equal thread-id (plist-get graph :thread-id)))
+          (should (equal (plist-get thread :title) (plist-get graph :thread)))
+          (should (equal (plist-get thread :page) (plist-get graph :page-name)))
+          ;; The page name Logseq gets is clean: no [[...]] in it.
+          (should-not (string-search "[[" (plist-get graph :page-name)))
+          (should (equal thread-id
+                         (cdr (assoc "thread-id" (plist-get page :properties)))))
+          ;; A property-only bullet is the identity, not a node.
+          (should (= 1 (length blocks)))
+          (should note)
+          (should (equal "note" (cdr (assoc "role" (plist-get note :properties)))))
+          ;; A note on the thread's own page is not a link to itself.
+          (should-not (assoc "thread" (plist-get note :properties)))
+          (should (member "Stone Co" (plist-get note :links)))
+          (should (member "Stone Co" (plist-get graph :links)))
+          ;; The page's own name in a node's `thread' property is not a
+          ;; page it links to.
+          (should-not (member (plist-get thread :page) (plist-get graph :links)))
+          ;; The conversation is captured in the journal, linking the page.
+          (should (cl-find-if (lambda (text) (string-match-p "matte" text))
+                              backlink-texts))
+          (should (cl-find-if (lambda (text) (string-match-p "Noted" text))
+                              backlink-texts))
+          ;; The note is on the page, and links it: it is a node, not a
+          ;; backlink to the page itself.
+          (should-not (cl-find-if (lambda (text) (string-match-p "warm grey" text))
+                                  backlink-texts)))))))
+
+(ert-deftest harness-workspace-knowledge-graph-explorer-opens-a-node ()
+  "A node opens by id, with its children; an unknown node says so."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (let* ((thread (harness-workspace-test-graph-thread id))
+             (thread-id (plist-get thread :id))
+             (note (harness-call 'knowledge/write id thread-id 'assistant
+                                 "The grout is warm grey."))
+             (page (plist-get note :page)))
+        ;; A child bullet is what the page's nodes nest under the note.
+        (let ((file (harness-logseq-page-file page harness-logseq-directory)))
+          (write-region "  - A child note\n" nil file t))
+        (let* ((graph (harness-call 'knowledge/graph id (list :thread thread-id)))
+               (block (cl-find-if (lambda (item)
+                                    (string-match-p "warm grey" (plist-get item :text)))
+                                  (plist-get graph :blocks)))
+               (detail (harness-call 'knowledge/graph/node id (plist-get block :id)
+                                     (list :thread thread-id))))
+          (should (equal (plist-get block :id)
+                         (plist-get (plist-get detail :block) :id)))
+          (should (equal (plist-get block :id)
+                         (plist-get (plist-get detail :node) :id)))
+          (should (cl-find-if (lambda (child)
+                                (string-match-p "child note" (plist-get child :text)))
+                              (plist-get detail :children)))
+          (let ((missing (harness-call 'knowledge/graph/node id "n-not-a-block"
+                                       (list :thread thread-id))))
+            (should (null (plist-get missing :node)))
+            (should (equal "missing" (plist-get missing :status)))
+            (should (equal "no-node" (plist-get missing :why)))))))))
+
+(ert-deftest harness-workspace-knowledge-graph-explorer-opens-a-page ()
+  "A page opens by the name a block links; a page not there says so."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "Ask [[Stone Co]] for a sample.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (let* ((thread (harness-workspace-test-graph-thread id))
+             (page (plist-get thread :page)))
+        ;; The user can make the linked page in Logseq; the explorer reads it.
+        (harness-call 'logseq/page-add "Stone Co" "The stonemason for the tile."
+                      (list :root harness-logseq-directory))
+        (let ((found (harness-call 'knowledge/graph/page id "Stone Co"))
+              (own (harness-call 'knowledge/graph/page id page))
+              (missing (harness-call 'knowledge/graph/page id "Nowhere")))
+          (should (equal "ready" (plist-get found :status)))
+          (should (equal "Stone Co" (plist-get (plist-get found :page) :title)))
+          (should (cl-find-if
+                   (lambda (block)
+                     (string-match-p "stonemason" (plist-get block :text)))
+                   (plist-get found :blocks)))
+          (should (equal "ready" (plist-get own :status)))
+          (should (equal page (plist-get own :page-name)))
+          (should (equal "missing" (plist-get missing :status)))
+          (should (null (plist-get missing :blocks))))))))
+
+(ert-deftest harness-workspace-knowledge-graph-explorer-without-a-graph ()
+  "A graph that cannot be read says why, and the explorer still answers."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (thread (harness-call 'workspace/thread/create id "Kitchen renovation"))
+           (thread-id (plist-get thread :id))
+           (blocker (expand-file-name "blocker" harness-state-directory))
+           (bad (expand-file-name "not-a-directory/graph/" harness-state-directory)))
+      (write-region "x" nil blocker)
+      (harness-call 'workspace/update id :graph bad)
+      (let ((graph (harness-call 'knowledge/graph id (list :thread thread-id))))
+        (should (equal "unavailable" (plist-get graph :status)))
+        (should (equal "no-page-directory" (plist-get graph :why)))
+        (should (null (plist-get graph :blocks)))
+        (should (null (plist-get graph :backlinks)))
+        (should (plist-get graph :thread-id)))
+      (let ((page (harness-call 'knowledge/graph/page id "Anywhere")))
+        (should (equal "unavailable" (plist-get page :status)))
+        (should (null (plist-get page :blocks)))))))

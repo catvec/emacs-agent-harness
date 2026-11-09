@@ -96,6 +96,34 @@ COMPUTERS, when given, is what the registered computers are."
         (should (string-match-p "Noted." text))
         (should (equal "Message…" (funcall harness-compose-placeholder-function)))))))
 
+(ert-deftest harness-ui-workspace-names-a-switched-to-thread ()
+  "A message routed to another thread is named with that thread."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-mode)
+      (setq harness-ui-workspace--id "w-1"
+            harness-ui-workspace--thread "th-1"
+            harness-ui-workspace--state 'ready
+            harness-ui-workspace--data (harness-ui-workspace-test-data)
+            harness-ui-workspace--entries
+            (append (harness-ui-workspace-test-entries)
+                    '((:kind "message" :thread "th-2" :role "user"
+                             :text "And the subscription?")
+                      (:kind "message" :thread "th-2" :role "assistant"
+                             :text "Cancelled.")))
+            harness-ui-workspace--knowledge nil)
+      (cl-letf (((symbol-function 'harness-compose-fetch-completions) #'ignore))
+        (harness-ui-workspace--render))
+      (let ((text (buffer-string)))
+        (should (string-match-p "Thread · Harness memory" text))
+        ;; Named once, before the message that switched to it; its
+        ;; reply, and the messages before it, carry no second name.
+        (should (= 1 (cl-count-if (lambda (line)
+                                    (string-match-p "\\`Thread · Harness memory\\'" line))
+                                  (split-string text "\n"))))
+        (should (string-match-p "The tile is matte." text))
+        (should (string-match-p "Cancelled." text))))))
+
 (ert-deftest harness-ui-workspace-computers-are-one-click-away ()
   "The workspace shows the registered computers, their screen share and control."
   (harness-ui-workspace-test-with
@@ -151,13 +179,16 @@ COMPUTERS, when given, is what the registered computers are."
         (harness-ui-workspace--render))
       (goto-char (point-min))
       (should (equal (buffer-substring-no-properties (line-beginning-position) (line-end-position))
-                     "Workspace · Home   Thread · Kitchen renovation · Running   Knowledge · ready   Computer · off   Tasks New thread Episode Stop Refresh Workspace computer Resources"))
+                     "Workspace · Home   Thread · Kitchen renovation · Running   Knowledge · ready   Computer · off   Tasks New thread Episode Stop Refresh Graph Workspace computer Resources"))
       (search-forward "Tasks")
       (should (equal "The task board of this workspace" (get-text-property (1- (point)) 'help-echo)))
       (search-forward "New thread")
       (should (equal "Start a new topic" (get-text-property (1- (point)) 'help-echo)))
       (search-forward "Refresh")
       (should (equal "Read the workspace again" (get-text-property (1- (point)) 'help-echo)))
+      (search-forward "Graph")
+      (should (equal "The Logseq nodes of this thread"
+                     (get-text-property (1- (point)) 'help-echo)))
       (search-forward "Workspace computer")
       (should (equal "workspace computer page"
                      (get-text-property (1- (point)) 'help-echo))))))
@@ -736,7 +767,7 @@ so before the first token arrives."
         (goto-char (point-min))
         (should (equal (concat "Workspace · Home   Thread · Kitchen renovation · Running · "
                                "Waiting for the model…   Knowledge · unavailable   Computer · off   "
-                               "Tasks New thread Episode Stop Refresh Workspace computer Resources")
+                               "Tasks New thread Episode Stop Refresh Graph Workspace computer Resources")
                        (buffer-substring-no-properties
                         (line-beginning-position) (line-end-position)))))))
 
@@ -816,6 +847,292 @@ line above the box, where the person types, does not."
         (should (equal "running" (plist-get thread :episode-status)))
         (should (equal "waiting" (plist-get (plist-get thread :activity) :phase)))))))
 
+
+(defun harness-ui-workspace-test-graph-data (status)
+  "Return a graph answer for the explorer tests, at STATUS."
+  (append
+   (list :workspace "w-1" :workspace-name "Home" :status status
+         :page-name "Threads/Kitchen renovation"
+         :thread "Kitchen renovation" :thread-id "th-1"
+         :page (list :title "Threads/Kitchen renovation"
+                     :name "Threads/Kitchen renovation"
+                     :properties (list (cons "thread-id" "th-1")
+                                       (cons "workspace-status" "active"))
+                     :tags (list "Thread") :links (list "Stone Co"))
+         :links (list "Stone Co") :count 1)
+   (when (equal status "ready")
+     (list :blocks (list (list :id "b-1" :line 3 :indent 0
+                               :text "The grout is warm grey."
+                               :properties (list (cons "id" "b-1")
+                                                 (cons "workspace" "Home")
+                                                 (cons "thread" "[[Threads/Kitchen renovation]]"))
+                               :tags (list "Memory" "Decision")
+                               :links (list "Stone Co")
+                               :created 1794161220000
+                               :page "Threads/Kitchen renovation"))
+           :backlinks (list (list :id "j-1" :page "2026-11-08"
+                                  :text "user: The tile is matte.")
+                            (list :id "j-2" :page "2026-11-08"
+                                  :text "assistant: Noted."))))))
+
+
+;;;; The graph explorer
+
+(defun harness-ui-workspace-test-graph-render (view data &optional stack error)
+  "Render the graph buffer with VIEW, DATA, STACK and ERROR.
+Return its text, text properties and all, so tooltips are kept."
+  (with-temp-buffer
+    (harness-ui-workspace-graph-mode)
+    (setq buffer-read-only nil
+          harness-ui-workspace-graph--id "w-1"
+          harness-ui-workspace-graph--name "Home"
+          harness-ui-workspace-graph--thread "th-1"
+          harness-ui-workspace-graph--view view
+          harness-ui-workspace-graph--stack stack
+          harness-ui-workspace-graph--error error
+          harness-ui-workspace-graph--data data)
+    (harness-ui-workspace-graph--render)
+    (buffer-string)))
+
+(defun harness-ui-workspace-test-graph-time ()
+  "Return the note fixture's created time, as the buffer shows it."
+  (format-time-string "%Y-%m-%d %H:%M"
+                      (seconds-to-time (/ 1794161220000 1000.0))))
+
+(ert-deftest harness-ui-workspace-graph-shows-the-thread ()
+  "The graph buffer's thread view, its exact words and its tooltips."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (insert (harness-ui-workspace-test-graph-render
+               '(:kind thread)
+               (harness-ui-workspace-test-graph-data "ready")))
+      (should (equal
+               (concat
+                "Graph · Home   Thread · Kitchen renovation   Logseq · ready   "
+                "Refresh Workspace\n"
+                "\n"
+                "Page\n"
+                "  Name  Threads/Kitchen renovation\n"
+                "  Nodes  1\n"
+                "  Tags  Thread\n"
+                "  Properties\n"
+                "    thread-id  th-1\n"
+                "    workspace-status  active\n"
+                "  Links  Stone Co\n"
+                "\n"
+                "Nodes\n"
+                "Note · " (harness-ui-workspace-test-graph-time) "\n"
+                "  The grout is warm grey.\n"
+                "  Tags  Memory, Decision\n"
+                "  Links  Stone Co\n"
+                "  Properties\n"
+                "    id  b-1\n"
+                "    workspace  Home\n"
+                "    thread  [[Threads/Kitchen renovation]]\n"
+                "\n"
+                "Backlinks\n"
+                "  2026-11-08  user: The tile is matte.\n"
+                "  2026-11-08  assistant: Noted.\n"
+                "\n"
+                "g · refresh   RET · open   q · bury\n")
+               (buffer-string)))
+      (goto-char (point-min))
+      (search-forward "Refresh")
+      (should (equal "Read the graph again" (get-text-property (1- (point)) 'help-echo)))
+      (search-forward "Workspace")
+      (should (equal "The workspace chat" (get-text-property (1- (point)) 'help-echo)))
+      (search-forward "Note")
+      (should (equal "The node in the graph" (get-text-property (1- (point)) 'help-echo)))
+      (search-forward "Stone Co")
+      (should (equal "The page in the graph" (get-text-property (1- (point)) 'help-echo))))))
+
+(ert-deftest harness-ui-workspace-graph-opens-a-node ()
+  "The graph buffer's node view: the node, its page and its children."
+  (harness-ui-workspace-test-with
+    (let ((data (harness-ui-workspace-test-graph-data "ready")))
+      (with-temp-buffer
+        (insert (harness-ui-workspace-test-graph-render
+                 '(:kind node :id "b-1")
+                 (append data
+                         (list :block (car (plist-get data :blocks))
+                               :node (car (plist-get data :blocks))
+                               :children (list (list :id "b-2" :line 4 :indent 2
+                                                     :text "A child note."
+                                                     :properties nil :tags nil :links nil
+                                                     :created nil
+                                                     :page "Threads/Kitchen renovation"))))
+                 '((:kind thread))))
+        (should (equal
+                 (concat
+                  "Graph · Home   Node · b-1   Logseq · ready   Refresh Back Workspace\n"
+                  "\n"
+                  "Node\n"
+                  "  Role  Note\n"
+                  "  Time  " (harness-ui-workspace-test-graph-time) "\n"
+                  "  Text  The grout is warm grey.\n"
+                  "  Page  Threads/Kitchen renovation\n"
+                  "  Tags  Memory, Decision\n"
+                  "  Links  Stone Co\n"
+                  "  Properties\n"
+                "    id  b-1\n"
+                "    workspace  Home\n"
+                "    thread  [[Threads/Kitchen renovation]]\n"
+                  "\n"
+                  "Children\n"
+                  "Block\n"
+                  "  A child note.\n"
+                  "\n"
+                  "g · refresh   RET · open   b · back   q · bury\n")
+                 (buffer-string)))
+        (goto-char (point-min))
+        (search-forward "Back")
+        (should (equal "The node or page before this one"
+                       (get-text-property (1- (point)) 'help-echo)))))))
+
+(ert-deftest harness-ui-workspace-graph-opens-a-page ()
+  "The graph buffer's page view, a page not there, and an absent graph."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (insert (harness-ui-workspace-test-graph-render
+               '(:kind page :name "Stone Co")
+               (list :workspace "w-1" :workspace-name "Home" :status "ready" :why nil
+                     :page-name "Stone Co"
+                     :page (list :title "Stone Co" :name "Stone Co"
+                                 :properties nil :tags (list "People") :links nil)
+                     :blocks (list (list :id "b-3" :line 1 :indent 0 :text "The stonemason."
+                                         :properties nil :tags nil :links nil
+                                         :created nil :page "Stone Co"))
+                     :backlinks nil)))
+      (should (equal
+               (concat
+                "Graph · Home   Page · Stone Co   Logseq · ready   Refresh Workspace\n"
+                "\n"
+                "Page\n"
+                "  Name  Stone Co\n"
+                "  Title  Stone Co\n"
+                "  Tags  People\n"
+                "\n"
+                "Nodes\n"
+                "Block\n"
+                "  The stonemason.\n"
+                "\n"
+                "Backlinks\n"
+                "  No backlinks\n"
+                "\n"
+                "g · refresh   RET · open   q · bury\n")
+               (buffer-string))))
+    (with-temp-buffer
+      (insert (harness-ui-workspace-test-graph-render
+               '(:kind page :name "Nowhere")
+               (harness-ui-workspace-test-graph-data "missing")))
+      (should (equal
+               (concat
+                "Graph · Home   Page · Nowhere   Logseq · not found   Refresh Workspace\n"
+                "\n"
+                "Page\n"
+                "  No page\n"
+                "\n"
+                "Nodes\n"
+                "  No nodes\n"
+                "\n"
+                "Backlinks\n"
+                "  No backlinks\n"
+                "\n"
+                "g · refresh   RET · open   q · bury\n")
+               (buffer-string))))
+    (with-temp-buffer
+      (insert (harness-ui-workspace-test-graph-render
+               '(:kind thread)
+               (plist-put (harness-ui-workspace-test-graph-data "unavailable")
+                          :why "no-page-directory")))
+      (should (equal
+               (concat
+                "Graph · Home   Thread · Kitchen renovation   Logseq · unavailable   "
+                "Refresh Workspace\n"
+                "\n"
+                "Page\n"
+                "  No graph\n"
+                "  no-page-directory\n"
+                "\n"
+                "g · refresh   RET · open   q · bury\n")
+               (buffer-string))))))
+
+(ert-deftest harness-ui-workspace-graph-says-what-is-not-there ()
+  "A node that is gone says so; a missing graph has no page to draw."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (insert (harness-ui-workspace-test-graph-render
+               '(:kind node :id "n-gone")
+               (append (harness-ui-workspace-test-graph-data "ready")
+                       (list :block nil :node nil :children nil))
+               '((:kind thread))))
+      (should (string-match-p "Node\n  No node\n" (buffer-string))))
+    (with-temp-buffer
+      (insert (harness-ui-workspace-test-graph-render
+               '(:kind thread)
+               (harness-ui-workspace-test-graph-data "missing")))
+      (should (string-match-p "Logseq · not found" (buffer-string)))
+      (should (string-match-p "Page\n  No page\n" (buffer-string))))
+    (with-temp-buffer
+      (insert (harness-ui-workspace-test-graph-render
+               '(:kind thread)
+               (harness-ui-workspace-test-graph-data "ready")
+               nil "No Logseq CLI"))
+      (should (string-match-p "\nNo Logseq CLI\n" (buffer-string))))))
+
+(ert-deftest harness-ui-workspace-graph-keys-and-refusals ()
+  "The graph buffer is read-only, keeps its keys, and refuses what it cannot do."
+  (harness-ui-workspace-test-with
+    (should (eq 'harness-ui-workspace-graph
+                (lookup-key harness-ui-workspace-mode-map (kbd "C-c w l"))))
+    (with-temp-buffer
+      (harness-ui-workspace-graph-mode)
+      (should (equal "Workspace Graph" mode-name))
+      (should buffer-read-only)
+      (should (eq 'harness-ui-workspace-graph-refresh
+                  (lookup-key harness-ui-workspace-graph-mode-map (kbd "g"))))
+      (should (eq 'harness-ui-workspace-graph-open
+                  (lookup-key harness-ui-workspace-graph-mode-map (kbd "RET"))))
+      (should (eq 'harness-ui-workspace-graph-back
+                  (lookup-key harness-ui-workspace-graph-mode-map (kbd "b"))))
+      (should (eq 'harness-ui-bury
+                  (lookup-key harness-ui-workspace-graph-mode-map (kbd "q"))))
+      (should-error (harness-ui-workspace-graph-open) :type 'user-error)
+      (should-error (harness-ui-workspace-graph-back) :type 'user-error)
+      (should-error (harness-ui-workspace-graph-workspace) :type 'user-error))
+    (let ((harness-ui-workspace-graph--last-id nil))
+      (should-error (harness-ui-workspace-graph) :type 'user-error))))
+
+(ert-deftest harness-ui-workspace-graph-follows-a-node-and-a-page ()
+  "RET at a node or a link opens it, and keeps the view before it."
+  (harness-ui-workspace-test-with
+    (let ((data (harness-ui-workspace-test-graph-data "ready")))
+      (with-temp-buffer
+        (harness-ui-workspace-graph-mode)
+        (setq buffer-read-only nil
+              harness-ui-workspace-graph--id "w-1"
+              harness-ui-workspace-graph--name "Home"
+              harness-ui-workspace-graph--view '(:kind thread)
+              harness-ui-workspace-graph--data data)
+        (harness-ui-workspace-graph--render)
+        (goto-char (point-min))
+        (search-forward "Stone Co")
+        (cl-letf (((symbol-function 'harness-ui-workspace-graph--fetch) #'ignore))
+          (harness-ui-workspace-graph-open))
+        (should (equal '(:kind page :name "Stone Co")
+                       harness-ui-workspace-graph--view))
+        (should (equal '((:kind thread)) harness-ui-workspace-graph--stack))
+        (setq harness-ui-workspace-graph--view '(:kind thread)
+              harness-ui-workspace-graph--stack nil
+              harness-ui-workspace-graph--data data)
+        (harness-ui-workspace-graph--render)
+        (goto-char (point-min))
+        (search-forward "Note")
+        (cl-letf (((symbol-function 'harness-ui-workspace-graph--fetch) #'ignore))
+          (harness-ui-workspace-graph-open))
+        (should (equal '(:kind node :id "b-1")
+                       harness-ui-workspace-graph--view))
+        (should (equal '((:kind thread)) harness-ui-workspace-graph--stack))))))
 
 ;;;; Typing in the compose box
 

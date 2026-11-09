@@ -8,9 +8,11 @@ detailed UI and copy inventory, the tests, and the staged plan.  The
 first slice is implemented: `workspace`, `workspace-knowledge`, the
 markdown half of `logseq`, `workspace-box` and `ui-workspace` are in
 the tree, with their tests, and the Flutter client has the `Workspace`
-tab, its responsive layout and a computer that draws the real RFB
-stream.  The Logseq CLI and its DB graphs, the embedding index, the
-scribe/dream, the container backend, routines and voice are not.  The
+tab, its responsive layout, the `Graph` page that reads the current
+thread's Logseq page and a computer that draws the real RFB stream.  The Logseq CLI and its DB graphs, the index and its persistent
+vectors, the dream's review UI, the container backend, routines and
+voice are not; who writes a note, the nightly dream and the semantic
+rerank are in [the knowledge graph note](workspace-knowledge-graph.md).  The
 computer's design and its `local` boundary are in
 [workspace computer](workspace-computer.md).  The decision that the
 workspace's knowledge is a Logseq graph and the memory module keeps
@@ -91,21 +93,24 @@ What exists now: the `logseq` module, a client for a Logseq
 **markdown** graph (`$LOGSEQ_HOME`, else `~/logseq`; pages, journals,
 blocks and properties as files); `workspace-knowledge` (a page per
 thread, the day's journal captures, search and the `knowledge_search`,
-`knowledge_write`, `knowledge_read` and `knowledge_status` tools); the
-`workspace` module (records, threads, episodes, the timeline, routing
-and the brief); and `ui-workspace` (the Emacs buffer, thread list,
-timeline and compose box), with `lisp/modules/harness-logseq-test.el`,
+`knowledge_write`, `knowledge_read` and `knowledge_status` tools, the
+dream's pass and its schedule, and the semantic rerank);
+the `workspace` module (records, threads, episodes, the timeline,
+routing and the brief); and `ui-workspace` (the Emacs buffer, thread
+list, timeline, compose box and graph explorer), with
+`lisp/modules/harness-logseq-test.el`,
 `lisp/modules/harness-workspace-test.el` and
 `lisp/ui/harness-ui-workspace-test.el`.  The harness's own `memory`
 module keeps the small behavioral notes and is not the workspace's
 knowledge store.
 
 What does not exist yet: the Logseq CLI and its DB graphs (the
-markdown graph is read and written directly), the embedding index, the
-scribe/curator/dream, the box, routines and voice.  Those are stages 0
-and 3 to 8 below.  The Flutter client draws the workspace, its threads
-and its computer from the same `workspace/*` and `knowledge/*`
-methods; its `Memory` screen reaches the graph through ACP aliases
+markdown graph is read and written directly), the persistent embedding
+index, the curator, the dream's operation review, the box's container
+backend, routines and voice.  Those are stages 0 and 3 to 8 below.  The
+Flutter client draws the workspace, its threads, its `Graph` page and
+its computer from the same `workspace/*` and `knowledge/*` methods; its
+`Memory` screen reaches the graph through ACP aliases
 (`memory/notes`, `memory/search`, `memory/status` with a `:workspace`).
 
 ### Modules
@@ -117,9 +122,9 @@ talks ACP.
 | Module | Layer | Requires | What it is |
 |---|---|---|---|
 | `logseq` | state | `core`, `util` | The Logseq markdown graph client: pages, journals, blocks, properties, search and backlinks, read and written as files.  No workspace or memory policy.  The CLI and its DB graphs are stage 0 below. |
-| `workspace-knowledge` | state | `logseq`, `session`, `tools` | Thread pages, journal captures, retrieval, the knowledge tools and the write path.  It knows pages, blocks and provenance, not threads or chats. |
-| `workspace` | state | `workspace-knowledge`, `session`, `agent`, `project`; uses `tasks`, `supervisor` and `seed` when loaded | Workspaces, threads, episodes, the timeline, routing, the brief, the scribe and the curator.  It is the mode. |
-| `workspace-dream` | state | `workspace-knowledge`, `workspace` | The dream scheduler, phases, reports and review state. |
+| `workspace-knowledge` | state | `logseq`, `session`, `tools` | Thread pages, journal captures, retrieval, the dream's pass and schedule, the semantic rerank, the knowledge tools and the write path.  It knows pages, blocks and provenance, not threads or chats. |
+| `workspace` | state | `workspace-knowledge`, `session`, `agent`, `project`; uses `tasks`, `supervisor` and `seed` when loaded | Workspaces, threads, episodes, the timeline, routing and the brief.  It is the mode. |
+| `workspace-dream` | state | `workspace-knowledge`, `workspace` | The dream scheduler, phases, reports and review state.  The pass and its nightly schedule are in `workspace-knowledge`; the phases, risk classes and review state are not. |
 | `workspace-box` | state | `store` | The computer's lifecycle, private X display, browser profile, input, control lock and VNC endpoint.  Optional: without it the workspace has no computer.  The first backend is `local`, not the container in the design. |
 | `workspace-routines` | state | `workspace`, `notifications` | Triggers, runs and delivery.  Optional; a workspace without it has no scheduled work. |
 | `ui-workspace-voice` | UI | `ui-workspace`, `ui-voice` (when present) | The call control on a thread; the delegation path is `workspace/prompt` with `:channel 'voice`, which marks the turns. |
@@ -133,24 +138,34 @@ The first release can ship `workspace` and `workspace-knowledge` with the
 UI and leave the box, routines and dream behind feature switches, but
 the design expects all of them.
 
-**Background work.**  The workspace makes model calls the user did not
-send.  They are of two kinds.  A **one-shot** job (the router, the
-recall query expansion) is an internal session: one `provider/complete`
-with a JSON answer, recorded and costed like the harness's other
-internal calls.  A **tool-using** job (the librarian, the scribe, the
-curator, the dream) is a background session with its own kind
-(`workspace-librarian`, `workspace-scribe`, `workspace-curator`,
+**Background work.**  The workspace keeps model calls the user did not
+send to a minimum, and a turn makes none of its own.  What is left is
+consolidation, and it asks no model: the nightly dream reads pages and
+rewrites their state.  The shape a background job would take is here
+for the stages that add one (the librarian, the curator).  They are of
+two kinds.  A **one-shot** job (the recall query expansion) is an
+internal session: one `provider/complete` with a JSON answer, recorded
+and costed like the harness's other internal calls.  A **tool-using**
+job (the librarian, the curator, the dream) is a background session
+with its own kind (`workspace-librarian`, `workspace-curator`,
 `workspace-dream`): an ordinary agent loop with a narrow tool
 allowlist, a short context, the same permission chain and tool slots,
 and a transcript the user can open.  Those kinds are added to
 `harness-ui-sessions-hidden-kinds`, so the session list stays clean;
 `I` shows them.  A background session is non-interactive and never
-prompts: its tool list is narrowed to the memory (or task-reading)
-tools, and a call that would need the user -- forget, a login, a
-mount, a permission it cannot decide -- is refused and reported rather
-than left waiting.  It never messages the user directly; the workspace
-turns its result into a timeline card, a memory write or a
-notification, and anything that needs a person goes to review.
+prompts: its tool list is narrowed to the knowledge (or task-reading)
+tools, and a call that would need the user -- a login, a mount, a
+permission it cannot decide -- is refused and reported rather than left
+waiting.  It never messages the user directly; the workspace turns its
+result into a timeline card, a knowledge write or a notification, and
+anything that needs a person goes to review.
+
+**A finished turn is not read again.**  The agent writes what the turn
+settled with `knowledge_write` while it still has the conversation, so
+there is no per-turn extraction pass and no `workspace-scribe` kind.
+Its cost, the work it duplicated and the trivia it accumulated are why
+it was removed; [the knowledge graph
+note](workspace-knowledge-graph.md#who-writes-a-note) records that.
 
 ### The shape of a request
 
@@ -159,9 +174,9 @@ notification, and anything that needs a person goes to review.
         |  _harness/workspace/prompt {workspace, text, thread?, channel?}
         v
    workspace/prompt
-        |-- hard signals? ------------------------------.
-        |-- similarity over thread summaries? ----------+--> route
-        |-- router model (only if ambiguous) ----------'
+        |-- hard signals? ----------------------------------.
+        |-- ranking over the threads' passages? ------------+--> route
+        |-- embeddings, if configured and the words are close -'
         |
         |-- continue: agent/prompt(episode, text)
         |-- revive:   park current; create episode; agent/prompt(episode, brief + text)
@@ -170,12 +185,12 @@ notification, and anything that needs a person goes to review.
         v
    agent turn (ordinary session; tools, permissions, compaction as usual)
         |  stream/tool events -> session events -> workspace timeline + UI
+        |  knowledge_write -> workspace-knowledge -> logseq (the turn's notes)
         v
    agent/turn-ended
         |-- timeline entry (reply, usage, costs)
-        |-- scribe (if due) --.
-        |-- curator (if due) -+--> workspace-knowledge queue --> logseq --> index
-        |-- task linker (on task events) --'
+        |-- the reply captured in the day's journal, linked to the thread
+        |-- task linker (on task events) --> workspace-knowledge queue --> logseq
         v
    workspace/thread-changed, workspace/timeline-appended
 ```
@@ -257,7 +272,7 @@ A workspace record:
  :project "/home/me/workspace/" :graph-root "…" :graph "home"
  :instructions "…" :model "…" :thinking "medium"
  :permission-mode 'auto :non-interactive nil
- :router-model nil :scribe-model nil :dream-model nil
+ :dream-model nil
  :embedding-model "…" :brief-tokens 24000
  :threads (…) :last-thread "th-…" :routines (…) :box (…)
  :created … :updated …)
@@ -295,7 +310,7 @@ values are plists.
 | `workspace/threads` | `id &optional filter` | thread records with status and last message |
 | `workspace/thread` | `id thread` | one thread, its page and episodes |
 | `workspace/thread/create` | `id title &optional plist` | a thread with no episode |
-| `workspace/thread/update` | `id thread &rest plist` (`:title :status :pinned :page`) | the thread |
+| `workspace/thread/update` | `id thread &rest plist` (`:title :status :pinned :project :summary :next-action`) | the thread, its page brought up to date |
 | `workspace/thread/merge` | `id from into` | links two threads; the timeline keeps its entries and groups them under the target |
 | `workspace/thread/park` | `id thread` | parks the live episode |
 | `workspace/thread/revive` | `id thread &optional opts` | starts a new episode from the thread's brief |
@@ -303,6 +318,18 @@ values are plists.
 | `workspace/episode` | `id thread &optional episode` | the episode's session and summary |
 | `workspace/context` | `id &optional thread episode` | the last brief: sections, cards, tokens, why |
 | `workspace/brief` | `id &optional opts` | a digest for the chat/voice: tasks, threads, dreams, box |
+
+**The graph**
+
+| Method | Arguments | Returns |
+|---|---|---|
+| `knowledge/graph` | `workspace &optional opts` (`:thread`) | the thread's page: page, blocks, links, backlinks, status, title |
+| `knowledge/graph/node` | `workspace node &optional opts` (`:thread`) | one block, its children and the graph |
+| `knowledge/graph/page` | `workspace name &optional opts` | a page by name, its blocks and backlinks |
+
+The readings are in the state layer so the Emacs buffer, the app and a
+call see the same graph; [the routing
+note](workspace-topic-routing.md#the-explorer) is their design.
 
 **Memory**
 
@@ -447,11 +474,9 @@ All options are `defcustom`s in `harness` and are described by
 - `harness-workspace-thread-idle-hours` (8).
 - `harness-workspace-brief-tokens` (24000), `…-brief-recent-turns` (6),
   `…-recall-timeout` (1.5).
-- `harness-workspace-router-model` (nil: the simple tier),
-  `…-router-threshold` (0.55), `…-router-timeout` (4).
+- `harness-workspace-router-threshold` (0.2), `…-router-recent` (6),
+  `…-router-timeout` (2), `…-router-semantic` (t).
 - `harness-workspace-librarian` (t when an embedding model exists).
-- `harness-workspace-scribe-model`, `…-scribe-every` (4),
-  `…-scribe-blocks` (6).
 - `harness-workspace-curate-every` (10).
 - `harness-workspace-timeline-days` (365).
 - `harness-workspace-notify` (`task-review`, `task-input`,
@@ -471,13 +496,17 @@ All options are `defcustom`s in `harness` and are described by
 
 **Dream**
 
-- `harness-workspace-dream` (t), `…-dream-hour` (3),
-  `…-dream-catch-up` (t), `…-dream-catch-up-hours` (36),
-  `…-dream-idle-minutes` (45), `…-dream-min-turns` (12),
-  `…-dream-model` (nil: medium tier), `…-dream-thinking` (nil),
-  `…-dream-candidates` (40), `…-dream-ops` (60),
-  `…-dream-min-score` (2.0), `…-dream-min-confidence` (0.6),
-  `…-dream-budget`, `…-dream-undo-hours` (72).
+Implemented, in `workspace-knowledge`: `harness-workspace-knowledge-dream`
+(`auto`), `…-dream-hour` (3) and `…-dream-report` (t).  The pass asks no
+model.
+
+Staged with stage 4's phases and review: `harness-workspace-dream` (t),
+`…-dream-catch-up` (t), `…-dream-catch-up-hours` (36),
+`…-dream-idle-minutes` (45), `…-dream-min-turns` (12),
+`…-dream-model` (nil: medium tier), `…-dream-thinking` (nil),
+`…-dream-candidates` (40), `…-dream-ops` (60),
+`…-dream-min-score` (2.0), `…-dream-min-confidence` (0.6),
+`…-dream-budget`, `…-dream-undo-hours` (72).
 
 **Box**
 
@@ -563,8 +592,9 @@ The workspace adds one section to the system prompt of an episode:
 > when you need something you were not given; use `knowledge_write`
 > when the user asks you to remember, when a decision is made, or when
 > a commitment or open loop is created.  Write one concise block of
-> knowledge.  Cite the pages you used as `[[Page]]`.  Never claim to
-> remember something you did not retrieve; say what you know and ask.
+> knowledge, and write nothing on a turn that settled nothing.  Cite the
+> pages you used as `[[Page]]`.  Never claim to remember something you
+> did not retrieve; say what you know and ask.
 > The memory tools are not for knowledge: `memory_save` is only for
 > small behavioral notes about how the user wants work done.  The brief
 > you were given says where each item came from.  The computer is the
@@ -594,22 +624,25 @@ Agent: …
 [/workspace-brief]
 ```
 
-The **router prompt** is short and JSON-only; it sees the thread
-summaries, the active thread's last messages and the user's line, and
-answers one action with a confidence.  It is one model call, recorded
-as an internal session (`workspace-router`).  The **librarian**,
-**scribe**, **curator** and **dream** prompts are JSON-only and
+The **router asks no prompt**.  A message is ranked against each
+thread's passages (its title, its summary and its last messages) with
+an IDF over the workspace's own words and, when an embedding model is
+configured, reranked by the cosine of the message and the thread's
+digest ([the routing note](workspace-topic-routing.md#the-ranker)).
+There is no internal session for it and no model tier to choose.  The
+librarian**, **curator** and **dream** prompts (the last two staged,
+and the dream's own pass today asks no model at all) are JSON-only and
 capped, but those jobs use tools; they run as background sessions with
 their own kinds, so each step and its result is in a transcript that
-can be read back.
+can be read back.  A turn's own note needs no prompt: it is the agent's
+`knowledge_write` in the turn.
 
 The model tiers:
 
 | Job | Default | Why |
 |---|---|---|
-| router | simple | cheap, many calls |
+| `knowledge/nearest` (the routing blend) | the embedding model | one small text per thread, cached |
 | librarian | simple | retrieval selection |
-| scribe | simple | frequent, short |
 | curator | simple or medium | a page of state |
 | dream | medium | the quality that matters |
 | chat episode | the user's choice | this is the conversation |
@@ -617,9 +650,9 @@ The model tiers:
 ### Cache and cost
 
 - **A new episode is a cold cache by definition.**  The brief is the
-  first request; it is bounded and mostly stable.  The router prefers
-  *continue* while the episode is warm, so the common case reads the
-  cache.
+  first request; it is bounded and mostly stable.  The ranker keeps a
+  message in the warm episode unless another thread clearly holds it,
+  so the common case reads the cache.
 - **Thread seeds.**  A thread revived often can keep a *seed* session:
   a fork of the thread's stable brief on the thread's model, primed
   once.  Each new episode forks the seed, so its first request reads
@@ -632,8 +665,8 @@ The model tiers:
   topic policy; when it happens, the existing compaction UI still
   works, and the next episode does not depend on it.
 - **Costs are recorded** on the episode, the
-  scribe/curator/librarian/dream background sessions, and the
-  workspace; `workspace/status` and the
+  curator/librarian/dream background sessions (where they exist), and
+  the workspace; `workspace/status` and the
   header show the day's total.  `harness-workspace-knowledge-budget` and
   `…-dream-budget` pause the background writers, never the chat.
 
@@ -654,10 +687,11 @@ The model tiers:
   `/projects/<name>` and `/scratch` inside it; a path outside the
   mounts, a new mount, a network change, a login or an outside action
   still asks, and stopping or removing the box revokes the profile.
-- The memory tools have their own `permission/decide` stages:
-  forgetting a block is the user's, in Logseq; `knowledge_write` to a
-  user-edited block asks; `knowledge_write` to `Preferences` or a
-  `#Private` page asks; a normal append follows the mode.
+- `knowledge_write` is a normal `write`-kind tool, so the workspace's
+  permission mode governs it: an append to the thread's page follows
+  the mode, and a page the agent names gets the same check as any
+  other write.  Forgetting is the user's, in Logseq.  A per-page
+  `permission/decide` stage for the graph is stage 3's.
 - `browser_login` is user-only in every mode and is not answered by
   the judge.
 - `task_control` with `verify`, `merge` or `complete` from a workspace
@@ -687,7 +721,7 @@ tab.
   module but no graph or no Logseq, the chat degrades as the memory
   section says.
 - Without `workspace-box`: no computer; the chat and tasks work.
-- Without `workspace-dream`: no consolidation; the scribe and curator
+- Without `workspace-dream`: no consolidation; the agent and the user
   still write; `Dream` is absent.
 - Without `workspace-routines`: no scheduled work; the chat works.
 - Without voice: no `Call`; everything else works.
@@ -1160,6 +1194,13 @@ The Emacs client has the same page: `C-c w R` from the workspace
 buffer opens `*Workspace Resources*` (`g` refreshes, `q` buries), with
 the same sections and the same metadata-only rule.
 
+The graph explorer is the Emacs client's own page for now: `C-c w l`,
+or the `Graph` button, opens `*Workspace Graph*` on the selected
+thread's page.  Its exact words, keys and tooltips are [the copy
+inventory in the routing note](workspace-topic-routing.md#the-copy-before-implementation);
+the app can add a view of the same `knowledge/graph*` methods without a
+new server surface.
+
 Two deviations from the design inventory above, both on purpose: the
 client's page title is the workspace's name alone, where Emacs shows
 `Workspace · Home`, because the tab already says which page it is; and
@@ -1358,12 +1399,12 @@ are the tests the later stages add.
 | `lisp/modules/harness-logseq-test.el` | page names, journal paths, bullets and properties, search ranking and filtering, snippets, backlinks, page properties, the missing graph |
 | `lisp/modules/harness-workspace-test.el` | thread pages, journal captures, knowledge search and recall, the knowledge tools and their filter, the generic memory tools left alone, the ACP aliases |
 | `lisp/modules/harness-workspace-test.el` | workspace/thread/episode records, the timeline, routing (hard, similarity, model), brief budgets, continuation and re-entry, a restart, a deleted episode, a moved project, settings |
-| `test/harness-workspace-scribe-test.el` | the scribe's prompts, batching, duplicate detection, hash conflict, no write for a BTW, a failed write queued |
+| `lisp/modules/harness-workspace-test.el` | a turn costs one model call and leaves no note of its own; the notes the agent writes are on the thread's page with provenance; the dream removes a duplicate and refreshes a page |
 | `test/harness-workspace-dream-test.el` | phases, candidate scoring, duplicate/update/contradiction, risk classification, idempotent apply, user-edit guard, review/apply/skip, undo, budget stop, backup failure, a crash resumed |
 | `lisp/modules/harness-workspace-box-test.el` | the `local` box: the off state and its missing tools, a running record's VNC URL and socket, the control lock and input refusal, the window parser, browser metadata with no values, and every method the clients call |
 | `test/harness-workspace-routines-test.el` | schedule computation, timezone, missed runs, catch-up, read-only tools, delivery, pause/resume, event triggers |
 | `lisp/ui/harness-ui-workspace-test.el` | exact rendered copy (the inventory), header states, empty/loading/error states, dividers, brief cards, event cards, compose routing, keys, overflow, mouse buttons |
-| `lisp/ui/harness-ui-workspace-test.el` | header knowledge state, `_harness/knowledge/status`, `workspace/knowledge-changed`, exact copy |
+| `lisp/ui/harness-ui-workspace-test.el` | header knowledge state, `_harness/knowledge/status`, `workspace/knowledge-changed`, exact copy, the graph explorer's views, tooltips, keys and refusals |
 | `test/harness-ui-workspace-box-test.el` | computer panel states, screenshot, takeover, login form, exact copy |
 | `test/harness-ui-workspace-dream-test.el` | review list, diff, apply/skip/undo, exact copy |
 | `test/harness-workspace-voice-test.el` | a call attaches to the thread, delegation goes to `workspace/prompt`, voice nodes, interruption, a call while a turn runs |
@@ -1396,9 +1437,10 @@ above and the test change together.
 - **A fake embedding provider.**  `provider/embed` returns deterministic
   vectors for known texts; the same text gets the same vector; the
   index tests can assert the nearest without a model.
-- **A scripted router.**  A function that returns a fixed action, so
-  the routing tests do not call a model; a separate suite tests the
-  JSON prompt with the demo provider.
+- **A scripted embedding model.**  The routing tests register a
+  `provider/embed` that gives each topic its own direction, so a
+  paraphrase is placed by meaning where the words alone would split
+  it; no provider is called.
 - **A scripted agent provider.**  The existing demo provider writes a
   turn; the tests assert the workspace's messages, not a model's
   prose.
@@ -1410,11 +1452,12 @@ provider, drives a "day":
 
 1. Create `Home`; capture "call the plumber" into `Inbox`.
 2. Ask "What's in my inbox?" -> a new thread; the agent recalls the
-   capture and answers; the scribe writes a journal line.
-3. Ask "Remember that I prefer the matte finish" -> a preference block
-   with provenance; the index has it.
-4. Ask about "the backsplash" in a new session -> the router revives
-   the thread; the brief contains the preference and the decision.
+   capture and answers; the turn is captured in the journal.
+3. Ask "Remember that I prefer the matte finish" -> the agent writes a
+   preference block with `knowledge_write`, and the graph has it.
+4. Ask about "the backsplash" in a new session -> the ranker
+   revives the thread; the brief contains the preference and the
+   decision.
 5. Submit a task from the chat; the fake task board returns a task;
    `task/changed` writes a journal line and a thread link.
 6. Simulate `task/done` -> the project page is updated.
@@ -1461,9 +1504,10 @@ and offline.
   test fixture, and the brief under 1.5 s.
 - Indexing 10k blocks is incremental and does not block the Emacs UI;
   a slice-based background job, like session-search.
-- A new episode creates its brief without a model call when the router
-  is confident; the router call is under 4 s and never blocks the
-  compose input (the message is shown while it routes).
+- A new episode creates its brief without a model call; routing is
+  local, its only provider call (the embedding rerank) is bounded at 2
+  s, and neither blocks the compose input (the message is shown while
+  it routes).
 - A dream is bounded by its operation and token caps; a 1000-block
   graph does not exceed the test's time limit.
 - A screenshot round trip is under 500 ms on the fake box; the UI
@@ -1498,7 +1542,7 @@ riskiest contracts are settled before the UI that depends on them.
 |---|---|---|---|---|
 | 0 | Embeddings and the Logseq client | none | `harness-embeddings.el` extracted; `logseq` module with CLI/HTTP client, one writer, schema, fake CLI tests | the graph can be read and written safely, and the vector math exists once |
 | 1 | Memory index and tools | 0 | `workspace-knowledge`: SQLite schema, FTS, vectors, sync, hybrid retrieval, `knowledge_search/get/write/status`, private pages, redaction | knowledge is useful from an ordinary session, before any workspace UI exists |
-| 2 | Workspace and the one chat (Emacs) | 1 | `workspace` records, threads, episodes, timeline, router, brief, `workspace/prompt`, `ui-workspace` chat, thread sidebar, dividers, settings line, copy tests | the user can chat across threads and the context clears without compaction |
+| 2 | Workspace and the one chat (Emacs) | 1 | `workspace` records, threads, episodes, timeline, routing, brief, `workspace/prompt`, `ui-workspace` chat, thread sidebar, dividers, settings line, copy tests | the user can chat across threads and the context clears without compaction |
 | 3 | Scribe, curator, task linker and memory browser | 2 | the three writers, batching, hash checks, `ui-workspace-memory`, provenance, correct/forget | memory stays current from real turns, and the user can see why it thinks something |
 | 4 | Dreaming | 3 | `workspace-dream`: scheduler, phases, scoring, review/apply/skip/undo, report page, `ui-workspace-dream` | the graph is consolidated, reviewed and improved without silent rewrites |
 | 5 | The box (computer) and its resources | 2 | `workspace-box`: lifecycle, image, mounts, exec, screenshot, input, browser/CDP and its data, login, VNC, snapshots, the wallet broker, `ui-workspace-box`; the client Resources page is already in the tree against the blocked contract | the agent has a real computer, the user can take over and bound a purchase, and the host is out of reach |
@@ -1527,9 +1571,16 @@ runs commands and input, keeps a Firefox profile, and enforces the
 takeover lock; the Flutter and Emacs clients draw and drive it.  The
 memory contract also gains `memory/get`, `memory/forget`,
 `memory/pages`, `memory/page`, `memory/sync` and `memory/reindex`, and
-`workspace/thread/merge` is implemented.  It does not include the
-Logseq CLI and its DB graphs, the embedding index, the scribe/curator/dream, the
-container backend, routines or voice; those keep their stage below.
+`workspace/thread/merge` is implemented.  Note-writing is the agent's,
+with `knowledge_write` in the turn that settled a note: there is no
+per-turn extraction pass.  The dream's pass and nightly schedule (the
+core of stage 4) rewrite every thread page, remove a note written twice
+and leave a `Dreams/` report, with a dry run and a report page, and it
+asks no model; `knowledge/search` reranks by meaning when an embedding
+model is set.  It does not include the Logseq
+CLI and its DB graphs, the persistent index and its vectors, the
+curator, the dream's operation review, the container backend, routines
+or voice; those keep their stage below.
 
 ### Stage 0: embeddings and the Logseq client
 
@@ -1619,7 +1670,7 @@ the brief and the clients do not change when the index lands.
 
 1. Workspace record, thread record, timeline, store integration,
    restart recovery.
-2. `workspace/prompt`: hard signals, similarity, router model,
+2. `workspace/prompt`: hard signals, the ranker, the embedding rerank,
    continue/revive/new/split, forced new thread, stop.
 3. The brief: identity, thread, project/tasks, recall, recent, working
    set; budgets; the thread seed hook (the seed itself can be Stage 8).
@@ -1638,33 +1689,48 @@ the brief and the clients do not change when the index lands.
   episode remains openable;
 - the brief never exceeds its token budget in the fixture;
 - every string in the copy inventory is asserted;
-- the Emacs UI never blocks on a logseq, embedding or router call.
+- the Emacs UI never blocks on a logseq, embedding or routing call.
 
-### Stage 3: scribe, curator, task linker and browser
+### Stage 3: note-writing, curator, task linker and browser
+
+**Status.**  Note-writing is implemented, and it is the agent's: a turn
+that settles something calls `knowledge_write`, which writes a
+deduplicated block with provenance on the thread's page or a page the
+agent names.  There is no per-turn extraction pass; an earlier draft
+had one and it was removed (see [who writes a
+note](workspace-knowledge-graph.md#who-writes-a-note)).  The
+curator, the task linker and the browser's correct/forget are not.
 
 **Work**
 
-1. The scribe with batching, immediate triggers, duplicate search,
-   hash checks, budget.
+1. ~~The per-turn extractor.~~  Removed: the agent writes its own
+   notes, and the graph's own duplicate check keeps a statement once.
 2. The curator with the thread page shape.
 3. The task linker and the `task/*` and `merge/*` subscriptions.
-4. The memory browser, provenance, correct/forget, index line.
+4. The graph explorer's provenance views and a correction flow.
 5. Tests for a turn, a preference, a correction, a user edit and a
    BTW.
 
 **Acceptance**
 
-- a "remember" is written immediately; an ordinary turn is written at
-  the next batch;
-- a duplicate is not written twice; a correction supersedes;
-- a user edit between read and write produces a hash conflict, not an
-  overwrite;
+- a turn that writes a note has it on the graph with its provenance,
+  and a turn that writes nothing adds nothing;
+- a statement written twice is on the page once;
+- a correction names the note it supersedes;
 - a task's review and merge appear in the journal and on the project
   page, once;
-- the browser shows the block, the source, the session and the node;
+- the explorer shows the block, its source, its session and its node;
 - the copy tests pass.
 
 ### Stage 4: dreaming
+
+**Status.**  The pass, its nightly schedule with the per-day record,
+its dry run and its `Dreams/<date>` report page are implemented:
+`knowledge/dream` rewrites each thread page's identity and state,
+removes a note this workspace wrote more than once, and records one
+bullet per thread.  The phases below (collect, extract, reconcile,
+plan), the risk classes, the review/apply/skip/undo and the backup are
+not.
 
 **Work**
 
@@ -1744,6 +1810,11 @@ broker are still the work below.
 - the copy tests pass.
 
 ### Stage 7: voice, Flutter and remote
+
+**Status.**  The app's `Graph` page is implemented: it reads
+`knowledge/graph`, `knowledge/graph/node` and `knowledge/graph/page`,
+opens a node with its children and a linked page by name, and goes
+back.  Voice and remote access are not.
 
 **Work**
 
@@ -1863,9 +1934,11 @@ stopped.
 
 ### Writing memory on every turn
 
-*Rejected for cost and noise.*  A cheap scribe on every turn is a
-model call per turn and a page of duplicates.  The batching plus
-immediate triggers keeps "remember" instant and ordinary chatter out.
+*Rejected for cost and noise.*  A second model over every finished turn
+is a call per turn and a page of duplicates, and the agent that answered
+the turn already knows what it settled.  The agent writes its own notes;
+see [who writes a note](workspace-knowledge-graph.md#who-writes-a-note)
+and the alternatives it weighs there.
 
 ### A separate task system for the workspace
 
@@ -1904,9 +1977,9 @@ comes after the timeline and memory are stable.
 ### No review gates on memory
 
 *Rejected.*  An agent that can rewrite its own knowledge and
-instructions without review will drift.  The scribe appends; the dream
-updates and merges behind a review; skills are proposed, not
-installed.
+instructions without review will drift.  The agent appends its notes and
+never rewrites a block; the dream updates and merges behind a review;
+skills are proposed, not installed.
 
 ## Open questions
 
@@ -1921,15 +1994,15 @@ should confirm before the relevant stage starts.
    Does the user want the box on a home server or a VPS, with the
    harness also there?  A remote box changes the snapshot and network
    storage choices.
-3. **Which models?**  The router/scribe/dream defaults assume the
-   provider tiers (`provider/tier-model`).  A provider without tiers
+3. **Which models?**  The embedding/dream defaults assume the provider
+   tiers (`provider/tier-model`).  A provider without tiers
    needs explicit models; the design falls back to the workspace model
    with a note.
 4. **Voice memory.**  Should voice turns be remembered by default?
    The design says yes; a `private` call is the exception.  This is a
    privacy choice.
-5. **Budget.**  What is the default daily cap for the scribe and the
-   dream?  The design leaves it nil (no cap) and shows the cost; a
+5. **Budget.**  What is the default daily cap for the dream and the
+   embedding calls?  The design leaves it nil (no cap) and shows the cost; a
    daily-life user may prefer a cap.
 6. **Task memory.**  Should a task's own session get `memory_*` tools,
    or should only the workspace write its results?  The design starts
@@ -1955,11 +2028,11 @@ should confirm before the relevant stage starts.
 |---|---|---|
 | Logseq's CLI or graph version changes under us | a version check at startup, a fake CLI in the suite, the HTTP fallback, and a graph export before a migration | a new Logseq release can still change a JSON key; the client reports the command and the shape instead of guessing |
 | A graph is corrupted by a write | no direct `db.sqlite` access, one writer, `graph backup create` before dreams, hashes on updates | a crash during a Logseq write is Logseq's to recover; the backup is the fallback |
-| The scribe fills the graph with noise | batching, search-before-write, duplicate detection, a per-turn block cap, the memory browser and correction | a bad model can still write a plausible wrong note; the user can see and correct it |
+| Notes fill the graph with noise | the agent writes only what a turn settled, the tool deduplicates a statement, the explorer shows every block with its source, and correction is the user's | a model can still write a plausible wrong note; the user can see and correct it |
 | The dream overwrites a decision | user edits outrank, hash checks, risk classes, review for merges/deletes/supersessions, 72-hour undo | a low-risk update can still surprise the user; the report shows every change |
 | Recall misses the one note that mattered | hybrid words + meaning + links, one-hop expansion, a librarian, an explicit `knowledge_search`, citations | a badly linked page is hard to find; the dream's link health and the recall test are the repair path |
-| The router splits the wrong thread | default continue, a clear divider, `Keep in this thread`, forced `New thread` | a split costs a click and a little extra context |
-| Context and background jobs cost too much | cheap tiers, router only when ambiguous, scribe batching, dream caps, per-workspace budgets | a very active workspace can still exceed a soft budget; the chat keeps working |
+| The ranker splits the wrong thread | default continue, a clear divider, `Keep in this thread`, forced `New thread` | a split costs a click and a little extra context |
+| Context and background jobs cost too much | no judge for routing, no per-turn extraction, cheap tiers where a job uses one, dream caps, per-workspace budgets | a very active workspace can still exceed a soft budget; the chat keeps working |
 | Memory is private data | local graph, no sync by default, private pages, redaction, local embedding option, a visible provider | a hosted model sees the brief and the recall; the policy and the user's choice govern that |
 | The box escapes | rootless container, no host home, no Docker socket, a fixed mount list, fail closed, no LAN publish | the container runtime and kernel are the real boundary; a misconfiguration is a host risk |
 | A login leaks | a private form outside the transcript, one-time by default, optional save to a secret source, takeover for MFA | the browser's own memory and the box's snapshot hold the session; they are inside the box |
@@ -1977,7 +2050,7 @@ are starting points for the first release, not promises.
 |---|---|---|
 | Warm memory search | under 250 ms at 50k chunks | `memory/search`, the tests |
 | Brief build | under 1.5 s, or a partial brief with a reason | `workspace/context` |
-| Route decision | under 400 ms with local signals; under 4 s with the router model | `workspace/prompt` |
+| Route decision | under 400 ms, local; the embedding rerank, when one is configured, bounded at 2 s | `workspace/prompt` |
 | New episode first token | the brief plus the model's first token; no extra round trip | the session's usage |
 | Memory corrections | fewer than 1 in 10 agent-written blocks corrected or forgotten in the first week | the memory browser's events |
 | Dream review acceptance | more than 4 in 5 proposed medium/high-risk operations accepted | dream records |

@@ -6,6 +6,7 @@ import '../acp/capabilities.dart';
 import '../models/computer.dart';
 import '../models/demo_session.dart';
 import '../models/memory.dart';
+import '../models/workspace_graph.dart';
 import '../models/picture.dart';
 import '../models/quota.dart';
 import '../models/server_info.dart';
@@ -1187,6 +1188,45 @@ class HarnessApi {
     } on AcpException {
       return null;
     }
+  }
+
+  /// The page of [thread] in the workspace's Logseq graph, its nodes and the
+  /// nodes that link it back.  An unsupported harness says so in the answer.
+  Future<WorkspaceGraph> workspaceGraph(String id, {String? thread}) async {
+    if (!can('knowledge/graph')) {
+      return const WorkspaceGraph(status: 'unavailable', why: 'unsupported');
+    }
+    return WorkspaceGraph.fromWire(
+      await extension('knowledge/graph', {
+        'workspace': id,
+        if (thread != null && thread.isNotEmpty) 'opts': {'thread': thread},
+      }),
+    );
+  }
+
+  /// One node of the thread's page, with the blocks under it.
+  Future<WorkspaceGraph> workspaceGraphNode(
+    String id,
+    String node, {
+    String? thread,
+  }) async {
+    return WorkspaceGraph.fromWire(
+      await extension('knowledge/graph/node', {
+        'workspace': id,
+        'node': node,
+        if (thread != null && thread.isNotEmpty) 'opts': {'thread': thread},
+      }),
+    );
+  }
+
+  /// Another page of the graph by name, such as `Dreams/2026-11-08`.
+  Future<WorkspaceGraph> workspaceGraphPage(String id, String name) async {
+    return WorkspaceGraph.fromWire(
+      await extension('knowledge/graph/page', {
+        'workspace': id,
+        'name': name,
+      }),
+    );
   }
 
   /// The computer panel's state, or null when the box is not implemented.

@@ -76,6 +76,7 @@
     (define-key map (kbd "C-c w n") #'harness-ui-workspace-new-thread)
     (define-key map (kbd "C-c w o") #'harness-ui-workspace-open-episode)
     (define-key map (kbd "C-c w g") #'harness-ui-workspace-refresh)
+    (define-key map (kbd "C-c w l") #'harness-ui-workspace-graph)
     (define-key map (kbd "C-c w c") #'harness-ui-workspace-computer)
     (define-key map (kbd "C-c w R") #'harness-ui-workspace-resources)
     (define-key map (kbd "C-c w b") #'harness-ui-workspace-open-board)
@@ -344,6 +345,10 @@ cost.  The settings are buttons of the shared settings line
      "Refresh" #'harness-ui-workspace-refresh "Read the workspace again")
     (insert " ")
     (harness-ui-workspace--insert-button
+     "Graph" #'harness-ui-workspace-graph
+     "The Logseq nodes of this thread")
+    (insert " ")
+    (harness-ui-workspace--insert-button
      "Workspace computer" #'harness-ui-workspace-computer
      "workspace computer page")
     (insert " ")
@@ -386,6 +391,12 @@ cost.  The settings are buttons of the shared settings line
             (insert (propertize "★ " 'face 'harness-caution-face)))
           (insert "\n"))))))
 
+(defun harness-ui-workspace--thread-title (thread)
+  "Return the title of the thread THREAD, an id, or \"Thread\"."
+  (let ((record (cl-find thread (plist-get harness-ui-workspace--data :threads)
+                         :key (lambda (item) (plist-get item :id)) :test #'equal)))
+    (or (and record (plist-get record :title)) "Thread")))
+
 (defun harness-ui-workspace--insert-divider (entry)
   "Insert a divider for ENTRY."
   (let* ((reason (let ((reason (plist-get entry :reason)))
@@ -397,14 +408,19 @@ cost.  The settings are buttons of the shared settings line
                  ('revived "Resumed")
                  ('long-context "Continued")
                  (_ "New thread")))
-         (thread (cl-find (plist-get entry :thread)
-                          (plist-get harness-ui-workspace--data :threads)
-                          :key (lambda (item) (plist-get item :id)) :test #'equal))
-         (title (or (and thread (plist-get thread :title))
-                    (plist-get entry :title) "Thread")))
+         (thread (plist-get entry :thread))
+         (title (if thread
+                    (harness-ui-workspace--thread-title thread)
+                  (or (plist-get entry :title) "Thread"))))
     (insert (propertize (format "── %s · %s ──" word title)
                         'face 'harness-hint-face)
             "\n\n")))
+
+(defun harness-ui-workspace--insert-thread-line (thread)
+  "Insert a line naming the thread THREAD a message was routed to."
+  (insert (propertize (format "Thread · %s" (harness-ui-workspace--thread-title thread))
+                      'face 'harness-dim-face)
+          "\n"))
 
 (defun harness-ui-workspace--insert-message (entry)
   "Insert a message ENTRY."
@@ -428,16 +444,26 @@ cost.  The settings are buttons of the shared settings line
             "\n\n")))
 
 (defun harness-ui-workspace--insert-timeline ()
-  "Insert the timeline."
+  "Insert the timeline.
+A message the router put in another thread than the one before it is
+named with its thread, so a switch back is visible where it happened."
   (if (null harness-ui-workspace--entries)
       (insert (propertize "No messages" 'face 'harness-dim-face) "\n")
-    (dolist (entry harness-ui-workspace--entries)
-      (pcase (let ((kind (plist-get entry :kind)))
-               (cond ((symbolp kind) kind) ((stringp kind) (intern kind)) (t nil)))
-        ('divider (harness-ui-workspace--insert-divider entry))
-        ('brief (harness-ui-workspace--insert-brief entry))
-        ('message (harness-ui-workspace--insert-message entry))
-        (_ nil)))))
+    (let ((previous nil))
+      (dolist (entry harness-ui-workspace--entries)
+        (pcase (let ((kind (plist-get entry :kind)))
+                 (cond ((symbolp kind) kind) ((stringp kind) (intern kind)) (t nil)))
+          ('divider
+           (harness-ui-workspace--insert-divider entry)
+           (setq previous (plist-get entry :thread)))
+          ('brief (harness-ui-workspace--insert-brief entry))
+          ('message
+           (let ((thread (plist-get entry :thread)))
+             (when (and previous thread (not (equal previous thread)))
+               (harness-ui-workspace--insert-thread-line thread))
+             (setq previous thread)
+             (harness-ui-workspace--insert-message entry)))
+          (_ nil))))))
 
 (defun harness-ui-workspace--computer-state (computer)
   "Return COMPUTER's state as a word for the workspace."
@@ -1397,14 +1423,474 @@ one the workspace buffer opened last."
       (pop-to-buffer buffer)
       (harness-ui-workspace-resources-refresh buffer))))
 
-;;;; Workspace computer
+;;;; Workspace graph
 
-;; The workspace's computer as the Emacs client sees it: the real box's
-;; state and VNC endpoint, and its screen as the picture the box took.  The
-;; app draws the live RFB stream; Emacs opens the same noVNC page in the
-;; desktop's browser, or takes a screenshot, because it cannot draw RFB
-;; itself.  There is no drawn preview here: a box that is off says what it
-;; needs, and a screenshot is the framebuffer x11vnc is serving now.
+;; The Logseq graph behind a thread: the page the thread writes, the
+;; nodes on it -- the turns and the notes -- the pages they link to and
+;; the nodes that link back.  It is read-only, and it explores: RET
+;; follows a node or a page, `b' comes back, `g' reads it again.
+
+(defvar harness-ui-workspace-graph--last-id nil
+  "The workspace the graph buffer opened last.")
+
+(defvar-local harness-ui-workspace-graph--id nil
+  "Workspace id of this graph buffer.")
+
+(defvar-local harness-ui-workspace-graph--name nil
+  "Name of the workspace this graph buffer shows.")
+
+(defvar-local harness-ui-workspace-graph--thread nil
+  "Thread this graph buffer opened with, or nil for the workspace's last.")
+
+(defvar-local harness-ui-workspace-graph--view nil
+  "What this graph buffer shows.
+That is (:kind thread), (:kind node :id ID) or (:kind page :name NAME).")
+
+(defvar-local harness-ui-workspace-graph--data nil
+  "The answer of the last graph request this buffer drew.")
+
+(defvar-local harness-ui-workspace-graph--stack nil
+  "The views before this one, newest first.")
+
+(defvar-local harness-ui-workspace-graph--loading nil
+  "Whether a graph request is on its way.")
+
+(defvar-local harness-ui-workspace-graph--error nil
+  "Why the last graph request failed, or nil.")
+
+(defvar harness-ui-workspace-graph-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "g") #'harness-ui-workspace-graph-refresh)
+    (define-key map (kbd "RET") #'harness-ui-workspace-graph-open)
+    (define-key map (kbd "b") #'harness-ui-workspace-graph-back)
+    (define-key map (kbd "q") #'harness-ui-bury)
+    map)
+  "Keys of the graph buffer.")
+
+(define-derived-mode harness-ui-workspace-graph-mode special-mode "Workspace Graph"
+  "Major mode of a thread's Logseq graph.
+It is read-only: the thread's page, its nodes with their role, time,
+tags, links and properties, and the nodes that link to it.  A node's
+id or a linked page at point opens with \\[harness-ui-workspace-graph-open],
+\\[harness-ui-workspace-graph-back] returns to the view before it, and
+\\[harness-ui-workspace-graph-refresh] reads the graph again."
+  (setq buffer-read-only t)
+  (setq-local truncate-lines nil
+              word-wrap t))
+
+(defun harness-ui-workspace-graph--heading (text)
+  "Insert TEXT as a section heading, after one blank line."
+  (unless (or (bobp) (looking-back "\n\n" 2 t))
+    (insert "\n"))
+  (insert (propertize text 'face 'harness-label-face) "\n"))
+
+(defun harness-ui-workspace-graph--line (label value &optional face)
+  "Insert LABEL and VALUE on one line, VALUE with FACE."
+  (insert "  " (propertize label 'face 'harness-dim-face) "  "
+          (propertize (format "%s" (or value "")) 'face (or face 'default))
+          "\n"))
+
+(defun harness-ui-workspace-graph--pair (entry)
+  "Return ENTRY, a property, as (NAME . VALUE).
+The bus gives a property as a cons; a client over ACP reads it as a
+two-element list, because JSON has no pair."
+  (if (and (consp entry) (consp (cdr entry)) (stringp (car entry)))
+      (cons (car entry) (cadr entry))
+    entry))
+
+(defun harness-ui-workspace-graph--pairs (properties)
+  "Return PROPERTIES as (NAME . VALUE) conses, whichever shape they come in."
+  (mapcar #'harness-ui-workspace-graph--pair properties))
+
+(defun harness-ui-workspace-graph--role (block)
+  "Return BLOCK's role as the word the graph shows."
+  (let ((role (cdr (assoc "role"
+                          (harness-ui-workspace-graph--pairs
+                           (plist-get block :properties))))))
+    ;; A value the graph gives as several is read by its first title.
+    (when (listp role)
+      (setq role (car role)))
+    (pcase (downcase (format "%s" role))
+      ((or "user" "you") "You")
+      ((or "assistant" "agent") "Agent")
+      ((or "note" "memory") "Note")
+      ;; A block on a thread's page is durable knowledge, not a turn.
+      (_ (if (assoc "thread" (harness-ui-workspace-graph--pairs
+                              (plist-get block :properties)))
+             "Note"
+           "Block")))))
+
+(defun harness-ui-workspace-graph--role-face (block)
+  "Return the face of BLOCK's role."
+  (pcase (harness-ui-workspace-graph--role block)
+    ("You" 'harness-user-label-face)
+    ("Agent" 'harness-agent-label-face)
+    (_ 'harness-label-face)))
+
+(defun harness-ui-workspace-graph--time (block)
+  "Return BLOCK's creation time as a short local time, or nil."
+  (let ((created (plist-get block :created)))
+    (when (numberp created)
+      (format-time-string "%Y-%m-%d %H:%M" (seconds-to-time (/ created 1000.0))))))
+
+(defun harness-ui-workspace-graph--target-button (label target &optional help)
+  "Insert LABEL as a button that opens TARGET, with HELP as its tooltip."
+  (let ((start (point)))
+    (harness-ui-button label (lambda () (harness-ui-workspace-graph--follow target))
+                       :face 'link :help help)
+    (put-text-property start (point) 'harness-graph-target target)))
+
+(defun harness-ui-workspace-graph--properties-lines (properties)
+  "Insert PROPERTIES, one per line, under the Properties label."
+  (when properties
+    (insert "  " (propertize "Properties" 'face 'harness-dim-face) "\n")
+    (dolist (pair properties)
+      (insert "    " (propertize (format "%s" (car pair)) 'face 'harness-dim-face)
+              "  " (propertize (format "%s" (cdr pair)) 'face 'default)
+              "\n"))))
+
+(defun harness-ui-workspace-graph--properties (block)
+  "Insert BLOCK's properties, but its role."
+  (harness-ui-workspace-graph--properties-lines
+   (cl-remove-if (lambda (pair) (equal (car pair) "role"))
+                 (harness-ui-workspace-graph--pairs
+                  (plist-get block :properties)))))
+
+(defun harness-ui-workspace-graph--page-buttons (links)
+  "Insert LINKS as page buttons on the line, and end the line."
+  (let ((first t))
+    (dolist (link links)
+      (unless first (insert "  "))
+      (setq first nil)
+      (harness-ui-workspace-graph--target-button
+       link (list :kind 'page :name link) "The page in the graph")))
+  (insert "\n"))
+
+(defun harness-ui-workspace-graph--node (block)
+  "Insert BLOCK as a node of the page, clickable by its id."
+  (let* ((target (list :kind 'node :id (plist-get block :id)))
+         (time (harness-ui-workspace-graph--time block))
+         (start (point)))
+    (harness-ui-workspace-graph--target-button
+     (harness-ui-workspace-graph--role block) target
+     "The node in the graph")
+    (add-face-text-property start (point) (harness-ui-workspace-graph--role-face block))
+    (when time
+      (insert " · " (propertize time 'face 'harness-dim-face)))
+    (insert "\n  "
+            (replace-regexp-in-string "\n" "\n  "
+                                      (or (plist-get block :text) ""))
+            "\n")
+    (let ((tags (plist-get block :tags)))
+      (when tags
+        (insert "  " (propertize "Tags" 'face 'harness-dim-face) "  "
+                (mapconcat #'identity tags ", ") "\n")))
+    (let ((links (plist-get block :links)))
+      (when links
+        (insert "  " (propertize "Links" 'face 'harness-dim-face) "  ")
+        (harness-ui-workspace-graph--page-buttons links)))
+    (harness-ui-workspace-graph--properties block)))
+
+(defun harness-ui-workspace-graph--nodes (blocks)
+  "Insert BLOCKS as the nodes of a page."
+  (if (null blocks)
+      (insert "  " (propertize "No nodes" 'face 'harness-dim-face) "\n")
+    (let ((first t))
+      (dolist (block blocks)
+        (unless first (insert "\n"))
+        (setq first nil)
+        (harness-ui-workspace-graph--node block)))))
+
+(defun harness-ui-workspace-graph--backlink (block)
+  "Insert BLOCK as a node that links to the page."
+  (let ((page (plist-get block :page)))
+    (insert "  ")
+    (when page
+      (harness-ui-workspace-graph--target-button
+       page (list :kind 'page :name page) "The page in the graph")
+      (insert "  "))
+    (insert (propertize (or (plist-get block :text) "") 'face 'default) "\n")))
+
+(defun harness-ui-workspace-graph--backlinks (blocks)
+  "Insert BLOCKS as the nodes that link to the page."
+  (if (null blocks)
+      (insert "  " (propertize "No backlinks" 'face 'harness-dim-face) "\n")
+    (dolist (block blocks)
+      (harness-ui-workspace-graph--backlink block))))
+
+(defun harness-ui-workspace-graph--status (data)
+  "Return DATA's status as the header says it."
+  (pcase (plist-get data :status)
+    ("ready" "ready")
+    ("missing" "not found")
+    ("unavailable" "unavailable")
+    ("error" "error")
+    (_ "loading")))
+
+(defun harness-ui-workspace-graph--refresh-button ()
+  "Insert the header's Refresh button."
+  (harness-ui-button "Refresh" #'harness-ui-workspace-graph-refresh
+                     :help "Read the graph again"))
+
+(defun harness-ui-workspace-graph--header ()
+  "Insert the header of the graph buffer."
+  (let* ((data harness-ui-workspace-graph--data)
+         (view harness-ui-workspace-graph--view)
+         (kind (plist-get view :kind))
+         (thread (or (plist-get data :thread) harness-ui-workspace-graph--thread))
+         (what (pcase kind
+                 ('node (format "Node · %s" (plist-get view :id)))
+                 ('page (format "Page · %s" (plist-get view :name)))
+                 (_ (format "Thread · %s" (or thread "All threads")))))
+         (status (harness-ui-workspace-graph--status data)))
+    (insert (propertize "Graph" 'face 'harness-header-face)
+            " · " (propertize (or harness-ui-workspace-graph--name "Workspace")
+                              'face 'harness-header-face)
+            "   " (propertize what 'face 'harness-dim-face)
+            "   " (propertize (format "Logseq · %s" status) 'face 'harness-dim-face)
+            "   ")
+    (harness-ui-workspace-graph--refresh-button)
+    (insert " ")
+    (when harness-ui-workspace-graph--stack
+      (harness-ui-button "Back" #'harness-ui-workspace-graph-back
+                         :help "The node or page before this one")
+      (insert " "))
+    (harness-ui-button "Workspace" #'harness-ui-workspace-graph-workspace
+                       :help "The workspace chat")
+    (insert "\n")))
+
+
+(defun harness-ui-workspace-graph--record (page &optional title)
+  "Insert PAGE's TITLE, tags, links and properties."
+  (when page
+    (when title
+      (harness-ui-workspace-graph--line "Title" (plist-get page :title)))
+    (when (plist-get page :tags)
+      (harness-ui-workspace-graph--line "Tags"
+                                        (mapconcat #'identity (plist-get page :tags) ", ")))
+    (harness-ui-workspace-graph--properties-lines
+     (harness-ui-workspace-graph--pairs (plist-get page :properties)))
+    (when (plist-get page :links)
+      (insert "  " (propertize "Links" 'face 'harness-dim-face) "  ")
+      (harness-ui-workspace-graph--page-buttons (plist-get page :links)))))
+
+(defun harness-ui-workspace-graph--render-thread ()
+  "Insert the thread's page, nodes and backlinks."
+  (let ((data harness-ui-workspace-graph--data))
+    (harness-ui-workspace-graph--heading "Page")
+    (if (equal "ready" (plist-get data :status))
+        (progn
+          (harness-ui-workspace-graph--line "Name" (plist-get data :page-name))
+          (harness-ui-workspace-graph--line "Nodes" (format "%s" (or (plist-get data :count) 0)))
+          (harness-ui-workspace-graph--record (plist-get data :page))
+          (harness-ui-workspace-graph--heading "Nodes")
+          (harness-ui-workspace-graph--nodes (plist-get data :blocks))
+          (harness-ui-workspace-graph--heading "Backlinks")
+          (harness-ui-workspace-graph--backlinks (plist-get data :backlinks)))
+      (insert "  " (propertize (if (equal "missing" (plist-get data :status))
+                                    "No page" "No graph")
+                                'face 'harness-dim-face)
+              "\n")
+      (when (plist-get data :why)
+        (insert "  " (propertize (format "%s" (plist-get data :why))
+                                 'face 'harness-dim-face)
+                "\n")))))
+
+(defun harness-ui-workspace-graph--render-node ()
+  "Insert one node, its children and the pages it links to."
+  (let* ((data harness-ui-workspace-graph--data)
+         (block (plist-get data :block)))
+    (harness-ui-workspace-graph--heading "Node")
+    (if (null block)
+        (insert "  " (propertize "No node" 'face 'harness-dim-face) "\n")
+      (harness-ui-workspace-graph--line "Role" (harness-ui-workspace-graph--role block))
+      (harness-ui-workspace-graph--line "Time" (harness-ui-workspace-graph--time block))
+      (harness-ui-workspace-graph--line "Text" (plist-get block :text))
+      (when (plist-get block :page)
+        (insert "  " (propertize "Page" 'face 'harness-dim-face) "  ")
+        (harness-ui-workspace-graph--target-button
+         (plist-get block :page)
+         (list :kind 'page :name (plist-get block :page))
+         "The page in the graph")
+        (insert "\n"))
+      (let ((tags (plist-get block :tags)))
+        (when tags
+          (harness-ui-workspace-graph--line "Tags" (mapconcat #'identity tags ", "))))
+      (let ((links (plist-get block :links)))
+        (when links
+          (insert "  " (propertize "Links" 'face 'harness-dim-face) "  ")
+          (harness-ui-workspace-graph--page-buttons links)))
+      (harness-ui-workspace-graph--properties block)
+      (harness-ui-workspace-graph--heading "Children")
+      (harness-ui-workspace-graph--nodes (plist-get data :children)))))
+
+(defun harness-ui-workspace-graph--render-page ()
+  "Insert a page, its nodes and the nodes that link to it."
+  (let ((data harness-ui-workspace-graph--data))
+    (harness-ui-workspace-graph--heading "Page")
+    (if (or (null (plist-get data :page))
+            (equal "missing" (plist-get data :status)))
+        (insert "  " (propertize "No page" 'face 'harness-dim-face) "\n")
+      (harness-ui-workspace-graph--line "Name" (or (plist-get data :name)
+                                                  (plist-get data :page-name)))
+      (harness-ui-workspace-graph--record (plist-get data :page) t))
+    (harness-ui-workspace-graph--heading "Nodes")
+    (harness-ui-workspace-graph--nodes (plist-get data :blocks))
+    (harness-ui-workspace-graph--heading "Backlinks")
+    (harness-ui-workspace-graph--backlinks (plist-get data :backlinks))))
+
+(defun harness-ui-workspace-graph--hints ()
+  "Insert the keys every view of the graph buffer offers."
+  (let ((hints '("g · refresh" "RET · open")))
+    (when harness-ui-workspace-graph--stack
+      (setq hints (append hints '("b · back"))))
+    (setq hints (append hints '("q · bury")))
+    (insert "\n"
+            (mapconcat (lambda (hint) (propertize hint 'face 'harness-hint-face))
+                       hints "   ")
+            "\n")))
+
+(defun harness-ui-workspace-graph--render ()
+  "Draw the graph buffer."
+  (when (derived-mode-p 'harness-ui-workspace-graph-mode)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (harness-ui-workspace-graph--header)
+      (when harness-ui-workspace-graph--error
+        (insert "\n" (propertize harness-ui-workspace-graph--error
+                                 'face 'harness-caution-face)
+                "\n"))
+      (when harness-ui-workspace-graph--loading
+        (insert "\n" (propertize "Loading…" 'face 'harness-dim-face) "\n"))
+      (pcase (plist-get harness-ui-workspace-graph--view :kind)
+        ('node (harness-ui-workspace-graph--render-node))
+        ('page (harness-ui-workspace-graph--render-page))
+        (_ (harness-ui-workspace-graph--render-thread)))
+      (harness-ui-workspace-graph--hints)
+      (goto-char (point-min)))))
+
+(defun harness-ui-workspace-graph--request (view)
+  "Return the (METHOD . PARAMS) that reads VIEW."
+  (pcase (plist-get view :kind)
+    ('node (cons "_harness/knowledge/graph/node"
+                 (list :workspace harness-ui-workspace-graph--id
+                       :node (plist-get view :id)
+                       :opts (list :thread harness-ui-workspace-graph--thread))))
+    ('page (cons "_harness/knowledge/graph/page"
+                 (list :workspace harness-ui-workspace-graph--id
+                       :name (plist-get view :name))))
+    (_ (cons "_harness/knowledge/graph"
+             (list :workspace harness-ui-workspace-graph--id
+                   :opts (list :thread harness-ui-workspace-graph--thread))))))
+
+(defun harness-ui-workspace-graph--fetch ()
+  "Read what this buffer shows from the harness and draw it."
+  (when (and (derived-mode-p 'harness-ui-workspace-graph-mode)
+             harness-ui-workspace-graph--id)
+    (let* ((buffer (current-buffer))
+           (request (harness-ui-workspace-graph--request harness-ui-workspace-graph--view)))
+      (setq harness-ui-workspace-graph--loading t
+            harness-ui-workspace-graph--error nil)
+      (harness-ui-workspace-graph--render)
+      (harness-ui-call
+       (car request) (cdr request)
+       (lambda (result)
+         (when (buffer-live-p buffer)
+           (with-current-buffer buffer
+             (when (derived-mode-p 'harness-ui-workspace-graph-mode)
+               (setq harness-ui-workspace-graph--data result
+                     harness-ui-workspace-graph--name
+                     (or (plist-get result :workspace-name)
+                         harness-ui-workspace-graph--name)
+                     harness-ui-workspace-graph--loading nil)
+               (harness-ui-workspace-graph--render)))))
+       (lambda (error)
+         (when (buffer-live-p buffer)
+           (with-current-buffer buffer
+             (when (derived-mode-p 'harness-ui-workspace-graph-mode)
+               (setq harness-ui-workspace-graph--loading nil
+                     harness-ui-workspace-graph--error (harness-error-message error))
+               (harness-ui-workspace-graph--render)))))))))
+
+(defun harness-ui-workspace-graph--follow (target)
+  "Show TARGET, a node or a page, keeping the view before it."
+  (when target
+    (push harness-ui-workspace-graph--view harness-ui-workspace-graph--stack)
+    (setq harness-ui-workspace-graph--view target
+          harness-ui-workspace-graph--data nil)
+    (harness-ui-workspace-graph--fetch)))
+
+(defun harness-ui-workspace-graph-open ()
+  "Open the node or page at point."
+  (interactive)
+  (let ((target (or (get-text-property (point) 'harness-graph-target)
+                    (and (> (point) (point-min))
+                         (get-text-property (1- (point)) 'harness-graph-target)))))
+    (unless target
+      (user-error "No node or page here"))
+    (harness-ui-workspace-graph--follow target)))
+
+(defun harness-ui-workspace-graph-back ()
+  "Show the view before this one."
+  (interactive)
+  (unless harness-ui-workspace-graph--stack
+    (user-error "No earlier view"))
+  (setq harness-ui-workspace-graph--view (pop harness-ui-workspace-graph--stack)
+        harness-ui-workspace-graph--data nil)
+  (harness-ui-workspace-graph--fetch))
+
+(defun harness-ui-workspace-graph-refresh ()
+  "Read the graph again."
+  (interactive)
+  (harness-ui-workspace-graph--fetch))
+
+(defun harness-ui-workspace-graph-workspace ()
+  "Show the workspace chat of this graph."
+  (interactive)
+  (let ((buffer (cl-find-if (lambda (candidate)
+                              (and (buffer-live-p candidate)
+                                   (with-current-buffer candidate
+                                     (and (derived-mode-p 'harness-ui-workspace-mode)
+                                          (equal harness-ui-workspace--id
+                                                 harness-ui-workspace-graph--id)))))
+                            (harness-ui-workspace--buffers))))
+    (if buffer
+        (pop-to-buffer buffer)
+      (user-error "No workspace buffer"))))
+
+;;;###autoload
+(defun harness-ui-workspace-graph (&optional workspace thread)
+  "Show the Logseq graph of THREAD in WORKSPACE, or of the current one.
+The graph is the thread's page: its nodes are the turns and the notes,
+with the pages they link to and the nodes that link back.  A node or a
+linked page at point opens with `harness-ui-workspace-graph-open'."
+  (interactive)
+  (let* ((here (derived-mode-p 'harness-ui-workspace-mode))
+         (id (or workspace
+                 (and here harness-ui-workspace--id)
+                 harness-ui-workspace-graph--last-id))
+         (thread (or thread
+                     (and here (harness-ui-workspace--selected-thread))))
+         (name (and here (plist-get harness-ui-workspace--data :name))))
+    (unless id
+      (user-error "No workspace open"))
+    (setq harness-ui-workspace-graph--last-id id)
+    (let ((buffer (get-buffer-create "*Workspace Graph*")))
+      (with-current-buffer buffer
+        (harness-ui-workspace-graph-mode)
+        (setq harness-ui-workspace-graph--id id
+              harness-ui-workspace-graph--name name
+              harness-ui-workspace-graph--thread thread
+              harness-ui-workspace-graph--view '(:kind thread)
+              harness-ui-workspace-graph--data nil
+              harness-ui-workspace-graph--stack nil
+              harness-ui-workspace-graph--error nil
+              harness-ui-workspace-graph--loading t)
+        (harness-ui-workspace-graph--render))
+      (pop-to-buffer buffer)
+      (harness-ui-workspace-graph--fetch))))
+
+;;;; Workspace computer
 
 (defvar-local harness-ui-workspace-computer--workspace nil
   "Workspace id of the computer buffer.")

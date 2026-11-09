@@ -152,6 +152,9 @@ class FakeHarness {
           'memory/status',
           'memory/notes',
           'memory/search',
+          'knowledge/graph',
+          'knowledge/graph/node',
+          'knowledge/graph/page',
           if (resources) ...[
             'workspace/resources/status',
             'workspace/browser/clear',
@@ -2401,6 +2404,78 @@ class FakeHarness {
         ]);
         return;
       }
+      if (method == '_harness/knowledge/graph') {
+        graphRequests.add('thread');
+        _respond(id, graphFixture);
+        return;
+      }
+      if (method == '_harness/knowledge/graph/node') {
+        final node = asStringOr(params['node'], '');
+        graphRequests.add('node:$node');
+        if (node == 'b1') {
+          _respond(id, {
+            ...graphFixture,
+            'block': graphNote,
+            'node': graphNote,
+            'children': const <Object?>[],
+          });
+        } else {
+          _respond(id, {
+            ...graphFixture,
+            'status': 'missing',
+            'why': 'no-node',
+            'block': null,
+            'node': null,
+            'children': const <Object?>[],
+          });
+        }
+        return;
+      }
+      if (method == '_harness/knowledge/graph/page') {
+        final name = asStringOr(params['name'], '');
+        graphRequests.add('page:$name');
+        if (name == 'Stone Co') {
+          _respond(id, {
+            ...graphFixture,
+            'page-name': name,
+            'page': {
+              'name': name,
+              'title': name,
+              'properties': [
+                ['workspace', 'Home'],
+                ['summary', 'The sample is still open.'],
+              ],
+              'tags': const <String>[],
+              'links': const <String>[],
+            },
+            'blocks': [
+              {
+                'id': 'b9',
+                'text': 'Ask Stone Co for a sample.',
+                'role': 'note',
+                'page': name,
+                'properties': [
+                  ['role', 'note'],
+                  ['workspace', 'Home'],
+                ],
+              },
+            ],
+            'backlinks': const <Object?>[],
+            'count': 1,
+          });
+        } else {
+          _respond(id, {
+            ...graphFixture,
+            'status': 'missing',
+            'page-name': name,
+            'page': {'name': name, 'title': name},
+            'blocks': const <Object?>[],
+            'backlinks': const <Object?>[],
+            'count': 0,
+          });
+        }
+        return;
+      }
       if (method == '_harness/task/list') {
         // As the harness answers it: the tasks of one project when it is
         // given a `cwd`, every task of every project without.
@@ -3163,6 +3238,77 @@ class FakeHarness {
   }
 
   final List<String> memorySearches = <String>[];
+  final List<String> graphRequests = <String>[];
+  Map<String, Object?> get graphNote => {
+    'id': 'b1',
+    'text': 'The tile is matte and the grout is warm grey.',
+    'role': 'note',
+    'page': 'Threads/Kitchen renovation',
+    'tags': const ['Memory'],
+    'links': const ['Stone Co'],
+    'properties': [
+      ['workspace', 'Home'],
+      ['workspace-id', 'w1'],
+      ['role', 'note'],
+      ['source-session', 's1'],
+    ],
+    'created': DateTime.now()
+        .subtract(const Duration(minutes: 12))
+        .toUtc()
+        .toIso8601String(),
+  };
+  Map<String, Object?> get graphFixture => {
+    'status': 'ready',
+    'workspace': 'w1',
+    'workspace-name': 'Home',
+    'page-name': 'Threads/Kitchen renovation',
+    'thread': 'Kitchen renovation',
+    'thread-id': 'th1',
+    'count': 2,
+    'page': {
+      'name': 'Threads/Kitchen renovation',
+      'title': 'Threads/Kitchen renovation',
+      'properties': [
+        ['workspace', 'Home'],
+        ['workspace-status', 'active'],
+        ['thread-title', 'Kitchen renovation'],
+        ['summary', 'The tile is matte; the Stone Co sample is still open.'],
+        ['next-action', 'Wait for the Stone Co sample.'],
+      ],
+      'tags': const ['Thread'],
+      'links': const ['Stone Co'],
+    },
+    'blocks': [
+      graphNote,
+      {
+        'id': 'b2',
+        'text': 'Noted. Ask Stone Co for a sample.',
+        'role': 'assistant',
+        'properties': [
+          ['workspace', 'Home'],
+        ],
+        'created': DateTime.now()
+            .subtract(const Duration(minutes: 13))
+            .toUtc()
+            .toIso8601String(),
+      },
+    ],
+    'links': const ['Stone Co'],
+    'backlinks': [
+      {
+        'id': 'b3',
+        'text': 'The tile is matte. The grout is warm grey.',
+        'role': 'user',
+        'page': '2026-11-08',
+        'thread': 'Threads/Kitchen renovation',
+        'journal': true,
+        'created': DateTime.now()
+            .subtract(const Duration(minutes: 14))
+            .toUtc()
+            .toIso8601String(),
+      },
+    ],
+  };
   final List<Map<String, Object?>> memoryNotes = [
     {
       'id': 'n1',

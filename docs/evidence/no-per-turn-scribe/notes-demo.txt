@@ -1,0 +1,21 @@
+
+=== who writes a workspace note
+
+The tile is matte.
+  requests while the turn ran: 1
+  requests after it ended:     0
+  the thread's page holds no note
+
+The grout is warm grey.
+  requests while the turn ran: 1
+  requests after it ended:     0
+  the thread's page holds no note
+
+Let us go with quartz for the countertop.
+  requests while the turn ran: 2
+  requests after it ended:     0
+  note: Chose quartz for the countertop.
+        from a7a73cda-cc3b-4c4b-9e27-f5722c8c86b6 (role note)
+
+4 provider requests for 3 turns, and none after one ended
+the agent's own knowledge_write is the only writer

@@ -36,8 +36,32 @@ What is written when:
 - `knowledge/write`: a durable block on the thread's page, or on a
   page the agent names (`Projects/harness`, `Preferences`), which is
   what the knowledge tools write;
-- `knowledge/thread-touch`: the thread page's status and last-touched
-  properties, so the page reads current in Logseq.
+- `knowledge/thread-touch`: the thread page's status, last-touched,
+  summary and next-action properties, so the page reads current in
+  Logseq;
+- the nightly dream: `knowledge/dream` runs over every workspace once a
+  day at `harness-workspace-knowledge-dream-hour`;
+- `knowledge/dream`: the graph's maintenance pass.  A thread page gets
+  its current identity and state again, a note this workspace wrote
+  twice is kept once, and the changes go on a `Dreams/<date>` report
+  page.  `:dry-run` reports without writing, and no block the user
+  wrote is touched.
+
+Who writes a note, and when: the agent, in its turn, through
+`knowledge_write` -- it knows what the turn settled and writes what
+is worth keeping while it still has the conversation in context.
+Nothing here reads a finished turn with a model of its own: a second
+pass over every turn repeats the work the agent had already done,
+costs a call per turn, and tends to accumulate trivia.  The dream
+below is the only automatic writer, it asks no model, and it touches
+nothing but the state of pages this workspace made.
+
+A block keeps its shape: a line of a message or a note becomes an
+indented continuation, so code, quotes and paragraphs stay whole, and
+a fenced code block is text even where a line looks like a bullet or
+a property.  The properties are lowercase and dashed, pages are
+namespaced (`Threads/`, `Projects/`, `Dreams/`), and only a page that
+exists is linked.
 
 The tools (`knowledge_search`, `knowledge_write`, `knowledge_read`
 and `knowledge_status`) are offered to workspace episodes only; every
@@ -52,10 +76,22 @@ stops at `harness-logseq-search-pages` and `...-journal-pages`.  A
 later stage can put an index in front of the same answers without
 changing this contract.
 
+A semantic search goes one step further without an index: with
+`harness-workspace-knowledge-embedding-model` set, the word matches
+and the workspace's newest blocks are embedded (provider/embed), and
+the blocks nearest the query in meaning come first, with a small
+boost for the words they matched.  The vectors are kept in memory and
+are dropped when the cache is full; the graph is not changed.
+
 ## Provides
 
 ### Methods
 
+- `knowledge/dream` (workspace &optional opts) — Consolidate WORKSPACE's Logseq graph and return what it did.
+- `knowledge/graph` (workspace &optional opts) — Return the page of WORKSPACE's thread with its blocks and backlinks.
+- `knowledge/graph/node` (workspace node &optional opts) — Return NODE of WORKSPACE's thread's page, with its children.
+- `knowledge/graph/page` (workspace name &optional opts) — Return page NAME of WORKSPACE's graph with its blocks and backlinks.
+- `knowledge/nearest` (query texts &optional timeout) — Return how near QUERY is to each of TEXTS in meaning, or nil.
 - `knowledge/notes` (workspace &optional opts) — Return the newest blocks of WORKSPACE's knowledge, newest first.
 - `knowledge/page` (workspace page &optional opts) — Return PAGE of WORKSPACE's graph with its blocks.
 - `knowledge/pages` (workspace &optional filter) — Return the pages of WORKSPACE's graph it made for its threads.
@@ -70,9 +106,9 @@ changing this contract.
 ### Tools
 
 - `knowledge_read` — Read one page of the workspace's Logseq graph by name, such as a thread's page or Projects/harness. Returns the page's blocks, newest last.
-- `knowledge_search` — Search the workspace's Logseq knowledge graph: decisions, facts, projects, people and the notes of every thread. Use it for anything the brief did not give you, for what another thread learned, or for a preference the user wrote down. Set all to search the user's whole graph, not only this workspace. Never invent knowledge you did not retrieve.
+- `knowledge_search` — Search the workspace's Logseq knowledge graph: decisions, facts, projects, people and the notes of every thread. Use it for anything the brief did not give you, for what another thread learned, or for a preference the user wrote down. Set all to search the user's whole graph, not only this workspace. With mode semantic and an embedding model set, it finds blocks by meaning rather than by words. Never invent knowledge you did not retrieve.
 - `knowledge_status` — Say what the workspace's Logseq graph holds: blocks, pages, the graph root and when it last changed.
-- `knowledge_write` — Write durable knowledge to the workspace's Logseq graph: a decision, a fact, a commitment, an open loop or a next action. The block goes on the current thread's page unless page names another one (Projects/harness, Preferences, People/Ada). Write one concise statement, not a transcript dump; the user's own edits in Logseq outrank what you write.
+- `knowledge_write` — Write durable knowledge to the workspace's Logseq graph: a decision, a fact, a commitment, an open loop or a next action. The block goes on the current thread's page unless page names another one (Projects/harness, Preferences, People/Ada); a statement already on the page is not written again. Write one concise statement, not a transcript dump, and only when the turn settled something; the user's own edits in Logseq outrank what you write.
 
 ### Events
 
@@ -81,7 +117,15 @@ changing this contract.
 ### Options
 
 - `harness-workspace-knowledge-capture-chars` — Most characters of one message the journal capture keeps.
+- `harness-workspace-knowledge-dream` — Whether the graph maintains itself once a day.
+- `harness-workspace-knowledge-dream-hour` — Hour of the local day the nightly dream runs, 0 to 23.
+- `harness-workspace-knowledge-dream-report` — Whether `knowledge/dream` writes a report page in the graph.
+- `harness-workspace-knowledge-embedding-batch` — Most blocks one embedding request carries.
+- `harness-workspace-knowledge-embedding-cache` — Most block vectors kept in memory before the cache is cleared.
+- `harness-workspace-knowledge-embedding-dimensions` — Length of the vectors to ask for, or nil for the model's own.
+- `harness-workspace-knowledge-embedding-model` — Model that embeds the graph for semantic search, as PROVIDER:NAME.
 - `harness-workspace-knowledge-recall-limit` — Blocks a brief recalls from the graph.
+- `harness-workspace-knowledge-semantic-candidates` — Most blocks a semantic search embeds and ranks.
 - `harness-workspace-knowledge-status-seconds` — Seconds a workspace's knowledge status is kept before it is read again.
 - `harness-workspace-knowledge-thread-blocks` — Blocks a brief quotes from the thread's own page.
 
@@ -89,17 +133,23 @@ changing this contract.
 
 ### Methods it calls
 
+- `logseq/backlinks` ([logseq](logseq.md))
 - `logseq/block-add` ([logseq](logseq.md))
+- `logseq/block-remove` ([logseq](logseq.md))
 - `logseq/page` ([logseq](logseq.md))
 - `logseq/page-add` ([logseq](logseq.md))
 - `logseq/page-list` ([logseq](logseq.md))
 - `logseq/property-set` ([logseq](logseq.md))
 - `logseq/search` ([logseq](logseq.md))
 - `logseq/status` ([logseq](logseq.md))
+- `provider/embed` ([provider](provider.md)), when it is loaded
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))
 - `session/node` ([session](session.md))
+- `usage/price` ([usage](usage.md)), when it is loaded
+- `usage/record` ([usage](usage.md)), when it is loaded
 - `workspace/get` ([workspace](workspace.md)), when it is loaded
+- `workspace/list` ([workspace](workspace.md)), when it is loaded
 
 ### Events it handles
 

@@ -31,6 +31,8 @@
 (require 'harness-agent)
 (require 'harness-small)
 (require 'harness-secret-sandbox)
+(require 'harness-workspace)
+(require 'harness-workspace-knowledge)
 
 (defmacro harness-prompts-test-with-overrides (model overrides &rest body)
   "Run BODY with OVERRIDES for MODEL in `harness-prompt-overrides'."

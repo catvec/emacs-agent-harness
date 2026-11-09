@@ -8,7 +8,7 @@ Persistent workspace chat: one timeline over topic threads and episodes.
 - **Source:** [lisp/modules/harness-workspace.el](../../lisp/modules/harness-workspace.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [store](store.md), [session](session.md), [agent](agent.md), [project](project.md), [workspace-knowledge](workspace-knowledge.md)
-- **Brings along:** [ui-workspace](ui-workspace.md) (its UI)
+- **Brings along:** [ui-workspace](ui-workspace.md) (its UI), [small](small.md) (its file requires it)
 
 ## About
 
@@ -32,11 +32,12 @@ so the old episode stays whole, searchable and openable after the
 workspace has moved on.  The module subscribes to the sessions' node
 and turn events to grow the timeline and the thread summary.
 
-Routing is deliberately conservative.  An explicit thread, an explicit
-`/new`, the only live episode, a thread title in the message, or the
-last thread when nothing says otherwise; a topic marker makes a new
-thread.  A model router can be added later without changing the shape
-of `workspace/prompt`.
+Routing is deliberately conservative and local.  An explicit thread,
+an explicit `/new`, a thread title in the message, or the last thread
+when nothing says otherwise; a topic marker makes a new thread, and a
+thread is a small document the message is ranked against by the words
+each holds, so a thread that holds none of a message never keeps it.
+No model is asked to place a message.
 
 ## Provides
 
@@ -91,6 +92,10 @@ of `workspace/prompt`.
 - `harness-workspace-notify` — Whether the workspace sends a notification when a reply is ready.
 - `harness-workspace-permission-mode` — Permission mode of a workspace episode.
 - `harness-workspace-recall` — Knowledge blocks a brief recalls from the Logseq graph.
+- `harness-workspace-router-recent` — Messages of a thread the router reads for its words.
+- `harness-workspace-router-semantic` — Whether an embedding model re-ranks a close routing call.
+- `harness-workspace-router-threshold` — How much of a message a thread must hold to be its topic.
+- `harness-workspace-router-timeout` — Seconds the semantic re-rank may take before the words decide.
 - `harness-workspace-thinking` — Thinking level a workspace episode runs at, or nil for the session default.
 - `harness-workspace-thread-idle-hours` — Hours after which a message starts a new episode in the same thread.
 
@@ -102,6 +107,7 @@ of `workspace/prompt`.
 - `agent/cancel` ([agent](agent.md))
 - `agent/prompt` ([agent](agent.md))
 - `agent/running` ([agent](agent.md))
+- `knowledge/nearest` ([workspace-knowledge](workspace-knowledge.md))
 - `knowledge/recall` ([workspace-knowledge](workspace-knowledge.md))
 - `knowledge/status` ([workspace-knowledge](workspace-knowledge.md))
 - `knowledge/thread-page` ([workspace-knowledge](workspace-knowledge.md))

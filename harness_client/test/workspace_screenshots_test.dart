@@ -16,6 +16,8 @@ import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/interaction.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:harness_client/src/state/workspace_controller.dart';
+import 'package:harness_client/src/state/workspace_graph_controller.dart';
+import 'package:harness_client/src/ui/screens/workspace_graph_screen.dart';
 import 'package:harness_client/src/ui/adaptive/platform_style.dart';
 import 'package:harness_client/src/ui/app_scope.dart';
 import 'package:harness_client/src/ui/screens/workspace_screen.dart';
@@ -285,10 +287,56 @@ Future<void> _write(
   });
 }
 
+Future<GlobalKey> _showGraph(
+  WidgetTester tester, {
+  double width = 390,
+  double height = 844,
+}) async {
+  final boundary = GlobalKey();
+  final settings = SettingsController();
+  final app = AppController(settings: settings);
+  final controller = WorkspaceGraphController.preview();
+  addTearDown(controller.dispose);
+  await tester.pumpWidget(
+    RepaintBoundary(
+      key: boundary,
+      child: HarnessStyle(
+        style: HarnessPlatformStyle.material,
+        child: MaterialApp(
+          debugShowCheckedModeBanner: false,
+          theme: HarnessTheme.material(Brightness.light),
+          home: MediaQuery(
+            data: MediaQueryData(size: Size(width, height)),
+            child: WorkspaceGraphScreen(
+              app: app,
+              workspace: const WorkspaceSummary(id: 'w1', name: 'Home'),
+              threadId: 'th1',
+              controller: controller,
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+  for (var i = 0; i < 8; i++) {
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+  return boundary;
+}
+
 void main() {
   final shots = Platform.environment['HARNESS_SHOTS'];
   setUpAll(() async {
     await loadRealFonts();
+  });
+
+  testWidgets('the graph page on a phone', (tester) async {
+    final boundary = await _showGraph(tester);
+    expect(find.text('Graph'), findsWidgets);
+    expect(tester.takeException(), isNull);
+    if (shots != null) {
+      await _write(tester, boundary, '$shots/workspace-graph.png');
+    }
   });
 
   testWidgets('workspace on a phone', (tester) async {

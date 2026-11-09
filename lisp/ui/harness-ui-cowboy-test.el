@@ -455,7 +455,8 @@ first."
       ;; changes that kept it busy, so the UI's copy may still list the
       ;; question for a few milliseconds after the turn.
       (harness-test-wait (lambda () (not (harness-ui-cowboy-waiting-p sid))) 5
-                         "the UI's copy of the session to lose the question"))))
+                         "the UI's copy of the session to lose the question")
+      (should-not (harness-ui-cowboy-waiting-p sid)))))
 
 (defun harness-ui-cowboy-test--define-hosted ()
   "Define `hosted', a fake hosted loop (Claude Code, Copilot).

@@ -50,6 +50,7 @@ without changing this contract.
 
 - `logseq/backlinks` (name &optional opts) — Return the blocks of the graph at OPTS' `:root` that link page NAME.
 - `logseq/block-add` (page text &optional opts) — Append TEXT as a block of PAGE in the graph at OPTS' `:root`.
+- `logseq/block-remove` (page id &optional opts) — Remove block ID from PAGE in the graph at OPTS' `:root`.
 - `logseq/page` (name &optional opts) — Return page NAME of the graph at OPTS' `:root`, or nil.
 - `logseq/page-add` (page text &optional opts) — Add TEXT as a block of PAGE, creating the page with OPTS' properties.
 - `logseq/page-list` (&optional opts) — Return the pages of the graph at OPTS' `:root`, newest first.

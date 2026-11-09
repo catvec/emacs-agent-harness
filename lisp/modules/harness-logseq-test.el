@@ -208,5 +208,70 @@
       (should (equal "2026-11-01 12:00"
                      (harness-logseq-block-property block "learned-at"))))))
 
+(ert-deftest harness-logseq-keeps-a-multiline-block ()
+  "A block's lines become indented continuations and read back whole.
+A blank line, a code fence and a quote stay inside the one block, and
+a line in the fence that looks like a bullet or a property is text."
+  (let* ((text (concat "The tile is matte.\n\n"
+                       "The grout is warm grey.\n"
+                       "  indented line\n"
+                       "```elisp\n"
+                       "- this is not a bullet\n"
+                       "key:: this is not a property\n"
+                       "```\n"
+                       "> a quote"))
+         (rendered (harness-logseq-render-block
+                    text '(("workspace" . "Home")))))
+    (should (string-prefix-p "- The tile is matte.\n  \n  The grout" rendered))
+    (should (string-match-p "^  - this is not a bullet$" rendered))
+    (should (string-match-p "^  key:: this is not a property$" rendered))
+    (let* ((blocks (harness-logseq-parse-blocks rendered))
+           (block (car blocks)))
+      (should (= 1 (length blocks)))
+      (should (equal text (plist-get block :text)))
+      (should (equal "Home" (harness-logseq-block-property block "workspace")))
+      (should (= 1 (plist-get block :line)))
+      ;; Nine lines of text, then the property line.
+      (should (= 10 (plist-get block :end-line))))))
+
+(ert-deftest harness-logseq-parse-counts-a-parent-to-its-children ()
+  "A block's end-line covers the blocks indented under it, not its siblings."
+  (let* ((blocks (harness-logseq-parse-blocks
+                  "- Parent\n  id:: p1\n  - Child\n    id:: c1\n    - Grandchild\n      id:: g1\n- Sibling\n  id:: s1\n"))
+         (parent (nth 0 blocks))
+         (sibling (nth 3 blocks)))
+    (should (equal "Parent" (plist-get parent :title)))
+    (should (= 6 (plist-get parent :end-line)))
+    (should (equal "Sibling" (plist-get sibling :title)))
+    (should (= 8 (plist-get sibling :end-line)))))
+
+(ert-deftest harness-logseq-block-remove-takes-a-block-and-its-children ()
+  "Removing a block by id removes its properties and the blocks under it."
+  (harness-logseq-test-with
+    (let ((file (harness-logseq-page-file "Projects/harness"
+                                          harness-logseq-directory)))
+      (harness-write-file-atomically
+       file
+       (concat "- Parent\n"
+               "  id:: p1\n"
+               "  workspace:: Home\n"
+               "  - Child\n"
+               "    id:: c1\n"
+               "- Sibling\n"
+               "  id:: s1\n"))
+      (let ((removed (harness-call 'logseq/block-remove "Projects/harness" "p1")))
+        (should removed)
+        (should (equal "Parent" (plist-get removed :title))))
+      (let* ((content (harness-read-file file))
+             (blocks (harness-logseq-parse-blocks content)))
+        (should (equal 1 (length blocks)))
+        (should (equal "Sibling" (plist-get (car blocks) :title)))
+        (should (equal "s1" (harness-logseq-block-property (car blocks) "id")))
+        (should-not (string-match-p "Parent\\|Child\\|p1\\|c1" content)))
+      ;; A block that is not there is nil, and nothing is written.
+      (let ((before (harness-read-file file)))
+        (should-not (harness-call 'logseq/block-remove "Projects/harness" "gone"))
+        (should (equal before (harness-read-file file)))))))
+
 (provide 'harness-logseq-test)
 ;;; harness-logseq-test.el ends here
