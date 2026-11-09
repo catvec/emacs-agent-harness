@@ -3154,25 +3154,29 @@ lists every key.")
 ;; The Ediff control panel, the threads beside it, the threads in a
 ;; report and in a chat, and the threads view opened on its own all offer
 ;; the same commands.  They are written once, here, as a label and a
-;; tooltip with the key and command each surface binds: a surface draws
-;; the controls of its groups in rows, and `harness-ui-patch-review-keys'
-;; lists them all in one place.  No surface keeps a key legend of its own.
+;; tooltip with the key and command each surface binds.  A surface draws
+;; the few controls the work there needs, on one fitted line; every
+;; command of the surface, with its key and a click, is in
+;; `harness-ui-patch-review-keys', which no surface draws a key legend
+;; beside.
 
 (defconst harness-ui-patch-review--control-groups
   '((threads "Threads")
     (navigate "Navigate")
     (diff "Diff")
     (view "View"))
-  "The groups the review's controls are drawn in, with their titles.
-The controls of the threads and those of the file's diff are in groups
-of their own, so neither is ever drawn among the other.")
+  "The groups the review's controls are listed in, with their titles.
+The keys list reads them apart, so the controls of the threads and those
+of the file's diff are never read as the same kind of command.")
 
 (defconst harness-ui-patch-review--control-definitions
   '((comment :group threads :label "Comment"
      :help "Comment on the current difference"
+     :drawn (ediff)
      :ediff (c harness-ui-patch-review-comment))
     (new-thread :group threads :label "New thread"
      :help "Thread of your own, nothing quoted"
+     :drawn (threads pane)
      :threads (c harness-ui-patch-review-new-thread))
     (reply :group threads :label "Reply"
      :help "Reply in the thread at point"
@@ -3223,35 +3227,44 @@ of their own, so neither is ever drawn among the other.")
      :threads (D change-review-ui-show-source))
     (approve :group diff :label "Approve"
      :help "Approve the file; a second press takes it off"
+     :drawn (ediff)
      :ediff (a harness-ui-patch-review-approve-ediff))
     (next-file :group diff :label "Next file"
      :help "Next file to review"
+     :drawn (ediff)
      :ediff (N harness-ui-patch-review-ediff-next-file))
     (previous-file :group diff :label "Previous file" :short "Prev file"
      :help "Previous file"
+     :drawn (ediff)
      :ediff (P harness-ui-patch-review-ediff-previous-file))
     (skip-approved :group view
      :label harness-ui-patch-review--skip-approved-label
      :help "Leave out the files already approved"
+     :drawn (ediff)
      :ediff (s harness-ui-patch-review-toggle-skip-approved))
     (auto-approve :group view
      :label harness-ui-patch-review--auto-approve-label
      :help "Approve the files gone through without a comment"
+     :drawn (ediff)
      :ediff (u harness-ui-patch-review-toggle-auto-approve))
     (files :group view
      :label harness-ui-patch-review--files-label
      :help "The files in a column beside Ediff"
+     :drawn (ediff)
      :ediff (t harness-ui-patch-review-toggle-ediff-tree))
     (expand :group view :label "Expand all"
      :help "Open every file's threads and every thread"
+     :drawn (threads pane)
      :threads (E harness-ui-patch-review-expand-all-threads))
     (collapse :group view :label "Collapse all"
      :help "Fold every file's threads and every thread"
+     :drawn (threads pane)
      :threads (C harness-ui-patch-review-collapse-all-threads))
     (send :group view
      :label harness-ui-patch-review--send-drafts-label
      :help "Send the drafts to the agent together, while the task is at work"
      :when harness-ui-patch-review--sendable-p
+     :drawn (ediff threads pane)
      :ediff (S harness-ui-patch-review-send-replies)
      :threads (S harness-ui-patch-review-send-replies))
     (filter :group view :label "Filter"
@@ -3259,22 +3272,28 @@ of their own, so neither is ever drawn among the other.")
      :threads (f change-review-ui-cycle-filter))
     (keys :group view :label "Keys"
      :help "Every key of the review"
+     :drawn (ediff threads pane)
      :ediff ("C-c ?" harness-ui-patch-review-keys)
      :threads ("C-c ?" harness-ui-patch-review-keys))
     (report :group view :label "Report"
      :help "Back to the report"
+     :drawn (ediff)
      :ediff (q harness-ui-patch-review-ediff-quit))
     (ediff :group view :label "Ediff"
      :help "Back to the comparison"
+     :drawn (pane)
      :pane (T harness-ui-patch-review-open)))
-  "The review's commands, their labels, tooltips and keys by surface.
+  "The review's commands, their labels, tooltips, keys and places.
 Each entry has a `:group', a `:label' (a string, or a function of the
 review returning one), a `:help' tooltip, and a binding for each surface
 it shows on: `:ediff', `:threads' (a report, a chat's threads, the
 threads view) or `:pane' (the threads beside Ediff).  A binding is
 \(KEY COMMAND), KEY a key description string or a `kbd' form, or
 \(KEY COMMAND HELP) with a tooltip of its own.  A label in square
-brackets is drawn for the button; `:short' is its narrow form.")
+brackets is drawn for the button; `:short' is its narrow form.
+`:drawn' names the surfaces that keep the control on their line, the few
+the work there turns to; every other control of the surface is in
+`harness-ui-patch-review-keys', with its key and a click.")
 
 (defun harness-ui-patch-review--skip-approved-label (_review)
   "Return the label of the skip-approved setting, with its check."
@@ -3311,12 +3330,14 @@ or the list of keys -- so they name their review."
     ('collapse (lambda () (harness-ui-patch-review--set-comments-folded review t)))
     ('send (lambda () (harness-ui-patch-review-send-replies review)))))
 
-(defun harness-ui-patch-review--control-specs (surface &optional review)
+(defun harness-ui-patch-review--control-specs (surface &optional review drawn)
   "Return the controls of the review on SURFACE, in their groups.
 SURFACE is `ediff', `threads' or `pane'; REVIEW is the review whose
-settings and drafts the labels tell, when one is at hand.  Each group is
-\(TITLE . SPECS) and each spec is a plist of `:id', `:label', `:key',
-`:command', `:action' and `:help', for
+settings and drafts the labels tell, when one is at hand.  With DRAWN,
+only the controls that keep to the surface's own line
+\(`:drawn' in `harness-ui-patch-review--control-definitions'), in the
+groups that have one.  Each group is \(TITLE . SPECS) and each spec is a
+plist of `:id', `:label', `:key', `:command', `:action' and `:help', for
 `harness-ui-patch-review--control-button'."
   (let ((surface-key (intern (format ":%s" surface)))
         ;; The pane beside Ediff has every thread control, and the way back
@@ -3328,6 +3349,8 @@ settings and drafts the labels tell, when one is at hand.  Each group is
       (let ((id (car entry))
             (definition (cdr entry)))
         (when-let* ((binding (cl-some (lambda (key) (plist-get definition key)) keys))
+                    ((or (null drawn)
+                         (memq surface (plist-get definition :drawn))))
                     ((or (null review)
                          (null (plist-get definition :when))
                          (funcall (plist-get definition :when) review))))
@@ -3384,55 +3407,45 @@ spec's command when clicked, and its tooltip is the spec's help."
   (propertize (concat line "\n") 'wrap-prefix continuation))
 
 (defun harness-ui-patch-review--control-lines (surface width &optional review)
-  "Return the controls of SURFACE, drawn in their groups at most WIDTH wide.
-Each group starts a line with its title, its controls after it, and goes
-on the next lines when WIDTH has no room for them.  A line is never
-wider than WIDTH when one control fits; a control wider than the room
-left wraps where it is, under the group's controls, so that every one is
-whole and clickable however narrow the window is.  REVIEW tells the
-labels that depend on it, its settings and its drafts."
-  (let* ((groups (harness-ui-patch-review--control-specs surface review))
-         (column (1+ (apply #'max 0
-                            (mapcar (lambda (group) (string-width (car group)))
-                                    groups))))
-         ;; A row of long labels needs the room its longest control takes
-         ;; after the title; a narrower window gets the short labels and a
-         ;; continuation close to the edge, so no control runs off it.
+  "Return the lines of the controls SURFACE keeps, whole, at most WIDTH wide.
+SURFACE is `ediff', `threads' or `pane', and REVIEW tells the labels that
+depend on it.  They are the controls `:drawn' there, in their groups'
+order: at most a handful, each with its key.  A window narrower than the
+widest of them gets the short labels (`Prev thread'), and a control that
+still does not fit the room left goes on the next line, under the first,
+so that every one is whole and clickable however narrow the window is.
+The lines are joined with newlines, each ending in one.  A column of the
+room is kept spare: a window whose width is measured in pixels can be a
+column wider than the text it shows, and a line drawn to the last column
+would then be wrapped by the window, its last control's key alone on the
+line after."
+  (let* ((width (max 8 (1- width)))
+         (groups (harness-ui-patch-review--control-specs surface review t))
+         (specs (apply #'append (mapcar #'cdr groups)))
          (widest (apply #'max 0
-                        (mapcar (lambda (group)
-                                  (apply #'max 0
-                                         (mapcar (lambda (spec)
-                                                   (string-width
-                                                    (harness-ui-patch-review--control-button spec)))
-                                                 (cdr group))))
-                                groups)))
-         (wide (>= width (+ 2 column widest)))
-         (continuation (if wide
-                           (make-string (+ 2 column) ?\s)
-                         "  "))
-         lines)
-    (dolist (group groups)
-      (let* ((title (car group))
-             (head (concat "  " title
-                           (if wide (make-string (- column (string-width title)) ?\s) "")))
-             (line (if wide head continuation))
-             (started nil))
-        (unless wide
-          (push (harness-ui-patch-review--control-line head "  ") lines))
-        (dolist (spec (cdr group))
-          ;; A narrow window gets the short label, when the spec has one.
-          (let* ((item (harness-ui-patch-review--control-button
-                        spec (and (not wide) (plist-get spec :short))))
-                 (addition (if started (concat "  " item) item)))
-            (if (and started
-                     (> (+ (string-width line) (string-width addition)) width))
-                (progn
-                  (push (harness-ui-patch-review--control-line line continuation) lines)
-                  (setq line (concat continuation item)))
-              (setq line (concat line addition)))
-            (setq started t)))
-        (push (harness-ui-patch-review--control-line line continuation) lines)))
-    (mapconcat #'identity (nreverse lines) "")))
+                        (mapcar (lambda (spec)
+                                  (string-width (harness-ui-patch-review--control-button spec)))
+                                specs)))
+         ;; A line of long labels needs the room its longest control takes;
+         ;; a narrower window gets the short labels, so no control runs off.
+         (wide (>= width (+ 2 widest)))
+         items)
+    (dolist (spec specs)
+      (push (harness-ui-patch-review--control-button
+             spec (and (not wide) (plist-get spec :short)))
+            items))
+    (setq items (nreverse items))
+    (let ((line "  ") lines)
+      (dolist (item items)
+        (let ((addition (if (string= line "  ") item (concat "  " item))))
+          (if (> (+ (string-width line) (string-width addition)) width)
+              (progn
+                (push (harness-ui-patch-review--control-line line "  ") lines)
+                (setq line (concat "  " item)))
+            (setq line (concat line addition)))))
+      (when (> (length line) 2)
+        (push (harness-ui-patch-review--control-line line "  ") lines))
+      (mapconcat #'identity (nreverse lines) ""))))
 
 (defun harness-ui-patch-review--info-join (segments &optional short)
   "Return SEGMENTS, facts of the review, joined by a middle dot.
@@ -3464,11 +3477,49 @@ the room they take."
                 'face 'harness-dim-face
                 'wrap-prefix "  ")))
 
+(defvar-local harness-ui-patch-review--keys-origin nil
+  "The buffer the keys list was asked from, where its rows run their commands.")
+
+(defun harness-ui-patch-review--keys-run (action)
+  "Run ACTION in the buffer the keys list was asked from.
+ACTION is a command, which runs interactively so it can ask for what it
+needs, or a plain function of no arguments."
+  (let ((origin (and (buffer-live-p harness-ui-patch-review--keys-origin)
+                     harness-ui-patch-review--keys-origin)))
+    (if (null origin)
+        (user-error "No review here")
+      (let ((window (get-buffer-window origin t)))
+        (with-current-buffer origin
+          (when (window-live-p window)
+            (select-window window))
+          (if (commandp action)
+              (call-interactively action)
+            (funcall action)))))))
+
+(defun harness-ui-patch-review--keys-row (spec)
+  "Insert SPEC's row of the keys list: its key, its label, and what it does.
+The label is a button running the control in the buffer the list was
+asked from, so every key of it has a click."
+  (let* ((label (plist-get spec :label))
+         (key (format "%s" (or (plist-get spec :key) "")))
+         (action (or (plist-get spec :action) (plist-get spec :command)))
+         (run (lambda () (interactive) (harness-ui-patch-review--keys-run action)))
+         (button (buttonize label (lambda (_button) (funcall run))
+                            nil (harness-ui-one-line (plist-get spec :help)))))
+    (insert (format "  %-7s " key)
+            (propertize button 'face 'button 'mouse-face 'highlight 'pointer 'hand
+                        'keymap (harness-ui-mouse-keymap run))
+            "   "
+            (propertize (harness-ui-one-line (plist-get spec :help))
+                        'face 'harness-dim-face)
+            "\n")))
+
 (defun harness-ui-patch-review-keys (&optional surface)
   "Show every key of the review, grouped, in a buffer of its own.
 SURFACE is `ediff', `threads' or `pane', by default the surface this
 buffer is: the thread view, or the Ediff control panel.  This is the one
-place the review's keys, their labels and what they do are listed."
+place the review's keys, their labels and what they do are listed, and
+each of them can be clicked: a row runs its command where point was."
   (interactive)
   (let* ((surface (or surface
                       (if (derived-mode-p 'change-review-threads-mode)
@@ -3477,6 +3528,7 @@ place the review's keys, their labels and what they do are listed."
          (review (ignore-errors
                    (or (harness-ui-patch-review--review-here)
                        harness-ui-patch-review--review)))
+         (origin (current-buffer))
          (buffer (get-buffer-create "*Review keys*")))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
@@ -3485,16 +3537,12 @@ place the review's keys, their labels and what they do are listed."
         (dolist (group (harness-ui-patch-review--control-specs surface review))
           (insert (propertize (car group) 'face 'harness-label-face) "\n")
           (dolist (spec (cdr group))
-            (insert "  " (harness-ui-kbd (plist-get spec :key))
-                    "  " (plist-get spec :label)
-                    "   "
-                    (propertize (harness-ui-one-line (plist-get spec :help))
-                                'face 'harness-dim-face)
-                    "\n"))
+            (harness-ui-patch-review--keys-row spec))
           (insert "\n"))
         (insert (propertize "Ediff" 'face 'harness-label-face) "\n"
                 "  " (harness-ui-kbd "?") "  Ediff's own keys, in its control panel\n")
         (special-mode)
+        (setq-local harness-ui-patch-review--keys-origin origin)
         (goto-char (point-min))
         (set-buffer-modified-p nil)))
     (display-buffer buffer)
@@ -3505,8 +3553,13 @@ place the review's keys, their labels and what they do are listed."
 That is the narrowest window showing the buffer -- a line has to fit in
 every one -- else `change-review-ui-width', else 100, less MARGIN."
   (let* ((windows (get-buffer-window-list (current-buffer) nil t))
+         ;; A window's pixel width can be a column over its body's: the line
+         ;; is fitted to what shows.
          (width (if windows
-                    (apply #'min (mapcar #'window-max-chars-per-line windows))
+                    (apply #'min (mapcar (lambda (window)
+                                           (min (window-max-chars-per-line window)
+                                                (window-body-width window)))
+                                         windows))
                   (or change-review-ui-width 100))))
     (max 8 (- width (or margin 0)))))
 
@@ -3540,12 +3593,13 @@ comment's under its bar, which goes on down the lines."
 (defun harness-ui-patch-review--threads-heading (review &optional trailing surface)
   "Return the heading of REVIEW's threads: its filters, then its controls.
 The filter buttons are the library's, the one in force marked, and the
-controls are the review's thread controls, drawn by
-`harness-ui-patch-review--control-lines' so that a narrow window gets
-them in rows of their own.  TRAILING, a string, ends the filter line:
-the chat puts its [Compose] button there.  SURFACE is `threads' or
-`pane', `threads' by default: the threads beside Ediff offer the way back
-to it."
+controls under them are the few the threads need, drawn by
+`harness-ui-patch-review--control-lines' on one line that fits the
+window: [New thread], [Expand all], [Collapse all], [Send drafts] at
+work, and [Keys] for every command of the review.  TRAILING, a string,
+ends the filter line: the chat puts its [Compose] button there.  SURFACE
+is `threads' or `pane', `threads' by default: the threads beside Ediff
+offer the way back to it."
   (let* ((set (harness-ui-patch-review--r-set review))
          (filter (or change-review-ui--filter 'open))
          (width (harness-ui-patch-review--text-width))
@@ -7054,16 +7108,20 @@ and its controls wrap to more lines then; the height follows."
 
 (defun harness-ui-patch-review--ediff-help ()
   "Return the brief help of the Ediff control panel of a review.
-It is one place for what the reviewer needs to know: where they are in
-the files, as a line of facts (`harness-ui-patch-review--ediff-facts'),
-then the controls in their groups -- the threads, going between them,
-the file's diff and the view's settings -- each drawn by
-`harness-ui-patch-review--control-lines' so that a narrow panel wraps
-them rather than cutting one off.  Every key, with what it does, is one
-button away, in `harness-ui-patch-review-keys'."
+It is what the panel is for: where the reviewer is in the files, as a
+line of facts (`harness-ui-patch-review--ediff-facts'), then the few
+controls the panel alone offers, drawn by
+`harness-ui-patch-review--control-lines' on a line, or two in a narrow
+panel -- [Comment], [Approve], the file's neighbours, the send and the
+report -- each whole and clickable.  Every key of the review, with what
+it does, is one button away, in `harness-ui-patch-review-keys'."
   (let* ((window (get-buffer-window (current-buffer)))
+         ;; Not more columns than the window has: a line measured to the
+         ;; pixel width alone can be a column over, and the wrap then takes
+         ;; a control's key to the next line.
          (width (max 8 (if window
-                           (window-max-chars-per-line window)
+                           (min (window-max-chars-per-line window)
+                                (window-body-width window))
                          (frame-width)))))
     (concat (harness-ui-patch-review--info-line
              (harness-ui-patch-review--ediff-facts) width)
@@ -8206,6 +8264,10 @@ so a slow callback cannot open a view after the call reported a timeout.")
       (let ((buffer (change-review-open-threads set filter)))
         (with-current-buffer buffer
           (setq default-directory (harness-ui-patch-review--link-directory review)))
+        ;; The review's controls, keys and drawing, as beside Ediff: the
+        ;; view is the same wherever it opens, and the library's own key
+        ;; line is not drawn above it.
+        (harness-ui-patch-review--prepare-threads-view review buffer)
         (harness-ui-patch-review--install-quote-keys buffer)
         (unless (and (buffer-live-p buffer) (get-buffer-window buffer t))
           (user-error "Review view unavailable"))

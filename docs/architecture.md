@@ -16803,15 +16803,15 @@ THE THREADS, a section below the files and not a view of their own: the
 heading is the library's filter buttons with their counts
 (`change-review-ui-threads-heading`, the drafts not sent left to the
 control that sends them while the task is at work, else counted there),
-then the review's controls in their groups
-(`harness-ui-patch-review--control-lines`): the threads' ([New thread],
-[Close], [Reviewed], [Edit draft], [Delete draft], [Delete thread],
-[Fold thread]), the navigation's ([Next thread], [Previous thread],
-[Next comment], [Previous comment], [Diff], [Source]) and the view's
-([Expand all], [Collapse all], [Send drafts], [Filter], [Keys]).  The
-controls wrap under their group's title where the surface is narrow, so
-a narrow window gets rows of whole controls rather than controls cut
-off.  Then the threads of the status the buffer's filter lets through
+then the few controls the threads need, on one line fitted to the window
+(`harness-ui-patch-review--control-lines`): [New thread], [Expand all],
+[Collapse all], [Send drafts] while the task is at work, and [Keys].
+The commands a thread's own header offers -- [Reply], [Close], [Diff],
+[Delete thread] -- and the keys that move between threads and comments
+are not drawn again: [Keys] (C-c ?) lists every one of them with its key,
+and a click on a row of it runs the command.  A narrow window puts a
+control that does not fit on the line under, so each is whole rather than
+cut off.  Then the threads of the status the buffer's filter lets through
 (`change-review-ui-threads-string`: by file, the change as a whole
 first, each as the threads view draws it, with [Reply] [Close] [Diff]
 and `▸ where`), each file under its own heading.  A view that offers the
@@ -16874,10 +16874,12 @@ difference reviewed, one that waits first), T, TAB, e, k, K, a, s,
 u, t, S, C-c ?, n, M-n, M-p, N, P and q (under evil, `evil-normalize-keymaps` puts it where
 evil-collection made Ediff's map overriding) and a brief help of its
 own (`ediff-brief-help-message-function`): one line of facts about the
-file under comparison and the review, then the controls in their groups
--- Threads, Navigate, Diff and View -- drawn by the same model the
-threads view and the report draw them with, each whole and wrapping at
-the panel's width rather than cut off, with [Keys] for the whole list.
+file under comparison and the review, then the few controls the panel
+alone offers -- [Comment], [Approve], [Next file], [Previous file], the
+three settings it shows the state of, [Send drafts] at work, [Keys] and
+[Report] -- drawn by the same model the threads view and the report draw
+them with, each whole and on the next line where the panel is narrow
+rather than cut off, with [Keys] for every command of the review.
 Ediff sizes the panel once, to the help it composed before the review's
 keys and file were installed, so the review fits the window to the help
 it draws again, to the lines the controls take

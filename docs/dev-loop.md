@@ -429,10 +429,13 @@ the tool call that ran the command -- rather than describing it.
 
 ## Review and permission messages
 
-Review changes shows the review's facts in one line and its controls in
-groups -- Threads, Navigate, Diff and View -- under them; a control's
-tooltip says what it does, and [Keys] (C-c ?) lists every key of the
-review, Ediff's own included, in a buffer of its own. For example, the
+Review changes shows the review's facts in one line and, under it, the
+few controls the surface needs -- [New thread], [Expand all], [Collapse
+all], [Send drafts] and [Keys] in the threads, and the panel's own beside
+Ediff; a control's tooltip says what it does, and [Keys] (C-c ?) lists
+every key of the review by group -- Threads, Navigate, Diff and View --
+each with a click that runs it, Ediff's own included, in a buffer of its
+own. For example, the
 file hint in the tree starts `RET: compare  a: approve  n/p: files
 T: threads`.
 

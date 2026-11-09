@@ -1386,14 +1386,24 @@ point on the next one.  The box stays in sight under Ediff."
           ;; Ediff's own keys are still there.
           (should (eq #'harness-ui-patch-review-next-difference (key-binding "n")))
           (should (eq ediff-brief-help-message-function #'harness-ui-patch-review--ediff-help))
-          (should (string-search "[Report] q" (harness-ui-patch-review-test--text control)))
-          (should (string-search "[Next thread] M-n" (harness-ui-patch-review-test--text control)))
-          (should (string-search "[Previous thread] M-p" (harness-ui-patch-review-test--text control)))
-          ;; The brief help says which file of the six this is; none seen yet,
-          ;; and the thread controls are apart from the diff's.
-          (should (string-search "File 1 of 6 · 0 viewed\n" (harness-ui-patch-review-test--text control)))
-          (should (string-search "[Comment] c" (harness-ui-patch-review-test--text control)))
-          (should (string-search "[Approve] a" (harness-ui-patch-review-test--text control)))
+          ;; The brief help: the file of the six this is, none seen yet,
+          ;; then the panel's own few controls, in their order.
+          (let ((text (harness-ui-patch-review-test--text control)))
+            (should (string-prefix-p "File 1 of 6 · 0 viewed\n" text))
+            (should (string-match-p
+                     "\\`File 1 of 6 · 0 viewed\n\\(  \\[[^\n]+\n\\)+\\'" text))
+            ;; The task waits for review: its drafts go with the feedback,
+            ;; so [Send drafts] is not among the panel's controls.
+            (let ((labels (mapcar (lambda (label) (string-match (regexp-quote label) text))
+                                  '("[Comment] c" "[Approve] a" "[Next file] N"
+                                    "[Previous file] P" "[✓ Skip approved] s"
+                                    "[✓ Auto-approve] u" "[✓ Files] t"
+                                    "[Keys] C-c ?" "[Report] q"))))
+              (should (cl-every #'identity labels))
+              (should (equal labels (sort (copy-sequence labels) #'<)))
+              (should-not (string-search "[Send" text)))
+            (dolist (label '("[Reply]" "[Close]" "[Reviewed]" "[Next thread]" "[Fold thread]"))
+              (should-not (string-search label text))))
           ;; On the first difference: line 2 on the branch.
           (should (= 0 ediff-current-difference))
           (should (= 2 ediff-number-of-differences))
@@ -2559,8 +2569,18 @@ harness's copy too, and a thread with a comment that was sent is never deleted."
         (with-current-buffer control
           (should (eq #'harness-ui-patch-review-delete-comment (key-binding "k")))
           (should (eq #'harness-ui-patch-review-delete-thread (key-binding "K"))))
-        (should (string-search "[Delete draft] k" (harness-ui-patch-review-test--text control)))
-        (should (string-search "[Delete thread] K" (harness-ui-patch-review-test--text control)))
+        ;; The keys are the panel's; the list of every one says what k and K
+        ;; do, with the command a click on it runs.
+        (let (keys)
+          (cl-letf (((symbol-function 'display-buffer) #'ignore))
+            (setq keys (harness-ui-patch-review-keys 'ediff)))
+          (unwind-protect
+              (with-current-buffer keys
+                (should (string-search "  k       Delete draft   Delete the draft at the difference\n"
+                                       (buffer-substring-no-properties (point-min) (point-max))))
+                (should (string-search "  K       Delete thread   Delete a thread of drafts at the difference\n"
+                                       (buffer-substring-no-properties (point-min) (point-max)))))
+            (kill-buffer keys)))
         (with-current-buffer new
           (should (eq #'harness-ui-patch-review-delete-comment (key-binding "k")))
           (should (eq #'harness-ui-patch-review-delete-thread (key-binding "K"))))
@@ -2742,13 +2762,28 @@ and RET on it act in the report."
       (harness-ui-patch-review-test--wait-text popout "^▾ Changes (6) .*   2 open, 1 closed \\[Threads\\]")
       (let ((text (harness-ui-patch-review-test--text popout)))
         ;; Below the files, under a heading with the filter buttons, then the
-        ;; review's controls in their groups, then the threads.
+        ;; few controls of the threads, then the threads.
         (should (< (string-match "^▾ Threads  \\[open 2\\] +to review 0 +reviewed 0 +closed 1 +all 3" text)
-                   (string-match "^  Threads  \\[New thread\\] c" text)
+                   (string-match "^  \\[New thread\\] c" text)
                    (string-match "^▾   a\\.el +1 thread$" text)))
+        ;; The heading keeps the four controls the thread lines do not have,
+        ;; on the lines under the filters, and no key legend beside them.
         (dolist (label '("[New thread] c" "[Expand all] E" "[Collapse all] C"
                          "[Keys] C-c ?"))
           (should (string-search label text)))
+        (let* ((lines (split-string text "\n"))
+               (start (1+ (cl-position-if (lambda (line)
+                                            (string-prefix-p "▾ Threads" line))
+                                          lines)))
+               (heading (mapconcat #'identity
+                                   (seq-take-while (lambda (line) (string-prefix-p "  [" line))
+                                                   (nthcdr start lines))
+                                   "\n")))
+          (should (string-prefix-p "  [New thread] c" heading))
+          (dolist (label '("[Close]" "[Reviewed]" "[Edit draft]" "[Delete draft]"
+                           "[Delete thread]" "[Fold thread]" "[Next thread]"
+                           "[Filter]" "[Send drafts]"))
+            (should-not (string-search label heading))))
         ;; The task waits for review: its drafts go with the feedback, so
         ;; [Send drafts] is not among its controls.
         (should-not (string-match-p "\\[Send \\(?:[0-9]+ \\)?drafts\\]" text))
@@ -2950,7 +2985,6 @@ been left."
         (should (window-live-p box))
         (with-current-buffer control
           (should (eq #'harness-ui-patch-review-edit-comment (key-binding "e")))
-          (should (string-search "[Edit draft] e" (harness-ui-patch-review-test--text control)))
           ;; No thread at the difference yet: e is the box, and says why.
           (let (said)
             (cl-letf (((symbol-function 'message)
@@ -3065,27 +3099,26 @@ between buttons when it does not fit."
         (with-current-buffer control
           (harness-ui-patch-review-test--comment "Why two?")
           (call-interactively #'harness-ui-patch-review-approve-ediff)
-          ;; The help: where the reviewer is, then the controls in their
-          ;; groups -- the threads' never among the diff's -- and every one
-          ;; whole and inside the panel at any width.
+          ;; The help: where the reviewer is, then the panel's own few
+          ;; controls, whole and inside the panel at any width.
           (let ((help (cl-letf (((symbol-function 'window-max-chars-per-line)
+                                 (lambda (&rest _) 400))
+                                ((symbol-function 'window-body-width)
                                  (lambda (&rest _) 400)))
                         (harness-ui-patch-review--ediff-help))))
-            (should (string-prefix-p "File 1 of 6 · 1 viewed · 1 approved · 1 thread · 1 draft\n" help))
-            (let* ((lines (split-string help "\n" t))
-                   (threads (seq-find (lambda (line) (string-prefix-p "  Threads  " line)) lines))
-                   (diff (seq-find (lambda (line) (string-prefix-p "  Diff  " line)) lines))
-                   (view (seq-find (lambda (line) (string-prefix-p "  View  " line)) lines)))
-              (should (string-search "[Comment] c" threads))
-              (should (string-search "[Reply] r" threads))
-              (should-not (string-search "[Approve]" threads))
-              (should (string-search "[Approve] a" diff))
-              (should (string-search "[Next file] N" diff))
-              (should-not (string-search "[Comment]" diff))
-              (should (string-search "[Keys] C-c ?" view))
-              (should (string-search "[Report] q" view))))
+            (should (equal (substring-no-properties help)
+                           (concat "File 1 of 6 · 1 viewed · 1 approved · 1 thread · 1 draft\n"
+                                   "  [Comment] c  [Approve] a  [Next file] N  [Previous file] P"
+                                   "  [✓ Skip approved] s  [✓ Auto-approve] u  [✓ Files] t"
+                                   "  [Keys] C-c ?  [Report] q\n")))
+            ;; A command a thread's own header offers is not drawn again.
+            (dolist (label '("[Reply]" "[Close]" "[Reviewed]" "[Diff]"
+                             "[Next thread]" "[Previous thread]" "[Fold thread]"))
+              (should-not (string-search label help))))
           (dolist (width '(60 40 24))
             (let ((help (cl-letf (((symbol-function 'window-max-chars-per-line)
+                                   (lambda (&rest _) width))
+                                  ((symbol-function 'window-body-width)
                                    (lambda (&rest _) width)))
                           (harness-ui-patch-review--ediff-help))))
               (dolist (line (split-string help "\n" t))
@@ -6643,7 +6676,6 @@ first comes back."
         ;; From the control panel: the current difference is line 2, where the thread is.
         (with-current-buffer control
           (should (eq #'harness-ui-patch-review-cycle-fold (key-binding (kbd "TAB"))))
-          (should (string-search "[Fold thread] TAB" (harness-ui-patch-review-test--text control)))
           (should (= 0 ediff-current-difference))
           (call-interactively #'harness-ui-patch-review-cycle-fold))
         (change-review-ui-flush)
@@ -6773,55 +6805,53 @@ they are drawn again when a window changes its size."
         (ignore thread)
         (with-current-buffer control (call-interactively #'harness-ui-patch-review-ediff-quit))))))
 
-(ert-deftest harness-ui-patch-review-controls-are-grouped-at-any-width ()
-  "The review's controls are drawn in their groups, and no group takes another's.
-The thread controls, going between them, the file's diff and the view's
-settings stay apart; a narrow surface wraps its controls rather than cutting
-one off, and the threads view has all of them."
+(ert-deftest harness-ui-patch-review-controls-are-few-and-whole-at-any-width ()
+  "The few controls a surface keeps are on one line, whole, at any width.
+The threads' heading keeps what starts a thread, opens and folds the
+threads, sends the drafts and lists every key; the panel beside it keeps
+what only it can do; neither repeats the commands a thread's own line
+offers, with a key beside every one.  A narrow surface puts the rest on
+the lines under, never cutting a control off."
   (let ((ediff (harness-ui-patch-review--control-lines 'ediff 80 nil))
         (threads (harness-ui-patch-review--control-lines 'threads 80 nil))
         (pane (harness-ui-patch-review--control-lines 'pane 80 nil)))
-    (should (string-prefix-p "  Threads  [Comment] c  [Reply] r" ediff))
-    (should (string-match-p "\n  Navigate \\[Next thread\\] M-n" ediff))
-    (should (string-match-p "\n  Diff     \\[Approve\\] a  \\[Next file\\] N" ediff))
-    (should (string-match-p "\n  View     \\[✓ Skip approved\\] s" ediff))
-    ;; The threads' controls never join the diff's group.
-    (should-not (string-match-p "Diff .*\\[Comment\\]" ediff))
-    (should-not (string-match-p "Diff .*\\[Reply\\]" ediff))
-    ;; The threads view has the review's controls, and the pane the way back.
-    (should (string-prefix-p "  Threads  [New thread] c" threads))
-    (should (string-match-p "\n  View     \\[Expand all\\] E" threads))
-    (should (string-search "[Keys] C-c ?" threads))
-    (should (string-prefix-p "  Threads  [New thread] c" pane))
-    (should (string-search "[Ediff] T" pane))
+    ;; The threads' heading: the commands the thread lines do not have.
+    (should (equal (substring-no-properties threads)
+                   (concat "  [New thread] c  [Expand all] E  [Collapse all] C  [Send drafts] S\n"
+                           "  [Keys] C-c ?\n")))
+    ;; The pane adds the way back to the comparison and nothing else.
+    (should (equal (substring-no-properties pane)
+                   (concat "  [New thread] c  [Expand all] E  [Collapse all] C  [Send drafts] S\n"
+                           "  [Keys] C-c ?  [Ediff] T\n")))
+    ;; The panel: the thread it is on, the file's neighbours and settings.
+    (should (equal (substring-no-properties ediff)
+                   (concat "  [Comment] c  [Approve] a  [Next file] N  [Previous file] P\n"
+                           "  [✓ Skip approved] s  [✓ Auto-approve] u  [✓ Files] t  [Send drafts] S\n"
+                           "  [Keys] C-c ?  [Report] q\n")))
+    ;; A command a thread's own line offers is not drawn again.
+    (dolist (label '("[Close]" "[Reopen]" "[Reviewed]" "[Reply]" "[Diff]"
+                     "[Delete draft]" "[Delete thread]" "[Fold thread]"
+                     "[Edit draft]" "[Filter]" "[Next thread]" "[Previous thread]"
+                     "[Next comment]" "[Previous comment]" "[Source]"))
+      (should-not (string-search label threads))
+      (should-not (string-search label pane)))
     (dolist (text (list ediff threads pane))
       (dolist (line (split-string text "\n" t))
         (should (<= (string-width line) 80)))))
-  ;; A skinny surface: each control whole, and inside the width, the
-  ;; panel's diff controls and the pane's way back among them.
-  (dolist (width '(40 32 30 24))
-    (dolist (surface '(pane ediff))
+  ;; A skinny surface: each control whole, and inside the width.
+  (dolist (width '(60 46 40 32 24))
+    (dolist (surface '(threads pane ediff))
       (let ((text (harness-ui-patch-review--control-lines surface width nil)))
         (dolist (line (split-string text "\n" t))
           (should (<= (string-width line) width)))
-        (dolist (label (if (eq surface 'ediff)
-                           '("[Comment] c" "[Keys] C-c ?")
-                         '("[New thread] c" "[Keys] C-c ?")))
-          (should (string-search label text)))
-        (should (or (string-search (if (eq surface 'ediff)
-                                       "[Prev thread] M-p"
-                                     "[Prev thread] P")
-                                   text)
-                    (string-search (if (eq surface 'ediff)
-                                       "[Previous thread] M-p"
-                                     "[Previous thread] P")
-                                   text)))
-        (should (string-search "[Fold thread] TAB" text))
-        (when (eq surface 'ediff)
-          (should (string-search "[Approve] a" text))
-          (should (string-search "[Reply] r" text)))
-        (when (eq surface 'pane)
-          (should (string-search "[Ediff] T" text)))))))
+        (dolist (label (pcase surface
+                         ('ediff '("[Comment] c" "[Approve] a" "[Next file] N"
+                                   "[Previous file] P" "[Keys] C-c ?" "[Report] q"))
+                         ('pane '("[New thread] c" "[Expand all] E"
+                                  "[Collapse all] C" "[Keys] C-c ?" "[Ediff] T"))
+                         (_ '("[New thread] c" "[Expand all] E"
+                              "[Collapse all] C" "[Keys] C-c ?"))))
+          (should (string-search label text)))))))
 
 (ert-deftest harness-ui-patch-review-controls-say-what-they-do ()
   "The controls' names and tooltips are the words the review shows.
@@ -6850,32 +6880,88 @@ each tooltip a phrase, asked of the one model every surface draws."
                      ("Send drafts" . "Send the drafts to the agent together, while the task is at work")
                      ("Filter" . "Which threads show")
                      ("Keys" . "Every key of the review")))))
-  ;; The panel's own names, with the settings' checks in front of them.
-  (let ((labels (mapcar (lambda (spec) (plist-get spec :label))
-                        (apply #'append
-                               (mapcar #'cdr (harness-ui-patch-review--control-specs 'ediff nil))))))
-    (dolist (label '("Comment" "Reply" "Approve" "Next file" "Previous file"
+  ;; The drawn controls are those of the groups, and never the others.
+  (let ((labels (lambda (surface)
+                  (mapcar (lambda (spec) (plist-get spec :label))
+                          (apply #'append
+                                 (mapcar #'cdr
+                                         (harness-ui-patch-review--control-specs
+                                          surface nil t)))))))
+    (should (equal (funcall labels 'threads)
+                   '("New thread" "Expand all" "Collapse all" "Send drafts" "Keys")))
+    (should (equal (funcall labels 'pane)
+                   '("New thread" "Expand all" "Collapse all" "Send drafts" "Keys" "Ediff")))
+    (should (equal (funcall labels 'ediff)
+                   '("Comment" "Approve" "Next file" "Previous file"
                      "✓ Skip approved" "✓ Auto-approve" "✓ Files"
-                     "Send drafts" "Keys" "Report"))
-      (should (member label labels)))))
+                     "Send drafts" "Keys" "Report")))
+    ;; Every command of the surface is in the keys list, drawn or not.
+    (should (equal (mapcar (lambda (group) (car group))
+                           (harness-ui-patch-review--control-specs 'threads nil))
+                   '("Threads" "Navigate" "View")))
+    (should (equal (mapcar (lambda (spec) (plist-get spec :label))
+                           (apply #'append
+                                  (mapcar #'cdr
+                                          (harness-ui-patch-review--control-specs
+                                           'threads nil))))
+                   '("New thread" "Close" "Reviewed" "Edit draft" "Delete draft"
+                     "Delete thread" "Fold thread" "Next thread" "Previous thread"
+                     "Next comment" "Previous comment" "Diff" "Source"
+                     "Expand all" "Collapse all" "Send drafts" "Filter" "Keys")))))
 
 (ert-deftest harness-ui-patch-review-keys-are-listed-in-one-place ()
   "The review's keys, their labels and what they do are in one buffer,
-grouped as the controls are; Ediff's own keys end the list."
-  (let (buffer)
-    (cl-letf (((symbol-function 'display-buffer) #'ignore))
-      (setq buffer (harness-ui-patch-review-keys 'ediff)))
+grouped as the controls are; Ediff's own keys end the list.  Every row
+is a button, so a command the surfaces keep off their lines can still be
+clicked."
+  (let (buffer (origin (generate-new-buffer " *review origin*")))
     (unwind-protect
-        (with-current-buffer buffer
-          (should (eq 'special-mode major-mode))
-          (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-            (should (string-prefix-p "Review keys\n\nThreads\n" text))
-            (should (string-search "  c  Comment   Comment on the current difference\n" text))
-            (should (string-search "  M-n  Next thread   Next thread of the file\n" text))
-            (should (string-search "  a  Approve   Approve the file; a second press takes it off\n" text))
-            (should (string-search "  C-c ?  Keys   Every key of the review\n" text))
-            (should (string-search "Ediff\n  ?  Ediff's own keys, in its control panel\n" text))))
-      (kill-buffer buffer))))
+        (progn
+          (cl-letf (((symbol-function 'display-buffer) #'ignore))
+            (with-current-buffer origin
+              (setq buffer (harness-ui-patch-review-keys 'ediff))))
+          (with-current-buffer buffer
+            (should (eq 'special-mode major-mode))
+            (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+              (should (string-prefix-p "Review keys\n\nThreads\n" text))
+              (should (string-search "  c       Comment   Comment on the current difference\n" text))
+              (should (string-search "  M-n     Next thread   Next thread of the file\n" text))
+              (should (string-search "  a       Approve   Approve the file; a second press takes it off\n" text))
+              (should (string-search "  C-c ?   Keys   Every key of the review\n" text))
+              (should (string-search "Ediff\n  ?  Ediff's own keys, in its control panel\n" text))
+              ;; Every row's label is a button with the control's tooltip.
+              (dolist (row '(("  c       " "Comment" "Comment on the current difference")
+                             ("  M-n     " "Next thread" "Next thread of the file")
+                             ("  a       " "Approve"
+                              "Approve the file; a second press takes it off")
+                             ("  C-c ?   " "Keys" "Every key of the review")
+                             ("  q       " "Report" "Back to the report")))
+                (goto-char (point-min))
+                (should (search-forward (concat (nth 0 row) (nth 1 row) "   ")
+                                        nil t))
+                (goto-char (match-beginning 0))
+                (search-forward (nth 0 row))
+                (should (equal (nth 1 row) (button-label (button-at (point)))))
+                (should (equal (nth 2 row)
+                               (get-text-property (point) 'help-echo)))
+                (should (keymapp (get-text-property (point) 'keymap))))
+              ;; Ediff's own keys are no row of the review's, and no button.
+              (goto-char (point-min))
+              (search-forward "Ediff's own keys" nil t)
+              (should-not (button-at (match-beginning 0)))))
+          ;; A click runs the command where the list was asked from.
+          (with-current-buffer buffer
+            (goto-char (point-min))
+            (search-forward "  C-c ?   Keys   " nil t)
+            (goto-char (match-beginning 0))
+            (search-forward "Keys")
+            (let ((called nil))
+              (cl-letf (((symbol-function 'harness-ui-patch-review-keys)
+                         (lambda (&rest _) (setq called (current-buffer)))))
+                (push-button (1- (point)))
+                (should (eq called origin))))))
+      (kill-buffer buffer)
+      (kill-buffer origin))))
 
 (ert-deftest harness-ui-patch-review-cuts-long-replies-and-folds-many-in-ediff ()
   "A thread of many replies under a line of the version Ediff shows draws its
@@ -7975,6 +8061,9 @@ BODY may replace DATA after adding threads or versions to REVIEW."
   "Named closed threads are full and targeted, without changing their status."
   (harness-ui-patch-review-test-with-tool-review
     (let* ((harness-ui-patch-review-ediff-tree t)
+           ;; A comment longer than 15 lines is cut with [Show more]; the
+           ;; tool opens the thread full, and this shows the whole of it.
+           (change-review-ui-max-comment-lines nil)
            (set (harness-ui-patch-review--r-set review))
            (body (concat "Who used b3?\n" (apply #'concat (make-list 14 "Closed-thread detail.\n"))
                          "Final closed-thread detail."))
@@ -8003,7 +8092,18 @@ BODY may replace DATA after adding threads or versions to REVIEW."
             (with-current-buffer buffer
               (should (eq 'all change-review-ui--filter))
               (should (= (point) (window-point (get-buffer-window buffer t)))))
-            (should (string-search "Final closed-thread detail." (harness-ui-patch-review-test--text buffer)))
+            ;; The pane is narrow: the words wrap, each line under the
+            ;; bar of the thread, and it is the whole of the comment that
+            ;; is there, not just what one line has room for.
+            (should (string-search
+                     "Final closed-thread detail."
+                     (with-temp-buffer
+                       (insert (harness-ui-patch-review-test--text buffer))
+                       (goto-char (point-min))
+                       (while (re-search-forward "^[^\n┃]*┃[ \t]*" nil t)
+                         (replace-match ""))
+                       (replace-regexp-in-string "[ \t\n]+" " "
+                                                 (buffer-string)))))
             (when (equal view "ediff")
               (let* ((state (harness-ui-patch-review--r-ediff review))
                      (old (plist-get state :a)))
@@ -8011,6 +8111,34 @@ BODY may replace DATA after adding threads or versions to REVIEW."
                 (should (equal id (plist-get state :thread)))
                 (with-current-buffer old
                   (should (= 3 (line-number-at-pos (window-point (get-buffer-window old t))))))))))))))
+
+(ert-deftest harness-ui-patch-review-tool-open-draws-the-threads-as-the-review-does ()
+  "The threads view the tool opens is the review's: the facts of the review and
+the threads' few controls above the threads, not the library's line of keys."
+  (harness-ui-patch-review-test-with-tool-review
+    (let* ((comment (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"))
+           (id (change-review-thread-id (harness-ui-patch-review-test--thread-of review comment))))
+      ;; The tool reads the set from the harness's copy of the review.
+      (setq data (change-review-set-to-data (harness-ui-patch-review--r-set review)))
+      (let* ((buffer (get-buffer (plist-get (harness-ui-patch-review-test--tool-result
+                                           (harness-ui-patch-review-tool-open
+                                            (list :task "t-patch" :view "threads" :thread id)))
+                                          :buffer))))
+      (should (buffer-live-p buffer))
+      (with-current-buffer buffer
+        (should (eq 'change-review-threads-mode major-mode))
+        (let ((text (harness-ui-patch-review-test--text buffer)))
+          ;; The review's facts and the threads' controls, in that order.
+          (should (string-prefix-p (concat (harness-ui-patch-review--title review)
+                                           " · v1 of 1 · 1 thread · 1 draft\n"
+                                           "Threads   open 1   to review 0   reviewed 0"
+                                           "   closed 0  [all 1]     1 draft not sent\n")
+                                   text))
+          (should (string-search "\n  [New thread] c  [Expand all] E  [Collapse all] C"
+                                 text))
+          (should (string-search "  [Keys] C-c ?\n" text))
+          ;; Not the library's own line of every key.
+          (should-not (string-search "n/p comments" text))))))))
 
 (ert-deftest harness-ui-patch-review-tool-open-rejects-an-invalid-diff-not-the-retained-one ()
   "A failed revision selection is a rejected promise, not a base-diff receipt."

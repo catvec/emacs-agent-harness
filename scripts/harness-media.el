@@ -4693,6 +4693,9 @@ them; the one the reviewer closed themselves is not here."
     (harness-media--reset-layout)
     (let ((buffer (change-review-open-threads
                    (harness-ui-patch-review--r-set harness-media--review) 'unreviewed)))
+      ;; As the review opens it: its facts and its controls above the
+      ;; threads, not the library's own line of keys.
+      (harness-ui-patch-review--prepare-threads-view harness-media--review buffer)
       (delete-other-windows)
       (with-current-buffer buffer
         (goto-char (point-min))
@@ -4703,6 +4706,25 @@ them; the one the reviewer closed themselves is not here."
       (set-window-start nil (point-min))
       (harness-media--settle 0.5))
     (harness-media--capture "review-to-review")))
+
+(defun harness-media-shot-review-keys ()
+  "Every key of the review, in a buffer of its own, each with a click.
+The threads' heading keeps a few controls and [Keys] (C-c ?); this is what
+[Keys] opens: the review's commands by group, their keys and what they do,
+the ones a thread's own line offers among them, which none of the surfaces
+draws a legend of."
+  (let ((popout (harness-media--review-layout)))
+    (ignore popout)
+    (harness-media--reset-layout)
+    (harness-media--view
+     (lambda ()
+       (let ((buffer (change-review-open-threads
+                      (harness-ui-patch-review--r-set harness-media--review) 'all)))
+         (harness-ui-patch-review--prepare-threads-view harness-media--review buffer)
+         (switch-to-buffer buffer)
+         ;; [Keys] opens its buffer beside the view; the picture is of it.
+         (switch-to-buffer (harness-ui-patch-review-keys 'threads)))))
+    (harness-media--capture "review-keys")))
 
 (defun harness-media--review-diff-read-p (review selector)
   "Non-nil when REVIEW shows the diff SELECTOR, read and its threads placed."
@@ -5077,6 +5099,7 @@ names."
     ("review-banner" . harness-media-shot-review-banner)
     ("review-ediff" . harness-media-shot-review-ediff)
     ("review-to-review" . harness-media-shot-review-to-review)
+    ("review-keys" . harness-media-shot-review-keys)
     ;; After them: it chooses another diff, and puts the first back.
     ("review-diff" . harness-media-shot-review-diff)
     ;; It takes review-select on the way.
