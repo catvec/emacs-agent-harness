@@ -14603,6 +14603,18 @@ from, and with nothing new from the remote `harness--updated` then
 reloads, as it does for commits that came in, when the commit this Emacs
 noted on loading (`harness-revision--loaded`, of the same checkout) is
 not the checkout's -- the outcome is "updated", with a count of none.
+The reload is the running code's.  A tree an update installed was checked
+by another Emacs first, and it may hold what the running code does not
+expect -- a module's tests beside it, the shared helper they require in
+test/ (`docs/design/co-located-module-tests.md`) -- so its reload can be
+refused where the tree's own is not.  Then the tree's `harness.el` is
+loaded, and its `harness--reload` runs instead
+(`harness--update-reload`), which finishes the update in the Emacs that
+made it; only such a verified tree is loaded.  A checkout that moved on
+by itself was checked by no Emacs, and a reload the installed tree
+refuses or a `harness.el` that does not load leave the first refusal:
+then the message says to restart Emacs
+(`docs/design/reload-with-the-installed-tree.md`).
 A detached HEAD, or a checkout with no remote, is refused with a message
 that says so.  What to do without updating is said too: reload when the
 loaded checkout moved on, push when only a local checkout has them.  The

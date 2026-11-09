@@ -598,6 +598,35 @@ straight-pull-package RET emacs-agent-harness would find no package."
     (should (string-match-p "Failed: it has local changes" (harness-ui-version-test--text)))
     (should (eq 'harness-failure-face (harness-ui-version-test--face-of "Failed:")))))
 
+(ert-deftest harness-ui-version-restarts-for-a-process-left-behind ()
+  "An update the tree reloaded asks for a restart when the process was left behind.
+The harness process runs the code this Emacs ran before the tree came
+in, and a reload cannot teach it the tree (`harness--update-reload').
+The page offers the restart for that, as it does for a refusal, and
+only where there is a process of this Emacs to restart."
+  (harness-ui-version-test-with-page
+      (harness-ui-version-test--report "latest" (harness-ui-version-test--loaded))
+    (setq harness--last-update
+          (list :state "updated" :from "1111111" :to "2222222" :count 1
+                :commits (list (list :commit (harness-ui-version-test--hash ?b)
+                                     :subject "Second"
+                                     :date (- (float-time) 120)))
+                :reload (list :files 189 :process-stale t)
+                :at (- (float-time) 60)))
+    (let ((harness-ui-connection-address 'process))
+      (harness-ui-version--render)
+      (should (member "[Restart]" (harness-ui-version-test--buttons)))
+      ;; A server elsewhere is not this Emacs's to restart.
+      (let ((harness-ui-connection-address "box:7000"))
+        (harness-ui-version--render)
+        (should-not (member "[Restart]" (harness-ui-version-test--buttons)))))
+    ;; A reload that left nothing behind offers none.
+    (setq harness--last-update
+          (harness-plist-merge harness--last-update (list :reload (list :files 189))))
+    (let ((harness-ui-connection-address 'process))
+      (harness-ui-version--render)
+      (should-not (member "[Restart]" (harness-ui-version-test--buttons))))))
+
 (ert-deftest harness-ui-version-shows-a-plugin-update ()
   "A plugin updated in its own checkout says so, and offers the restart.
 A plugin's code loads once per process, so an update is not running

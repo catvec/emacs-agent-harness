@@ -117,12 +117,15 @@ A harness from before the move that is already running, with
 `harness-enabled-modules` t, still takes every file under the module
 directories for a module when it reloads after such an update -- its
 module list leaves out only what its code knew to leave out -- and
-compiles the suites before it loads the new `harness.el`.  The update
-is installed, the reload is refused, and the version page offers
-`[Restart]`: the one-time cost of the move, after which the check and
-the reload both leave the tests out.  Making the old reload find the
-helper instead would load the suites into the running harness as if
-they were modules, which is what this change makes sure never happens.
+compiles the suites before it loads the new `harness.el`.  Its reload is
+refused, and the update does not end there: the tree it installed was
+checked by another Emacs, so its own `harness.el` is loaded and its
+reload, which leaves the tests out, finishes the update in place
+\(`harness--update-reload`, see
+[reload-with-the-installed-tree.md](reload-with-the-installed-tree.md)).
+Making the old reload find the helper instead would load the suites into
+the running harness as if they were modules, which is what this change
+makes sure never happens.
 
 ## Test runner
 

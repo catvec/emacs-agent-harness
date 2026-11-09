@@ -697,6 +697,84 @@ and the version page beside the message says it is not the latest."
         (should (string-match-p (format "still runs %s: restart Emacs to load it" running) (car shown)))
         (should-not (string-match-p "reset --keep" (car shown)))))))
 
+(defvar harness-update-test--loaded nil
+  "Non-nil once the harness.el of a tree a test stands in for has loaded.")
+
+(ert-deftest harness-update-reload-of-an-installed-tree-loads-its-harness-el ()
+  "A refusal of the running code is made again by the tree the update installed.
+That tree was checked by another Emacs before it was installed, so its
+harness.el may be loaded, and its reload is the one that knows what the
+tree holds: the suites beside its modules, and the helper they require
+in test/.  The harness process runs the older code, so the result says
+it waits for a restart, and it is not asked to reload a tree it would
+refuse."
+  (let ((dir (file-name-as-directory (harness-test-temp-dir)))
+        (harness-update-test--loaded nil)
+        (harness-process t)
+        (reloads 0)
+        result)
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "harness.el" dir)
+            (insert ";;; harness.el --- the tree an update installed  -*- lexical-binding: t; -*-\n"
+                    "(setq harness-update-test--loaded t)\n"
+                    "(defun harness--reload (&optional no-process)\n"
+                    "  (list :files 7 :errors nil :no-process no-process))\n"
+                    "(provide 'harness)\n"))
+          ;; The running code refuses the tree; the tree's own reload
+          ;; takes what it holds.
+          (cl-letf (((symbol-function 'harness--reload)
+                     (lambda (&optional _no-process)
+                       (cl-incf reloads)
+                       (if harness-update-test--loaded
+                           (list :files 7 :errors nil)
+                         (list :refused
+                               '("harness-ui-chat-test.el: Cannot open load file: harness-test-helpers"))))))
+            (setq result (harness--update-reload dir t)))
+          ;; The running code's reload was refused once; then the tree's
+          ;; own harness.el loaded, and its reload answered.
+          (should (= 1 reloads))
+          (should harness-update-test--loaded)
+          (should (equal 7 (plist-get result :files)))
+          (should-not (plist-get result :refused))
+          ;; The process runs the older code, and is not asked to reload.
+          (should (eq t (plist-get result :no-process)))
+          (should (eq t (plist-get result :process-stale))))
+      (delete-directory dir t))))
+
+(ert-deftest harness-update-reload-of-a-tree-that-moved-on-keeps-the-refusal ()
+  "A checkout that moved on by itself was checked by no Emacs, so it is not loaded.
+Only a tree an update installed and verified may load its harness.el
+before the reload, which is what makes doing so safe."
+  (let ((dir (file-name-as-directory (harness-test-temp-dir)))
+        (harness-update-test--loaded nil)
+        result)
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "harness.el" dir)
+            (insert "(setq harness-update-test--loaded t)\n"))
+          (cl-letf (((symbol-function 'harness--reload)
+                     (lambda () (list :refused '("harness-ui-chat-test.el: oops")))))
+            (setq result (harness--update-reload dir nil)))
+          (should-not harness-update-test--loaded)
+          (should (equal '("harness-ui-chat-test.el: oops") (plist-get result :refused))))
+      (delete-directory dir t))))
+
+(ert-deftest harness-update-reload-of-an-installed-tree-that-does-not-load-keeps-the-refusal ()
+  "When the installed tree's harness.el cannot load, the first refusal stands."
+  (let ((dir (file-name-as-directory (harness-test-temp-dir)))
+        result)
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "harness.el" dir)
+            (insert ";;; -*- lexical-binding: t; -*-\n"
+                    "(error \"the tree does not load\")\n"))
+          (cl-letf (((symbol-function 'harness--reload)
+                     (lambda () (list :refused '("harness-ui.el: oops")))))
+            (setq result (harness--update-reload dir t)))
+          (should (equal '("harness-ui.el: oops") (plist-get result :refused))))
+      (delete-directory dir t))))
+
 (ert-deftest harness-update-nothing-new-and-nothing-known-of-what-runs-is-up-to-date ()
   "Without a commit the harness is known to run, or one of another checkout, nothing is reloaded."
   (harness-update-test-with-clone

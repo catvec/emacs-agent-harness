@@ -691,14 +691,19 @@ a project's own checkout is fast-forwarded there, and a restart loads it."
 (defun harness-ui-version--restart-action ()
   "Return the action restarting the harness process, when it needs one.
 A harness reload that was refused or failed needs one, and so does a
-plugin update: plugins load once per process."
+plugin update: plugins load once per process.  So does an update that
+reloaded this Emacs with the tree that came in, when the running code
+refused the tree: the harness process runs that code, and a reload
+cannot teach it the tree (`harness--update-reload')."
   (when (and (eq harness-ui-connection-address 'process)
              (or (let ((result (harness-ui-version--last-update)))
                    (and result
                         (pcase (plist-get result :state)
                           ("updated" (let ((reload (plist-get result :reload)))
-                                       (and reload (or (plist-get reload :refused)
-                                                       (plist-get reload :errors)))))
+                                       (and reload
+                                            (or (plist-get reload :refused)
+                                                (plist-get reload :errors)
+                                                (plist-get reload :process-stale)))))
                           (_ nil))))
                  (let ((result (and (boundp 'harness--last-plugin-update)
                                     harness--last-plugin-update)))

@@ -1106,7 +1106,7 @@ newer version of the code on the way might read a snapshot otherwise."
                   (setq unbound (nconc gone unbound)))))))
         (sort unbound #'string<)))))
 
-(defun harness--reload ()
+(defun harness--reload (&optional no-process)
   "Check every harness source file, then load them all again in place.
 The files are this one, the core and library files, and the modules of
 this Emacs.  Return (:refused PROBLEMS) when one of them does not
@@ -1122,7 +1122,9 @@ the modules that are no longer enabled but run on until a restart
 file loaded again no longer defines, which were unbound
 \(`harness--reload-snapshot'): a key, hook or timer that still names
 one reports it undefined.  In the UI of a harness process, the process
-is asked to reload too."
+is asked to reload too, unless NO-PROCESS says not to: a process that
+runs code older than the tree would refuse it, and a restart, not a
+reload, is what teaches it the tree."
   (harness--setup-load-path)
   (let* ((early (mapcar #'harness--path (append harness--core-files harness--library-files)))
          (files (append early (harness--module-files)))
@@ -1180,7 +1182,7 @@ is asked to reload too."
                 (push (format "module %s: %s" (harness-module-name m)
                               (if (stringp err) err (error-message-string err)))
                       errors)))))
-        (when (and harness-process (fboundp 'harness-ui-reload-server))
+        (when (and harness-process (not no-process) (fboundp 'harness-ui-reload-server))
           (harness-ui-reload-server))
         (run-hooks 'harness-reload-hook)
         (harness-emit 'harness/reloaded)
@@ -1738,6 +1740,54 @@ git checkout, and when the checkout it was loaded from is another."
               ((harness-revision--same-directory-p directory dir)))
     commit))
 
+(defun harness--update-reload (dir installed)
+  "Reload the harness after the update of DIR; INSTALLED is whether a tree came in.
+INSTALLED says the update installed a tree it fetched, which another
+Emacs checked (`harness--verify-commit'): its harness.el loads and every
+source compiles.  Such a tree may hold what the code running now does not
+expect -- a module's tests beside it, the shared helper they require in
+test/ -- and the reload of the running code is refused for it.  Then the
+tree's own harness.el is loaded, and its `harness--reload', which knows
+what the tree holds, runs instead: the update finishes in the Emacs that
+made it.  Only a verified tree is loaded: a checkout that moved on by
+itself was checked by no Emacs, and its refusal stands.  So does a
+refusal the installed tree's reload makes, and that of a tree whose
+harness.el cannot load; then the first result is returned, and the
+message says to restart Emacs.
+
+The retry does not ask the harness process to reload.  That process
+runs the code this Emacs ran before the tree came in and would refuse
+the tree in its turn; only a restart teaches it the tree, so the
+result is marked `:process-stale', and the version page and the
+message offer the restart."
+  (let ((result (harness--reload)))
+    (if (not (and installed (plist-get result :refused)))
+        result
+      (let ((self (expand-file-name "harness.el" dir)))
+        (condition-case err
+            (progn
+              (load self nil 'nomessage)
+              (harness-log 'info "update: the running reload of %s was refused; its own harness.el, which knows the tree, loaded to reload it"
+                           (abbreviate-file-name dir))
+              ;; The harness process runs the code this Emacs ran before
+              ;; the tree came in, and would refuse it too: only a restart
+              ;; teaches it the tree, and the version page offers one.
+              ;; The tree's own reload, which takes NO-PROCESS where this
+              ;; version of it does; an older one, without the argument,
+              ;; is called as it is.
+              (let* ((arity (func-arity #'harness--reload))
+                     (result (if (or (eq (cdr arity) 'many)
+                                     (>= (cdr arity) 1))
+                                 (harness--reload t)
+                               (harness--reload))))
+                (if (and harness-process (not (plist-get result :refused)))
+                    (plist-put result :process-stale t)
+                  result)))
+          (error
+           (harness-log 'error "update: loading %s failed: %s"
+                        (abbreviate-file-name self) (error-message-string err))
+           result))))))
+
 (defun harness--updated (dir result)
   "Report RESULT of `harness--update-checkout' on DIR, reloading what came in.
 Return the message shown, and record the outcome in `harness--last-update'
@@ -1747,7 +1797,10 @@ An update that brought nothing is \"up to date\" only when the harness
 runs what the checkout holds.  A checkout can move on by itself, pulled
 by a package manager or by hand, while the harness runs the commit it
 was loaded from; then \"up to date\" would be false.  The update does what
-it does for commits that came in, and reloads."
+it does for commits that came in, and reloads.  The reload is the
+running code's; when that refuses a tree the update installed and
+verified, the tree's own harness.el reloads it instead
+\(`harness--update-reload')."
   (let* ((from (plist-get result :from))
          (to (plist-get result :to))
          (commits (plist-get result :commits))
@@ -1780,7 +1833,7 @@ it does for commits that came in, and reloads."
         (setq text (format "%s; `harness-start' loads it" summary)))
        (t
         (harness--update-note-stage "reloading")
-        (setq reload (harness--reload))
+        (setq reload (harness--update-reload dir (> count 0)))
         (setq text
               (cond
                ((and running (plist-get reload :refused))
@@ -1794,6 +1847,8 @@ it does for commits that came in, and reloads."
                 (format "%s%s, but these failed to load: %s"
                         summary (if running "" " and reloaded")
                         (string-join (plist-get reload :errors) "; ")))
+               ((plist-get reload :process-stale)
+                (format "%s and reloaded · harness process: restart" summary))
                (running summary)
                (t (format "%s and reloaded" summary)))))))
     (message "%s" text)
@@ -1820,7 +1875,10 @@ checked by another Emacs, out of the checkout: its harness.el must load,
 and every source file compile with no merge conflict marker in its
 code.  Only then is the checkout fast-forwarded to it and
 `harness-reload' run, which loads it in this Emacs and in the harness
-process, keeping running sessions.  So is a checkout that moved on by
+process, keeping running sessions.  The running code's reload can be
+refused a tree that changed what it loads; the tree was checked, so its
+own harness.el takes it from there and reloads again
+\(`harness--update-reload').  So is a checkout that moved on by
 itself, pulled by a package manager or by hand, while the harness ran
 the commit it was loaded from: the harness is not up to date then,
 whatever the remote has.  Nothing changes when the update
