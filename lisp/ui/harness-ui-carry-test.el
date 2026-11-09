@@ -27,7 +27,7 @@
   "Return a spec with a few priced choices, OVERRIDES put over it."
   (let ((spec (list :id "p1" :icon 'harness-icon-clock :title "Something cold" :detail "since 14:02"
                     :lines '("A line of context")
-                    :rows '(("Waiting" "your message") ("Resend" "$0.315 uncached"))
+                    :rows '(("Message" "your message") ("Cost" "$0.315 uncached"))
                     :ask "Choose what goes first"
                     :choices (list (harness-carry-choice 'brief :cost-text "~$0.0040" :by "Cheap")
                                    (harness-carry-choice 'summary :cost-text "~$0.330")
@@ -51,16 +51,16 @@ and the line saying how to press a key from the compose box."
   (let ((lines (harness-ui-carry-test--lines (harness-ui-carry-panel-string (harness-ui-carry-test--spec)))))
     (should (string-match-p "\\` .*Something cold  since 14:02\\'" (nth 0 lines)))
     (should (equal "   A line of context" (nth 1 lines)))
-    (should (equal "   Waiting  your message" (nth 2 lines)))
-    (should (equal "   Resend   $0.315 uncached" (nth 3 lines)))
+    (should (equal "   Message  your message" (nth 2 lines)))
+    (should (equal "   Cost     $0.315 uncached" (nth 3 lines)))
     (should (equal "" (nth 4 lines)))
     (should (equal "   Choose what goes first" (nth 5 lines)))
-    (should (equal '("    b  Brief summary    ~$0.0040  Cheap · narrative, tool calls in brief · read uncached · first and last messages kept · default"
-                     "    s  Summary          ~$0.330   whole conversation · read uncached · first and last messages kept"
-                     "    t  Transcript file  free      whole conversation as a file the model reads"
-                     "    q  Not now                    message waits")
+    (should (equal '("    b  Brief       ~$0.0040  Cheap · narrative · default"
+                     "    s  Summary     ~$0.330   context"
+                     "    t  Transcript  free      file"
+                     "    q  Pause                 pause")
                    (seq-subseq lines 6 10)))
-    (should (equal "   from the box: C-c . b" (nth 10 lines)))
+    (should (equal "   Box key · C-c . b" (nth 10 lines)))
     (should (= 12 (length lines)))))
 
 (ert-deftest harness-ui-carry-panel-leaves-out-what-it-is-not-given ()
@@ -76,12 +76,12 @@ line; `:always' adds the capitals' line and says what they do."
          (always (harness-ui-carry-test--lines
                   (harness-ui-carry-panel-string (harness-ui-carry-test--spec :always t :hint nil)))))
     (should (string-match-p "\\` .*Bare\\'" (nth 0 bare)))
-    (should (equal '("" "    b  Brief summary  narrative, tool calls in brief · read uncached · first and last messages kept"
-                     "    q  Not now        message waits" "")
+    (should (equal '("" "    b  Brief  narrative"
+                     "    q  Pause  pause" "")
                    (cdr bare)))
-    (should-not (cl-some (lambda (l) (string-match-p "from the box" l)) always))
+    (should-not (cl-some (lambda (l) (string-match-p "Box key" l)) always))
     ;; The capitals of every choice but not now, then a blank, as the footer.
-    (should (member "    B   S   T   default for every session, no asking" always))
+    (should (member "    B   S   T   default" always))
     (should-not (member "    Q" always))))
 
 (ert-deftest harness-ui-carry-panel-accepts-choices-as-a-vector ()
@@ -109,13 +109,13 @@ in amber too."
     (let ((prefix (get-text-property (string-search "Cheap" string) 'wrap-prefix string)))
       (should (string-blank-p prefix))
       (should (eq 'harness-ui-carry-face (get-text-property 0 'face prefix))))
-    (let ((help (get-text-property (string-search "Brief summary" string) 'help-echo string)))
-      (should (string-prefix-p "Brief summary (~$0.0040) · Cheap · narrative" help))
-      (should (string-match-p " · Press b on this panel, or click; B: default for every session, no asking\\'" help))
+    (let ((help (get-text-property (string-search "Brief" string) 'help-echo string)))
+      (should (string-prefix-p "Brief · ~$0.0040 · Cheap · narrative" help))
+      (should (string-match-p " · key · b · default · B · button\\'" help))
       (should-not (string-match-p "\n" help)))
     ;; Not now has no capital.
-    (let ((help (get-text-property (string-search "Not now" string) 'help-echo string)))
-      (should (string-match-p " · Press q on this panel, or click\\'" help)))))
+    (let ((help (get-text-property (string-search "Pause" string) 'help-echo string)))
+      (should (string-match-p " · key · q · button\\'" help)))))
 
 (ert-deftest harness-ui-carry-flow-breaks-between-segments ()
   "A wording breaks between its segments at the width, the next lines
@@ -143,11 +143,9 @@ buffer that truncates its lines (the session list) shows all of it."
     (should (cl-every (lambda (l) (<= (string-width l) 80)) lines))
     ;; The first line of the wording follows the cost; the others are under it,
     ;; broken between segments and never inside one.
-    (should (member "    b  Brief summary    ~$0.0040  Cheap · narrative, tool calls in brief" lines))
-    (should (member (concat (make-string 34 ?\s) "read uncached · first and last messages kept") lines))
-    (should (member (concat (make-string 34 ?\s) "default") lines))
+    (should (member "    b  Brief       ~$0.0040  Cheap · narrative · default" lines))
     ;; Wide enough, nothing breaks.
-    (should (member "    b  Brief summary    ~$0.0040  Cheap · narrative, tool calls in brief · read uncached · first and last messages kept · default"
+    (should (member "    b  Brief       ~$0.0040  Cheap · narrative · default"
                     (harness-ui-carry-test--lines
                      (harness-ui-carry-panel-string (harness-ui-carry-test--spec :width 200)))))))
 
@@ -182,7 +180,7 @@ under it stays under it."
                   (harness-ui-carry-test--spec :answer (lambda (name always) (push (list name always) answers))))))
     (with-temp-buffer
       (insert string)
-      (goto-char (1+ (string-search "Transcript file" string)))
+      (goto-char (1+ (string-search "Transcript" string)))
       (harness-ui-action-push))
     (should (equal '(("transcript" nil)) answers))))
 
@@ -307,10 +305,10 @@ only where the host has a box."
   (harness-ui-carry-test-with-host
     (harness-ui-carry-show host "ask" (lambda () (harness-ui-carry-test--spec)) #'ignore)
     (with-current-buffer host
-      (should-not (string-match-p "from the box" (buffer-string)))
+      (should-not (string-match-p "Box key" (buffer-string)))
       (cl-letf (((symbol-function 'harness-compose-live-p) (lambda () t)))
         (harness-ui-carry-test--redraw))
-      (should (string-match-p "from the box: C-c \\. b" (buffer-string))))))
+      (should (string-match-p "Box key · C-c \\. b" (buffer-string))))))
 
 (ert-deftest harness-ui-carry-host-picks-the-buffer-the-command-ran-in ()
   "The question shows in the buffer the command ran in, if that can host it;

@@ -8027,7 +8027,7 @@ C-c . presses its keys, and the board is as it was once it is answered."
           (should-not (memq 'harness-ui-carry-face (ensure-list (get-text-property (1- start) 'face))))
           (should (string-match-p "Switch model  A → B" text))
           (should (string-match-p "^    s  Summary +~\\$0\\.010 +" text))
-          (should (string-match-p "^   from the box: C-c \\. s$" text))
+          (should (string-match-p "^   Box key · C-c \\. s$" text))
           ;; Point is on it, so its keys work; they are the board's no more.
           (should (harness-ui-carry-on-panel-p))
           (harness-ui-tasks--render-tail)
@@ -8047,7 +8047,7 @@ C-c . presses its keys, and the board is as it was once it is answered."
       (harness-ui-carry-show board "switch" spec (lambda (name) (push name answers)))
       (with-current-buffer board
         (goto-char (point-min))
-        (search-forward "Transcript file")
+        (search-forward "Transcript")
         (goto-char (match-beginning 0))
         (harness-ui-action-push))
       (should (equal '("transcript" "summary") answers))

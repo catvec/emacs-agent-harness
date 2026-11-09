@@ -21,38 +21,46 @@ carry on again and again costs attention and answers nothing new: the
 user already decided to send the near-full conversation uncached, and
 the situation did not change.
 
-The question is not one with an "always": every automatic compaction is
-the user's to decide, and a lasting default would let the conversation
-grow past what the model can be sent. What is wanted is narrower: the
-answer stands while it still makes sense, and is not asked again for
-the same state.
+The first fix was a latch: the answer stood, per session, while the
+conversation could still be sent, and the question came back only when
+the conversation changed. That stopped the repeated asking in the
+reported case, but it kept two limits the user then asked against: the
+answer stopped at the window, and there was no lasting answer at all.
+The user's words: "make sure that the user can always carry on without
+these nags. there is nothing worse then working on something and then
+an auto compact happens and makes your session into an idiot."
+
+So the question has an "always" now, and carrying on is always a
+choice, past the window too.
 
 ## The decision
 
-An answer to carry on stands, per session, while the conversation can
-still be sent:
+An answer to carry on stands, per session, until the conversation
+changes:
 
 - The question is not put again at the next steps of the turn, nor
-  before the next turn, nor at the turns after it, while the context is
-  within the session's window.
-- The question comes back once the context is past the window
-  (`harness-compaction--window`): carrying on is then a request the
-  model cannot take, and the choices no longer offer it, so the answer
-  no longer applies. At a step boundary it comes back at once, not
-  after the cooldown, because the next step is the request that cannot
-  be sent.
-- The question also comes back once a boundary has found the context
-  under the limit: a compaction, a cut or a conversation given back has
-  made it another conversation, and the next question about it is a new
-  one.
-- Any other answer (a kind, not now, a dismissal) forgets the earlier
+  before the next turn, nor at the turns after it, past the model's
+  window as well as within it. A provider that cannot send the
+  conversation says so; the harness does not take the choice away.
+- The question comes back once a boundary has found the context under
+  the limit: a compaction, a cut or a conversation given back has made
+  it another conversation, and the next question about it is a new one.
+- Any other answer (a kind, later, a dismissal) forgets the earlier
   carry-on, as the session's end does.
+- The capital of Continuation answers "always carry on": it saves
+  `harness-compaction-carry-on`, and every session that would wait for
+  the user then carries on without the question. It is a setting, shown
+  and turned off in Settings, not a per-process latch; a session that
+  never waits for the user does not take it, so unattended work still
+  compacts rather than failing on an overgrown context.
+- Carrying on is the default choice of the question: a careless RET or
+  Space carries on, rather than compacting the conversation.
 
-The answer is a per-process table, `harness-compaction--carried-on`,
+The per-session answer is a table, `harness-compaction--carried-on`,
 like the state of a mid-turn compaction and the one-turn hold a
 reverted conversation gets: it is not kept across a restart, and a
-restart asks once more. Nothing in the transcript changes; the hint
-already says what was chosen and why.
+restart asks once more. The lasting answer is the setting, saved. The
+hint says what was chosen and why; nothing in the transcript changes.
 
 ## Alternatives
 
@@ -65,42 +73,48 @@ already says what was chosen and why.
   task session's user is then asked again at every follow-up message
   about the same near-full conversation, which is the same complaint at
   a longer interval.
-- **A lasting "always carry on" setting**, as the cold-cache question
-  offers. It would let conversations grow past the window unasked, and
-  the design keeps every automatic compaction the user's decision. The
-  latch stops at the window, where carrying on is impossible, and at
-  the limit, where the conversation changed.
-- **Keep the answer past the window too.** The request would be refused
-  by the model or the provider; carrying on is not among the choices
-  there for that reason.
-- **Persist the answer in the session record**, so a restart keeps it.
-  The answer is a convenience for a conversation that changed under the
-  user's eyes; the session record carries decisions with lasting
-  meaning, and the two neighbours of this table (the mid-turn state and
-  the reverted conversation's hold) are not persisted either.
+- **Keep the latch and no lasting answer.** Rejected by the user: it
+  still nags, and it still stops at the window. The question exists so
+  the user can keep working; "always carry on" is that answer made
+  lasting.
+- **Let "always carry on" apply to unattended sessions too.** Rejected:
+  a task has nobody to notice a provider refusing an over-window
+  request, and its work must not stall. It applies only where someone
+  can be asked (`harness-compaction--carry-on-always-p`).
+- **Persist the per-session answer in the session record**, so a restart
+  keeps it. The answer is a convenience for a conversation that changed
+  under the user's eyes; the lasting choice is the setting, and the two
+  neighbours of this table (the mid-turn state and the reverted
+  conversation's hold) are not persisted either.
 
 ## The shape of the change
 
 - `harness-compaction--carried-on`: session id -> `t` while the answer
-  stands, with `harness-compaction--carried-on-p` (has the answer, and
-  the context is within the window) and `harness-compaction--note-answer`
-  (carry on sets it, anything else forgets it).
+  stands, with `harness-compaction--carried-on-p` (has the answer) and
+  `harness-compaction--note-answer` (carry on sets it, anything else
+  forgets it).
+- `harness-compaction-carry-on`: the lasting answer, saved by the
+  capital of Continuation (`harness-compaction--save-carry-on`), and
+  `harness-compaction--carry-on-always-p`, which lets a session that
+  would wait for the user go on unasked.
 - `harness-compaction--asked-before-turn` and
   `harness-compaction--asked-before-step` record every answer as it
   arrives.
-- `harness-compaction--before-turn`: while the answer stands, the
-  message goes on unasked; a turn whose context is under the limit
-  forgets the answer.
-- `harness-compaction--before-step`: the same at step boundaries, and
-  where the user is asked, a step past the window asks at once rather
-  than after the cooldown.
+- `harness-compaction--before-turn`: while the answer stands, or the
+  lasting one does, the message goes on unasked; a turn whose context is
+  under the limit forgets the per-session answer.
+- `harness-compaction--before-step`: the same at step boundaries, past
+  the window too.
 - `harness-compaction--on-deleted` forgets it with the session.
 - The module commentary and `docs/architecture.md` say what stands and
   for how long.
-- Tests in `lisp/modules/harness-compaction-test.el`: a six-step turn and the
-  turn after it ask once; past the window the question returns without
-  carrying on; under the limit the answer is forgotten and the next
-  approach asks again; a step past the window asks at once. The first
+- Tests in `lisp/modules/harness-compaction-test.el`: a six-step turn
+  and the turn after it ask once; past the window the answer stands;
+  under the limit the answer is forgotten and the next approach asks
+  again; a step past the window asks at once without an answer; "always
+  carry on" saves the setting and stops the asking in a session that
+  waits for the user, while an unattended session still compacts. The
+  first
   fails without the latch (the boundary before the fifth step asks
   again), the last without the bypass.
 

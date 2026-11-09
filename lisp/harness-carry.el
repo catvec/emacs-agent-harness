@@ -21,6 +21,20 @@
 ;;   `compaction/estimate' answer.  Both questions send their choices so,
 ;;   in that order, and the panel draws what it is sent.
 ;;
+;; - `harness-carry-menu-ways', the short menu the questions show: a
+;;   summary, a transcript file, a fresh start, carrying on and not now.
+;;   The question before an automatic compaction and the one before a
+;;   message to a session whose prompt cache went cold offer the same
+;;   list, for different reasons; `harness-carry-menu' makes it from an
+;;   estimate, marking a way that cannot be made as it is `:unavailable'
+;;   rather than leaving it out, so the two menus stay one.
+;;
+;; A summary is the one way that asks a model to read the conversation,
+;; so it is the one way whose offer depends on the prompt cache: a cold
+;; read costs as much as sending the conversation again.  A transcript
+;; file asks no model, and is the harness's own way: the conversation
+;; goes to a file the model searches and reads as it needs.
+;;
 ;; - the costs.  `harness-carry-cost-text' says what a way costs as an
 ;;   estimate gives it: "free" for what asks no model, "~$0.42" for the
 ;;   rest, and for carrying on what the uncached context costs.
@@ -38,28 +52,38 @@
 (require 'subr-x)
 (require 'harness-util)
 
+(defconst harness-carry-menu-ways
+  '(summary transcript fresh carry-on hold)
+  "The ways the questions offer, in the order they offer them.
+One short list for the question before an automatic compaction and the
+one before a message to a session whose prompt cache went cold: the
+same choices, for different reasons.  `summary' is the one way that asks
+a model to read the conversation; `transcript' is the harness's own --
+the conversation in a file the model reads.  `hold' is `Pause', which
+no lasting answer may make the default.")
+
 (defconst harness-carry-ways
-  '((brief :key ?b :label "Brief summary"
-           :what "narrative, tool calls in brief · read uncached · first and last messages kept")
+  '((brief :key ?b :label "Brief"
+           :what "narrative")
     (summary :key ?s :label "Summary"
-             :what "whole conversation · read uncached · first and last messages kept")
-    (transcript :key ?t :label "Transcript file"
-                :what "whole conversation as a file the model reads")
-    (fresh :key ?f :label "Start afresh"
-           :what "nothing carried over")
-    (carry-on :key ?c :label "Carry on"
-              :what "whole conversation again, uncached")
-    (ignore :key ?i :label "Ignore"
-            :what "whole conversation, nothing added")
-    (hold :key ?q :label "Not now"
-          :what "message waits"))
+             :what "context")
+    (transcript :key ?t :label "Transcript"
+                :what "file")
+    (fresh :key ?f :label "Fresh start"
+           :what "empty")
+    (carry-on :key ?c :label "Continuation"
+              :what "context")
+    (ignore :key ?i :label "Silence"
+            :what "context")
+    (hold :key ?q :label "Pause"
+          :what "pause"))
   "The ways to carry a conversation over, in the order they are offered.
 Each entry is (WAY :key KEY :label LABEL :what WHAT): WAY a symbol, KEY
 the character that picks it on a panel, LABEL what the options call it
-and WHAT what it does, in nouns, a segment after another with \" · \".
-A question names the ways it offers and may say the same thing
-otherwise where the situation does: `hold' is \"Cancel\" for a model
-switch, which has no message to keep waiting.")
+and WHAT what it does, a noun or an adjective, a segment after another
+with \" · \".  A question names the ways it offers and may say the
+same thing otherwise where the situation does: `hold' is \"No switch\"
+for a model switch, which has no message to keep waiting.")
 
 (defun harness-carry-names ()
   "Return the symbols of `harness-carry-ways', in order."
@@ -88,6 +112,41 @@ VALUE is a way's symbol or its name, in any case."
   "Return the way the character or one-letter string KEY picks, or nil."
   (let ((char (if (stringp key) (and (= (length key) 1) (aref key 0)) key)))
     (car (cl-find char harness-carry-ways :key (lambda (e) (plist-get (cdr e) :key))))))
+
+;;;; What a way reads
+
+(defun harness-carry-reads-cache-p (way estimate)
+  "Non-nil when WAY, as ESTIMATE prices it, reads the conversation from the cache.
+That is the estimate's own word for the way (`:cached'), never the
+session's cache stamp: a way's request has its own prefix, and only an
+estimate that says that prefix is cached is evidence that it is.  A way
+that asks no model reads nothing, and is not one."
+  (let ((kind (harness-carry-kind-estimate estimate way)))
+    (and kind
+         (memq way '(summary brief))
+         (harness-json-true-p (plist-get kind :cached))
+         t)))
+
+(defun harness-carry-available-p (way estimate)
+  "Non-nil when WAY can be carried out as ESTIMATE prices it.
+Everything is, but a way that asks a model to read the conversation: it
+is offered only when the estimate says its own request reads the cache,
+because a cold read costs as much as the turn it would save."
+  (or (not (memq (harness-carry-way way) '(summary brief)))
+      (harness-carry-reads-cache-p way estimate)))
+
+(defun harness-carry-cache-text (way estimate)
+  "Return where WAY, as ESTIMATE prices it, reads the conversation.
+\"cached\" or \"uncached\" for a way that asks a model to read it, and
+nil for a way the estimate says nothing about: the other ways' costs say
+it themselves.  It is a word of the panel's line, not a sentence."
+  (let ((way (harness-carry-way way)))
+    (when (memq way '(summary brief))
+      (let ((kind (harness-carry-kind-estimate estimate way)))
+        (and kind
+             (if (harness-json-true-p (plist-get kind :cached))
+                 "cached"
+               "uncached"))))))
 
 ;;;; What each way costs
 
@@ -120,8 +179,15 @@ costs.  Nil when COST is not known: holding has no price."
 (defun harness-carry-cost-text (estimate way)
   "Return what WAY costs as ESTIMATE says, in a few words, or nil.
 ESTIMATE is a `compaction/estimate' answer: see
-`harness-carry-cost-string' for how it reads."
-  (harness-carry-cost-string way (harness-carry-cost estimate way)))
+`harness-carry-cost-string' for how it reads.  Carrying on with a cache
+that lasts reads its price from the cache, and says so; one that lapsed
+pays to send the conversation again, uncached."
+  (let ((cost (harness-carry-cost estimate way)))
+    (if (and (memq (harness-carry-way way) '(carry-on ignore))
+             (numberp cost)
+             (harness-json-true-p (plist-get estimate :cached)))
+        (format "~%s cached" (harness-format-cost cost))
+      (harness-carry-cost-string way cost))))
 
 (defun harness-carry-total (costs)
   "Return the sum of COSTS, prices in dollars, or nil when one is not known.
@@ -148,7 +214,7 @@ switch there, which has no message to keep waiting."
   (apply #'harness-carry-choice way
          :mode (symbol-name (cdr (assq way harness-carry-switch-ways)))
          (if (eq way 'hold)
-             (append (list :label "Cancel" :what "model unchanged") props)
+             (append (list :label "No switch" :what "model unchanged") props)
            props)))
 
 ;;;; Choices
@@ -180,13 +246,45 @@ that stands for the conversation after it (`:after').  MAKE makes each
 choice, `harness-carry-choice' by default; a model switch passes
 `harness-carry-switch-choice'."
   (mapcar (lambda (way)
-            (let ((kind (harness-carry-kind-estimate estimate way)))
-              (funcall (or make #'harness-carry-choice) way
-                       :cost (harness-carry-cost estimate way)
-                       :cost-text (harness-carry-cost-text estimate way)
-                       :by (plist-get kind :model-label)
-                       :after (plist-get kind :after))))
+            (let* ((kind (harness-carry-kind-estimate estimate way))
+                   (cache (harness-carry-cache-text way estimate))
+                   (what (and cache
+                              (string-join
+                               (delq nil (list (harness-carry-property way :what) cache))
+                               " · "))))
+              (apply (or make #'harness-carry-choice) way
+                     (append (list :cost (harness-carry-cost estimate way)
+                                   :cost-text (harness-carry-cost-text estimate way)
+                                   :by (plist-get kind :model-label)
+                                   :after (plist-get kind :after))
+                             (and what (list :what what))))))
           ways))
+
+(defun harness-carry--not-offered (choice why)
+  "Return CHOICE shown but not offered, WHY a noun phrase saying why.
+The writer goes: no model writes a way that is not offered."
+  (let ((choice (plist-put (plist-put (copy-sequence choice) :unavailable t) :cost nil)))
+    (setq choice (plist-put choice :by nil))
+    (setq choice (plist-put choice :cost-text "no cache"))
+    (plist-put choice :why why)))
+
+(defun harness-carry-menu (estimate)
+  "Return the ways the questions offer, as choices, as ESTIMATE prices them.
+They are `harness-carry-menu-ways' in order, made by
+`harness-carry-choices'.  A way that cannot be made as ESTIMATE prices
+it -- a summary whose own request the prompt cache does not hold -- is
+kept, marked `:unavailable' and saying why, rather than left out: both
+questions show the same menu, and only the reason they are asked
+differs.  The caller draws an unavailable choice without a key, and
+answers a name of one as it answers a name that is no choice.  Carrying
+on is always offered, past the model's window too: it is the user's to
+choose, and the provider that cannot send the conversation says so."
+  (mapcar (lambda (choice)
+            (let ((way (harness-carry-way (plist-get choice :choice))))
+              (if (harness-carry-available-p way estimate)
+                  choice
+                (harness-carry--not-offered choice "no cache"))))
+          (harness-carry-choices harness-carry-menu-ways estimate)))
 
 (provide 'harness-carry)
 ;;; harness-carry.el ends here

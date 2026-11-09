@@ -2,7 +2,7 @@
 
 # ui-compaction-ask
 
-The question before an automatic compaction as a panel: the kinds, what each costs, and carrying on.
+The question before an automatic compaction as a panel: one list of ways, what each choice costs, and carrying on.
 
 - **Runs in:** the UI (your Emacs)
 - **Source:** [lisp/ui/harness-ui-compaction-ask.el](../../lisp/ui/harness-ui-compaction-ask.el)
@@ -13,24 +13,29 @@ The question before an automatic compaction as a panel: the kinds, what each cos
 
 A conversation that comes near its model's context window is
 compacted before it can be sent again, and compacting spends money:
-the summary reads the whole conversation again.  So where the user
-can be asked, the harness asks first (harness-compaction.el), with
-the kinds of compaction and what each costs, and carrying on with
-the whole conversation and what that costs: a brief summary, a
-summary, a transcript file, a fresh start, a cut of the oldest
-context, carrying on, or not now.
+the summary reads the conversation again, from the prompt cache while
+that lasts.  So where the user can be asked, the harness asks first
+(harness-compaction.el), in one list: Summary, Transcript, Fresh
+start, Continuation and Pause -- the same list the cold-cache question
+asks, for another reason.  A summary is offered only where its own
+request reads the prompt cache, and says what it costs there; it is
+shown, no cache, otherwise.  The ways that ask no model are always
+offered, and carrying on is always one of them: past the model's
+window too, the user's to choose.
 
 The question is a pending question like any other, with its own
 `:compaction` in the payload.  This module draws it with the panel of
 the ways to carry a conversation over (harness-ui-carry.el), which
-the cold-cache question uses too (harness-ui-cowboy.el): the
-choices, their keys and their costs are the harness's, and what this
+the cold-cache question uses too (harness-ui-cowboy.el): one page and
+one list, the same both questions show (`harness-carry-menu`), with
+the choices, their keys and their costs the harness's.  What this
 module says is the heading -- the context against the window the
-model can be sent -- and the rows, what carrying on costs against
-the cache.  A key answers once (b, s, t, f, x, c, q); there is no
-"always" here, as every automatic compaction is the user's to
-decide.  A client that does not know `:compaction` shows the
-ordinary question, whose options carry their costs in their words.
+model can be sent.  A summary whose own request would read the
+conversation uncached is drawn, no cache.  A key answers once; the
+capital of Continuation answers "always", which saves
+`harness-compaction-carry-on` and stops the asking.  A client that
+does not know `:compaction` shows the ordinary question, whose
+options carry their costs in their words.
 
 ## Uses
 

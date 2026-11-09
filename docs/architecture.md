@@ -201,9 +201,11 @@ default) the layers above are split across two Emacs processes:
   buffers of the user's Emacs, which the harness cannot reach.
 - The ways to carry a conversation over (lisp/harness-carry.el, see
   cowboy and handoff below) are loaded on both sides: the cold-cache
-  question and the model switch send their choices from one table of
-  keys, labels and wording, priced by one cost function, and the UI
-  draws them with one panel (ui-carry).
+  question, the question before an automatic compaction and the model
+  switch send their choices from one table of keys, labels and wording,
+  priced by one cost function, and the UI draws them with one panel
+  (ui-carry).  The two compaction questions ask one short menu from that
+  table (`harness-carry-menu`), the same choices for different reasons.
 - The Claude plugin library (lisp/harness-claude-plugin.el, see
   "Looking like an ordinary Claude Code session" under provider) is
   loaded on both sides like the others, but only the harness process
@@ -334,8 +336,9 @@ ready with what it set up before, and the reload reports the error; a
 disabled module stays off.
 `harness-reload` compiles every file first and refuses to load anything
 if one fails.  It loads harness.el, the core files, the libraries of
-lisp/ (`harness--library-files`: policy, files, links, redaction, the Emacs
-endpoint, desktop notifications, server, revision, module docs, slots) and the
+lisp/ (`harness--library-files`: policy, files, links, redaction, the
+carry table, the prompt registry, the Emacs endpoint,
+desktop notifications, server, revision, module docs, slots) and the
 modules, so a module never runs against a library as it was before an
 update; a file added to lisp/ that both sides load belongs in one of
 those lists.  Records made before a reload
@@ -5853,20 +5856,23 @@ and tools.
   `compaction` node, which stands in for the conversation from then on:
   `session/messages` starts at it, as a user message, followed by the
   unanswered user messages carried over after it.  OPTS `:kind` (one of
-  `harness-compaction-kinds`) says what it holds.  A `summary` or
-  `brief` reads the whole conversation as the input of a request with a
-  system prompt and (for a summary) no tools of its own, so no cache of
-  the chat covers it (`harness-compaction-request-warm-p`, which only
-  the estimate can say, and never says today).  One is made only when
-  the estimate says that request's own prefix is cached, for the very
-  model it would go to; otherwise OPTS `:fallback`, a kind that asks no
-  model, is made instead, said in a hint and kept in the node's `:meta`
-  as `:requested-kind`; without one, the call is refused before a
-  request exists.  Nobody's choice is warmth: OPTS `:approved`, an
-  answer to the question, the compact panel, a saved cowboy default and
-  a handoff mode all fail closed the same way.  An informed exception
-  to buy a cold summary is a product decision that is not implemented:
-  it would be Noah's to make, not the harness's to assume.
+  `harness-compaction-kinds`) says what it holds.  A `summary` is sent as
+  the chat's next request would be, with the instruction appended, so
+  the conversation's own prompt cache covers it
+  (`harness-compaction--prefix-cache-p`); a `brief` renders the
+  narrative anew, and neither is made unless
+  `harness-compaction-request-warm-p` says its request reads cached
+  input, for the very model it would go to.  Otherwise OPTS
+  `:fallback`, a kind that asks no model, is made instead, said in a
+  hint and kept in the node's `:meta` as `:requested-kind`; without
+  one, the call is refused before a request exists.  Nobody's choice is
+  warmth: OPTS `:approved`, an answer to the question, the compact
+  panel and a saved cowboy default all fail closed the same way.  OPTS
+  `:transfer` is the handoff's exception: the conversation leaves for a
+  provider that never saw it, so there is no cache to read and the
+  transfer is the point.  An informed exception to buy a cold summary
+  of a conversation that stays is a product decision that is not
+  implemented: it would be Noah's to make, not the harness's to assume.
   - `summary` (the default kind of a bare call): the session's model
     (OPTS `:model` another) summarises the conversation, and the
     message reads "Summary of the conversation so far: ...".  OPTS `:context` is
@@ -6009,16 +6015,26 @@ and tools.
   :kinds)`: the context the next message sends, how many messages it
   holds, whether the prompt cache still lasts
   for the session's model, what that message costs as things are and
-  read from the cache, whether a compaction runs, and the configured
-  kind; `:kinds` has `(:kind :model :model-label :input :output :cached
-  :cost :after)` per kind, at list prices (`usage/price`, so a
-  time-of-day price applies; nil without one).  A summary reads the
-  whole context, from the cache only on a fork of a hosted conversation
-  whose cache is warm, else at the uncached rate: the higher of the
-  cache-write and the input price, as a provider that does not charge
-  for writes (DeepSeek, priced 0) still charges the input.  A brief
-  summary reads the system prompt, the sample and the ask; either
-  writes up to the summary's budget
+  read from the cache, whether a compaction runs, the configured kind;
+  `:kinds` has `(:kind :model :model-label
+  :input :output :cached :available :cost :after)` per kind, at list
+  prices (`usage/price`, so a time-of-day price applies; nil without
+  one).  A summary starts as the conversation's next step does -- same
+  model, system prompt, tools and conversation -- with the instruction
+  appended, so its `:cached` says whether that request reads the
+  conversation from the prompt cache
+  (`harness-compaction--prefix-cache-p`): it does while the session's
+  cache lasts for its model, its provider is sent the conversation at
+  every request rather than keeping it itself, and the agent's request
+  builder is there; a hosted loop forks its own conversation and reads
+  it cached that way.  Otherwise the context is read at the uncached
+  rate: the higher of the cache-write and the input price, as a provider
+  that does not charge for writes (DeepSeek, priced 0) still charges the
+  input.  `:available` says whether a kind can be made as it is: a
+  summary only when its request is cached, a `brief` only where a
+  handoff has no cached alternative, and the kinds that ask no model
+  always.  A brief summary reads the system prompt, the sample and the
+  ask; either writes up to the summary's budget
   (`harness-compaction--summary-output`).  A transcript, a fresh start
   and a truncation cost nothing and leave their note (`:after`) in place
   of the context; a truncation's entry also carries `:kept` and
@@ -6079,16 +6095,24 @@ and tools.
   automatic compaction makes where nobody is asked (`summary`; any of
   the kinds, `truncate` included), `harness-compaction-ask` (on), which
   asks before an automatic compaction where the user can be asked,
-  `harness-compaction-mid-turn` (on) and
-  `harness-compaction-brief-model`.
-- A summary is never made cold: `summary` and `brief` read the whole
-  conversation uncached, on a request with a system prompt and (for a
-  summary) no tools of its own, so no cache of the chat covers it
-  (`harness-compaction-request-warm-p`; `compaction/estimate` says
-  `:cached` nil for both).  Every path asks
+  `harness-compaction-mid-turn` (on),
+  `harness-compaction-brief-model`, and `harness-compaction-carry-on`
+  (off), which makes carrying on the lasting answer to the question.
+- A summary is never made cold: it is sent as the chat's next request,
+  with the instruction appended (`harness-compaction--prefix-request`),
+  so the conversation's own prompt cache serves it
+  (`harness-compaction--prefix-cache-p'), and `compaction/estimate` says
+  `:cached` and `:available` for it.  A `brief` renders the narrative
+  anew, so no cache of the chat covers it: it is for a handoff, and is
+  not offered otherwise (`harness-carry-available-p').  A hosted loop's
+  summary forks the conversation its provider holds, which the estimate
+  counts as cached.  Every path asks
   `harness-compaction--effective-kind` which kind it may use, and one
-  that asks a model becomes a `transcript` unless the estimate says
-  that request's own prefix is cached.  The guard sits in
+  that asks a model becomes a `transcript` unless the estimate says that
+  request's own prefix is cached.  A handoff's OPTS
+  `:transfer` is the one exception: the conversation leaves for a
+  provider that never saw it, so there is no cache to read and the
+  transfer is the point.  The guard sits in
   `harness-compaction--compact-now`, the one place a compaction is
   made, so a queued, stale or direct caller cannot bypass it: OPTS
   `:fallback` is the kind that asks no model, and without it a model
@@ -6115,28 +6139,38 @@ and tools.
   on, in a session that waits for the user (`harness-compaction--asks-p':
   the setting, a session that is not non-interactive, and a
   `question/ask'), the automatic compaction asks first
-  (`harness-compaction--ask', event `compaction/asked').  The question
-  says how full the context is against the window, and what carrying on
-  costs uncached against the cache while it lasts; its options are the
-  kinds (`harness-compaction--ask-kinds': brief, summary, transcript,
-  fresh, truncate, each with what it costs, the configured one marked
-  the default), carrying on (left out when the conversation is past the
-  window and could not be sent at all) and not now.  Its payload
-  `:compaction' has the context, the window and the usable part of it,
-  the model, what carrying on costs with and without the cache, the
-  default and the choices, for a client that draws more than the
-  question (`harness-ui-compaction-ask').  The turn waits for the
-  answer: a kind compacts as it says, carrying on sends the
+  (`harness-compaction--ask', event `compaction/asked').  It asks one
+  flat list, the same list the cold-cache question asks
+  (`harness-carry-menu`, see cowboy below), for its own reason: the
+  heading says how full the context is against the window, and the
+  choices are Summary, Transcript, Fresh start, Continuation and Pause, with
+  what each costs.  Carrying on is marked the default: it changes
+  nothing, and a default that compacts the conversation is too easy to
+  give by accident.  It is always offered, past the model's window too:
+  it is the user's to choose, and a provider that cannot send the
+  conversation says so.  The summary is shown with no cache -- dimmed, without a
+  key, its price column saying "no cache" -- when its own request is
+  not cached, and an answer that names it anyway asks again saying so;
+  the ways that ask no model are always offered.  Its
+  payload `:compaction' has the context, the window and the usable part
+  of it, the model, whether the prompt cache is warm, what carrying on
+  costs with and without the cache, the default and the choices, for a
+  client that draws more than the question
+  (`harness-ui-compaction-ask').  Its `:always' lists the choices whose
+  capital key answers "always"; only carrying on may.  The turn waits
+  for the answer: a kind compacts as it says, carrying on sends the
   conversation as it is, and a dismissed question holds the message,
-  with `harness-compaction--hold-reason', as not now does.  An answer
-  naming no choice asks again.  An answer to carry on stands while the
-  conversation can still be sent: the question is not put again before
-  the next turn, nor at the next steps of one, and comes back once the
-  context is past the window -- where carrying on is no option -- or
-  once a boundary has found the context under the limit since, a
-  compaction or a trim having made it another conversation
-  (`harness-compaction--carried-on'; any other answer forgets it, and so
-  does the session's end).  A question that cannot be asked (an
+  with `harness-compaction--hold-reason', as Pause does.  An answer
+  naming no choice asks again.  An answer to carry on stands until the
+  conversation changes, past the model's window too: the question is
+  not put again before the next turn, nor at the next steps of one, and
+  a boundary that has found the context under the limit since, a
+  compaction or a trim having made it another conversation, forgets the
+  answer (`harness-compaction--carried-on'; any other answer forgets it,
+  and so does the session's end).  The capital of Continuation answers
+  "always carry on": `harness-compaction-carry-on' is saved, and from
+  then on a session that would wait for the user carries on without
+  being asked (`harness-compaction--carry-on-always-p').  A question that cannot be asked (an
   error, or no `question/ask') falls back to
   `harness-compaction--effective-kind' of `harness-compaction-kind': a
   summary or brief nobody chose is a transcript there too.  An answer
@@ -6145,18 +6179,19 @@ and tools.
   its own request is cached; otherwise a transcript is written and a
   hint says what was not made and why.  Whatever the answer, the
   transcript says what goes first and why
-  (`harness-compaction--say': "Context nearly full: compacting into a
-  summary first, as you chose"), and the node's `:meta' `:auto' keeps
-  the choice and who made it.
+  (`harness-compaction--say': "Context · summary · chosen"), and the
+  node's `:meta' `:auto' keeps the choice and who made it.
 - Nobody asked: a session that never waits for the user -- a task, a
   supervisor's worker, one whose `harness-non-interactive' is
   set -- has no one to answer, so the compaction is made as
   `harness-compaction-kind' says, with the hint saying that is why
-  ("as harness-compaction-kind says (nobody to ask)") -- a `summary` or
-  `brief` there is a transcript instead, since nobody chose to pay for
-  it, and a second hint says what was not made and why ("The summary
-  would read the whole conversation uncached, so it was not made:
-  transcript file instead", `harness-compaction--say-not-warm`).  A
+  ("Context · summary · automatic") -- a `summary` or `brief` there is
+  a transcript instead, since nobody chose to pay for it, and a second
+  hint says what was not made and why ("Summary · no cache ·
+  transcript", `harness-compaction--say-not-warm`).  A
+  session that never waits for the user does not take a lasting
+  "always carry on" either; unattended work is not left to fail on an
+  overgrown context.  A
   client that asks about a cold cache there is left to ask as it did
   (`harness-cowboy-ask'); what an automatic compaction may not do is
   spend without saying so.
@@ -6243,34 +6278,37 @@ as it is, all of the conversation uncached, without a decision.
   as a new conversation's first message, uncached.  So the gate asks
   right after a redaction, or takes the default for a session nobody is
   asked about, as for any cold cache.
-- The choices (`harness-cowboy-choices`, the ways of `harness-carry-ways`
-  in lisp/harness-carry.el, which the model switch offers too, with the
-  same keys b s t f c i q and the same words): `brief`, `summary`,
-  `transcript` and `fresh` compact as `compaction/compact` does, with
-  `:meta (:cowboy (:choice C :by BY))`, before the message.  `brief` and
-  `summary` are model requests that read the whole conversation, and
-  they read it uncached: their system prompt and tool list differ from
-  the chat's (`harness-compaction--summary-request` has `:tools` nil), so
-  no cache of the chat covers them, and a small summary says nothing
-  about the size of the input it read.  `transcript` and `fresh` ask no
-  model.  `carry-on` sends the conversation as it is and says so in a
-  hint; `ignore` sends it as it is and adds nothing at all (no hint, no
-  compaction, no status change); `hold` stops the turn (`:proceed` nil,
-  reason "not now: …"), the message staying in the transcript to go with the next
-  one.  A summary or brief is made only when the estimate says its own
-  request is cached, for the model it would go to: an unasked default,
-  a user's answer and a saved "always" answer are all choices, not
-  warmth, and become a transcript with a hint saying what was not made.
-  A warm summary that fails falls back to `transcript` (`:fallback` in
-  the meta), each said in a hint.  When the transcript
+- The choices (`harness-carry-menu`, the five ways both questions show,
+  in lisp/harness-carry.el): `summary`, `transcript`, `fresh`,
+  `carry-on` and `hold`, with the keys s t f c q and the words the
+  panel uses.  The gate shows the same rows as the question before an
+  automatic compaction, for its own reason: the summary is shown, not
+  offered, because the gate found the chat's cache lapsed and the
+  summary would read the whole conversation uncached
+  (`harness-carry-available-p`).  Carrying on is always offered, past
+  the model's window too.  `transcript` and `fresh` compact as
+  `compaction/compact` does, with `:meta (:cowboy (:choice C :by BY))`,
+  before the message.  `transcript` and `fresh` ask no model.
+  `carry-on` sends the conversation as it is and says so in a hint; a
+  saved `ignore` setting sends it as it is and adds nothing at all (no
+  hint, no compaction, no status change), and an answer that names
+  `ignore` answers `carry-on`; `hold` stops the turn (`:proceed` nil,
+  reason "cache cold · message hold"), the message staying in the
+  transcript to go with the next one.  A summary is made only when the estimate says its
+  own request is cached, for the model it would go to: an unasked
+  default, a user's answer and a saved "always" answer are all choices,
+  not warmth, and become a transcript with a hint saying what was not
+  made.  A warm summary that fails falls back to `transcript`
+  (`:fallback` in the meta), each said in a hint.  When the transcript
   cannot be written either -- and a cut would drop nothing -- the
   message is held (`:proceed` nil, `harness-cowboy--uncacheable-reason`):
-  it is never sent uncached as a fallback.  A hint says what went first and why ("as
-  you chose", "the default for a session that does not wait for you",
-  …), except for `ignore`, which leaves no hint.  While the compaction
-  runs the session is `running` with the activity `(:phase compacting)`
-  (`agent/note-activity`), and a message sent meanwhile waits with the
-  turn (`agent/hold`) instead of steering it.  A compaction that is
+  it is never sent uncached as a fallback.  A hint says what went first
+  and why ("Cache cold · 14:07 · continue · ~3.0k tokens uncached ·
+  chosen", …), except for `ignore`, which leaves no hint.  While
+  the compaction runs the session is `running` with the activity
+  `(:phase compacting)` (`agent/note-activity`), and a message sent
+  meanwhile waits with the turn (`agent/hold`) instead of steering it.
+  A compaction that is
   under way when the message comes -- one the user started from the cache
   panel or with `/compact` -- answers the question already: the
   compaction module's gate (priority 11) holds the turn until it is
@@ -6288,10 +6326,9 @@ as it is, all of the conversation uncached, without a decision.
   :by :after)` (`harness-carry-choices`; `harness-cowboy-cost-text` is
   `harness-carry-cost-text`, which prices the model switch's choices
   too).  `:dropped`, when a redaction dropped the cache, is the
-  moment, and then the question says so ("a redaction dropped this
-  session's provider conversation at HH:MM, so no prompt cache holds
-  it") and names no cached price to compare with: none can be had; the
-  hint after the choice opens "Prompt cache dropped at HH:MM by a
+  moment, and then the question says so ("Cache dropped · HH:MM ·
+  redaction") and names no cached price to compare with: none can be
+  had; the hint after the choice opens "Cache dropped · HH:MM ·
   redaction".  Clients that know it draw it (ui-cowboy); the others show
   an ordinary question.  The answer is read by
   `harness-cowboy-parse-answer`: a choice's name, label, option as
@@ -6319,9 +6356,9 @@ as it is, all of the conversation uncached, without a decision.
   `unasked`) names the decision whose `:after` the settings hold now as
   `:decided-by` (`harness-cowboy--live-decision`).
 - Not asked, `harness-cowboy-default` goes first (`transcript`, which
-  asks no model; `brief` and `summary` read the whole conversation
-  uncached, and `carry-on` sends it as it is).  No model judges the
-  choice.
+  asks no model; a `brief` or `summary` there would read the whole
+  conversation uncached, so it is made as a transcript instead, and
+  `carry-on` sends it as it is).  No model judges the choice.
 - `agent/cancelling` or `agent/turn-ended` while the question waits
   dismisses it; `session/deleted` lets the turn go.  A harness that
   stops while it waits loses the turn, not the message: settling the
@@ -6476,19 +6513,20 @@ nobody would be asked what goes first.
   (non-interactive) is where it acts.  It also requires the estimate for
   the chosen kind (`compaction/estimate`) to say that kind's own request
   is cached: the chat's cache, the last request and a time to live say
-  nothing about the compaction request's prefix, which has its own system
-  prompt and no tools.  The estimates the harness makes today say
-  `:cached` nil for `brief` and `summary`, so a model-written compaction
-  is not made here; `transcript` and `fresh` ask no model.  It claims the
-  cache, then calls `compaction/compact` with the option's kind
+  nothing about the compaction request's prefix.  A `summary` so saved
+  says `:cached` while the cache is about to lapse, since its request
+  starts as the chat's next one
+  (`harness-compaction--prefix-cache-p`); a `brief` says nil, its
+  narrative rendered anew, and `transcript` and `fresh` ask no model.
+  It claims the cache, then calls `compaction/compact` with the option's kind
   (`:idle t`, `:meta (:precompact (:choice KIND :expires T))`) and holds
   a user message that comes meanwhile (an `agent/before-turn` gate at
   priority 11) until it is done.  A failure is logged and left to the
   compaction's own hint.
 - The note that follows (a hint, "Prompt cache about to lapse at HH:MM:
-  compacted into a brief summary, while the compaction request's own
-  prefix was cached, so the next message sends that instead of ~84.0k
-  tokens uncached") tells of a lasting
+  compacted into a summary, while the compaction request's own prefix
+  was cached, so the next message sends that instead of ~84.0k tokens
+  uncached") tells of a lasting
   decision of the kind `precompact` (`:meta :decision`), `done` while the
   feature is on: [Turn off] undoes it (`harness-cache-precompact` set
   false and saved through `config/set`), [Turn on] redoes it, from any
@@ -6528,13 +6566,17 @@ so switching to either loses nothing.
   `:choices` are the ways to hand over it offers, in order, as the
   cold-cache question offers its own (`harness-carry-choices`): `(:choice
   :key :label :what :cost :cost-text :by :after :mode)` for `brief` (the
-  new model writes it, mode `compact-new`), `summary` (the current model
-  does, mode `compact`; it also has `:cost-uncached`, what it costs once
-  the cache lapsed), `transcript`, `fresh` (mode `none`) and `hold`
+  new model writes it, mode `compact-new`; it reads the narrative
+  uncached, which a transfer accepts), `summary` (the current model
+  does, mode `compact`, reading the conversation from its prompt cache
+  while that lasts; it also has `:cost-uncached`, what it costs once the
+  cache lapsed), `transcript`, `fresh` (mode `none`) and `hold`
   (labelled Cancel, mode `cancel`), priced by `compaction/estimate`, the
   new model writing the brief summary (without that module nothing is
   priced but what asks no model); the check `handoff/switch` makes for
-  itself leaves them out.  The wording is
+  itself leaves them out.  Both summaries are offered whatever the cache
+  says, since the conversation is leaving: `handoff/switch` asks for it
+  with OPTS `:transfer`.  The wording is
   nouns, a segment after another, and says that the two summaries keep the
   conversation's first and last messages as they were written.  `:cache` is the session's
   (see "Session"): whether the old model's prompt cache still lasts,
@@ -10064,11 +10106,11 @@ and a message for the echo area.  Only the user calls it.
   measures the conversation as it is now for a plan stored without one),
   fails before a fork or a request is made, on its first attempt as on
   any other.  It is not compacted into a summary first: a compaction
-  request has a system prompt and a tool list of its own, so no cache of
-  the chat covers it, and it reads the whole conversation cold before
-  writing its small summary -- often more than the turn it would save.
-  The way out is a fresh step, whose brief is the plan's summary and its
-  own prompt, never the conversation.
+  replaces the supervisor's conversation, which every step after it
+  reads, and its summary costs a model request before the fork it would
+  save -- while the worker would inherit a summary rather than the
+  plan's conversation.  The way out is a fresh step, whose brief is the
+  plan's summary and its own prompt, never the conversation.
 - A step that starts again (`:attempts` above 1: `retry_step`, perhaps
   on a higher tier, or an interrupted, failed or cancelled step run
   again) follows the same rule: a fresh step is a `session/create` like
@@ -10171,8 +10213,8 @@ and a demo provider that reports cache writes is not evidence of a
 cached read.  The supervisor's fork steps are bounded by
 `harness-supervisor-fork-limit` instead, and a fresh step is the
 fallback; nothing in the supervisor compacts a cold conversation into a
-summary, because the compaction request has a different prefix and
-reads it uncached too (see the supervisor and cowboy sections).  Legacy
+summary, because that reads the whole conversation uncached (see the
+supervisor and cowboy sections).  Legacy
 sessions marked `:seed` in their `:ext` are still recognised by the UI
 and kept out of navigation.
 
@@ -10382,10 +10424,12 @@ when it sees the context filling up mid-task, and lets the harness ask
 for one the same way: the handler calls the core `compaction/compact`
 with OPTS `:kind` (`harness-compaction-kinds`: transcript (the default),
 summary, brief, fresh or truncate), `:reason` (kept on the node's
-`:meta`) and `:mode` for what a running turn means.  A summary or brief
-reads the whole conversation uncached and is made only when the estimate
-says its own request is cached; the tool is the agent's, not the user's,
-so it is made as a transcript instead, and the result says so.  `queue`, the
+`:meta`) and `:mode` for what a running turn means.  A model kind is
+made only when the estimate says its own request reads the cache: a
+`summary` starts as the chat's next request and reads the prompt cache
+while it lasts, while a `brief` renders the narrative anew and is never
+cached.  One the estimate does not clear is made as a transcript
+instead, and the result says so.  `queue`, the
 default, registers the compaction for the turn's next boundary and lets
 the turn go on; `interrupt` cancels the running turn first
 (`agent/cancel`) and compacts as soon as it is over, losing the step in
@@ -12854,16 +12898,18 @@ and `harness-ui-cowboy-face` are its obsolete names).  The text is nouns
 and imperatives, no sentences.
 Cold-cache question (`harness-ui-cowboy`, module `ui-cowboy`): the
 harness's question about a cold prompt cache (see cowboy) as that panel,
-in place of the ordinary question panel: a heading with the clock time
-the cache lapsed (or, when `:cowboy`
-has `:dropped`, "dropped by a redaction at 14:07"; a cache held for
-another model reads as that model's, whatever became of it), the model
-and the context; the message that waits, who sent it and its first line;
-what resending costs against the cache it lost (against none for a
-dropped cache: no cached price can be had); the choices of the payload,
-what it leaves out of one coming from `harness-carry-ways`; and a footer
-with the capitals that answer "always", a line about session_history when
-the session has it, and the typed answers.  Its keymap has
+in place of the ordinary question panel: the title `Cache` and a detail
+of segments -- `cold · cache of X · session Y` for a cache held for
+another model, `dropped · 14:03 · redaction` when `:cowboy` has
+`:dropped`, else `expired · 14:07`, then the model and the context
+(`~3.0k tokens`); a `Message` row with who sent the waiting message and
+its first line; a `Cost` row with what continuing costs uncached against
+the cache it lost (`$0.500 uncached · $0.050 cached`; against none for a
+dropped cache: no cached price can be had); the ask line `Options`; the
+choices of the payload, what it leaves out of one coming from
+`harness-carry-ways`; and a footer with the capitals that answer
+"always", a line about session_history when the session has it, and the
+typed answers.  Its keymap has
 `harness-ui-pending-question-map` as its parent, so digits pick an
 option as on any question; answers go through
 `harness-ui-pending-answer-question` (`harness-ui-cowboy-answer`), and
@@ -12871,13 +12917,15 @@ text typed in the box answers it too.  Without a `:cowboy` the ordinary
 question panel shows.
 The question before an automatic compaction (`harness-ui-compaction-ask`,
 module `ui-compaction-ask`) is that panel too, from the question's
-`:compaction': "Context nearly full", the context against the window and
-the model, a row for what carrying on costs uncached against the cache
-while it lasts, and the kinds with what each costs, the configured one
-marked the default.  Its keys are the choices' (b, s, t, f, x for the
-cut, c, q), there is no capitals line -- every automatic compaction is
-the user's to decide -- and its footer points at session_history.
-Without a `:compaction` the ordinary question panel shows.
+`:compaction': the heading "Context", the context against the window,
+the model and whether the prompt cache is warm, and the choices with
+what each costs, carrying on marked the default.  It is one page -- the
+same five rows the cold-cache question shows -- with the keys of its
+choices; only Continuation has a capital, "always carry on", and a footer
+points at session_history.  A summary is dimmed, without a key and its price
+column saying "no cache", where its own request would read the prompt
+cache cold.  Without a `:compaction` the ordinary question panel
+shows.
 The question of a model switch (`harness-ui-handoff`, module `ui-handoff`)
 is the same panel with a local question: a spec made whenever the panel
 is drawn, so what the cache means for the summary is true as of then,
@@ -12925,12 +12973,12 @@ says in its header "before the prompt cache lapsed" (the cowboy's says
 "the prompt cache being cold").
 Prompt cache warning (`harness-ui-cache`, module `ui-cache`): once the
 session's `:cache :expires` has passed while it is idle or closed, a
-panel above the box says so ("Prompt cache expired at
-14:07, 5 minutes after its last use") and what the next message costs:
-it re-sends ~N tokens (`:usage :context`) uncached, about the
-cache-write (else input) price of those tokens instead of their
-cache-read price, at the model's list prices, when the catalogue
-prices both.  A session whose turn is still running shows none, a
+panel above the box says so (the title `Cache`, the detail `expired ·
+14:07 · 5 minutes` and the context) and
+what the next message costs: it re-sends ~N tokens (`:usage :context`),
+"Cost  ~$0.315 uncached · ~$0.025 cached", at the
+cache-write (else input) price of those tokens against their cache-read
+price, at the model's list prices, when the catalogue prices both.  A session whose turn is still running shows none, a
 session blocked on an answer included: the next request is that turn's
 own, not the user's next message, and a running session's requests use
 the cache again.  Nor does it show for a session this UI sent a message
@@ -12954,19 +13002,19 @@ newest record the UI has of the session (`harness-ui-session`: the
 session list's and a fetch's too), not the chat buffer's copy of the
 last update.  A session switched away from the model whose cache its
 requests last used (`:cache :model`) shows the panel at once,
-whatever the time ("Prompt cache cold  cached for Opus 4.6, not
-DeepSeek V4"), with the same cost: the new model reads nothing of
+whatever the time (`Cache` with the detail `cold · cache of Opus 4.6 ·
+session DeepSeek V4`), with the same cost: the new model reads nothing of
 that cache.  Switched back while the cache lasts, the panel goes; the
 new model's first request stamps a cache of its own, and a switch or
 compaction that starts the conversation over reports none, so no panel
 (see "Session").  A cache a redaction dropped (`:cache :dropped`, see
 "Session") shows the panel at once too, whatever the time, headed
-"Prompt cache dropped  at 14:07, by a redaction" with the moment of the
-drop, and with a tooltip saying a redaction took a secret out of the
-conversation and dropped the provider's copy of it, and its prompt
-cache with it.  Its cost line names the uncached price alone ("about
-$0.315, at list prices"): no cached one can be had, so there is none to
-compare it with.  The model switch wins when both apply: a cache held
+`Cache` with the detail `dropped · 14:07 · redaction`, the moment of the
+drop, and with
+a tooltip saying a redaction took a secret out of the conversation and
+dropped the provider's copy of it, and its prompt cache with it.  Its
+cost row names the uncached price alone ("Cost  ~$0.315 uncached"):
+no cached one can be had, so there is none to compare it with.  The model switch wins when both apply: a cache held
 for another model reads as that model's, dropped or not.  The first
 request that stamps a cache after a redaction clears the dropped mark,
 and so does a compaction, so the panel goes then as well.  While the
@@ -12980,20 +13028,22 @@ a session update (a new request stamps a new `:cache-at`) reschedules
 it, and the panel goes as soon as the session runs or a message is
 sent.  Its text names clock times only, never "idle for", so nothing in
 it goes stale between redraws.  A session without context or cache use
-never shows it.  Its last line offers to compact the conversation
-first, so the next
-message sends only what stands in for it: a button per kind
-(`harness-ui-compact-kinds`), the brief summary first -- the cheap way
-out of a long conversation gone cold -- then the summary, the
-transcript file and a fresh start, each with its key on that line (b,
-s, t, f, through a
-keymap composed under the buttons' own, `harness-ui-with-keymap`) and
-what it costs (`compaction/estimate`, asked once per state the panel
-shows, `harness-ui-cache--estimate`, and drawn when it comes; the
-buttons only name the kinds until then, a transcript being free).
-Pressing one runs `compaction/compact` (`harness-ui-compact-run`); the
-line says so while it runs (`harness-ui-compact-doing`), and the panel
-goes once the compaction resets the cache.  A session the cowboy
+never shows it.  Its last section offers to carry the conversation over
+first, so the next message sends only what stands in for it: the panel
+the two questions draw (`harness-ui-carry-panel-string`), from the menu
+they show (`harness-carry-menu`), less `Pause` and `Continuation`, which
+are about a message that waits.  So it has the title `Cache`, the detail
+above, a `Cost` row and the ask line `Options`; the summary is the first
+row, dimmed, its cost column saying `no cache`, because with the cache
+cold it would read the conversation uncached; the `Transcript` and
+`Fresh start` rows ask no model (`harness-ui-compact-cache-kinds`), each
+with its key (t, f, through the shared keymap, `harness-ui-carry-keymap`)
+and what it costs (`compaction/estimate`, asked once per state the panel
+shows, `harness-ui-cache--estimate`, and drawn when it comes; the rows
+only name the ways until then, all free).  Pressing one
+runs `compaction/compact` (`harness-ui-compact-run`); the panel says
+`Compaction · transcript` while it runs (`harness-ui-compact-doing`), and
+it goes once the compaction resets the cache.  A session the cowboy
 module compacts before a message shows as running with the activity
 `compacting` meanwhile, so the panel offers nothing then either.  A
 session blocked on an answer is in the middle of a turn, so it shows
@@ -14165,12 +14215,13 @@ which for a batch is what it costs for all of its sessions, nothing
 where a price is not known.  Summarising on the current model is cheap
 while its prompt cache lasts ("cache warm"); once `handoff/check`'s
 `:cache` lapsed, or belongs to another model, the choice says so instead
-("cache expired at 14:07 · all uncached", "cache cold · all uncached",
-and for a batch how many lapsed) and costs what `:cost-uncached` says
-(`harness-ui-handoff--cache-note`, `harness-ui-handoff--choices`).  For
-one session whose cache a redaction dropped (`:cache` has `:dropped`, see
-`session/reset-provider`) it says so, as the cache panel does: "cache
-dropped at 14:07 by a redaction · all uncached".
+("cache · expired · 14:07 · all uncached", "cache · cold · all uncached",
+and for a batch how many lapsed: "cache lapsed · 2 of 3 uncached") and
+costs what `:cost-uncached` says (`harness-ui-handoff--cache-note`,
+`harness-ui-handoff--choices`).  For one session whose cache a redaction
+dropped (`:cache` has `:dropped`, see `session/reset-provider`) it says
+so, as the cache panel does: "cache · dropped · 14:07 · redaction · all
+uncached".
 
 The panel shows where the switch started (`harness-ui-carry-host`, see
 "Chat buffer"): HOST, the buffer the command ran in, which every caller
@@ -15850,14 +15901,16 @@ message meets a cold cache, in that panel, through
 `harness-ui-pending-panel-functions`; see "Chat buffer"), the question
 before an automatic compaction (`harness-ui-compaction-ask`: the same
 panel for a context near its window, its heading the context against
-the window, its rows what carrying on costs against the cache, no
-"always"; see "Chat buffer"), compacting by hand
+the window, its rows what carrying on costs against the cache, its
+capital "always carry on"; see "Chat buffer"), compacting by hand
 (`harness-ui-compact`: `harness-compact`, `C-c h C` and "C" in the
-menu, asks which kind with `read-multiple-choice`, the help buffer a
-table of each kind's writer, cost and effect and what carrying on
-costs, from `compaction/estimate`; the kinds are brief, summary,
-transcript and fresh; refuses a session running a turn; registers
-/compact, /compact KIND, in `harness-chat-commands`), and the
+menu, asks one flat list with `read-multiple-choice` -- Summary,
+Transcript, Fresh start and Continuation -- the help buffer naming
+the session, the model and the cache and what carrying on costs, from
+`compaction/estimate`; a summary says "no cache" where its own
+request reads the cache cold, and a brief is a handoff's; refuses a
+session running a turn; registers /compact, /compact KIND, in
+`harness-chat-commands`), and the
 handed-in report (`harness-ui-report`: the summary as markdown and the
 evidence -- images as wide as the popout and up to
 `harness-ui-report-image-max-height` of the frame high, the popout

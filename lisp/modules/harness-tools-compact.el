@@ -41,8 +41,8 @@
 (defconst harness-tools-compact-kinds '("transcript" "summary" "brief" "fresh" "truncate")
   "The kinds of compaction the `compact' tool offers, the default first.
 They are the kinds of `harness-compaction-kinds', with the kind that
-asks no model first: a summary nobody chose reads the whole conversation
-uncached.")
+asks no model first: a summary nobody chose reads the conversation from
+the prompt cache while it lasts, and a cold one is refused.")
 
 (defconst harness-tools-compact-modes '("queue" "interrupt")
   "How the `compact' tool handles the turn it is called from.
@@ -78,8 +78,8 @@ REQUESTED and DONE are names of kinds.  Nil when they are the same, or
 when REQUESTED asks no model to read the conversation."
   (when (and (member requested '("summary" "brief"))
              (not (equal requested done)))
-    (format (concat "  A %s reads the whole conversation uncached, and this request is not"
-                    " known to be cached: %s instead.")
+    (format (concat "  A %s reads the conversation on a request of its own, and the prompt"
+                    " cache is not known to hold it: %s instead.")
             (if (equal requested "brief") "brief summary" "summary")
             (pcase done
               ("transcript" "a transcript file")
@@ -148,12 +148,12 @@ INPUT has `:kind' (`harness-tools-compact-kinds', default transcript),
           " and the old conversation stays on record for the session_history tool.  Call it when the context"
           " is filling this model's window, or before a long job that will add a lot more, rather than"
           " waiting for the harness to compact on its own.  kind chooses what stands in for the conversation:"
-          " summary has this session's model summarise the whole conversation, which reads all of it again;"
-          " brief has a cheap model summarise the conversation's narrative -- every user and assistant"
+          " summary has this session's model summarise the conversation on a request that starts as this"
+          " conversation's next step would, so it reads the conversation from the prompt cache while that"
+          " lasts; brief has a cheap model summarise the conversation's narrative -- every user and assistant"
           " message, each tool call and result in a line -- cheap however long the conversation but leaving"
-          " out what tools read and wrote; both read all of it uncached, on a request whose own system"
-          " prompt and tools no prompt cache holds, so unless that request is known to be cached they are"
-          " made as a transcript instead (the result says so); transcript (the default) writes the whole conversation"
+          " out what tools read and wrote, and never cached; unless a model-written one is known to read the"
+          " cache it is made as a transcript instead (the result says so); transcript (the default) writes the whole conversation"
           " to a file and leaves a note to read what is needed of it, asking no model; fresh carries nothing"
           " over but a note, asking no model; truncate drops the oldest messages and keeps the most recent as"
           " they are, asking no model, for a conversation too big to summarise.  mode chooses when it happens:"
@@ -164,7 +164,7 @@ INPUT has `:kind' (`harness-tools-compact-kinds', default transcript),
   :schema '(:type "object"
             :properties (:kind (:type "string"
                                 :enum ("summary" "brief" "transcript" "fresh" "truncate")
-                                :description "What stands in for the conversation: transcript (default), summary, brief, fresh or truncate; a summary nobody chose reads the whole conversation uncached and is made as a transcript instead.")
+                                :description "What stands in for the conversation: transcript (default), summary, brief, fresh or truncate; a summary reads the conversation from the prompt cache while it lasts, and one whose request the cache does not hold is made as a transcript instead.")
                          :mode (:type "string"
                                 :enum ("queue" "interrupt")
                                 :description "queue (default) compacts at this turn's next boundary; interrupt cancels the current turn now and compacts once it is over.")

@@ -87,8 +87,8 @@ and supervisor load only when they are named.
  :ui
  ;;btw                ; BTW side conversations over the current session or view.
  ;;children           ; Sub-agents of a session at work or blocked on you, pinned above its…
- ;;compact            ; Compact a session's conversation by hand, choosing the kind at a known…
- ;;compaction-ask     ; The question before an automatic compaction as a panel: the kinds,…
+ ;;compact            ; Compact a session's conversation by hand, at a known cost.
+ ;;compaction-ask     ; The question before an automatic compaction as a panel: one list of…
  ;;dirs               ; Obsolete: the directories of a session are a section of its access…
  ;;media              ; Audio playback and recording, video thumbnails, clipboard images.
  ;;popout             ; Popouts: one item of a session or task in a small window of its own.
@@ -219,8 +219,8 @@ and supervisor load only when they are named.
 | [ui-chatgpt-plan](ui-chatgpt-plan.md) |  |  | Sign in with ChatGPT from the settings page, with the accounts and what they may do. |
 | [ui-children](ui-children.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Sub-agents of a session at work or blocked on you, pinned above its compose box: name, progress and elapsed time, and for a blocked one what it asks, with the buttons that answer it. |
 | [ui-commit-msg](ui-commit-msg.md) |  | [ui](ui.md) | M-x harness-commit-msg-uninstall: take the harness's commit-msg hook out of a repository. |
-| [ui-compact](ui-compact.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Compact a session's conversation by hand, choosing the kind at a known cost. |
-| [ui-compaction-ask](ui-compaction-ask.md) |  | [ui](ui.md), [ui-pending](ui-pending.md), [ui-carry](ui-carry.md) | The question before an automatic compaction as a panel: the kinds, what each costs, and carrying on. |
+| [ui-compact](ui-compact.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Compact a session's conversation by hand, at a known cost. |
+| [ui-compaction-ask](ui-compaction-ask.md) |  | [ui](ui.md), [ui-pending](ui-pending.md), [ui-carry](ui-carry.md) | The question before an automatic compaction as a panel: one list of ways, what each choice costs, and carrying on. |
 | [ui-compose](ui-compose.md) | by default | [ui](ui.md) | The compose box shared by chat buffers and the task board. |
 | [ui-config](ui-config.md) | by default | [ui](ui.md) | Settings page: every harness setting, edited globally or for the project. |
 | [ui-cost-compare](ui-cost-compare.md) |  | [ui](ui.md), [ui-usage](ui-usage.md) | Compare what the recorded usage would have cost at other models' prices. |

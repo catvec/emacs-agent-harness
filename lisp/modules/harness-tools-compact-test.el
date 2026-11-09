@@ -118,7 +118,7 @@ the compaction."
                            requests))
       (should-not (plist-get result :is-error))
       (should (string-match-p "transcript file" (plist-get result :content)))
-      (should (string-match-p "reads the whole conversation uncached"
+      (should (string-match-p "the prompt cache is not known to hold it"
                               (plist-get result :content)))
       (let ((node (car (harness-tools-compact-test-compactions id))))
         (should (equal "transcript" (harness-node-compaction-kind node)))
@@ -138,7 +138,7 @@ turn goes on, not cancelled."
       (should (string-match-p "next boundary" (plist-get result :content)))
       ;; A brief summary nobody chose is queued as a transcript.
       (should (string-match-p "transcript file" (plist-get result :content)))
-      (should (string-match-p "reads the whole conversation uncached"
+      (should (string-match-p "the prompt cache is not known to hold it"
                               (plist-get result :content)))
       (should (gethash id harness-compaction--pending))
       (should-not (harness-tools-compact-test-compactions id))

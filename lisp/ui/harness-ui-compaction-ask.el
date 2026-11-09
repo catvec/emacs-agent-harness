@@ -4,24 +4,29 @@
 
 ;; A conversation that comes near its model's context window is
 ;; compacted before it can be sent again, and compacting spends money:
-;; the summary reads the whole conversation again.  So where the user
-;; can be asked, the harness asks first (harness-compaction.el), with
-;; the kinds of compaction and what each costs, and carrying on with
-;; the whole conversation and what that costs: a brief summary, a
-;; summary, a transcript file, a fresh start, a cut of the oldest
-;; context, carrying on, or not now.
+;; the summary reads the conversation again, from the prompt cache while
+;; that lasts.  So where the user can be asked, the harness asks first
+;; (harness-compaction.el), in one list: Summary, Transcript, Fresh
+;; start, Continuation and Pause -- the same list the cold-cache question
+;; asks, for another reason.  A summary is offered only where its own
+;; request reads the prompt cache, and says what it costs there; it is
+;; shown, no cache, otherwise.  The ways that ask no model are always
+;; offered, and carrying on is always one of them: past the model's
+;; window too, the user's to choose.
 ;;
 ;; The question is a pending question like any other, with its own
 ;; `:compaction' in the payload.  This module draws it with the panel of
 ;; the ways to carry a conversation over (harness-ui-carry.el), which
-;; the cold-cache question uses too (harness-ui-cowboy.el): the
-;; choices, their keys and their costs are the harness's, and what this
+;; the cold-cache question uses too (harness-ui-cowboy.el): one page and
+;; one list, the same both questions show (`harness-carry-menu'), with
+;; the choices, their keys and their costs the harness's.  What this
 ;; module says is the heading -- the context against the window the
-;; model can be sent -- and the rows, what carrying on costs against
-;; the cache.  A key answers once (b, s, t, f, x, c, q); there is no
-;; "always" here, as every automatic compaction is the user's to
-;; decide.  A client that does not know `:compaction' shows the
-;; ordinary question, whose options carry their costs in their words.
+;; model can be sent.  A summary whose own request would read the
+;; conversation uncached is drawn, no cache.  A key answers once; the
+;; capital of Continuation answers "always", which saves
+;; `harness-compaction-carry-on' and stops the asking.  A client that
+;; does not know `:compaction' shows the ordinary question, whose
+;; options carry their costs in their words.
 
 ;;; Code:
 
@@ -32,8 +37,6 @@
 (require 'harness-ui)
 (require 'harness-ui-pending)
 (require 'harness-ui-carry)
-
-;;;; Reading the question
 
 (defun harness-ui-compaction-ask--info (r)
   "Return the `:compaction' of question record R, or nil for another question."
@@ -52,55 +55,23 @@
                                 (harness-format-tokens context) (harness-format-tokens window)))
                        ((and (numberp context) (> context 0))
                         (format "~%s tokens" (harness-format-tokens context))))
-                 model))
+                 model
+                 (if (harness-json-true-p (plist-get info :cached))
+                     "cached"
+                   "uncached")))
      " · ")))
-
-(defun harness-ui-compaction-ask--rows (info &optional session)
-  "Return the labelled facts of the panel for INFO.
-What carrying on costs, against the price from the cache, where the
-cache still lasts.  SESSION, a session plist, words the cost as a
-plan's shares where it has rates."
-  (let ((carry (plist-get info :carry-on))
-        (cached (plist-get info :carry-on-cached))
-        (warm (harness-json-true-p (plist-get info :cached))))
-    (let ((text (lambda (usd)
-                  (if session (harness-ui-estimate-text usd session) (harness-format-cost usd)))))
-      (delq nil
-            (list (and (numberp carry)
-                       (list "Carry on"
-                             (if (and warm (numberp cached) (> carry cached))
-                                 (format "%s uncached against %s cached"
-                                         (funcall text carry) (funcall text cached))
-                               (format "%s uncached" (funcall text carry))))))))))
-
-(defun harness-ui-compaction-ask--choice (entry session)
-  "Return the choice of ENTRY, as the panel draws it, for SESSION.
-Its label, wording, key, cost and the context after it come from the
-harness; where the cost is a sum of money and SESSION has plan rates,
-it reads as a share of the plan's windows."
-  (let* ((name (plist-get entry :choice))
-         (cost (plist-get entry :cost))
-         (text (harness-ui-carry-text (plist-get entry :cost-text)))
-         (choice (list :choice name
-                       :key (harness-ui-carry-text (plist-get entry :key))
-                       :label (harness-ui-carry-text (plist-get entry :label))
-                       :what (harness-ui-carry-text (plist-get entry :what)))))
-    (when (numberp (plist-get entry :after))
-      (setq choice (plist-put choice :after (plist-get entry :after))))
-    (when text
-      (setq choice (plist-put choice :cost-text
-                              (if (and (numberp cost) session (not (equal text "free")))
-                                  (concat "~" (harness-ui-estimate-text cost session)
-                                          (if (equal name "carry-on") " uncached" ""))
-                                text))))
-    choice))
 
 ;;;; Answering
 
-(defun harness-ui-compaction-ask-answer (session-id pid choice)
+(defun harness-ui-compaction-ask-answer (session-id pid choice &optional always)
   "Answer the automatic-compaction question PID of SESSION-ID with CHOICE.
-CHOICE is a choice's name, such as \"brief\"."
-  (harness-ui-pending-answer-question session-id pid choice))
+CHOICE is a choice's name, such as \"brief\"; ALWAYS non-nil makes it the
+lasting answer, which only carrying on may be."
+  (harness-ui-pending-answer-question
+   session-id pid (if always (concat "always " choice) choice))
+  (when always
+    (message "%s · default"
+             (harness-carry-label (harness-carry-way choice)))))
 
 ;;;; The panel
 
@@ -112,19 +83,18 @@ See `harness-ui-carry-panel-string'."
          (session (harness-ui-session session-id)))
     (list :id pid
           :icon 'harness-icon-compaction
-          :title "Context nearly full"
+          :title "Context"
           :detail (harness-ui-compaction-ask--detail info)
-          :rows (harness-ui-compaction-ask--rows info session)
-          :ask "Choose what goes first"
-          :choices (mapcar (lambda (entry) (harness-ui-compaction-ask--choice entry session))
+          :ask "Options"
+          :choices (mapcar (lambda (entry) (harness-ui-carry-choice entry session))
                            (append (plist-get info :choices) nil))
           :default (plist-get info :default)
-          :always nil
+          :always (plist-get info :always)
           :footer (list (and (fboundp 'harness-compaction-history-p)
                              (harness-compaction-history-p session-id)
-                             "Left out: searchable with session_history"))
-          :answer (lambda (choice _always)
-                    (harness-ui-compaction-ask-answer session-id pid choice)))))
+                             "session_history"))
+          :answer (lambda (choice always)
+                    (harness-ui-compaction-ask-answer session-id pid choice always)))))
 
 (defun harness-ui-compaction-ask--string (spec)
   "Return the panel of SPEC, a spec of `harness-ui-compaction-ask--spec'."
@@ -170,7 +140,7 @@ On `harness-ui-pending-panel-functions': return non-nil when it did."
   (add-hook 'harness-ui-pending-panel-functions #'harness-ui-compaction-ask--insert-panel))
 
 (harness-define-module 'ui-compaction-ask
-  :doc "The question before an automatic compaction as a panel: the kinds, what each costs, and carrying on."
+  :doc "The question before an automatic compaction as a panel: one list of ways, what each choice costs, and carrying on."
   :requires '(ui ui-pending ui-carry)
   :init #'harness-ui-compaction-ask--init)
 

@@ -2,7 +2,7 @@
 
 # ui-compact
 
-Compact a session's conversation by hand, choosing the kind at a known cost.
+Compact a session's conversation by hand, at a known cost.
 
 - **Runs in:** the UI (your Emacs)
 - **Source:** [lisp/ui/harness-ui-compact.el](../../lisp/ui/harness-ui-compact.el)
@@ -13,40 +13,39 @@ Compact a session's conversation by hand, choosing the kind at a known cost.
 
 A conversation that nears its model's context window is compacted on
 its own, as `harness-compaction-kind` says (harness-compaction.el).
-This file compacts one by hand, in any of the kinds, and says first
-what each costs (`compaction/estimate`), at list prices:
+This file compacts one by hand, and says first what each way costs
+(`compaction/estimate`), at list prices:
 
-- a brief summary: a cheap model (by default the simple tier of the
-  session's provider) summarises the conversation's narrative --
-  every user and assistant message, each tool call and result in a
-  line -- for a few cents however long the conversation; what tools
-  read and wrote is left out, which the summary says;
-- a summary: the session's model summarises the whole conversation,
-  reading all of it again -- uncached once the prompt cache lapsed;
+- a summary: the session's model summarises the whole conversation on
+  a request that starts as the conversation's next step would, so the
+  conversation is read from the prompt cache while that lasts
+  (harness-compaction.el);
 - a transcript file: the whole conversation goes to a file in the
   session's directory, and a note tells the model to read what it
   needs of it.  No request;
 - a fresh start: nothing is carried over but a note saying so.  No
-  request either;
-- a cut old context: the oldest nodes go, the most recent are kept
-  as they were, and a note says what went.  No request either.
+  request either.
 
-The first three are the ways a handoff carries a conversation over to
-another provider (`compact-new`, `compact`, `transcript`), on the
-session's own.  After any of them the session's next message sends
-the summary or the note, not the whole conversation, cached or not;
-the model searches and reads what it left out with the
-session_history tool.
+A brief summary -- a cheap model reads the narrative, which no cache
+of the conversation covers -- is a handoff's way of carrying a
+conversation to another provider (`compact-new`), and a cut old
+context is what an automatic compaction falls back to; neither is one
+this question offers.  `/compact brief` or `/compact truncate` still
+makes either by name.
 
 `harness-compact` (C under the harness prefix and in its menu, or
-/compact in a chat's message box, /compact brief to skip the
-question) asks which, with what each costs and what carrying on
-costs.  The panel a session shows once its prompt cache expired
-(harness-ui-cache.el) offers the same as buttons, the brief summary
-first: that is when carrying on is dearest, the whole context going
-out uncached.  A message sent to such a session asks the same before
-it goes (harness-cowboy.el, harness-ui-cowboy.el).  A session running
-a turn is asked whether to interrupt the step and compact now, or to
+/compact in a chat's message box) asks one flat list, the same the
+automation asks (`harness-carry-menu`): Summary, Transcript,
+Fresh start and Continuation.  The Summary is shown, no cache, where
+the prompt cache does not hold its request, and says what it costs
+where it does; the ways that ask no model are always offered.  The
+panel a session shows once its prompt cache expired
+(harness-ui-cache.el) is the same table less the answers about a
+waiting message: a summary row, no cache, and the two buttons.
+That is when carrying on is dearest, the whole context going out
+uncached.  A message sent to such a session asks the same before it
+goes (harness-cowboy.el, harness-ui-cowboy.el).  A session running a
+turn is asked whether to interrupt the step and compact now, or to
 queue the compaction for the turn's next boundary
 (`harness-ui-compact-running-choice`): compacting it mid-step would
 let the turn go on writing after the conversation it replaces.

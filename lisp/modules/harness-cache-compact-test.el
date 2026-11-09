@@ -471,7 +471,7 @@ compaction, and nothing left running."
         (should-not (harness-cache-compact-test--notes sid))
         (should-not harness-cache-compact-test--compacted)
         (should (plist-get (harness-call 'session/get sid) :cache))
-        (should (cl-some (lambda (h) (string-match-p "Compaction failed" h))
+        (should (cl-some (lambda (h) (string-match-p "Compaction failure" h))
                          (harness-cache-compact-test--hints sid)))))))
 
 (ert-deftest harness-cache-compact-forgets-a-session-that-is-deleted ()

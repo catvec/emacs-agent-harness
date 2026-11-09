@@ -40,13 +40,6 @@
 (defvar harness-cowboy-test--requests nil
   "The requests of the turns the demo provider answered, newest first.")
 
-(defvar harness-cowboy-test--warm t
-  "Whether the estimate is simulated as proving the compaction request cached.
-The summary mechanics leave it t: a provider that says its own request's
-prefix is cached would let it be made.  Tests of the cold rule -- the
-default taken unasked, a saved answer, a dismissal -- bind it nil, and
-the real `harness-compaction-request-warm-p' decides.")
-
 (defun harness-cowboy-test--script (request)
   "Answer REQUEST: a summary when it asks for one, else a short reply.
 A turn's request is remembered in `harness-cowboy-test--requests'."
@@ -61,7 +54,7 @@ A turn's request is remembered in `harness-cowboy-test--requests'."
 
 (defmacro harness-cowboy-test-with (&rest body)
   "Load the state layer, compaction, the session tools and cowboy; run BODY.
-Asking is on and the default is the brief summary, whatever the user's
+Asking is on and the default is the transcript file, whatever the user's
 settings say."
   (declare (indent 0))
   `(harness-test-with-temp-state
@@ -78,7 +71,7 @@ settings say."
      (let ((harness-provider-demo--delay 0.005)
            (harness-provider-demo-script-override #'harness-cowboy-test--script)
            (harness-compaction-brief-model "demo:scripted")
-           (harness-cowboy-default 'brief)
+           (harness-cowboy-default 'transcript)
            (harness-cowboy-ask t)
            (harness-cowboy-min-context 0)
            (harness-cowboy-new-conversation-limit 100000)
@@ -86,12 +79,7 @@ settings say."
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
-       (cl-letf* ((warm (symbol-function 'harness-compaction-request-warm-p))
-                  ((symbol-function 'harness-compaction-request-warm-p)
-                   (lambda (session-id kind &optional model)
-                     (or harness-cowboy-test--warm
-                         (funcall warm session-id kind model)))))
-         ,@body))))
+       ,@body)))
 
 (defun harness-cowboy-test-session (&rest plist)
   "Create a demo session with an answered exchange whose prompt cache lapsed.
@@ -190,14 +178,13 @@ lapsed, but its first request is the same cache bomb as a lapsed one."
       (should (harness-cowboy--new-conversation-p (harness-call 'session/get fid)))
       (let ((p (harness-call 'agent/prompt fid "carry on")))
         (let ((payload (plist-get (harness-cowboy-test--question fid) :payload)))
-          (should (string-match-p (concat "\\`Your message waits: this conversation has never been sent,"
-                                          " so no prompt cache holds any of it")
+          (should (string-match-p "\\`First message · no cache · Message · your message"
                                   (plist-get payload :question))))
         (harness-cowboy-test--answer fid "carry on")
         (should (eq 'end-turn (plist-get (harness-test-await p 10) :stop-reason)))
         (should (string-match-p "please refactor the parser"
                                 (harness-cowboy-test--request-text (car harness-cowboy-test--requests))))
-        (should (cl-some (lambda (h) (string-match-p "carrying on with the whole conversation" h))
+        (should (cl-some (lambda (h) (string-match-p "continuation" h))
                          (harness-cowboy-test--hints fid)))))))
 
 (ert-deftest harness-cowboy-a-fork-that-starts-small-goes-on ()
@@ -237,15 +224,13 @@ carrying on would send the whole conversation uncached with nobody asked."
       (let ((p (harness-call 'agent/prompt sid "carry on from the new model")))
         (let ((payload (plist-get (harness-cowboy-test--question sid) :payload)))
           (should (eq 'blocked (plist-get (harness-call 'session/get sid) :status)))
-          (should (string-match-p (concat "\\`Your message waits: this session's prompt cache is cold\\.  "
-                                          "It is held for old, which this session no longer uses, "
-                                          "so Demo scripted has none of it\\.")
+          (should (string-match-p "\\`Cache · cold · old · session model Demo scripted"
                                   (plist-get payload :question)))
           (should (equal "demo:old" (plist-get (plist-get payload :cowboy) :cache-model)))
           (should (equal "old" (plist-get (plist-get payload :cowboy) :cache-model-label))))
         (harness-cowboy-test--answer sid "carry on")
         (should (eq 'end-turn (plist-get (harness-test-await p 10) :stop-reason)))
-        (should (cl-some (lambda (h) (string-match-p "\\`Prompt cache cold: held for old, not Demo scripted: carrying on with the whole conversation, ~3\\.0k tokens uncached, as you chose\\'" h))
+        (should (cl-some (lambda (h) (string-match-p "\\`Cache · cold · old · session model Demo scripted · continuation · ~3\\.0k tokens uncached · answer\\'" h))
                          (harness-cowboy-test--hints sid)))))))
 
 ;;;; Asking
@@ -273,42 +258,37 @@ conversation."
       (should-not (member "now add tests" (mapcar (lambda (n) (plist-get n :content))
                                                   (harness-call 'session/nodes sid))))
       (should (equal "now add tests" (plist-get (plist-get payload :waiting-message) :text)))
-      (should (string-match-p (concat "\\`Your message waits: this session's prompt cache lapsed at .*, [0-9]+ days ago\\."
-                                      "  Carrying on sends the whole conversation, ~3\\.0k tokens, uncached.*"
-                                      "  What goes first\\?  Answer \"always\"")
+      (should (string-match-p "\\`Cache · cold · .* · [0-9]+ days · Message · your message · ~3\\.0k tokens uncached"
                               (plist-get payload :question)))
-      ;; Every choice, with its cost; the default says so.
+      ;; The same menu the automatic compaction asks, with its costs; a
+      ;; cold cache holds none of the summary's request, so it is shown,
+      ;; not offered, and the default says so on the transcript file.
       (let ((options (plist-get payload :options)))
-        (should (= 7 (length options)))
-        (should (string-match-p "\\`Brief summary (~\\$[0-9.]+, the default)\\'" (nth 0 options)))
-        (should (string-match-p "\\`Summary (~\\$[0-9.]+)\\'" (nth 1 options)))
-        (should (equal "Transcript file (free)" (nth 2 options)))
-        (should (equal "Start afresh (free)" (nth 3 options)))
-        (should (string-match-p "\\`Carry on (~\\$[0-9.]+ uncached)\\'" (nth 4 options)))
-        (should (string-match-p "\\`Ignore (~\\$[0-9.]+ uncached)\\'" (nth 5 options)))
-        (should (equal "Not now" (nth 6 options))))
+        (should (= 5 (length options)))
+        (should (equal "Summary (no cache)" (nth 0 options)))
+        (should (equal "Transcript (free · default)" (nth 1 options)))
+        (should (equal "Fresh start (free)" (nth 2 options)))
+        (should (string-match-p "\\`Continuation (~\\$[0-9.]+ uncached)\\'" (nth 3 options)))
+        (should (equal "Pause" (nth 4 options))))
       (should (plist-get payload :allow-free-text))
       ;; What a client draws more than the question with.
-      (should (equal "brief" (plist-get info :default)))
-      (should (equal '("brief" "summary" "transcript" "fresh" "carry-on" "ignore" "hold")
+      (should (equal "transcript" (plist-get info :default)))
+      (should (equal '("summary" "transcript" "fresh" "carry-on" "hold")
                      (mapcar (lambda (c) (plist-get c :choice)) (plist-get info :choices))))
-      (should (equal "free" (plist-get (nth 2 (plist-get info :choices)) :cost-text)))
+      (should (eq t (plist-get (nth 0 (plist-get info :choices)) :unavailable)))
+      (should (equal "no cache" (plist-get (nth 0 (plist-get info :choices)) :cost-text)))
+      (should (equal "free" (plist-get (nth 1 (plist-get info :choices)) :cost-text)))
       ;; Each with its key and the wording of the table every question of this
-      ;; kind shares (`harness-carry-ways'), the two summaries saying that
-      ;; the first and last messages are kept.
-      (should (equal '("b" "s" "t" "f" "c" "i" "q")
+      ;; kind shares (`harness-carry-menu-ways').
+      (should (equal '("s" "t" "f" "c" "q")
                      (mapcar (lambda (c) (plist-get c :key)) (plist-get info :choices))))
-      (should (equal (mapcar (lambda (way) (harness-carry-property way :what)) (harness-carry-names))
-                     (mapcar (lambda (c) (plist-get c :what)) (plist-get info :choices))))
-      (should (string-match-p "first and last messages kept"
-                              (plist-get (nth 1 (plist-get info :choices)) :what)))
       (should (eq t (plist-get info :history)))
       (should (equal "now add tests" (plist-get info :preview)))
       (should (= 3020 (plist-get info :context)))
       (should (= 1300.0 (plist-get info :expires)))
       (should-not (harness-promise-settled-p p))
       ;; Answered with an option as offered: the transcript file first.
-      (harness-cowboy-test--answer sid "Transcript file (free)")
+      (harness-cowboy-test--answer sid "Transcript (free)")
       (should (eq 'end-turn (plist-get (harness-test-await p 10) :stop-reason)))
       (should (equal (list (list sid 'transcript 'user)) decided))
       (should-not (harness-call 'cowboy/asking sid))
@@ -321,7 +301,7 @@ conversation."
         (should (equal '(:choice "transcript" :by "user") (plist-get (plist-get node :meta) :cowboy)))
         ;; The note points at the conversation's history too.
         (should (string-match-p "session_history" (plist-get node :content))))
-      (should (member (format "Prompt cache cold since %s: writing the conversation to a transcript file first, as you chose"
+      (should (member (format "Cache · cold · %s · transcript · answer"
                               (format-time-string "%b %-d %H:%M" 1300.0))
                       (harness-cowboy-test--hints sid)))
       ;; The provider got the note and the message, not the old conversation.
@@ -336,7 +316,7 @@ conversation."
       (harness-call 'agent/prompt sid "[Message from session abc]\n\nreview this"
                     (list :from (list :kind 'session :id "abc12345" :name "Reviewer")))
       (let ((payload (plist-get (harness-cowboy-test--question sid) :payload)))
-        (should (string-prefix-p "A message from session \"Reviewer\" waits:" (plist-get payload :question)))
+        (should (string-match-p "Message · session \"Reviewer\"" (plist-get payload :question)))
         (should (equal "abc12345" (plist-get (plist-get (plist-get payload :cowboy) :from) :id)))
         ;; The preview skips the header that says no more than the sender.
         (should (equal "review this" (plist-get (plist-get payload :cowboy) :preview))))
@@ -345,15 +325,29 @@ conversation."
 
 (ert-deftest harness-cowboy-a-compaction-under-way-answers-the-question ()
   "A message sent while the conversation is compacted asks nothing.
-A session whose cache lapsed, compacted by hand -- from the cache panel,
+A session whose conversation is compacted by hand -- from the cache panel,
 say -- has the answer to the question under way: the compaction leaves
 nothing cold.  The message waits for it, the session shown as compacting,
 and goes with the compacted conversation, without the old one."
   (harness-cowboy-test-with
     (let* ((harness-provider-demo--delay 0.2)
            (sid (harness-cowboy-test-session))
-           (compaction (harness-call 'compaction/compact sid '(:kind "brief" :idle t)))
-           (turn (harness-call 'agent/prompt sid "and now the lexer")))
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (if (string-match-p "Do not call any tool"
+                                  (harness-cowboy-test--request-text request))
+                  '((:type text :delta "SUMMARY TEXT")
+                    (:type usage :input 50 :output 5)
+                    (:type done :stop-reason end-turn))
+                (harness-cowboy-test--script request))))
+           (compaction nil)
+           (turn nil))
+      ;; Warm the cache, so a summary is made as the chat's next request.
+      (harness-call 'session/usage-add sid (list :input 10 :output 10 :cache-read 3000
+                                                 :context 3020 :cache-at (float-time)
+                                                 :cache-ttl 3600))
+      (setq compaction (harness-call 'compaction/compact sid '(:kind "summary" :idle t))
+            turn (harness-call 'agent/prompt sid "and now the lexer"))
       (harness-test-wait (lambda () (eq 'running (plist-get (harness-call 'session/get sid) :status)))
                          5 "the turn to wait for the compaction")
       (should-not (harness-call 'question/pending sid))
@@ -369,72 +363,78 @@ and goes with the compacted conversation, without the old one."
              (compacted (cl-position 'compaction nodes :key (lambda (n) (plist-get n :kind))))
              (message (cl-position "and now the lexer" nodes :key (lambda (n) (plist-get n :content)) :test #'equal)))
         (should (< compacted message)))
-      ;; One message to the model: the summary and the message after it,
-      ;; not the conversation the summary stands for.
+      ;; The request carries the summary and the message after it, not the
+      ;; conversation the summary stands for.
       (let ((request (car harness-cowboy-test--requests)))
-        (should (= 1 (length (plist-get request :messages))))
-        (should (string-match-p "\\`Summary of the conversation so far:\n\nSUMMARY TEXT"
-                                (harness-cowboy-test--request-text request)))
-        (should (string-match-p "and now the lexer\\'" (harness-cowboy-test--request-text request)))))))
+        (should (string-match-p "SUMMARY TEXT" (harness-cowboy-test--request-text request)))
+        (should (string-match-p "and now the lexer\\'" (harness-cowboy-test--request-text request)))
+        ;; The summary keeps the first and last messages verbatim, but the
+        ;; whole conversation is not sent again.
+        (should (< (length (plist-get request :messages)) 3))))))
 
 (ert-deftest harness-cowboy-a-compaction-that-failed-leaves-the-question ()
   "A compaction that fails answers nothing: the cache is still cold, and
 the message that waited for it is asked about, as it would have been."
   (harness-cowboy-test-with
-    (let* ((harness-provider-demo--delay 0.1)
-           (harness-provider-demo-script-override
-            (lambda (request)
-              (if (string-match-p "handoff summary" (or (plist-get request :system) ""))
-                  '((:type done :stop-reason error :error "boom"))
-                (harness-cowboy-test--script request))))
-           (sid (harness-cowboy-test-session))
-           (compaction (harness-call 'compaction/compact sid '(:kind "brief" :idle t)))
-           (turn (harness-call 'agent/prompt sid "and now the lexer")))
-      (should-error (harness-test-await compaction 10))
-      (should (string-match-p "Your message waits"
-                              (plist-get (plist-get (harness-cowboy-test--question sid) :payload) :question)))
-      (harness-cowboy-test--answer sid "carry on")
-      (should (eq 'end-turn (plist-get (harness-test-await turn 15) :stop-reason)))
-      (should-not (harness-cowboy-test--compactions sid))
-      (should (string-match-p "please refactor the parser"
-                              (harness-cowboy-test--request-text (car harness-cowboy-test--requests)))))))
+    (let* ((sid (harness-cowboy-test-session))
+           (compaction nil)
+           (turn nil))
+      ;; Nowhere to write the transcript: the compaction that asks no model
+      ;; fails, and the conversation is still cold.
+      (cl-letf (((symbol-function 'harness-method/session/write-transcript)
+                 (lambda (&rest _) (signal 'harness-error (list "no room for a transcript")))))
+        (setq compaction (harness-call 'compaction/compact sid '(:kind "transcript" :idle t)))
+        (should-error (harness-test-await compaction 10))
+        (setq turn (harness-call 'agent/prompt sid "and now the lexer"))
+        (should (string-match-p "Message · your message"
+                                (plist-get (plist-get (harness-cowboy-test--question sid) :payload) :question)))
+        (harness-cowboy-test--answer sid "carry on")
+        (should (eq 'end-turn (plist-get (harness-test-await turn 15) :stop-reason)))
+        (should-not (harness-cowboy-test--compactions sid))
+        (should (string-match-p "please refactor the parser"
+                                (harness-cowboy-test--request-text
+                                 (car harness-cowboy-test--requests))))))))
 
-(ert-deftest harness-cowboy-brief-summary-and-carrying-on ()
-  "A brief summary is the cheap model's; carrying on sends it all again."
+(ert-deftest harness-cowboy-a-transcript-and-carrying-on ()
+  "A transcript file is written, and carrying on sends it all again."
   (harness-cowboy-test-with
     (let ((sid (harness-cowboy-test-session)))
       (let ((p (harness-call 'agent/prompt sid "first")))
-        (harness-cowboy-test--answer sid "b")
+        (harness-cowboy-test--answer sid "t")
         (harness-test-await p 10))
       (let ((node (car (harness-cowboy-test--compactions sid))))
-        (should (equal "brief" (harness-node-compaction-kind node)))
-        (should (string-prefix-p "SUMMARY TEXT" (plist-get node :content)))
+        (should (equal "transcript" (harness-node-compaction-kind node)))
+        (should (string-match-p "conversation so far was compacted into a file"
+                                (plist-get node :content)))
         (should (string-match-p "session_history" (plist-get node :content))))
-      (should (string-match-p "SUMMARY TEXT" (harness-cowboy-test--request-text (car harness-cowboy-test--requests))))
+      (should (string-match-p "conversation so far was compacted into a file"
+                              (harness-cowboy-test--request-text (car harness-cowboy-test--requests))))
       ;; Cold again: carry on, the whole conversation as it is.
       (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
       (let ((p (harness-call 'agent/prompt sid "second")))
         (harness-cowboy-test--answer sid "carry on")
         (harness-test-await p 10))
       (should (= 1 (length (harness-cowboy-test--compactions sid))))
-      (should (cl-some (lambda (h) (string-match-p ": carrying on with the whole conversation, ~430 tokens uncached, as you chose\\'" h))
+      (should (cl-some (lambda (h) (string-match-p "· continuation · ~430 tokens uncached · answer\\'" h))
                        (harness-cowboy-test--hints sid)))
       (let ((text (harness-cowboy-test--request-text (car harness-cowboy-test--requests))))
         (should (string-match-p "first" text))
         (should (string-match-p "second" text))))))
 
 (ert-deftest harness-cowboy-ignore-sends-everything-and-adds-nothing ()
-  "Ignore carries on with the whole conversation, uncached, and writes no
-hint and no compaction: the conversation goes on as if nothing happened."
+  "The ignore setting carries on with the whole conversation, uncached,
+and writes no hint and no compaction: the conversation goes on as if
+nothing happened.  The menu has one way to send everything now, carrying
+on, which says what it did; ignore stays a setting."
   (harness-cowboy-test-with
-    (let ((sid (harness-cowboy-test-session)))
-      (let ((p (harness-call 'agent/prompt sid "just go on")))
-        (harness-cowboy-test--answer sid "ignore")
-        (should (eq 'end-turn (plist-get (harness-test-await p 10) :stop-reason))))
+    (let ((harness-cowboy-ask nil)
+          (harness-cowboy-default 'ignore)
+          (sid (harness-cowboy-test-session)))
+      (harness-test-await (harness-call 'agent/prompt sid "just go on") 10)
+      (should-not (harness-call 'question/pending sid))
       (should-not (harness-cowboy-test--compactions sid))
       ;; No note of what went first: nothing is added to the conversation.
       (should-not (harness-cowboy-test--hints sid))
-      (should-not (harness-call 'question/pending sid))
       (should (member "just go on"
                       (mapcar (lambda (n) (plist-get n :content)) (harness-call 'session/nodes sid))))
       ;; The request carried the whole conversation and the message.
@@ -444,24 +444,25 @@ hint and no compaction: the conversation goes on as if nothing happened."
       ;; That request stamped a warm cache again: nothing asks any more.
       (should-not (harness-cowboy-cold-p (harness-call 'session/get sid) (float-time))))))
 
-(ert-deftest harness-cowboy-always-ignore-goes-on-silently ()
-  "Always ignore makes ignoring the default and stops the asking; later
-cold caches go on with no question, no compaction and no hint."
+(ert-deftest harness-cowboy-always-ignore-is-carrying-on ()
+  "The menu has one way to send everything: an answer of \"always
+ignore\" makes carrying on the default, and its hint says what went
+first.  Later cold caches go on, unasked, the same way."
   (harness-cowboy-test-with
     (let ((sid (harness-cowboy-test-session)))
       (let ((p (harness-call 'agent/prompt sid "one")))
         (harness-cowboy-test--answer sid "always ignore")
         (harness-test-await p 10))
-      (should (eq 'ignore harness-cowboy-default))
+      (should (eq 'carry-on harness-cowboy-default))
       (should-not harness-cowboy-ask)
       (should-not (harness-cowboy-test--compactions sid))
-      (should-not (harness-cowboy-test--hints sid))
-      ;; Cold again: nobody is asked and nothing is added before the message.
+      (should (cl-some (lambda (h) (string-match-p "continuation" h))
+                       (harness-cowboy-test--hints sid)))
+      ;; Cold again: nobody is asked and the hint says what went first.
       (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
       (harness-test-await (harness-call 'agent/prompt sid "two") 10)
       (should-not (harness-call 'question/pending sid))
       (should-not (harness-cowboy-test--compactions sid))
-      (should-not (harness-cowboy-test--hints sid))
       (let ((text (harness-cowboy-test--request-text (car harness-cowboy-test--requests))))
         (should (string-match-p "one" text))
         (should (string-match-p "two" text))))))
@@ -484,7 +485,7 @@ so it is warm and nothing asks again."
                   (:type usage :input 30 :output 5 :cache-read 0 :cache-write 0 :context 430)
                   (:type done :stop-reason end-turn))))))
       (let ((p (harness-call 'agent/prompt sid "feedback: fix it")))
-        (harness-cowboy-test--answer sid "b")
+        (harness-cowboy-test--answer sid "t")
         (harness-test-await p 10))
       (should (= 1 (length (harness-cowboy-test--compactions sid))))
       (let ((s (harness-call 'session/get sid)))
@@ -518,10 +519,11 @@ so it is warm and nothing asks again."
                                       (and q (not (equal (plist-get q :id) (plist-get first :id))))))
                          5 "the question again")
       (let ((again (harness-cowboy-test--question sid)))
-        (should (string-prefix-p "“purple, please” is not one of the choices.  Your message waits:"
+        (should (string-prefix-p "“purple, please” · no choice · Cache · cold"
                                  (plist-get (plist-get again :payload) :question)))
         (should (equal (plist-get again :id) (harness-call 'cowboy/asking sid))))
-      (harness-cowboy-test--answer sid "3")
+      ;; 2: the transcript file, second of the five the menu shows.
+      (harness-cowboy-test--answer sid "2")
       (harness-test-await p 10)
       (should (equal "transcript" (harness-node-compaction-kind (car (harness-cowboy-test--compactions sid))))))))
 
@@ -562,21 +564,34 @@ list is empty again."
           (should (equal (plist-get (car waiting) :id) (plist-get node :id)))))
       (should-not (harness-cowboy-test--waiting sid)))))
 
-(ert-deftest harness-cowboy-the-message-waits-for-the-compaction-the-answer-chose ()
-  "Answered with a compaction, the message waits for it, which says so: it
-is listed as waiting for the compaction, with a message sent meanwhile.
-Both are recorded after it, and nothing is listed once they are."
+(ert-deftest harness-cowboy-the-message-waits-for-the-compaction-under-way ()
+  "While a compaction runs, the messages sent meanwhile wait for it, which
+says so: they are listed as waiting for the compaction.  Both are
+recorded after it, and nothing is listed once they are."
   (harness-cowboy-test-with
     (let* ((harness-provider-demo--delay 0.2)
            (sid (harness-cowboy-test-session))
-           (p (harness-call 'agent/prompt sid "now add tests")))
-      (harness-cowboy-test--question sid)
-      (harness-cowboy-test--answer sid "brief")
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (if (string-match-p "Do not call any tool"
+                                  (harness-cowboy-test--request-text request))
+                  '((:type text :delta "SUMMARY TEXT")
+                    (:type done :stop-reason end-turn))
+                (harness-cowboy-test--script request))))
+           (compaction nil)
+           (p nil))
+      ;; Warm the cache, so a summary is made as the chat's next request.
+      (harness-call 'session/usage-add sid (list :input 10 :output 10 :cache-read 3000
+                                                 :context 3020 :cache-at (float-time)
+                                                 :cache-ttl 3600))
+      (setq compaction (harness-call 'compaction/compact sid '(:kind "summary" :idle t))
+            p (harness-call 'agent/prompt sid "now add tests"))
       (harness-test-wait (lambda () (gethash sid harness-compaction--running)) 10 "the compaction")
       (should (equal "the compaction" (plist-get (car (harness-cowboy-test--waiting sid)) :why)))
       (harness-call 'agent/prompt sid "and the docs")
       (should (equal '("now add tests" "and the docs") (harness-cowboy-test--waiting-texts sid)))
       (should (eq 'end-turn (plist-get (harness-test-await p 20) :stop-reason)))
+      (harness-test-await compaction 20)
       (should-not (harness-cowboy-test--waiting sid))
       (let ((texts (mapcar (lambda (n) (plist-get n :content))
                            (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
@@ -589,9 +604,8 @@ The default is a brief summary, which nobody chose and whose own request
 is not cached: the conversation is written to a transcript instead, and
 no model reads it."
   (harness-cowboy-test-with
-    (let* ((harness-cowboy-test--warm nil)
-           (harness-cowboy-ask nil)
-           (harness-cowboy-default 'brief)
+    (let* ((harness-cowboy-ask nil)
+           (harness-cowboy-default 'transcript)
            (sid (harness-cowboy-test-session))
            (requests nil))
       (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
@@ -606,9 +620,8 @@ no model reads it."
                            requests))
       (let ((node (car (harness-cowboy-test--compactions sid))))
         (should (equal "transcript" (harness-node-compaction-kind node)))
-        (should (member (concat "Prompt cache cold since " (harness-cowboy--clock 1300.0)
-                                ": writing the conversation to a transcript file first,"
-                                " the default, as asking is off (harness-cowboy-ask)")
+        (should (member (concat "Cache · cold · " (harness-cowboy--clock 1300.0)
+                                " · transcript · default")
                         (harness-cowboy-test--hints sid)))))))
 
 (ert-deftest harness-cowboy-taking-back-the-waiting-message-dismisses-the-question ()
@@ -633,7 +646,7 @@ ends cancelled at once, and the message is never recorded."
       (should (eq 'idle (plist-get (harness-call 'session/get sid) :status))))))
 
 (ert-deftest harness-cowboy-a-message-held-with-not-now-stops-showing-as-queued ()
-  "Not now keeps the message, in the transcript, where it is no queued
+  "Later keeps the message, in the transcript, where it is no queued
 message any more: the list of those that wait is empty."
   (harness-cowboy-test-with
     (let* ((sid (harness-cowboy-test-session))
@@ -663,7 +676,7 @@ message in the transcript, and the list of those that wait is empty."
 ;;;; Holding the message
 
 (ert-deftest harness-cowboy-not-now-keeps-the-message ()
-  "Not now: no turn starts, the message stays in the transcript, and the
+  "Later: no turn starts, the message stays in the transcript, and the
 next message, asked about again, sends it too."
   (harness-cowboy-test-with
     (let* ((sid (harness-cowboy-test-session))
@@ -674,7 +687,7 @@ next message, asked about again, sends it too."
       (should-not harness-cowboy-test--requests)
       (should-not (harness-cowboy-test--compactions sid))
       (should (member "the held one" (mapcar (lambda (n) (plist-get n :content)) (harness-call 'session/nodes sid))))
-      (should (member "Turn not started: not now: the prompt cache is cold, and the message waits; the next one sends it too"
+      (should (member "Turn not started: cache cold · message hold"
                       (harness-cowboy-test--hints sid)))
       (should (eq 'idle (plist-get (harness-call 'session/get sid) :status)))
       ;; Asked again with the next message; carrying on sends both.
@@ -738,8 +751,7 @@ list of those that wait is empty, no turn holding them any more."
 The default is a brief summary, which nobody chose and whose own request
 is not cached: the conversation is written to a transcript instead."
   (harness-cowboy-test-with
-    (let ((harness-cowboy-test--warm nil)
-          (sid (harness-cowboy-test-session :non-interactive t))
+    (let ((sid (harness-cowboy-test-session :non-interactive t))
           (asked nil))
       (harness-on 'question/asked (lambda (&rest _) (setq asked t)))
       (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt sid "feedback: fix it") 10)
@@ -748,8 +760,7 @@ is not cached: the conversation is written to a transcript instead."
       (let ((node (car (harness-cowboy-test--compactions sid))))
         (should (equal "transcript" (harness-node-compaction-kind node)))
         (should (equal '(:choice "transcript" :by "non-interactive") (plist-get (plist-get node :meta) :cowboy))))
-      (should (cl-some (lambda (h) (string-match-p (concat ": writing the conversation to a transcript file first, the default for a"
-                                                           " session that does not wait for you (harness-cowboy-default)\\'")
+      (should (cl-some (lambda (h) (string-match-p "· transcript · default · non-interactive\\'"
                                                    h))
                        (harness-cowboy-test--hints sid))))))
 
@@ -762,7 +773,7 @@ is not cached: the conversation is written to a transcript instead."
       (harness-test-await (harness-call 'agent/prompt sid "go") 10)
       (should-not (harness-call 'question/pending sid))
       (should (equal "transcript" (harness-node-compaction-kind (car (harness-cowboy-test--compactions sid)))))
-      (should (cl-some (lambda (h) (string-match-p "first, the default, as asking is off (harness-cowboy-ask)\\'" h))
+      (should (cl-some (lambda (h) (string-match-p "· transcript · default\\'" h))
                        (harness-cowboy-test--hints sid))))))
 
 (ert-deftest harness-cowboy-always-makes-it-the-default ()
@@ -776,7 +787,7 @@ is not cached: the conversation is written to a transcript instead."
       (should-not harness-cowboy-ask)
       (should (equal '(:choice "fresh" :by "always")
                      (plist-get (plist-get (car (harness-cowboy-test--compactions sid)) :meta) :cowboy)))
-      (should (cl-some (lambda (h) (string-match-p "as you chose, from now on without asking" h))
+      (should (cl-some (lambda (h) (string-match-p "default" h))
                        (harness-cowboy-test--hints sid)))
       ;; Cold again: nobody is asked.
       (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
@@ -784,22 +795,20 @@ is not cached: the conversation is written to a transcript instead."
       (should-not (harness-call 'question/pending sid))
       (should (= 2 (length (harness-cowboy-test--compactions sid)))))))
 
-(ert-deftest harness-cowboy-a-saved-always-summary-cannot-make-a-cold-one ()
-  "A saved \"always summary\" is a choice, not warmth: no summariser request.
-The answer is written to a transcript with what really went first said in
-a hint, and the default it saves is taken the same way, unasked, next
-time."
+(ert-deftest harness-cowboy-a-saved-summary-cannot-make-a-cold-one ()
+  "A saved summary is a choice, not warmth: no summariser request.
+The message is written to a transcript with what really went first said in
+a hint, and the default taken the same way the next time."
   (harness-cowboy-test-with-decisions
-    (let* ((harness-cowboy-test--warm nil)
+    (let* ((harness-cowboy-default 'summary)
+           (harness-cowboy-ask nil)
            (sid (harness-cowboy-test-session))
            (requests nil))
       (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
                  ((symbol-function 'harness-method/provider/complete)
                   (lambda (req) (push req requests) (funcall orig req))))
-        (let ((p (harness-call 'agent/prompt sid "one")))
-          (harness-cowboy-test--answer sid "always summary")
-          (harness-test-await p 10))
-        ;; Cold again: the saved answer takes the default, unasked.
+        (harness-test-await (harness-call 'agent/prompt sid "one") 10)
+        ;; Cold again: the saved default is taken, unasked, once more.
         (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
         (harness-test-await (harness-call 'agent/prompt sid "two") 10))
       (should (eq 'summary harness-cowboy-default))
@@ -808,12 +817,12 @@ time."
       (should (cl-every (lambda (node)
                           (equal "transcript" (harness-node-compaction-kind node)))
                         (harness-cowboy-test--compactions sid)))
-      ;; Neither the answer nor the default it saved read the conversation.
+      ;; Neither the default nor its transcripts read the conversation.
       (should-not (cl-some (lambda (req)
                              (string-match-p "handoff summary" (or (plist-get req :system) "")))
                            requests))
       (should (cl-some (lambda (hint)
-                         (string-match-p "writing the conversation to a transcript file first" hint))
+                         (string-match-p "· transcript ·" hint))
                        (harness-cowboy-test--hints sid))))))
 
 ;;;; "Always" as a lasting decision: undo, redo, from any session
@@ -842,8 +851,9 @@ time."
   (harness-cowboy-test--always-note sid))
 
 (defun harness-cowboy-test--always-note (sid)
-  "Return SID's newest hint saying a choice now holds without asking, or nil."
-  (car (last (harness-cowboy-test--hint-nodes sid "as you chose, from now on without asking"))))
+  "Return SID's newest hint saying a choice now holds without asking, or nil.
+That is the hint whose last words are the way it took, marked `default'."
+  (car (last (harness-cowboy-test--hint-nodes sid "· default"))))
 
 (defun harness-cowboy-test--move (way id)
   "Move decision ID one step WAY, undo or redo; return (OUTCOME . MESSAGE)."
@@ -861,19 +871,19 @@ the old default, redo stops asking again, and undo works once more."
       (should id)
       (should (eq 'cowboy (plist-get decision :kind)))
       (should (eq 'done (plist-get decision :state)))
-      (should (equal "Always starting afresh when the prompt cache is cold, without asking" (plist-get decision :text)))
-      (should (equal '(:choice "fresh" :before (:default "brief" :ask t) :after (:default "fresh" :ask :false))
+      (should (equal "Fresh start · cache · cold · default" (plist-get decision :text)))
+      (should (equal '(:choice "fresh" :before (:default "transcript" :ask t) :after (:default "fresh" :ask :false))
                      (plist-get decision :record)))
       ;; It knows its note, in the session it was made in.
       (should (equal sid (plist-get decision :session)))
       (should (equal (plist-get hint :id) (plist-get decision :node)))
       (should (eq 'fresh harness-cowboy-default))
       (should-not harness-cowboy-ask)
-      (should (equal '(undone . "Undone: asking again what goes first when the prompt cache is cold, and “Brief summary” is the default again")
+      (should (equal '(undone . "Undo · question · “Transcript” · default")
                      (harness-cowboy-test--move 'undo id)))
-      (should (eq 'brief harness-cowboy-default))
+      (should (eq 'transcript harness-cowboy-default))
       (should (eq t harness-cowboy-ask))
-      (should (equal '(done . "Redone: always starting afresh when the prompt cache is cold, without asking")
+      (should (equal '(done . "Redone: fresh start · cache · cold · default")
                      (harness-cowboy-test--move 'redo id)))
       (should (eq 'fresh harness-cowboy-default))
       (should-not harness-cowboy-ask)
@@ -926,21 +936,19 @@ kept with the decision, so it is still asked after a restart."
           (should-not harness-cowboy-ask)
           (let ((changed (harness-call 'decision/get id)))
             (should (eq 'done (plist-get changed :state)))
-            (should (equal (concat "Always writing the conversation to a transcript file first"
-                                   " when the prompt cache is cold, without asking")
+            (should (equal "Transcript · cache · cold · default"
                            (plist-get changed :text)))
-            (should (equal '(:choice "transcript" :before (:default "brief" :ask t)
+            (should (equal '(:choice "transcript" :before (:default "transcript" :ask t)
                                       :after (:default "transcript" :ask :false))
                            (plist-get changed :record)))
-            (should (equal (concat "Changed: always writing the conversation to a transcript file first"
-                                   " when the prompt cache is cold, without asking")
+            (should (equal "Changed: transcript · cache · cold · default"
                            (plist-get changed :result))))
           ;; The hint says the new choice, and still names the decision.
           (let ((fresh (harness-call 'session/node sid (plist-get hint :id))))
             (should (equal id (harness-node-decision fresh)))
-            (should (string-match-p "writing the conversation to a transcript file first"
+            (should (string-match-p "· transcript ·"
                                     (plist-get fresh :content)))
-            (should (string-match-p "as you chose, from now on without asking"
+            (should (string-match-p "· default"
                                     (plist-get fresh :content)))))))))
 
 (ert-deftest harness-cowboy-change-keeps-the-decision-when-dismissed ()
@@ -978,8 +986,7 @@ decision's last move: it ends instead, done or undone."
       (should-not harness-cowboy-ask)
       (let ((decision (harness-call 'decision/get id)))
         (should (eq 'changed (plist-get decision :state)))
-        (should (equal (concat "Not changed: the cold-cache settings changed since"
-                               " (in Settings, say), so they stay as they are")
+        (should (equal "not changed · settings changed"
                        (plist-get decision :result))))
       ;; Undone, and changed by hand since: nothing is applied either.
       (setq harness-cowboy-default 'brief harness-cowboy-ask t)
@@ -1003,7 +1010,7 @@ them while it still holds.  Whatever acts for the user where a cold cache is
 concerned, without asking, takes it from there."
   (harness-cowboy-test-with-decisions
     (let ((option (harness-call 'cowboy/default)))
-      (should (eq 'brief (plist-get option :choice)))
+      (should (eq 'transcript (plist-get option :choice)))
       (should (eq t (plist-get option :ask)))
       (should (eq t (plist-get option :asks)))
       (should-not (plist-get option :decision)))
@@ -1018,7 +1025,7 @@ concerned, without asking, takes it from there."
       ;; Undone, it is the old default again, with no answer behind it.
       (harness-call 'decision/undo id)
       (let ((option (harness-call 'cowboy/default)))
-        (should (eq 'brief (plist-get option :choice)))
+        (should (eq 'transcript (plist-get option :choice)))
         (should (eq t (plist-get option :ask)))
         (should-not (plist-get option :decision))))
     ;; A default that is no compaction is still the user's.
@@ -1047,21 +1054,20 @@ session that is gone is asked about as asking is."
 session, asking off; one that never waits for you -- the hint names the
 answer's decision, and any of those sessions can undo it."
   (harness-cowboy-test-with-decisions
-    (let* ((harness-cowboy-test--warm nil)
-           (first (harness-cowboy-test-session))
+    (let* ((first (harness-cowboy-test-session))
            (id (harness-node-decision (harness-cowboy-test--always first "always transcript")))
            (other (harness-cowboy-test-session))
            (non-interactive (harness-cowboy-test-session :non-interactive t)))
       (should id)
       (harness-test-await (harness-call 'agent/prompt other "go") 10)
       (should-not (harness-call 'question/pending other))
-      (let ((hint (car (harness-cowboy-test--hint-nodes other "the default, as asking is off"))))
+      (let ((hint (car (harness-cowboy-test--hint-nodes other "· transcript · default"))))
         (should hint)
         (should (equal id (harness-node-decided-by hint)))
         (should-not (harness-node-decision hint)))
       (harness-test-await (harness-call 'agent/prompt non-interactive "go") 10)
       (should (equal id (harness-node-decided-by
-                         (car (harness-cowboy-test--hint-nodes non-interactive "does not wait for you")))))
+                         (car (harness-cowboy-test--hint-nodes non-interactive "default · non-interactive")))))
       ;; Undone from another session than the one it was made in: asking
       ;; is on again there too, and the next cold message asks.
       (should (eq 'undone (car (harness-cowboy-test--move 'undo id))))
@@ -1072,15 +1078,15 @@ answer's decision, and any of those sessions can undo it."
         (harness-cowboy-test--answer other "carry on")
         (harness-test-await p 10))
       ;; Asked and answered once: that hint names no decision.
-      (should-not (harness-node-decided-by (car (last (harness-cowboy-test--hint-nodes other "as you chose\\'")))))
+      (should-not (harness-node-decided-by (car (last (harness-cowboy-test--hint-nodes other "answer\\'")))))
       ;; A session that does not wait for you takes the default the undo
       ;; put back, and no decision is behind it.
       (harness-call 'session/usage-add non-interactive '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
       (harness-test-await (harness-call 'agent/prompt non-interactive "again") 10)
-      (let ((hint (car (last (harness-cowboy-test--hint-nodes non-interactive "does not wait for you")))))
+      (let ((hint (car (last (harness-cowboy-test--hint-nodes non-interactive "default · non-interactive")))))
         ;; The default is a brief summary, which nobody chose here: the
         ;; conversation is written to a transcript instead.
-        (should (string-match-p "writing the conversation to a transcript file first"
+        (should (string-match-p "· transcript ·"
                                 (plist-get hint :content)))
         (should-not (harness-node-decided-by hint)))
       ;; Redone from yet another: the default and the silence are back.
@@ -1095,14 +1101,14 @@ answer is neither undone nor redone, and no hint names it any more."
     (let* ((sid (harness-cowboy-test-session))
            (id (harness-node-decision (harness-cowboy-test--always sid "always start afresh"))))
       (harness-call 'config/set 'harness-cowboy-default 'summary)
-      (should (equal '(changed . "Not undone: the cold-cache settings changed since (in Settings, say), so they stay as they are")
+      (should (equal '(changed . "not undone · settings changed")
                      (harness-cowboy-test--move 'undo id)))
       (should (eq 'summary harness-cowboy-default))
       (should-not harness-cowboy-ask)
       (should (eq 'changed (plist-get (harness-call 'decision/get id) :state)))
       ;; Ended: it offers nothing more, and says why.
       (should (equal (cdr (harness-cowboy-test--move 'redo id))
-                     "Not undone: the cold-cache settings changed since (in Settings, say), so they stay as they are"))
+                     "not undone · settings changed"))
       (let ((other (harness-cowboy-test-session)))
         (harness-test-await (harness-call 'agent/prompt other "go") 10)
         (should-not (harness-node-decided-by (car (harness-cowboy-test--hint-nodes other "as asking is off")))))))
@@ -1112,9 +1118,9 @@ answer is neither undone nor redone, and no hint names it any more."
            (id (harness-node-decision (harness-cowboy-test--always sid "always carry on"))))
       (should (eq 'undone (car (harness-cowboy-test--move 'undo id))))
       (harness-call 'config/set 'harness-cowboy-ask nil)
-      (should (equal '(changed . "Not redone: the cold-cache settings changed since (in Settings, say), so they stay as they are")
+      (should (equal '(changed . "not redone · settings changed")
                      (harness-cowboy-test--move 'redo id)))
-      (should (eq 'brief harness-cowboy-default))
+      (should (eq 'transcript harness-cowboy-default))
       (should-not harness-cowboy-ask))))
 
 (ert-deftest harness-cowboy-two-always-answers-never-share-the-settings ()
@@ -1130,7 +1136,7 @@ undo works; the other, its settings taken over, ends."
         (should-not (equal one two))
         ;; The settings are as the first's redo would make them, but the
         ;; second made them so: the first ends, and the second undoes.
-        (should (equal '(changed . "Not redone: the cold-cache settings are so again already (another answer, say), so they stay as they are")
+        (should (equal '(changed . "not redone · settings already so")
                        (harness-cowboy-test--move 'redo one)))
         (should (eq 'undone (car (harness-cowboy-test--move 'undo two))))
         (should (eq t harness-cowboy-ask))))))
@@ -1146,30 +1152,13 @@ settings, and its hint names no decision."
       (should (eq 'fresh harness-cowboy-default))
       (should-not harness-cowboy-ask))))
 
-(ert-deftest harness-cowboy-a-summary-that-fails-falls-back ()
-  "A summary the user chose that cannot be made gives way to the transcript file; the
-message goes all the same."
-  (harness-cowboy-test-with
-    (let ((harness-compaction-brief-model "nowhere:none")
-          (sid (harness-cowboy-test-session)))
-      (let ((p (harness-call 'agent/prompt sid "go")))
-        (harness-cowboy-test--answer sid "b")
-        (should (eq 'end-turn (plist-get (harness-test-await p 10) :stop-reason))))
-      (let ((node (car (harness-cowboy-test--compactions sid))))
-        (should (equal "transcript" (harness-node-compaction-kind node)))
-        (should (equal "brief" (plist-get (plist-get (plist-get node :meta) :cowboy) :choice)))
-        (should (plist-get (plist-get (plist-get node :meta) :cowboy) :fallback)))
-      (should (cl-some (lambda (h) (string-match-p "\\`No brief summary (.*): writing the conversation to a transcript file instead\\'" h))
-                       (harness-cowboy-test--hints sid))))))
-
 (ert-deftest harness-cowboy-a-compaction-that-cannot-be-made-holds-the-message ()
   "When neither a summary nobody chose nor a transcript can be made, the message is held.
-The conversation is too large to send uncached: no model is asked, and
+The conversation is context too large · no compaction: no model is asked, and
 nothing but the message goes on record."
   (harness-cowboy-test-with
-    (let* ((harness-cowboy-test--warm nil)
-           (harness-cowboy-ask nil)
-           (harness-cowboy-default 'brief)
+    (let* ((harness-cowboy-ask nil)
+           (harness-cowboy-default 'transcript)
            (sid (harness-cowboy-test-session))
            (requests nil))
       ;; Nowhere to write a transcript, and too little conversation to cut.
@@ -1181,7 +1170,7 @@ nothing but the message goes on record."
                                         :stop-reason))))
       (should (zerop (length requests)))
       (should-not (harness-cowboy-test--compactions sid))
-      (should (cl-some (lambda (h) (string-match-p "too large to send uncached" h))
+      (should (cl-some (lambda (h) (string-match-p "context too large · no compaction" h))
                        (harness-cowboy-test--hints sid)))
       ;; The message stays, to go once the user makes room.
       (should (member "go" (mapcar (lambda (n) (plist-get n :content))
@@ -1206,82 +1195,35 @@ right after it, and a tool message must answer the call before it."
           (setq asked nil))))
     ok))
 
-(ert-deftest harness-cowboy-brief-summarises-a-sample-with-tool-calls ()
-  "A brief summary of a long conversation with tool calls is made and used.
-The narrative the summary reads names the tool call and its result each
-in a line, keeps every message, and serializes without a payload."
-  (harness-cowboy-test-with
-    (let* ((sid (harness-cowboy-test-session))
-           (summaries nil)
-           (harness-provider-demo-script-override
-            (lambda (request)
-              (when (string-match-p "handoff summary" (or (plist-get request :system) ""))
-                (push request summaries))
-              (harness-cowboy-test--script request))))
-      ;; A long conversation, with a tool call right where a sample's head
-      ;; ends: its result must go with it.
-      (harness-call 'session/append sid '(:kind user :content "next: read it"))
-      (harness-call 'session/append sid (list :kind 'tool-call :tool "read_file" :call-id "c1"
-                                              :input (list :path "café/naïve.txt")))
-      (harness-call 'session/append sid '(:kind tool-result :call-id "c1" :output "the file says café"))
-      (dotimes (i 16)
-        (harness-call 'session/append sid (list :kind (if (cl-evenp i) 'assistant 'user)
-                                                :content (format "message %d" i))))
-      (let ((p (harness-call 'agent/prompt sid "feedback: fix it")))
-        (harness-cowboy-test--answer sid "b")
-        (harness-test-await p 10))
-      (should (= 1 (length summaries)))
-      (let* ((request (car summaries))
-             (messages (plist-get request :messages))
-             (text (harness-cowboy-test--request-text request)))
-        (should (string-match-p "next: read it" text))
-        (should (string-match-p (regexp-quote "[called read_file: path: café/naïve.txt]") text))
-        (should (string-match-p (regexp-quote "[result: the file says café]") text))
-        (dolist (i (number-sequence 0 15))
-          (should (string-match-p (format "message %d" i) text)))
-        (should-not (string-match-p "left out" text))
-        (should-not (cl-some (lambda (m) (cl-some (lambda (b) (equal (plist-get b :type) "tool_use"))
-                                                  (plist-get m :content)))
-                             messages))
-        ;; What the provider would put in its body serializes.
-        (should (stringp (harness-json-encode messages))))
-      (should (equal "brief" (harness-node-compaction-kind (car (harness-cowboy-test--compactions sid))))))))
-
-(ert-deftest harness-cowboy-a-failure-reports-short-and-asks-no-more ()
-  "A failure is reported short, falls back openly, and is not asked again.
+(ert-deftest harness-cowboy-a-failure-is-reported-short ()
+  "A failure is reported short, and the question is over.
 The error carries a whole transcript, as the `json-value-p' one did; the
-hint, the log and the fallback name only a short line, and the question
-that was answered is over -- it is not put again."
+hint, the log and the hold name only a short line, and the question that
+was answered is not put again."
   (harness-cowboy-test-with
     (let* ((big (make-string 5000 ?x))
            (sid (harness-cowboy-test-session))
            (logged nil)
            (harness-log-hook (list (lambda (_level msg) (push msg logged))))
-           (orig (symbol-function 'harness-method/provider/complete)))
-      (cl-letf (((symbol-function 'harness-method/provider/complete)
-                 (lambda (req)
-                   (if (string-match-p "handoff summary" (or (plist-get req :system) ""))
-                       (signal 'wrong-type-argument (list 'json-value-p big))
-                     (funcall orig req)))))
-        (let ((p (harness-call 'agent/prompt sid "feedback: fix it")))
-          (harness-cowboy-test--answer sid "b")
-          (should (eq 'end-turn (plist-get (harness-test-await p 10) :stop-reason)))))
+           (p (harness-call 'agent/prompt sid "feedback: fix it")))
+      (cl-letf (((symbol-function 'harness-method/session/write-transcript)
+                 (lambda (&rest _) (signal 'wrong-type-argument (list 'json-value-p big)))))
+        (harness-cowboy-test--answer sid "t")
+        ;; The message is held, not sent: no compaction was made.
+        (should (eq 'blocked (plist-get (harness-test-await p 10) :stop-reason))))
       ;; The choice was handled: nothing waits, and nothing asks again.
       (should-not (harness-call 'question/pending sid))
       (should-not (harness-call 'cowboy/asking sid))
       (should (zerop (hash-table-count harness-cowboy--asking)))
-      ;; The fallback is the transcript file, said in a hint, chosen as brief.
-      (let ((node (car (harness-cowboy-test--compactions sid))))
-        (should (equal "transcript" (harness-node-compaction-kind node)))
-        (should (equal "brief" (plist-get (plist-get (plist-get node :meta) :cowboy) :choice)))
-        (should (plist-get (plist-get (plist-get node :meta) :cowboy) :fallback)))
-      ;; Short: no hint, and no log line about the compaction, repeats the
-      ;; transcript the error carried.
+      ;; No compaction was made, and the message was held for another try.
+      (should-not (harness-cowboy-test--compactions sid))
+      (should (cl-some (lambda (hint)
+                         (string-match-p "context too large · no compaction" hint))
+                       (harness-cowboy-test--hints sid)))
+      ;; Short: no hint, and no log line, repeats the transcript the error carried.
       (dolist (hint (harness-cowboy-test--hints sid))
         (should (< (length hint) 400))
         (should-not (string-match-p "x\\{300\\}" hint)))
-      (should (cl-some (lambda (h) (string-match-p "\\`No brief summary (.*): writing the conversation to a transcript file instead\\'" h))
-                       (harness-cowboy-test--hints sid)))
       (let ((lines (cl-remove-if-not (lambda (l) (string-match-p "json-value-p" l)) logged)))
         (should lines)
         (dolist (line lines)
@@ -1310,30 +1252,30 @@ The newest comes first."
 
 (ert-deftest harness-cowboy-reads-typed-answers ()
   "An answer names a choice by name, label, option, number, key or words,
-with \"always\" or without."
-  (dolist (case '(("brief" brief) ("b" brief) ("Brief summary (~$0.01, the default)" brief)
-                  ("a brief summary please" brief) ("1" brief) ("cheap" brief)
-                  ("summary" summary) ("S" summary) ("2" summary) ("summarise it" summary)
-                  ("transcript" transcript) ("t" transcript) ("Transcript file (free)" transcript)
-                  ("write it to a file" transcript)
-                  ("fresh" fresh) ("Start afresh (free)" fresh) ("from scratch" fresh) ("f" fresh)
+with \"always\" or without.  The menu has five ways; a word for one it
+no longer offers still answers, as the way that took its place."
+  (dolist (case '(("brief" brief) ("Brief summary (~$0.01, the default)" summary)
+                  ("a brief summary please" summary) ("cheap" summary)
+                  ("summary" summary) ("S" summary) ("1" summary) ("summarise it" summary)
+                  ("transcript" transcript) ("t" transcript) ("Transcript (free)" transcript)
+                  ("write it to a file" transcript) ("2" transcript)
+                  ("fresh" fresh) ("Fresh start (free)" fresh) ("from scratch" fresh) ("f" fresh)
                   ("carry on" carry-on) ("carry-on" carry-on) ("c" carry-on) ("continue" carry-on)
-                  ("Carry on (~$0.42 uncached)" carry-on) ("5" carry-on)
-                  ("ignore" ignore) ("i" ignore) ("Ignore (~$0.42 uncached)" ignore)
-                  ("ignore, send whole context" ignore) ("send whole context" ignore)
-                  ("send it all" ignore) ("nothing" ignore) ("6" ignore)
-                  ("not now" hold) ("q" hold) ("hold" hold) ("7" hold) ("Not now" hold) ("later" hold)))
+                  ("Continuation (~$0.42 uncached)" carry-on) ("4" carry-on)
+                  ("ignore" ignore) ("i" carry-on) ("Silence (~$0.42 uncached)" carry-on)
+                  ("ignore, send whole context" carry-on) ("send whole context" carry-on)
+                  ("send it all" carry-on) ("nothing" carry-on)
+                  ("not now" hold) ("q" hold) ("hold" hold) ("5" hold) ("Pause" hold) ("pause" hold)))
     (should (equal (cons (cadr case) nil) (harness-cowboy-parse-answer (car case)))))
   (should (equal '(fresh . t) (harness-cowboy-parse-answer "always fresh")))
   (should (equal '(brief . t) (harness-cowboy-parse-answer "Always: brief")))
   (should (equal '(carry-on . t) (harness-cowboy-parse-answer "always carry on")))
   (should (equal '(ignore . t) (harness-cowboy-parse-answer "always ignore")))
-  (should (equal '(ignore) (harness-cowboy-parse-answer "Ignore, send whole context")))
   (should (equal '(transcript . t) (harness-cowboy-parse-answer "\"always transcript\"")))
   (should (equal '(transcript . t) (harness-cowboy-parse-answer "transcript, always")))
   (should-not (harness-cowboy-parse-answer "purple"))
   (should-not (harness-cowboy-parse-answer ""))
-  (should-not (harness-cowboy-parse-answer "9"))
+  (should-not (harness-cowboy-parse-answer "6"))
   (should-not (harness-cowboy-parse-answer nil)))
 
 (ert-deftest harness-cowboy-cost-texts ()

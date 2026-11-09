@@ -8,7 +8,7 @@ Warns above a session's compose box once its prompt cache has expired or been dr
 - **Source:** [lisp/ui/harness-ui-cache.el](../../lisp/ui/harness-ui-cache.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [ui](ui.md), [ui-chat](ui-chat.md)
-- **Brings along:** [cache](cache.md) (the rest of it), [ui-compact](ui-compact.md) (its file requires it)
+- **Brings along:** [cache](cache.md) (the rest of it), [ui-carry](ui-carry.md) (its file requires it), [ui-compact](ui-compact.md) (its file requires it)
 
 ## About
 
@@ -32,20 +32,18 @@ stamp of the turn before -- and a panel saying the cache expired a
 minute after the user's message would be false: the turn is running
 and has just used the cache.
 
-It offers to compact the conversation first, so the next message sends
-only what stands in for it (harness-ui-compact.el): a button for each
-kind with what it costs (`compaction/estimate`, asked once per thing
-the panel says and drawn when it comes), the brief summary first.
-That one is the cheap way out of a long conversation gone cold: a
-cheap model reads the conversation's narrative -- every message,
-tool calls in brief -- for cents, where a summary on the session's
-model reads all of it uncached, as
-carrying on would.  A transcript file asks no model at all.  The
-buttons' keys work while point is on their line; in the compose box
-they type, and C-c . and a key press it there
-(`harness-compose-panel-key`), as the line under the buttons says.  A
-session blocked on an answer is in the middle of a turn, so it shows no
-panel at all.
+It offers to carry the conversation over first, so the next message
+sends only what stands in for it (harness-ui-compact.el): the same
+panel the questions draw (harness-ui-carry.el), from the same menu
+(`harness-carry-menu`), less the answers about a waiting message,
+which this panel has none of.  A transcript file and a fresh start are
+rows that ask no model; a summary is a dim row, with no cache, because
+a cache that is cold holds none of its request and it would read the
+conversation uncached, as carrying on would.  The rows' keys work
+while point is on the panel; in the compose box they type, and C-c .
+and a key press it there (`harness-compose-panel-key`), as the line
+under the rows says.  A session blocked on an answer is in the middle
+of a turn, so it shows no panel at all.
 
 A cache can be dropped before its clock says so.  A redaction
 (harness-redact.el) takes a secret out of a conversation and resets a

@@ -101,13 +101,12 @@ call.  Past `harness-supervisor-fork-limit` tokens of it
 (`harness-supervisor--conversation-tokens`, recorded on the plan as
 `:fork-tokens`) `submit_plan` refuses fork steps, and a fork step of
 an older plan past it fails before a worker or a request exists, as
-does one whose size cannot be measured.  Nothing compacts it first:
-the compaction's own request has a different system prompt and tool
-list from the conversation's, so no prompt cache covers it, and it
-reads the whole conversation cold and then writes a summary -- often
-more than the turn it would save.  The way out is a fresh step, whose
-brief is the plan's summary and its own prompt, never the
-conversation.  The window of both is capped as
+does one whose size cannot be measured.  Nothing compacts it first: a
+compaction replaces the supervisor's conversation, which every step
+after it reads, and its summary costs a model request before the fork
+it would save -- while the worker would inherit a summary rather than
+the plan's conversation.  The way out is a fresh step, whose brief is
+the plan's summary and its own prompt, never the conversation.  The window of both is capped as
 `harness-tools-agent-context-limit` says, and never silently: a hint
 in the worker's transcript says so
 (`harness-supervisor--limit-hint`).  The worker's reply is the step's

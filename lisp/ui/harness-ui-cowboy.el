@@ -3,9 +3,12 @@
 ;;; Commentary:
 
 ;; A message to a session whose prompt cache went cold waits while the
-;; harness asks what goes first (harness-cowboy.el): a brief summary, a
-;; summary, a transcript file, a fresh start, the whole conversation as
-;; it is, or not now.  The question is a pending question like any
+;; harness asks what goes first (harness-cowboy.el): the same one-page
+;; list the question before an automatic compaction shows -- a summary,
+;; a transcript file, a fresh start, a continuation and a pause.  The
+;; summary is shown, no cache, as a cold cache holds none of its
+;; request: it would read the conversation uncached, as carrying on
+;; would, and its row says so.  The question is a pending question like any
 ;; other; its payload's `:cowboy' says when the cache lapsed (or that it
 ;; is held for a model the session no longer uses, or that a redaction
 ;; dropped it, and when), what carrying on costs and what each choice
@@ -22,12 +25,14 @@
 ;; their keys and their wording are those of harness-carry.el, as the
 ;; harness sends them; what the payload leaves out of one is the table's.
 ;;
-;; A key answers once -- b, s, t, f, c, i -- and its capital always: B,
-;; S, T, F, C or I makes the choice `harness-cowboy-default' and stops
-;; the asking (`harness-cowboy-ask'), saved as any setting is.  i
-;; ignores the cold cache: the whole conversation goes and nothing is
-;; added to it.  q answers not now: the message waits, and goes with the
-;; next one.  The keys work while point is on the panel, a click on a
+;; A key answers once -- t, f, c -- and its capital always: T, F or C
+;; makes the choice `harness-cowboy-default' and stops the asking
+;; (`harness-cowboy-ask'), saved as any setting is.  The harness sends
+;; which ways it offers and which it shows but does not offer; a summary
+;; is shown without a key, as a cold cache holds none of its request,
+;; and a way shown without a key cannot be answered.  q answers pause: the message waits, and goes with the
+;; next one.  Typing \"silence\" carries on, as it did when that was a
+;; separate way.  The keys work while point is on the panel, a click on a
 ;; choice from anywhere; digits pick an option as on any question, and
 ;; text typed in the box answers it too ("transcript", "always brief");
 ;; in the box, where the keys type, C-c . and a key press it on the
@@ -94,6 +99,8 @@ plist, words the cost (`harness-ui-cowboy--cost-text')."
     (dolist (prop '(:cost :after))
       (when (numberp (plist-get entry prop))
         (setq choice (plist-put choice prop (plist-get entry prop)))))
+    (when (plist-get entry :unavailable)
+      (setq choice (plist-put choice :unavailable t)))
     choice))
 
 (defun harness-ui-cowboy--dropped (info)
@@ -124,15 +131,34 @@ the default and stops the asking (not for \"hold\")."
   (harness-ui-pending-answer-question
    session-id pid (if (and always (not (equal choice "hold"))) (concat "always " choice) choice))
   (when (and always (not (equal choice "hold")))
-    (message "%s from now on, without asking; harness-cowboy-ask turns asking back on"
+    (message "%s · default"
              (harness-carry-label (harness-carry-way choice)))))
 
-(defun harness-ui-cowboy--keymap (session-id pid)
+(defconst harness-ui-cowboy--spoken
+  '((transcript . "transcript")
+    (fresh . "fresh")
+    (carry-on . "continuation")
+    (ignore . "silence")
+    (hold . "pause"))
+  "The words a typed answer uses for each way, as `harness-cowboy--words' has them.")
+
+(defun harness-ui-cowboy--ways (info)
+  "Return the ways INFO offers, in the carry table's order.
+A question that says nothing of its choices offers them all."
+  (let* ((names (mapcar (lambda (choice) (format "%s" (plist-get choice :choice)))
+                        (append (plist-get info :choices) nil)))
+         (ways (harness-carry-names)))
+    (if names
+        (cl-remove-if-not (lambda (way) (member (symbol-name way) names)) ways)
+      ways)))
+
+(defun harness-ui-cowboy--keymap (session-id pid info)
   "Return the keymap of the panel of question PID of SESSION-ID.
-A choice's key answers with it, its capital always; the digits of any
-question pick an option, under them."
+INFO is the question's `:cowboy'.  A choice's key answers with it, its
+capital always; the digits of any question pick an option, under them."
   (harness-ui-carry-keymap
-   (list :choices (mapcar #'harness-carry-choice (harness-carry-names))
+   (list :choices (mapcar (lambda (way) (harness-ui-cowboy--choice info way))
+                          (harness-ui-cowboy--ways info))
          :always t
          :answer (lambda (choice always) (harness-ui-cowboy-answer session-id pid choice always)))
    harness-ui-pending-question-map))
@@ -153,11 +179,11 @@ it (now, else when it wrote, else a short id): a session link
                        (and (stringp id) (substring id 0 (min 8 (length id))))
                        "?"))
             (shown (format "“%s”" label)))
-       (concat "message from session "
+       (concat "session "
                (if (stringp id)
                    (harness-ui-session-link id shown (format "Open the session %s" label))
                  shown))))
-    (_ (format "message from %s" (harness-sender-description from)))))
+    (_ (format "%s" (harness-sender-description from)))))
 
 (defun harness-ui-cowboy--detail (info now)
   "Return what the heading of the panel for INFO says, drawn at NOW.
@@ -173,11 +199,12 @@ while it shows."
                     (and (plist-get info :model) (harness-ui-model-label (plist-get info :model))))))
     (string-join
      (delq nil (append
-                (list (cond (stale (format "held for %s, not %s" stale model))
+                (list (cond (stale (format "cold · cache of %s · session %s" stale model))
                             (dropped
-                             (format "dropped by a redaction at %s" (harness-ui-format-clock dropped now)))
+                             (format "dropped · %s · redaction"
+                                     (harness-ui-format-clock dropped now)))
                             ((numberp expires)
-                             (format "since %s" (harness-ui-format-clock expires now)))))
+                             (format "expired · %s" (harness-ui-format-clock expires now)))))
                 (unless stale (list model))
                 (list (and (numberp context) (> context 0)
                            (format "~%s tokens" (harness-format-tokens context))))))
@@ -195,11 +222,11 @@ costs as a plan's shares where it has rates (`harness-ui-estimate-text')."
          (waiting (concat (harness-ui-cowboy--sender (plist-get info :from))
                           (if preview (format " · “%s”" (harness-truncate-end preview 120)) ""))))
     (delq nil
-          (list (list "Waiting" waiting)
+          (list (list "Message" waiting)
                 (and (not (harness-ui-cowboy--dropped info)) (numberp carry) (numberp cached) (> carry cached)
-                     (list "Resend" (format "%s uncached against %s cached"
-                                            (harness-ui-estimate-text carry session)
-                                            (harness-ui-estimate-text cached session))))))))
+                     (list "Cost" (format "%s uncached · %s cached"
+                                          (harness-ui-estimate-text carry session)
+                                          (harness-ui-estimate-text cached session))))))))
 
 (defun harness-ui-cowboy--spec (session-id r &optional now)
   "Return the spec of the panel of question record R, of SESSION-ID.
@@ -209,17 +236,22 @@ See `harness-ui-carry-panel-string'.  NOW is the current time by default."
          (session (harness-ui-session session-id))
          (now (or now (float-time))))
     (list :id pid
-          :icon 'harness-icon-clock :title "Prompt cache cold"
+          :icon 'harness-icon-clock
+          :title "Cache"
           :detail (harness-ui-cowboy--detail info now)
           :rows (harness-ui-cowboy--rows info session)
-          :ask "Choose what goes first"
+          :ask "Options"
           :choices (mapcar (lambda (way) (harness-ui-cowboy--choice info way session))
-                            (harness-carry-names))
+                            (harness-ui-cowboy--ways info))
           :default (plist-get info :default)
           :always t
           :footer (list (and (harness-json-true-p (plist-get info :history))
-                             "Left out: searchable with session_history")
-                        "Type a choice below: “transcript”, “always brief”")
+                             "session_history")
+                        (let ((way (harness-carry-way (plist-get info :default))))
+                          (and way
+                               (format "answers · “%s”"
+                                       (or (cdr (assq way harness-ui-cowboy--spoken))
+                                           (downcase (harness-carry-label way)))))))
           :answer (lambda (choice always) (harness-ui-cowboy-answer session-id pid choice always)))))
 
 (defun harness-ui-cowboy--string (spec)

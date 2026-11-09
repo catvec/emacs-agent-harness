@@ -16,8 +16,9 @@
 ;; (harness-handoff.el), here on the session's own provider:
 ;;
 ;; - `summary': the session's own model writes a thorough handoff
-;;   summary of the whole conversation.  It reads all of it again, from
-;;   the prompt cache while that lasts and uncached once it lapsed.
+;;   summary, on a request that starts as the conversation's next step
+;;   would, so it reads the conversation from the prompt cache while
+;;   that lasts and uncached once it lapsed.
 ;; - `brief': a cheap model (`harness-compaction-brief-model', by
 ;;   default the simple tier of the session's provider) summarises the
 ;;   conversation's narrative, as a handoff's new model does
@@ -125,7 +126,9 @@
 ;; draws it as a queued message, above its compose box, with the buttons
 ;; that take it back, and it leaves the list as it is recorded.
 ;;
-;; The summarisation request has no tools.  An API provider gets the
+;; A summary is the chat's next request, so it has the chat's own tools;
+;; the instruction tells the model not to call one.  A brief summary is a
+;; request of its own, with no tools.  An API provider gets the
 ;; transcript as ordinary messages.  A hosted-loop provider keeps the
 ;; conversation itself and is only sent the newest user messages, so it
 ;; summarises on a fork of the session's provider state (as naming
@@ -144,26 +147,37 @@
 ;; made on the new provider without that provider's context taking the
 ;; whole conversation, payloads and all, at once.
 ;;
-;; A summary and a brief summary read the whole conversation as the input
-;; of a request of their own -- a system prompt and, for a summary, no
-;; tools -- so no cache of the chat covers that request, and the size of
-;; what the model writes says nothing about the size of what it reads.  A
-;; cold one is therefore as expensive as the turn it would save, and can
-;; cost more.  Only an estimate that says that request's own prefix is
-;; cached (`harness-compaction-request-warm-p', which no chat's cache
-;; satisfies) lets one be sent: every automatic path asks
-;; `harness-compaction--effective-kind' for the kind it may use, and a
-;; summary or brief whose own request is not cached becomes a transcript.
-;; `compaction/compact'
+;; A summary is made as the conversation's next step would be: the same
+;; model, system prompt, tools, thinking level and conversation, with the
+;; summarisation instruction appended as its last user message
+;; (`harness-compaction--prefix-request').  A provider's prompt cache
+;; reads a request only as far as it starts like the one that wrote the
+;; cache, so the conversation is read at the cache price while the cache
+;; lasts; only the instruction is uncached input.  The question before
+;; an automatic compaction asks one flat list, the same the cold-cache
+;; question asks (`harness-compaction--ask'): Summary, Transcript,
+;; Fresh start, Continuation and Pause.  A summary is shown, no cache,
+;; when the estimate says its own request would read the conversation
+;; uncached, and its row says so.  A `brief' summary renders the
+;; conversation's narrative anew, and a hosted loop is sent the
+;; instruction as its newest message of a conversation it holds itself:
+;; no cache of the chat covers either, so a brief is for a handoff, and
+;; neither is made without an estimate that says its own request's prefix
+;; is cached (`harness-compaction--prefix-cache-p').  Every automatic
+;; path asks `harness-compaction--effective-kind' for the kind it may use,
+;; and a summary or brief whose own request is not cached becomes a
+;; transcript.  `compaction/compact'
 ;; is the single place that decides (`harness-compaction--compact-now'), so
 ;; a queued compaction, a stale caller or a new one cannot bypass it: OPTS
 ;; `:fallback' is the kind that asks no model to use instead, and without
 ;; one a summary whose own request is not cached is refused before a
 ;; request exists.  No choice, approval or saved answer is warmth: a user
-;; who picks a summary, a saved always answer, a handoff mode and the
-;; compact panel all fail closed the same way.  When neither the transcript
-;; nor a cut can be made, the turn is held rather than the whole
-;; conversation sent uncached.
+;; who picks a summary, a saved always answer and the compact panel all
+;; fail closed the same way.  A handoff's OPTS `:transfer' is the one
+;; exception, as the conversation is going to a provider that never saw
+;; it and no cache can hold it.  When neither the transcript nor a cut
+;; can be made, the turn is held rather than the whole conversation sent
+;; uncached.
 ;;
 ;; `compaction/status' grades how full the window is so a UI can colour
 ;; the token count progressively.
@@ -186,6 +200,7 @@
 (defvar harness-provider-fallback-context-window)
 
 (declare-function harness-agent-strip-result-images "harness-agent" (messages))
+(declare-function harness-agent-step-request "harness-agent" (session-id state on-event))
 (declare-function harness-cowboy--non-interactive-p "harness-cowboy" (session))
 (declare-function harness-cowboy-parse-answer "harness-cowboy" (text))
 (declare-function harness-agent-waiting-text "harness-agent" (texts))
@@ -227,23 +242,27 @@ this kind where nobody is asked, with one exception: a kind that asks a
 model to read the conversation (`summary' or `brief') is made only when
 the estimate says its own request is cached
 \(`harness-compaction-request-warm-p'), and otherwise the conversation
-is written to a transcript instead.  No chat cache, timestamp or time
-to live makes a summary's own request cached, so an automatic summary
-is never sent.  Where the user can be asked, the question before it
-offers the kinds (this one marked the default) with what each costs
-\(`harness-compaction-ask'); a kind they answer is chosen, but a
-summary or brief among them is still made only when the estimate says
-its own request is cached, and a transcript otherwise.  Compacting by
-hand (`harness-compact', or the panel above the message box of a
-session whose prompt cache expired) offers every kind, with what each
-costs, under the same rule: no choice makes a cold summary.  A standing
-exception for an informed user to buy a cold summary is not implemented;
-it would be a policy decision to ask for first."
+is written to a transcript instead.  A `summary' is the chat's next
+request with the instruction appended, so it reads the conversation
+from the prompt cache while that lasts; a `brief' renders the narrative
+anew, which no cache covers, and is a handoff's.  Where the user can be
+asked, the question before it offers the menu both questions share
+\(`harness-carry-menu': Summary, Transcript, Fresh start, Continuation
+and Pause) with what each costs (`harness-compaction-ask'), this one
+marked the default; a summary whose own request is not cached is shown,
+no cache.  A kind they answer is chosen, but a model kind among them
+is still made only when the estimate says its own request is cached, and
+a transcript otherwise.  Compacting by hand (`harness-compact', or the
+panel above the message box of a session whose prompt cache expired)
+offers the same list, less Pause, under the same rule: no choice makes
+a cold summary.  A standing exception for an informed user to buy a cold
+summary is not implemented; it would be a policy decision to ask for
+first."
   :type '(choice (const :tag "Summary: the session's model summarises the whole conversation" summary)
-                 (const :tag "Brief summary: a cheap model summarises the narrative, tool calls in brief" brief)
+                 (const :tag "Brief: a cheap model summarises the narrative, tool calls in brief" brief)
                  (const :tag "Transcript: a file the model reads what it needs of" transcript)
                  (const :tag "Fresh start: nothing carried over; the model looks back when it needs to" fresh)
-                 (const :tag "Cut old context: drop the oldest messages and keep the newest as they are" truncate))
+                 (const :tag "Context cut: drop the oldest messages and keep the newest as they are" truncate))
   :safe (lambda (v) (memq v '(summary brief transcript fresh truncate)))
   :group 'harness)
 
@@ -274,6 +293,15 @@ compaction and carries on from it, its model told that its work is not
 finished.  With nil the conversation is compacted only before the next
 turn, so a turn runs on past the limit until it is over.  A provider that
 compacts on its own side (Claude Code, Copilot) is left alone either way."
+  :type 'boolean :safe #'booleanp :group 'harness)
+
+(defcustom harness-compaction-carry-on nil
+  "Non-nil to carry on when a conversation nears its context window.
+The automatic compaction then sends the conversation as it is, before a
+turn and in the middle of one, instead of compacting it or asking what
+goes first.  Answering \"always carry on\" to the question sets this,
+and the settings page turns it off again.  A conversation past the
+model's window is still sent as it is: the provider may refuse it."
   :type 'boolean :safe #'booleanp :group 'harness)
 
 (defconst harness-compaction--system-prompt
@@ -376,14 +404,13 @@ of this module.")
 (defvar harness-compaction--carried-on (make-hash-table :test 'equal)
   "Session id -> t while the user's answer to carry on still stands.
 Set when the automatic compaction question is answered with `carry-on':
-the question is not put again while the conversation can still be sent
-at the size it has, before the next turn or at the next steps of one.
-Carrying on is no option once the context is past the window
-\(`harness-compaction--window'), and the question comes back then; a
-boundary that finds the context under the limit forgets the answer, a
-compaction or a trim having changed the conversation, and so does
-another answer (`harness-compaction--note-answer').  Gone with the
-session, and not kept across a restart.")
+the question is not put again, before the next turn or at the next
+steps of one, at the size the conversation has or past the model's
+window.  A boundary that finds the context under the limit forgets the
+answer, a compaction or a trim having changed the conversation, and so
+does another answer (`harness-compaction--note-answer').  Gone with the
+session, and not kept across a restart; `harness-compaction-carry-on'
+is the lasting answer.")
 
 (defun harness-compaction-busy-p (session-id)
   "Non-nil while a compaction of SESSION-ID is under way."
@@ -393,7 +420,9 @@ session, and not kept across a restart.")
 
 (defconst harness-compaction--model-kinds '(summary brief)
   "The kinds of compaction that ask a model to read the conversation.
-Both send the conversation as the input of a request of their own.")
+A summary sends it as the chat's next request, with the instruction
+appended, which the chat's prompt cache serves; a brief sends it as the
+narrative of a request of its own, which none does.")
 
 (defun harness-compaction--kind (kind &optional context)
   "Return KIND, a symbol or its name, as one of `harness-compaction-kinds'.
@@ -405,7 +434,7 @@ a `sample' is a `brief' one, of anything else a `summary'."
                  (t kind))))
     (unless (memq k harness-compaction-kinds)
       (signal 'harness-error
-              (list (format "Unknown compaction kind %s (use summary, brief, transcript, fresh or truncate)" kind))))
+              (list (format "Unknown compaction kind · %s" kind))))
     k))
 
 (defun harness-compaction--model-label (model)
@@ -536,22 +565,40 @@ where L is one of `ok', `warning', `urgent' and `critical'."
     (> context (harness-compaction--usable (harness-compaction--window session)
                                            (harness-compaction--reserve session)))))
 
-(defun harness-compaction--carried-on-p (session-id session)
-  "Non-nil when SESSION-ID's user chose to carry on, and it still can be.
-The answer stands while SESSION's context is within its window
-\(`harness-compaction--window'): past it the conversation cannot be
-sent, and the question, whose choices no longer include carrying on,
-is put again.  See `harness-compaction--carried-on'."
-  (and (gethash session-id harness-compaction--carried-on)
-       (<= (or (plist-get (plist-get session :usage) :context) 0)
-           (harness-compaction--window session))
-       t))
+(defun harness-compaction--carried-on-p (session-id)
+  "Non-nil when SESSION-ID's user chose to carry on.
+The answer stands until the conversation changes or another answer
+\(`harness-compaction--carried-on'), past the model's window too: a user
+who chose to carry on is not asked again, and a provider that cannot
+send the conversation says so."
+  (and (gethash session-id harness-compaction--carried-on) t))
+
+(defun harness-compaction--carry-on-always-p (session)
+  "Non-nil when SESSION carries on instead of compacting or asking.
+That is `harness-compaction-carry-on' in a session that would wait for
+the user; one nobody asks -- a task, a seed -- compacts as its kind
+says, so unattended work is not left to fail on an overgrown context."
+  (and harness-compaction-carry-on
+       (not (harness-compaction--non-interactive-p session))))
+
+(defun harness-compaction--save-carry-on (session-id)
+  "Make carrying on the lasting answer, as \"always carry on\" says.
+`harness-compaction-carry-on' then stops the question before an
+automatic compaction, and the settings page turns it off again.  A
+failure to save is logged, never raised: the answer still stands for
+SESSION-ID."
+  (condition-case err
+      (if (harness-method-exists-p 'config/set)
+          (harness-call 'config/set 'harness-compaction-carry-on t)
+        (harness-save-user-option 'harness-compaction-carry-on t))
+    (error (harness-log 'warn "compaction: could not save carrying on for %s: %s"
+                        session-id (harness-error-short-message err)))))
 
 (defun harness-compaction--note-answer (session-id choice)
   "Keep, or forget, SESSION-ID's answer to the automatic compaction question.
 CHOICE is what it was answered with: `carry-on' stands until the
-conversation changes or is past its window
-\(`harness-compaction--carried-on'), and any other answer ends it."
+conversation changes (`harness-compaction--carried-on'), and any other
+answer ends it."
   (if (eq choice 'carry-on)
       (puthash session-id t harness-compaction--carried-on)
     (remhash session-id harness-compaction--carried-on)))
@@ -638,47 +685,91 @@ conversation, held by MODEL's provider, which can fork it."
        (harness-call 'session/provider-state session-id model)
        (harness-json-true-p (plist-get (harness-call 'provider/capabilities model) :fork))))
 
-(defun harness-compaction--estimate-summary (_session-id session context _warm ends)
+(defun harness-compaction--prefix-cache-p (session)
+  "Non-nil when a summary request of SESSION would read the conversation cached.
+That is when SESSION's own prompt cache lasts for its model
+\(`harness-compaction--warm-p'), its provider is sent the conversation at
+every request rather than keeping it itself, and the agent's request
+builder is there to start the summary exactly as the conversation's next
+step would (`harness-agent-step-request'): the same model, system
+prompt, tools, thinking level and conversation, with the instruction
+appended.  A summary so made is a request whose prefix the chat's cache
+covers, so the conversation is read at the cache price; a hosted loop,
+and a cold cache, hold no such prefix."
+  (and (harness-compaction--warm-p session)
+       (not (harness-compaction--hosted-model-p (plist-get session :model)))
+       (fboundp 'harness-agent-step-request)
+       t))
+
+(defun harness-compaction--instruction (model)
+  "Return the user message that asks MODEL to write a compaction summary.
+The registry's compaction instructions come first, then the instruction
+not to call a tool -- the summary request has the chat's tools, and it
+must write, not work -- and the registry's request closes it.  This
+text is appended to the conversation, which the prompt cache serves; it
+is the only part of the request the cache does not hold."
+  (string-join
+   (delq nil
+         (list (harness-prompt-effective 'compaction-system
+                                         harness-compaction--system-prompt model)
+               "Do not call any tool.  Answer with the summary alone."
+               (harness-prompt-effective 'compaction-request
+                                         harness-compaction--request-text model)))
+   "\n\n"))
+
+(defun harness-compaction--instruction-tokens (model)
+  "Return about how many tokens `harness-compaction--instruction' takes."
+  (harness-estimate-tokens (harness-compaction--instruction model)))
+
+(defun harness-compaction--estimate-summary (session-id session context _warm ends)
   "Estimate a `summary' of SESSION, whose record is SESSION, of CONTEXT tokens.
-The summary request has a system prompt and a tool list of its own
-\(`harness-compaction--summary-request'), so no prompt cache of the
-conversation covers it, WARM or not: it reads CONTEXT uncached.  A
-cache of the chat the summary is of is not a cache of this request.
-ENDS is `harness-compaction--verbatim-tokens': what the first and last
-messages kept verbatim add to the result."
+A summary is made on a request that starts as the conversation's next
+step would -- same model, system prompt, tools and conversation -- with
+the summarisation instruction appended (`harness-compaction--summary-request'),
+so the conversation is read from the prompt cache while it lasts
+\(`harness-compaction--prefix-cache-p').  Its `:cached' says whether the
+request this estimate prices is such a one: nil when the cache lapsed
+or the provider keeps the conversation itself, in which case the whole
+context is read uncached.  ENDS is `harness-compaction--verbatim-tokens':
+what the first and last messages kept verbatim add to the result."
   (let* ((model (plist-get session :model))
-         (ask (harness-estimate-tokens
-               (harness-prompt-effective 'compaction-request harness-compaction--request-text model)))
+         (ask (harness-compaction--instruction-tokens model))
          (output harness-compaction--summary-output)
-         (cost (harness-compaction--cost
-                model (list (harness-compaction--uncached-key model) (+ context ask) :output output))))
+         ;; A hosted loop forks the conversation it holds and is sent only
+         ;; the instruction: no cache of a chat the harness cannot see is
+         ;; needed, as the provider serves its own conversation.
+         (cached (or (harness-compaction--prefix-cache-p session)
+                     (and (harness-compaction--hosted-model-p model)
+                          (harness-compaction--fork-p session-id model))))
+         (uncached (harness-compaction--cost
+                    model (list (harness-compaction--uncached-key model)
+                                (+ context ask) :output output)))
+         (cost (if cached
+                   (harness-compaction--cost
+                    model (list :cache-read context :input ask :output output))
+                 uncached)))
     (list :kind 'summary :model model :model-label (harness-compaction--model-label model)
-          :input (+ context ask) :output output :cached nil
-          :cost cost
-          ;; It reads all of it uncached either way; a client that keeps
-          ;; the estimate for a while and finds the cache lapsed meanwhile
-          ;; has the same price.
-          :cost-uncached cost
+          :input (+ context ask) :output output :cached (and cached t)
+          :available (and cached t)
+          :cost cost :cost-uncached uncached
           :after (+ output ends))))
 
 (defun harness-compaction--estimate-brief (session messages ends &optional model)
   "Estimate a `brief' summary of SESSION, whose provider messages are MESSAGES.
-Its model is sent the system prompt and the conversation's narrative
-\(`harness-compaction--narrative-messages'), all of it uncached.  ENDS
-is `harness-compaction--verbatim-tokens': what the first and last
-messages kept verbatim add to the result.  MODEL, when given, writes it
-in place of `harness-compaction--brief-model': a handoff has the new
-model write it."
+A brief summary of a `sample' renders the conversation's narrative anew,
+so no cache of the conversation covers that request: it reads it all
+uncached, and is offered only where a handoff has no cached alternative
+\(`:available' is nil).  Its model is `harness-compaction-brief-model',
+or MODEL when given.  ENDS is `harness-compaction--verbatim-tokens':
+what the first and last messages kept verbatim add to the result."
   (let* ((model (or model (harness-compaction--brief-model session)))
          (input (+ (harness-estimate-tokens harness-compaction--system-prompt)
                    (harness-compaction--messages-tokens
                     (harness-compaction--narrative-messages messages))
-                   (harness-estimate-tokens
-                    (harness-prompt-effective 'compaction-request
-                                              harness-compaction--request-text model))))
+                   (harness-compaction--instruction-tokens model)))
          (output harness-compaction--summary-output))
     (list :kind 'brief :model model :model-label (harness-compaction--model-label model)
-          :input input :output output :cached nil
+          :input input :output output :cached nil :available nil
           :cost (harness-compaction--cost
                  model (list (harness-compaction--uncached-key model) input :output output))
           :after (+ output ends))))
@@ -688,6 +779,7 @@ model write it."
 No model is asked anything; the note left in its place is about as
 long as an example of it."
   (list :kind 'transcript :model nil :model-label nil :input 0 :output 0 :cached nil :cost 0.0
+        :available t
         :after (harness-estimate-tokens (harness-compaction--transcript-note "/a/file.md" 1000))
         :file-tokens context))
 
@@ -696,6 +788,7 @@ long as an example of it."
 No model is asked anything, and only the note saying so stands for
 the conversation."
   (list :kind 'fresh :model nil :model-label nil :input 0 :output 0 :cached nil :cost 0.0
+        :available t
         :after (harness-estimate-tokens (harness-compaction--fresh-note count context t))))
 
 (defun harness-compaction--estimate-truncate (session-id context)
@@ -713,37 +806,42 @@ CONTEXT and `:dropped' is 0."
              (note (harness-compaction--truncate-note (length dropped) dropped-tokens
                                                       (length kept) kept-tokens t)))
         (list :kind 'truncate :model nil :model-label nil :input 0 :output 0 :cached nil :cost 0.0
+              :available t
               :after (+ (harness-estimate-tokens note) kept-tokens)
               :kept (length kept) :dropped (length dropped)
               :kept-tokens kept-tokens :dropped-tokens dropped-tokens))
     (harness-error
      (list :kind 'truncate :model nil :model-label nil :input 0 :output 0 :cached nil :cost 0.0
+           :available t
            :after context :kept (length (harness-call 'session/messages session-id)) :dropped 0))))
 
 (harness-defmethod compaction/estimate (session-id &optional opts)
   "Say what compacting SESSION-ID costs, kind by kind, and what carrying on does.
 Return (:context N :model MODEL :model-label LABEL :cached BOOL
-:carry-on USD :carry-on-cached USD :compacting BOOL :kind KIND :kinds
-ESTIMATES).  N is the context the next message sends, the last
-request's or else an estimate of the transcript's; `:cached' says the
-session's prompt cache still lasts for MODEL, `:carry-on' what the next
-message costs to send N as things are, `:carry-on-cached' what it would
-cost read from the cache.  `:compacting' says a compaction is under way
-and `:kind' is `harness-compaction-kind'.  ESTIMATES has one plist per
-kind of `harness-compaction-kinds', (:kind KIND :model MODEL
-:model-label LABEL :input N :output N :cached BOOL :cost USD :after N):
-the model that would write it, the tokens it would read and write
-\(`:cached' when it would read them from the cache), what that costs,
-and the context that stands for the conversation after it -- a
+:carry-on USD :carry-on-cached USD :compacting BOOL :kind KIND
+:kinds ESTIMATES).  N is the context the next message sends, the
+last request's or else an estimate of the transcript's; `:cached' says
+the session's prompt cache still lasts for MODEL, `:carry-on' what the
+next message costs to send N as things are, `:carry-on-cached' what it
+would cost read from the cache.  `:compacting' says a compaction is
+under way and `:kind' is `harness-compaction-kind'.  ESTIMATES has one
+plist per kind of `harness-compaction-kinds', (:kind KIND :model MODEL
+:model-label LABEL :input N :output N :cached BOOL :available BOOL :cost
+USD :after N): the model that would write it, the tokens it would read
+and write (`:cached' when it would read them from the cache), whether it
+can be made as it is (`:available': a summary only when its own request
+starts as the conversation's next step would and the cache holds it,
+a `brief' one only where a handoff has no cached alternative), what that
+costs, and the context that stands for the conversation after it -- a
 model-written one keeps the conversation's first and last messages
-verbatim, which that number includes.  Costs are
-at list prices, nil where the catalogue has none, and `transcript' and
-`fresh', which ask no model, cost 0; a transcript's `:file-tokens' is
-about how much the file holds.  `:messages' is how many messages the
-conversation sends now.  A `summary' also says what it would cost once
-the prompt cache lapsed, `:cost-uncached': its `:cost' while the cache
-lasts is the cheaper one, and a client that keeps the answer for a
-while reads the other when the cache lapses meanwhile.
+verbatim, which that number includes.  Costs are at list prices, nil
+where the catalogue has none, and `transcript' and `fresh', which ask no
+model, cost 0; a transcript's `:file-tokens' is about how much the file
+holds.  `:messages' is how many messages the conversation sends now.  A
+`summary' also says what it would cost once the prompt cache lapsed,
+`:cost-uncached': its `:cost' while the cache lasts is the cheaper one,
+and a client that keeps the answer for a while reads the other when the
+cache lapses meanwhile.
 
 OPTS `:brief-model' names the model that writes the `brief' summary in
 place of `harness-compaction-brief-model': a model switch has the new
@@ -784,7 +882,7 @@ model write it, and asks what that costs."
   (cond ((member context '(nil full "full")) 'full)
         ((member context '(sample "sample")) 'sample)
         (t (signal 'harness-error
-                   (list (format "Unknown compaction context %s (use full or sample)" context))))))
+                   (list (format "Unknown compaction context · %s" context))))))
 
 (defun harness-compaction--hosted-model-p (model)
   "Non-nil when MODEL's provider keeps the conversation itself."
@@ -951,16 +1049,46 @@ window could be too large for the provider to take."
        contextual)
      model)))
 
-(defun harness-compaction--summary-request (session model state messages)
+(defun harness-compaction--prefix-request (session model &optional state)
+  "Return the request that writes a summary from SESSION's own prompt cache.
+It starts exactly as the conversation's next step would
+\(`harness-agent-step-request'): the same model, system prompt, tools,
+thinking level, provider state and conversation, so the provider's prompt
+cache serves the conversation; the summarisation instruction is appended
+as its last user message, which is all the request adds.  MODEL is the
+summariser, the session's own."
+  (let* ((base (harness-agent-step-request (plist-get session :id) state nil))
+         (messages (plist-get base :messages))
+         (ask (list :type "text" :text (harness-compaction--instruction model)))
+         (last (car (last messages)))
+         (messages
+          (if (and last (eq (plist-get last :role) 'user))
+              (append (butlast messages)
+                      (list (plist-put (copy-sequence last) :content
+                                       (append (plist-get last :content) (list ask)))))
+            (append messages (list (list :role 'user :content (list ask)))))))
+    (append (harness-plist-remove base :on-event :max-tokens)
+            (list :messages messages
+                  :max-tokens harness-compaction--max-tokens))))
+
+(defun harness-compaction--summary-request (session model state messages &optional warm)
   "Return the one-off request that asks MODEL to summarise SESSION.
 STATE is the provider state MODEL gets, as `compaction/compact' has it,
-and MESSAGES the conversation it reads.  The system prompt and the
-request's last line are the registry's, as MODEL's overrides have them."
-  (list :model model :session session
-        :system (harness-prompt-effective 'compaction-system
-                                          harness-compaction--system-prompt model)
-        :messages messages :tools nil :provider-state state
-        :max-tokens harness-compaction--max-tokens))
+and MESSAGES the conversation it reads.  WARM non-nil says the summary
+is made as the conversation's next request would be,
+with the instruction appended (`harness-compaction--prefix-request'), so
+it reads the conversation from the prompt cache: the caller only says so
+when its own model is the session's, its provider is sent the
+conversation at every request, and the cache lasts.  Otherwise -- a
+hosted loop, another model, a cold cache -- it has a system prompt and a
+tool list of its own, which no cache of the conversation covers."
+  (if warm
+      (harness-compaction--prefix-request session model state)
+    (list :model model :session session
+          :system (harness-prompt-effective 'compaction-system
+                                            harness-compaction--system-prompt model)
+          :messages messages :tools nil :provider-state state
+          :max-tokens harness-compaction--max-tokens)))
 
 (defun harness-compaction--messages-tokens (messages)
   "Cheap token estimate for MESSAGES."
@@ -1056,16 +1184,16 @@ stays."
   "Return the hint saying INPUT-TOKENS of context became KIND.
 META is the compaction node's, whose `:file' names a transcript and
 `:truncate-dropped' how many nodes a truncation dropped."
-  (format "Compacted: %s tokens → %s"
-          (harness-format-tokens input-tokens)
-          (pcase kind
-            ('brief "brief summary")
-            ('transcript (format "transcript in %s"
-                                 (abbreviate-file-name (or (plist-get meta :file) "a file"))))
-            ('fresh "a fresh start")
-            ('truncate (format "a cut conversation (%d nodes dropped)"
-                               (plist-get meta :truncate-dropped)))
-            (_ "summary"))))
+  (let ((tokens (format "~%s tokens" (harness-format-tokens input-tokens))))
+    (pcase kind
+      ('brief (format "Compaction · %s · brief" tokens))
+      ('transcript (format "Compaction · %s · transcript · %s"
+                          tokens
+                          (abbreviate-file-name (or (plist-get meta :file) "file"))))
+      ('fresh (format "Fresh start · %s" tokens))
+      ('truncate (format "Context cut · %s · %d nodes"
+                         tokens (or (plist-get meta :truncate-dropped) 0)))
+      (_ (format "Compaction · %s · summary" tokens)))))
 
 (defun harness-compaction--with-history (session-id content kind)
   "Return CONTENT, a compaction of KIND for SESSION-ID, ending in the history note.
@@ -1171,8 +1299,8 @@ which `session/messages' sends as it is."
                       (and (numberp c) (> c 0) c))
                     (harness-compaction--messages-tokens (harness-call 'session/messages session-id))))
          (written (harness-call 'session/write-transcript session-id
-                                (list :title "Compacted conversation"
-                                      :about (format "Compacted %s: the session goes on from a note pointing here"
+                                (list :title "Compaction"
+                                      :about (format "Compaction · %s · session note"
                                                      (format-time-string "%Y-%m-%d %H:%M %Z")))))
          (file (plist-get written :file)))
     (harness-log 'info "compaction: %s written to %s" session-id file)
@@ -1350,8 +1478,11 @@ STATE is the provider state to send it with, CONTEXT what it is given
 \(`full' or `sample'), and PROMISE settles with the compaction node.
 KIND is the kind of summary (`summary' or `brief'), CAVEAT a note to
 end it with, or nil, and META more for the node's `:meta' (see
-`harness-compaction--finish').  The node's content keeps the
-conversation's first and last messages verbatim around the summary
+`harness-compaction--finish').  A summary of the whole conversation on the
+session's own model, while its cache lasts, is sent as the conversation's
+next request would be, so it reads the conversation from the prompt
+cache (`harness-compaction--summary-request').  The node's content keeps
+the conversation's first and last messages verbatim around the summary
 \(`harness-compaction--with-verbatim-ends').  The unanswered user
 messages carried over after it are those there are when the summary
 is in, not when it was asked for: one sent to the turn meanwhile, which
@@ -1362,19 +1493,22 @@ the compaction node otherwise, where the model never reads it."
          (trailing (harness-compaction--trailing-user-nodes path))
          (ends (harness-compaction--verbatim-ends path trailing))
          (messages (harness-compaction--context-messages session-id model state context))
+         (warm (and (eq context 'full)
+                    (equal model (plist-get session :model))
+                    (harness-compaction--prefix-cache-p session)))
          (estimate (or (let ((c (plist-get (plist-get session :usage) :context)))
                          (and (numberp c) (> c 0) c))
                        (harness-compaction--messages-tokens messages)))
          (text "") (usage nil))
-    (harness-log 'info "compaction: summarising %s with %s (%s context, %s tokens)"
-                 session-id model context estimate)
+    (harness-log 'info "compaction: summarising %s with %s (%s context, %s tokens%s)"
+                 session-id model context estimate (if warm ", from the prompt cache" ""))
     ;; A one-off call through `harness-small-ask': a provider's bad minute
     ;; -- a rate limit, a connection cut -- is waited out and the summary
     ;; asked for again, as a step of a turn would be.  A try that failed
     ;; left no summary behind, so the retry cannot duplicate one.
     (harness-prompt-ask
      '(compaction-system compaction-request)
-     (harness-compaction--summary-request session model state messages)
+     (harness-compaction--summary-request session model state messages warm)
      (list :label "compaction"
            :on-event
            (lambda (ev)
@@ -1413,13 +1547,13 @@ the compaction node otherwise, where the model never reads it."
 Only `compaction/estimate' can say so: its entry for KIND must report
 `:cached'.  MODEL, when given, is the model the request would be sent
 to; the estimate must price that same model, or it says nothing about
-this request.  A previous chat request, a warm session `:cache', a
-timestamp, a time to live or a provider state are not evidence that
-this request is cached: a summary has a system prompt and a tool list of
-its own (`harness-compaction--summary-request' has `:tools' nil), so no
-cache of the conversation covers it.  A user's choice, a saved answer
-or OPTS `:approved' is no evidence either: warmth is the only thing
-that may put a model kind on the wire."
+this request.  A summary of the whole conversation can be warm, because
+it is sent as the conversation's next request with the instruction
+appended (`harness-compaction--summary-request'), so the prompt cache
+holds its prefix while it lasts (`harness-compaction--prefix-cache-p');
+a `brief' one, whose narrative is rendered anew, cannot be.  A user's
+choice, a saved answer or OPTS `:approved' is no evidence either:
+warmth is the only thing that may put a model kind on the wire."
   (let* ((estimate (and (harness-method-exists-p 'compaction/estimate)
                         (ignore-errors (harness-call 'compaction/estimate session-id))))
          (entry (and estimate
@@ -1445,10 +1579,15 @@ A kind that asks a model (`harness-compaction--model-kinds') is made
 only when the estimate says that request's own prefix is cached, for the
 very model the request would go to
 \(`harness-compaction-request-warm-p'): nobody's choice, approval or
-saved answer overrides that.  Otherwise OPTS `:fallback' is used, a
-kind that asks no model, and without one the compaction is refused
-before a request exists, saying what to use instead."
+saved answer overrides that.  OPTS `:transfer' is the one exception: the
+conversation is being handed to a provider that never saw it
+\(harness-handoff.el), so there is no cache to read and the transfer is
+the point; its cost is what that transfer costs.  Otherwise OPTS
+`:fallback' is used, a kind that asks no model, and without one the
+compaction is refused before a request exists, saying what to use
+instead."
   (if (or (not (memq kind harness-compaction--model-kinds))
+          (harness-json-true-p (plist-get opts :transfer))
           (let ((session (ignore-errors (harness-call 'session/get session-id))))
             (and session
                  (harness-compaction-request-warm-p
@@ -1458,9 +1597,9 @@ before a request exists, saying what to use instead."
     (let ((fallback (harness-compaction--kind (plist-get opts :fallback))))
       (unless (memq fallback '(transcript fresh truncate))
         (signal 'harness-error
-                (list (format (concat "A %s reads the whole conversation uncached: its system prompt"
-                                      " and tools are not what the prompt cache holds, so it cannot be"
-                                      " shown to be cached.  Use transcript, fresh or truncate instead")
+                (list (format (concat "A %s reads the conversation on a request of its own, and the"
+                                      " prompt cache does not hold it: it cannot be shown to read"
+                                      " cached input.  Use transcript, fresh or truncate instead")
                               (harness-compaction--kind-name kind)))))
       fallback)))
 
@@ -1478,11 +1617,11 @@ when neither could be made."
       (lambda (_err) (harness-resolved nil))))))
 
 (defconst harness-compaction--uncacheable-reason
-  "not now: the conversation is too large to send uncached, and compacting it failed; ask again, or compact it by hand"
+  "context too large · no compaction · message hold"
   "Why a turn is held when its conversation could not be compacted at all.")
 
 (defconst harness-compaction--held-step-reason
-  "not now: the conversation is nearly full, and the step waits; compact it by hand, or send a message to go on"
+  "context full · step hold"
   "Why a step is refused when its compaction was dismissed or held back.
 A dismissed question is not an answer to send the whole conversation
 uncached with, and neither is `hold'.")
@@ -1536,13 +1675,13 @@ would be sent to."
                                    (_ (harness-compaction--transcript session-id session meta))))
               (error (harness-compaction--fail session-id promise err)))
           (let ((where (if (harness-json-true-p (plist-get meta :mid-turn))
-                           " in the middle of the turn"
+                           " · mid-turn"
                          "")))
             (harness-call 'session/hint session-id
                           (if (eq kind 'brief)
-                              (format "Compacting context%s: a brief summary by %s…"
+                              (format "Compaction%s · brief · %s"
                                       where (harness-compaction--model-label model))
-                            (format "Compacting context%s…" where))))
+                            (format "Compaction%s" where))))
           (harness-then (if (eq context 'sample)
                             ;; A sample is the point: do not hand the
                             ;; summariser the whole conversation on a fork.
@@ -1563,21 +1702,29 @@ would be sent to."
 OPTS `:kind' is one of `harness-compaction-kinds': `summary' (the
 default), `brief', `transcript', `fresh' or `truncate'.
 
-A `summary' or `brief' reads the whole conversation uncached: its request
-has a system prompt and, for a summary, no tools, so no cache of the chat
-covers it (`harness-compaction-request-warm-p').  One is made only when
-`compaction/estimate' says that request's own prefix is cached, for the
-very model the request would go to.  Otherwise OPTS `:fallback', a kind
-that asks no model (`transcript', `fresh' or `truncate'), is made
-instead, said in a hint and kept in the node's `:meta' as
-`:requested-kind'; without `:fallback' the call is refused before a
-request exists.  Nobody's choice, approval or saved answer is warmth:
-OPTS `:approved' is not a way around this, and neither is an answer to
-the question, a saved cowboy choice, a handoff mode, the compact panel
-or an agent's own tool.
+A `summary' reads the whole conversation on a request that starts as
+the conversation's next step would -- same model, system prompt, tools
+and conversation -- with the summarisation instruction appended, so the
+provider's prompt cache serves the conversation while it lasts
+\(`harness-compaction--prefix-cache-p').  A `brief' summary renders the
+conversation's narrative anew, which no cache of the conversation
+covers, and is for a handoff, where the new model has to be told it in
+text.  Either is made only when `compaction/estimate' says that
+request's own prefix is cached, for the very model the request would go
+to.  Otherwise OPTS `:fallback', a kind that asks no model
+\(`transcript', `fresh' or `truncate'), is made instead, said in a hint
+and kept in the node's `:meta' as `:requested-kind'; without
+`:fallback' the call is refused before a request exists.  Nobody's
+choice, approval or saved answer is warmth: OPTS `:approved' is not a
+way around this, and neither is an answer to the question, a saved
+cowboy choice, the compact panel or an agent's own tool.  OPTS
+`:transfer' is the exception, for a handoff: the conversation goes to a
+provider that never saw it, so no cache can hold it and the transfer is
+the point.
 
-A `summary' is written by the session's model, or OPTS `:model'.  OPTS
-`:context' is `full' (the default), which lets the summariser see the
+A `summary' is written by the session's model, or OPTS `:model'.  It
+covers the whole conversation.  OPTS `:context' is `full' (the
+default), which lets the summariser see the
 whole conversation (on a fork of the session's provider state when its
 provider can), or `sample', which sends it the conversation's narrative
 -- every user and assistant message, each tool call and result in one
@@ -1634,7 +1781,7 @@ once."
           (harness-compaction--enqueue session-id opts))
          ((and running (harness-json-true-p (plist-get opts :idle)))
           (signal 'harness-error
-                  (list "The session is running a turn: compact it once the turn is over")))
+                  (list "session running · compact after the turn")))
          (t (harness-compaction--compact-now session-id opts))))))
 
 (defun harness-compaction--fail (session-id promise err)
@@ -1644,7 +1791,7 @@ summariser can carry a whole transcript or request body as its data, and
 none of that belongs in *Messages*, in a hint or in the tree."
   (let ((msg (harness-error-short-message err)))
     (harness-log 'warn "compaction of %s failed: %s" session-id msg)
-    (ignore-errors (harness-call 'session/hint session-id (format "Compaction failed: %s" msg)))
+    (ignore-errors (harness-call 'session/hint session-id (format "Compaction failure · %s" msg)))
     (harness-emit 'compaction/failed session-id msg)
     (harness-reject promise err)))
 
@@ -1716,14 +1863,12 @@ REVERT non-nil says the compaction was reverted, else restored; WINDOW
 is the model's context window, TOKENS being more than it when the
 conversation before the compaction does not fit."
   (if revert
-      (format "Reverted the compaction: the model sees the conversation before it again, about %s tokens%s"
+      (format "Compaction · reverted · ~%s tokens%s"
               (harness-format-tokens tokens)
               (if (> tokens window)
-                  (format ", more than its %s window, so the next message compacts it again"
-                          (harness-format-tokens-compact window))
+                  (format " · window %s" (harness-format-tokens-compact window))
                 ""))
-    (format "Back to the compaction: the model sees its summary again, about %s tokens"
-            (harness-format-tokens tokens))))
+    (format "Compaction · restored · ~%s tokens" (harness-format-tokens tokens))))
 
 (defun harness-compaction--toggle (session-id node-id revert)
   "Revert the latest compaction of SESSION-ID, or restore it when REVERT is nil.
@@ -1740,8 +1885,8 @@ NODE-ID, when non-nil, names the compaction the caller means (see
           ;; button that has not changed yet -- so there is nothing to do.
           (list :state state :changed :false :node-id (plist-get node :id)
                 :message (if revert
-                             "The compaction is reverted already"
-                           "The conversation is on the compaction already"))
+                             "reverted already"
+                           "compacted already"))
         (harness-log 'info "compaction: %s %s the compaction %s" session-id
                      (if revert "reverts" "restores") (plist-get node :id))
         (harness-compaction--mark-reverted session-id node revert)
@@ -1809,18 +1954,17 @@ STATE is `compacted'."
 (defun harness-compaction--kind-name (kind)
   "Return the name people read for KIND."
   (pcase kind
-    ('brief "brief summary")
-    ('transcript "transcript file")
+    ('brief "brief")
+    ('transcript "transcript")
     ('fresh "fresh start")
-    ('truncate "cut old context")
+    ('truncate "cut context")
     (_ "summary")))
 
 (defun harness-compaction--not-warm-hint (requested kind)
   "Return the hint saying REQUESTED was not made since its request is not cached.
 KIND, which asks no model, was made in its place."
-  (format (concat "The %s would read the whole conversation uncached,"
-                  " so it was not made: %s instead")
-          (harness-compaction--kind-name requested)
+  (format "%s · no cache · %s"
+          (capitalize (harness-compaction--kind-name requested))
           (harness-compaction--kind-name kind)))
 
 (defun harness-compaction--say-not-warm (session-id requested kind)
@@ -1851,9 +1995,8 @@ compaction already waiting is replaced."
       ;; A summary nobody chose, whose own request is not cached, is not
       ;; made: say so now, while the kind is chosen, not when it runs.
       (harness-call 'session/hint session-id
-                    (format (concat "The %s would read the whole conversation uncached,"
-                                    " so it is not made: %s instead")
-                            (harness-compaction--kind-name requested)
+                    (format "%s · no cache · %s"
+                            (capitalize (harness-compaction--kind-name requested))
                             (harness-compaction--kind-name kind)))
       (setq opts (plist-put opts :meta
                             (append (list :requested-kind (symbol-name requested)
@@ -1864,10 +2007,9 @@ compaction already waiting is replaced."
     (puthash session-id (list :opts opts :interrupt interrupt) harness-compaction--pending)
     (harness-call 'session/hint session-id
                   (if interrupt
-                      (format (concat "Compaction queued: the turn is being interrupted and the"
-                                      " conversation compacted (%s) once it is over")
+                      (format "Compaction · queue · interruption · %s"
                               (harness-compaction--kind-name kind))
-                    (format "Compaction queued: a %s at the turn's next boundary"
+                    (format "Compaction · queue · next boundary · %s"
                             (harness-compaction--kind-name kind))))
     (when interrupt
       (harness-call 'agent/cancel session-id))
@@ -2027,34 +2169,32 @@ decide as they would have."
 ;; asks first, as the cold-cache question does (harness-cowboy.el), with
 ;; what each kind costs and what carrying on costs, and it compacts only
 ;; when told to.  An answer to carry on stands: the question is not put
-;; again while the conversation can still be sent -- before the next
-;; turn, nor at the next steps of one -- and comes back once it is past
-;; the window, where carrying on is no option, or once the context has
-;; been under the limit since, a compaction or a trim having made it
-;; another conversation (`harness-compaction--carried-on').  Asking three
-;; steps later, for a conversation a few thousand tokens longer, is
-;; asking about an answer already given.  Where nobody is asked -- a
-;; task, a seed, a session whose user turned asking off -- it makes
-;; `harness-compaction-kind', as before, and the transcript says so.
+;; again -- before the next turn, nor at the next steps of one, past the
+;; window too -- until the context has been under the limit since, a
+;; compaction or a trim having made it another conversation
+;; (`harness-compaction--carried-on').  Asking three steps later, for a
+;; conversation a few thousand tokens longer, is asking about an answer
+;; already given.  "Always carry on" makes it lasting
+;; (`harness-compaction-carry-on'), for every session that would wait
+;; for the user.  Where nobody is asked -- a task, a seed, a session
+;; whose user turned asking off -- it makes `harness-compaction-kind', as
+;; before, and the transcript says so.
 ;; Whatever made it, a compaction can be taken back and made again
 ;; afterwards (`compaction/revert', `compaction/restore'); the question
 ;; takes nothing of that away.
-
-(defconst harness-compaction--ask-kinds '(brief summary transcript fresh truncate)
-  "The compaction kinds the automatic-compaction question offers, in this order.")
 
 (defcustom harness-compaction-ask t
   "Non-nil to ask before an automatic compaction, where the user can be asked.
 Automatic compaction is the one the harness makes by itself when a
 conversation comes near its context window, before a turn or in the
-middle of one.  Compacting spends money -- a `summary' reads the whole
-conversation again -- so with this on, in a session that waits for the
-user, the question comes first, with what each kind costs and what
-carrying on costs, and the conversation is compacted only as they
-answer.  Nil compacts as `harness-compaction-kind' says without asking,
-as a session nobody is asked about always does: a task, a seed, a
-supervisor's worker, and any session whose `harness-non-interactive' is
-set."
+middle of one.  Compacting spends money -- a `summary' reads the
+conversation again, from the prompt cache while it lasts -- so with this
+on, in a session that waits for the user, the question comes first, with
+what each way costs and what carrying on costs, and the conversation is
+compacted only as they answer.  Nil compacts as `harness-compaction-kind'
+says without asking, as a session nobody is asked about always does: a
+task, a seed, a supervisor's worker, and any session whose
+`harness-non-interactive' is set."
   :type 'boolean :safe #'booleanp :group 'harness)
 
 (defun harness-compaction--non-interactive-p (session)
@@ -2081,122 +2221,57 @@ question reads it (`harness-cowboy--non-interactive-p')."
                              session-id (harness-error-short-message err))
                 nil))))
 
-(defun harness-compaction--kind-label (kind)
-  "Return the label people read for KIND, a compaction kind."
-  (pcase kind
-    ('truncate "Cut old context")
-    (_ (harness-carry-label kind))))
+(defun harness-compaction--default-choice (choices)
+  "Return the choice of CHOICES that the compaction question marks as its default.
+That is carrying on: it changes nothing, and a default that compacts the
+conversation is too easy to give by accident."
+  (cl-find "carry-on" choices :key (lambda (c) (plist-get c :choice)) :test #'equal))
 
-(defun harness-compaction--kind-what (kind)
-  "Return what KIND does, in a few words, for the question's panel."
-  (pcase kind
-    ('truncate "oldest messages dropped · newest kept as they are")
-    (_ (harness-carry-property kind :what))))
+(defun harness-compaction--option-text (choice default)
+  "Return CHOICE as one option of an ordinary question, DEFAULT marked.
+An unavailable choice says it is not offered in place of its price."
+  (let ((cost (plist-get choice :cost-text))
+        (default (and default (equal (plist-get choice :choice) default))))
+    (concat (plist-get choice :label)
+            (cond ((and cost default) (format " (%s · default)" cost))
+                  (cost (format " (%s)" cost))
+                  (default " (default)")))))
 
-(defun harness-compaction--ask-cost (choice estimate)
-  "Return what CHOICE costs, in a few words, as ESTIMATE says, or nil.
-CHOICE is a compaction kind, `carry-on' or `hold'."
-  (pcase choice
-    ((or 'transcript 'fresh 'truncate) "free")
-    ('hold nil)
-    ('carry-on
-     (let ((cached (plist-get estimate :carry-on-cached))
-           (carry (plist-get estimate :carry-on))
-           (warm (plist-get estimate :cached)))
-       (cond ((and warm (numberp cached) (numberp carry) (> carry cached))
-              (format "~%s cached, ~%s uncached"
-                      (harness-format-cost cached) (harness-format-cost carry)))
-             ((numberp carry) (format "~%s uncached" (harness-format-cost carry)))
-             (t nil))))
-    (_ (let ((cost (plist-get (harness-carry-kind-estimate estimate choice) :cost)))
-         (and (numberp cost) (format "~%s" (harness-format-cost cost)))))))
-
-(defun harness-compaction--ask-choices (estimate default &optional over)
-  "Return the choices of the automatic-compaction question, in the order offered.
-ESTIMATE is `compaction/estimate''s answer or nil, and DEFAULT the kind
-the harness would make unasked, marked as the default.  OVER non-nil
-says the conversation is past the model's window, so carrying on, which
-would be a request the model cannot take, is not offered.  Each choice
-is a plist (:choice NAME :key KEY :label LABEL :what WHAT :cost USD
-:cost-text TEXT :after TOKENS :default BOOL), as the panel draws them."
-  (append
-   (mapcar (lambda (kind)
-             (let* ((entry (harness-carry-kind-estimate estimate kind))
-                    (cost (plist-get entry :cost)))
-               (list :choice kind
-                     :key (char-to-string (or (harness-carry-key kind) ?x))
-                     :label (harness-compaction--kind-label kind)
-                     :what (harness-compaction--kind-what kind)
-                     :cost cost
-                     :cost-text (harness-compaction--ask-cost kind estimate)
-                     :after (plist-get entry :after)
-                     :default (eq kind default))))
-           harness-compaction--ask-kinds)
-   (delq nil
-         (list (unless over
-                 (list :choice 'carry-on
-                       :key (char-to-string (harness-carry-key 'carry-on))
-                       :label (harness-carry-label 'carry-on)
-                       :what (harness-carry-property 'carry-on :what)
-                       :cost (plist-get estimate :carry-on)
-                       :cost-text (harness-compaction--ask-cost 'carry-on estimate)
-                       :default nil))
-               (list :choice 'hold
-                     :key (char-to-string (harness-carry-key 'hold))
-                     :label (harness-carry-label 'hold)
-                     :what (harness-carry-property 'hold :what)
-                     :cost nil :cost-text nil :default nil)))))
-
-(defun harness-compaction--option-text (choice)
-  "Return CHOICE as one option of an ordinary question."
-  (concat (plist-get choice :label)
-          (if-let* ((cost (plist-get choice :cost-text))) (format " (%s)" cost) "")))
+(defun harness-compaction--not-offered-text (choice)
+  "Return the note saying why CHOICE cannot be made as things are.
+A summary is the only way the menu offers that asks a model to read the
+conversation; one whose own request the prompt cache does not hold is
+shown, not offered."
+  (format "%s · %s" (plist-get choice :label) (plist-get choice :why)))
 
 (defun harness-compaction--ask-text (session estimate &optional note)
-  "Return the question asking what goes first before an automatic compaction.
+  "Return the question before an automatic compaction.
 NOTE, when given, opens it because the answer named no choice."
   (let* ((context (or (plist-get estimate :context)
                       (plist-get (plist-get session :usage) :context)))
          (window (harness-compaction--window session))
          (known (and (numberp context) (> context 0)))
-         (over (and known (> context window)))
-         (cached (and (plist-get estimate :cached) (plist-get estimate :carry-on-cached)))
-         (carry (plist-get estimate :carry-on)))
+         (over (and known (> context window))))
     (concat
      (if note (concat note "  ") "")
      (cond
       ((and known over)
-       (format "The conversation is ~%s tokens, more than this model's ~%s window: its next request cannot send it."
+       (format "Context · ~%s of ~%s tokens"
                (harness-format-tokens context) (harness-format-tokens window)))
       (known
-       (format "The conversation is ~%s tokens of this model's ~%s window."
+       (format "Context · ~%s of ~%s tokens"
                (harness-format-tokens context) (harness-format-tokens window)))
-      (t "The conversation is near this model's context window."))
-     (concat
-      "  "
-      (cond
-       (over "What goes first?")
-       ((and (numberp cached) (numberp carry) (> carry cached))
-        (format "Carrying on sends it again: about %s uncached, or %s while the prompt cache lasts.  What goes first?"
-                (harness-format-cost carry) (harness-format-cost cached)))
-       ((numberp carry)
-        (format "Carrying on sends it again, uncached: about %s.  What goes first?"
-                (harness-format-cost carry)))
-       (t "What goes first?"))))))
+      (t "Context · near full")))))
 
-(defun harness-compaction--ask-info (session estimate where default)
-  "Return the `:compaction' of the question asking before an automatic compaction.
+(defun harness-compaction--ask-info (session estimate where default choices)
+  "Return the `:compaction' of the question before an automatic compaction.
 SESSION is the session's record, ESTIMATE `compaction/estimate''s
-answer or nil, WHERE `turn' or `step', and DEFAULT the kind taken
-unasked.  It is what a client needs to draw more than the question:
-what the context is against what the model can be sent, what carrying
-on costs with and without the cache, and per choice its cost, the
-model doing it and the context after it."
-  (let* ((window (harness-compaction--window session))
-         (over (> (or (plist-get estimate :context)
-                      (plist-get (plist-get session :usage) :context) 0)
-                  window))
-         (choices (harness-compaction--ask-choices estimate default over)))
+answer or nil, WHERE `turn' or `step', DEFAULT the name of the choice
+marked as the default, and CHOICES the menu.  It is what a client needs
+to draw more than the question: what the context is against what the
+model can be sent, what carrying on costs with and without the cache,
+and per choice its cost, the model doing it and the context after it."
+  (let ((window (harness-compaction--window session)))
     (list :reason "context"
           :where (symbol-name where)
           :context (or (plist-get estimate :context)
@@ -2208,105 +2283,137 @@ model doing it and the context after it."
           :cached (and (plist-get estimate :cached) t)
           :carry-on (plist-get estimate :carry-on)
           :carry-on-cached (plist-get estimate :carry-on-cached)
-          :default (symbol-name default)
+          :default default
           :choices (mapcar (lambda (choice)
-                             (list :choice (symbol-name (plist-get choice :choice))
+                             (list :choice (plist-get choice :choice)
                                    :key (plist-get choice :key)
                                    :label (plist-get choice :label)
                                    :what (plist-get choice :what)
                                    :cost (plist-get choice :cost)
                                    :cost-text (plist-get choice :cost-text)
-                                   :after (plist-get choice :after)))
+                                   :after (plist-get choice :after)
+                                   :unavailable (and (plist-get choice :unavailable) t)
+                                   :why (plist-get choice :why)
+                                   :default (and (equal (plist-get choice :choice) default) t)))
                            choices))))
 
 (defun harness-compaction--parse-answer (text choices)
-  "Return the choice of CHOICES TEXT names, or nil.
-CHOICES is what `harness-compaction--ask-choices' returns.  TEXT may
-name a choice by its name, its label, its number among the options, its
-key, or the words the cold-cache question's table gives it
-\(`harness-cowboy--words'), when the cowboy module is loaded.  An
-answer of `ignore' is `carry-on': the compaction question offers no
-separate way to send everything and add nothing."
+  "Return what TEXT answers among CHOICES, as (:choice NAME :always BOOL), or nil.
+CHOICES is what `harness-carry-menu' returns.  TEXT may name a choice
+by its name, its label, its number among the options, its key, or the
+words the cold-cache question's table gives it (`harness-cowboy--words'),
+when the cowboy module is loaded.  An answer of `ignore' is `carry-on':
+the menu offers no separate way to send everything and add nothing.
+ALWAYS says TEXT said \"always\", which makes the choice a lasting one
+where the question allows that."
   (let* ((raw (downcase (string-trim (or text ""))))
+         (always (and (string-match-p "\\balways\\b" raw) t))
          (rest (string-trim (replace-regexp-in-string "\\balways\\b[:,]?" "" raw)))
          (rest (string-trim rest "[ \t\n\"'“”.:!-]+" "[ \t\n\"'“”.:!-]+"))
+         ;; The words people type, not only the rows' labels: the same
+         ;; the cold-cache question's table has, without its module loaded.
+         (rest (pcase rest
+                 ((or "carry on" "carry-on" "continue") "carry-on")
+                 ((or "not now" "later" "hold") "hold")
+                 ((or "start afresh" "fresh start") "fresh")
+                 ((or "transcript file") "transcript")
+                 (_ rest)))
          (number (and (string-match-p "\\`[0-9]+\\'" rest) (string-to-number rest)))
+         (name (lambda (c) (format "%s" (plist-get c :choice))))
          (hit (cond
                ((and number (> number 0)) (nth (1- number) choices))
                ((cl-find-if (lambda (c)
-                              (member rest (list (plist-get c :key)
-                                                 (downcase (symbol-name (plist-get c :choice))))))
+                              (member rest (list (plist-get c :key) (funcall name c))))
                             choices))
                ((cl-find-if (lambda (c)
                               (and (not (string-empty-p rest))
                                    (string-prefix-p rest (downcase (plist-get c :label)))))
                             choices))
                ((and (fboundp 'harness-cowboy-parse-answer)
-                     (car (harness-cowboy-parse-answer text))
-                     (cl-find (car (harness-cowboy-parse-answer text)) choices
-                              :key (lambda (c) (plist-get c :choice))))
-                (cl-find (car (harness-cowboy-parse-answer text)) choices
-                         :key (lambda (c) (plist-get c :choice))))
-               ((and (fboundp 'harness-cowboy-parse-answer)
-                     (eq (car (harness-cowboy-parse-answer text)) 'ignore))
-                (cl-find 'carry-on choices :key (lambda (c) (plist-get c :choice)))))))
-    (and hit (plist-get hit :choice))))
+                     (car (harness-cowboy-parse-answer text)))
+                (let* ((parsed (car (harness-cowboy-parse-answer text)))
+                       (parsed (pcase parsed
+                                 ('ignore 'carry-on)
+                                 ('brief 'summary)
+                                 (other other))))
+                  (cl-find (symbol-name parsed) choices :key name :test #'equal))))))
+    (when hit
+      (list :choice (plist-get hit :choice) :always always))))
+
+(defun harness-compaction--ask-again (session-id estimate where settle note)
+  "Ask the compaction question of SESSION-ID again, NOTE saying why.
+SETTLE and ESTIMATE are as `harness-compaction--ask' has them, and
+WHERE is `turn' or `step'."
+  (condition-case err
+      (harness-compaction--ask
+       session-id (harness-call 'session/get session-id) estimate where settle note)
+    (error (harness-log 'warn "compaction: could not ask %s again: %s"
+                        session-id (harness-error-short-message err))
+           (funcall settle nil 'dismissed))))
 
 (defun harness-compaction--ask (session-id session estimate where settle &optional note)
   "Ask what goes first before compacting SESSION-ID automatically.
-WHERE is `turn' or `step'.  SETTLE is called once with (CHOICE . BY):
-CHOICE a compaction kind, `carry-on', `hold' or nil when the question
-was dismissed, BY `user' or `dismissed'.  ESTIMATE is
-`compaction/estimate''s answer or nil.  An answer naming no choice asks
-again, NOTE then saying so; a dismissed question settles nil."
-  (let* ((default (if (memq harness-compaction-kind harness-compaction--ask-kinds)
-                      harness-compaction-kind
-                    'summary))
-         (over (> (or (plist-get estimate :context)
-                      (plist-get (plist-get session :usage) :context) 0)
-                  (harness-compaction--window session)))
-         (choices (harness-compaction--ask-choices estimate default over))
+WHERE is `turn' or `step'.  SETTLE is called once with CHOICE, BY and
+nil: CHOICE a compaction kind, `carry-on', `hold' or nil when the
+question was dismissed, and BY `user', `always' or `dismissed'.
+ESTIMATE is `compaction/estimate''s answer or nil.  NOTE, when given,
+opens the question because the answer named no choice.
+The question is one page and one list, the same one the cold-cache
+question asks (`harness-carry-menu'): Summary, Transcript, Fresh start,
+Continuation and Pause.  A summary is shown, no cache, when its own
+request would read the conversation uncached, and an answer that names
+it asks again saying so.  The capital of Continuation is \"always carry
+on\", which saves `harness-compaction-carry-on' and stops the asking."
+  (let* ((choices (harness-carry-menu estimate))
+         (default (plist-get (harness-compaction--default-choice choices) :choice))
          (answered nil)
          (pid nil))
     (setq pid
           (harness-call
            'question/ask session-id
            (list :question (harness-compaction--ask-text session estimate note)
-                 :options (mapcar #'harness-compaction--option-text choices)
+                 :options (mapcar (lambda (c) (harness-compaction--option-text c default)) choices)
                  :allow-free-text t
-                 :compaction (harness-compaction--ask-info session estimate where default))
+                 :compaction (append (harness-compaction--ask-info session estimate where default choices)
+                                     (list :always '("carry-on"))))
            (lambda (text dismissed)
              (setq answered t)
              (when (equal (plist-get (gethash session-id harness-compaction--asking) :pid) pid)
                (remhash session-id harness-compaction--asking))
-             (let ((choice (and (not dismissed) (harness-compaction--parse-answer text choices))))
+             (let* ((parsed (and (not dismissed) (harness-compaction--parse-answer text choices)))
+                    (choice (and parsed
+                                 (cl-find (plist-get parsed :choice) choices
+                                          :key (lambda (c) (plist-get c :choice))
+                                          :test #'equal))))
                (cond
                 ((or dismissed (not (harness-call 'session/exists-p session-id)))
                  (funcall settle nil 'dismissed))
-                ((null choice)
-                 (condition-case err
-                     (harness-compaction--ask
-                      session-id (harness-call 'session/get session-id) estimate where settle
-                      (format "“%s” is not one of the choices."
-                              (harness-truncate-end (harness-first-line (or text "")) 60)))
-                   (error (harness-log 'warn "compaction: could not ask %s again: %s"
-                                       session-id (harness-error-short-message err))
-                          (funcall settle nil 'dismissed))))
-                (t (funcall settle choice 'user)))))))
+                ((null parsed)
+                 (harness-compaction--ask-again
+                  session-id estimate where settle
+                  (format "“%s” · no choice"
+                          (harness-truncate-end (harness-first-line (or text "")) 60))))
+                ((plist-get choice :unavailable)
+                 (harness-compaction--ask-again
+                  session-id estimate where settle
+                  (harness-compaction--not-offered-text choice)))
+                (t (funcall settle (intern (plist-get parsed :choice))
+                            (if (plist-get parsed :always) 'always 'user))))))))
     (unless answered
       (puthash session-id (list :pid pid :settle settle) harness-compaction--asking)
       (harness-emit 'compaction/asked session-id pid))
     pid))
 
 (defconst harness-compaction--hold-reason
-  "not now: the conversation is nearly full, and the message waits; the next one asks too"
+  "context full · message hold"
   "Why a held turn did not start, as the hint after it says.")
 
 (defun harness-compaction--decide (session-id session where)
   "Return a promise of what goes first before an automatic compaction.
 WHERE is `turn' or `step'.  The answer is (:choice KIND :by BY): KIND a
 compaction kind, `carry-on', `hold', or nil when the question was
-dismissed; BY `user', `dismissed' or `unasked'.  Where nobody is asked,
+dismissed, and BY `user', `always', `dismissed' or `unasked'.  Where
+nobody is asked,
 the answer is `harness-compaction-kind', unless that asks a model and
 its own request is not known to be cached: then it is the bounded kind
 `harness-compaction--effective-kind' returns instead, since a cold
@@ -2319,7 +2426,7 @@ summary is not made."
     (let* ((estimate (harness-compaction--estimate session-id))
            (promise (harness-make-promise))
            (settled nil)
-           (settle (lambda (choice by)
+           (settle (lambda (choice by &optional _)
                      (unless settled
                        (setq settled t)
                        (harness-resolve promise (list :choice choice :by by))))))
@@ -2336,33 +2443,40 @@ summary is not made."
 (defun harness-compaction--did-text (choice)
   "Return what automatic compaction as CHOICE did first, in words."
   (pcase choice
-    ('brief "compacting into a brief summary first")
-    ('summary "compacting into a summary first")
-    ('transcript "writing the conversation to a transcript file first")
-    ('fresh "starting afresh")
-    ('truncate "cutting the oldest context first")
-    ('carry-on "carrying on with the whole conversation")
-    (_ "compacting the conversation first")))
+    ('brief "brief")
+    ('summary "summary")
+    ('transcript "transcript")
+    ('fresh "fresh start")
+    ('truncate "context cut")
+    ('carry-on "continuation")
+    (_ "compaction")))
 
 (defun harness-compaction--say (session-id choice by session)
   "Append the hint saying automatic compaction did CHOICE in SESSION-ID.
-BY is who decided it: `user', `dismissed' or `unasked'.  SESSION is the
-session's record, for the context that carrying on sends."
+BY is who decided it: `user', `always', `dismissed' or `unasked'.
+SESSION is the session's record, for the context that carrying on
+sends."
   (let ((context (plist-get (plist-get session :usage) :context)))
     (when (harness-call 'session/exists-p session-id)
       (harness-call
        'session/hint session-id
-       (format "Context nearly full: %s%s"
-               (if (eq choice 'carry-on)
-                   (format "carrying on with the whole conversation%s"
-                           (if (and (numberp context) (> context 0))
-                               (format ", ~%s tokens uncached" (harness-format-tokens context))
-                             ""))
-                 (harness-compaction--did-text choice))
-               (pcase by
-                 ('user ", as you chose")
-                 ('unasked ", as harness-compaction-kind says (nobody to ask)")
-                 (_ "")))))))
+       (string-join
+        (delq nil
+              (list "Context"
+                    (if (eq choice 'carry-on)
+                        (concat "continuation"
+                                (and (numberp context) (> context 0)
+                                     (format " · ~%s tokens uncached"
+                                             (harness-format-tokens context))))
+                      (harness-compaction--did-text choice))
+                    (pcase by
+                      ('user "answer")
+                      ('always "default")
+                      ('unasked
+                       ;; The configured kind only when it is the one made.
+                       (if (eq choice harness-compaction-kind) "automatic" "fallback"))
+                      (_ nil))))
+        " · ")))))
 
 (defun harness-compaction--ask-meta (choice by)
   "Return the compaction node's `:meta' for CHOICE made by BY.
@@ -2425,6 +2539,8 @@ compacted, the message is held rather than sent uncached."
        (let ((choice (plist-get answer :choice))
              (by (plist-get answer :by)))
          (harness-compaction--note-answer session-id choice)
+         (when (and (eq choice 'carry-on) (eq by 'always))
+           (harness-compaction--save-carry-on session-id))
          (cond
           ((memq choice '(hold nil))
            (funcall next (list :proceed nil :reason harness-compaction--hold-reason)))
@@ -2471,6 +2587,8 @@ conversation uncached."
        (let ((choice (plist-get answer :choice))
              (by (plist-get answer :by)))
          (harness-compaction--note-answer session-id choice)
+         (when (and (eq choice 'carry-on) (eq by 'always))
+           (harness-compaction--save-carry-on session-id))
          (cond
           ((eq choice 'carry-on)
            (harness-compaction--say session-id 'carry-on by session)
@@ -2515,8 +2633,9 @@ costs and what carrying on costs, and does as they answer
 just gave back whole (`compaction/revert') is let through once, or the
 compaction would be made again before the model saw it
 \(`harness-compaction--revert-hold').  One whose user answered to carry
-on is let through, unasked, while it can still be sent: the answer
-stands (`harness-compaction--carried-on')."
+on is let through, unasked, past the window too: the answer stands
+\(`harness-compaction--carried-on'), and \"always carry on\" stands for
+every session (`harness-compaction-carry-on')."
   (let* ((id (plist-get session :id))
          (session (or (ignore-errors (harness-call 'session/get id)) session))
          (held (and (plist-get value :proceed)
@@ -2535,11 +2654,13 @@ stands (`harness-compaction--carried-on')."
       (funcall next value))
      ((harness-compaction-hosted-p session)
       (funcall next value))
-     ;; The user answered carry on, and the conversation can still be sent:
-     ;; the message goes, and the question is not put again
-     ;; (`harness-compaction--carried-on').
+     ;; Carrying on is the lasting answer: no question, no compaction.
+     ((harness-compaction--carry-on-always-p session)
+      (funcall next value))
+     ;; The user answered carry on: the message goes, and the question is
+     ;; not put again (`harness-compaction--carried-on').
      ((and (harness-compaction--asks-p session)
-           (harness-compaction--carried-on-p id session))
+           (harness-compaction--carried-on-p id))
       (funcall next value))
      ((harness-compaction--asks-p session)
       ;; The turn's message waits for the question and then the
@@ -2549,8 +2670,8 @@ stands (`harness-compaction--carried-on')."
       (let ((kind (harness-compaction--effective-kind id harness-compaction-kind
                                                       (list :fallback "transcript"))))
         (harness-compaction-show-waiting id)
-        (harness-compaction--say id kind 'unasked session)
         (harness-compaction--say-not-warm id harness-compaction-kind kind)
+        (harness-compaction--say id kind 'unasked session)
         (harness-compaction--compact-with-bounds
          id kind (harness-compaction--ask-meta kind 'unasked)
          (lambda (_node) (funcall next value))
@@ -2611,9 +2732,9 @@ step (`harness-compaction--mid-turn-due-p').  Where the user can be
 asked (`harness-compaction--asks-p') the question comes first
 (`harness-compaction--asked-before-step'), and a boundary it asked at
 counts as a try, so one compacted at is not asked again at once.  One
-answered to carry on is not asked about again while the conversation
-can still be sent (`harness-compaction--carried-on'); past the window,
-where it cannot, the question comes at once, not after the cooldown.
+answered to carry on is not asked about again, past the window too
+\(`harness-compaction--carried-on'); without that answer, a context past
+the window asks at once, not after the cooldown.
 The step goes on once a compaction, or a transcript or a cut in its
 place, was made, and is refused when none could be made, or when the
 user dismissed the question: the whole conversation is never sent
@@ -2631,6 +2752,8 @@ again first: a handler earlier in the chain may have changed its model."
       (funcall next value))
      ((harness-compaction-hosted-p session)
       (funcall next value))
+     ((harness-compaction--carry-on-always-p session)
+      (funcall next value))
      (t
       (let* ((carry-on (lambda (&rest _)
                          (harness-compaction--note-activity id nil)
@@ -2646,7 +2769,7 @@ again first: a handler earlier in the chain may have changed its model."
          ;; The user answered carry on, and the conversation can still be
          ;; sent: the step goes on, and the question is not put again
          ;; (`harness-compaction--carried-on').
-         ((and asks (harness-compaction--carried-on-p id session))
+         ((and asks (harness-compaction--carried-on-p id))
           (funcall next value))
          ((and (not over) (not (harness-compaction--mid-turn-due-p id)))
           (funcall next value))
@@ -2659,8 +2782,8 @@ again first: a handler earlier in the chain may have changed its model."
                  (meta (append (harness-compaction--ask-meta kind 'unasked)
                                (list :mid-turn t))))
             (harness-compaction--note-activity id 'compacting)
-            (harness-compaction--say id kind 'unasked session)
             (harness-compaction--say-not-warm id harness-compaction-kind kind)
+            (harness-compaction--say id kind 'unasked session)
             (harness-compaction--compact-with-bounds
              id kind meta
              (lambda (_node)

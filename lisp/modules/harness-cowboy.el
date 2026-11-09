@@ -13,28 +13,33 @@
 ;; Cowboy compaction is the quick way out a switch of provider offers
 ;; (harness-handoff.el): replace the conversation with something small
 ;; before the message goes, rather than send it all again.  The ways to
-;; do it are the ones the switch offers, from one table
+;; do it are the ones the questions share, from one table
 ;; (harness-carry.el): the same keys, the same words, the same prices
 ;; (`harness-cowboy-cost-text' is its `harness-carry-cost-text'), and
-;; one panel (harness-ui-carry.el) asks both questions.  This module makes it part of every turn.  Its
+;; one panel (harness-ui-carry.el) asks both questions -- the question
+;; before an automatic compaction and this one, the same five rows for
+;; different reasons.  This module makes it part of every turn.  Its
 ;; `agent/before-turn' gate (`harness-cowboy--gate') holds a turn whose
 ;; session's cache lapsed -- or is held for a model the session no
 ;; longer uses, which caches nothing for the model the message goes to
 ;; -- whoever sent the message, and asks what goes first
-;; (`harness-cowboy-choices'):
+;; (`harness-carry-menu'):
 ;;
-;; - `brief'      a brief summary by a cheap model, from the whole
-;;                narrative, tool calls in brief: cents;
-;; - `summary'    a summary by the session's model, which reads all of
-;;                the conversation again uncached;
+;; - `summary'    a summary by the session's model, which reads the
+;;                conversation from the prompt cache while it lasts --
+;;                and a cold cache holds none of it, so the row says it
+;;                has no cache;
 ;; - `transcript' the conversation written to a file the model reads as
 ;;                it needs; no model asked;
 ;; - `fresh'      nothing carried over: the model starts afresh and looks
 ;;                back when it needs to; no model asked;
 ;; - `carry-on'   the whole conversation, uncached, as before;
-;; - `ignore'     the same, and nothing else: no note, no compaction,
-;;                nothing added to the conversation at all;
 ;; - `hold'       not now: the message is kept and the turn does not start.
+;;
+;; A setting may name `brief' -- a brief summary by a cheap model, from
+;; the whole narrative, which no cache covers and the menu therefore
+;; leaves out -- or `ignore', the whole conversation with nothing
+;; added; taken unasked, they do what they always did.
 ;;
 ;; Whatever goes first, the conversation stays on record: a compaction
 ;; ends in a line pointing the model at the session_history tool
@@ -69,12 +74,14 @@
 ;; not asked, and neither is any session once asking is off: no judge
 ;; model weighs the choices, the default is taken.  The default default
 ;; is the transcript file: it asks no model, so it cannot send the whole
-;; conversation uncached.  A summary, `brief' or `summary', does: it
-;; reads the whole conversation on a request of its own, whose system
-;; prompt and tool list no cache of the conversation holds, and its small
-;; output does not make that input small.  A summary that cannot be made
-;; falls back to the transcript, and that to carrying on: the message
-;; always goes, unless held.
+;; conversation uncached.  A summary is offered only where the estimate
+;; says its own request reads the cache (`harness-carry-available-p'),
+;; and a cold cache holds none of it: the question shows the same five
+;; ways the one before an automatic compaction does
+;; (`harness-carry-menu'), the summary in it saying it has no cache,
+;; and the ways that ask no model offered.  A summary that cannot be
+;; made falls back to the transcript, and that to carrying on: the
+;; message always goes, unless held.
 ;;
 ;; The message waiting for the answer is not in the transcript yet: the
 ;; turn appends it once the gate settles, after the compaction (see
@@ -118,13 +125,16 @@
 (defconst harness-cowboy-choices
   (mapcar (lambda (way)
             (list way (harness-carry-label way) (harness-carry-property way :what)))
-          (harness-carry-names))
+          harness-carry-menu-ways)
   "What a message to a session whose prompt cache went cold can do first.
 Each entry is (CHOICE LABEL WHAT), in the order they are offered: the
-ways of `harness-carry-ways', which the model switch offers too.
-CHOICE is a symbol, LABEL what the options and the UI call it, and WHAT
-says what it does in a few words.  All but `hold' can be the default
-\(`harness-cowboy-default'); `hold' is only ever an answer.")
+ways of `harness-carry-menu-ways', the same list the question before an
+automatic compaction offers, for its own reason.  CHOICE is a symbol,
+LABEL what the options and the UI call it, and WHAT says what it does in
+a few words.  All but `hold' can be the default
+\(`harness-cowboy-default'); `hold' is only ever an answer.  A setting
+may name `brief' or `ignore', which the menu leaves out; taken unasked,
+they do what they always did.")
 
 (defcustom harness-cowboy-default 'transcript
   "What a message to a session whose prompt cache went cold does first, unasked.
@@ -136,23 +146,20 @@ with \"always\" and a choice sets it.
 
 `transcript' (the default) writes the conversation to a file the model
 reads as it needs; `fresh' carries nothing over.  Neither asks a model,
-so neither can send the conversation anywhere.  `brief' has a cheap
-model read the narrative -- every user and assistant message, each tool
-call and result in a line, never a payload -- and write a short summary;
-`summary' has the session's model read all of it.  Both read the whole
-conversation uncached, on a request whose own system prompt and tool
-list no prompt cache holds: a small summary does not make that input
-small, and for a long conversation it can cost more than the turn it
-saves.  `carry-on' sends it all again as before and says so in a hint;
+so neither can send the conversation anywhere.  `brief' and `summary'
+ask a model to read the conversation, and a cold cache holds none of
+that request: the question does not offer them, and a default that
+names one is made as a transcript instead.  `carry-on' sends it all
+again as before and says so in a hint;
 `ignore' sends it all again and adds nothing at all, no hint included.
 Whatever it is, the model can search and read the conversation it
 replaced with the session_history tool."
-  :type '(choice (const :tag "Brief summary: a cheap model reads the narrative, uncached" brief)
-                 (const :tag "Summary: the session's model reads all of it, uncached" summary)
-                 (const :tag "Transcript file: the model reads what it needs, no model asked" transcript)
-                 (const :tag "Start afresh: nothing carried over" fresh)
-                 (const :tag "Carry on: the whole conversation, uncached" carry-on)
-                 (const :tag "Ignore: send the whole context, adding nothing" ignore))
+  :type '(choice (const :tag "Brief: a cheap model reads the narrative" brief)
+                 (const :tag "Summary: the session's model reads the cached conversation" summary)
+                 (const :tag "Transcript: the model reads what it needs, no model asked" transcript)
+                 (const :tag "Fresh start: nothing carried over" fresh)
+                 (const :tag "Continuation: the whole conversation, uncached" carry-on)
+                 (const :tag "Silence: send the whole context, adding nothing" ignore))
   :safe (lambda (v) (memq v '(brief summary transcript fresh carry-on ignore)))
   :group 'harness)
 
@@ -189,10 +196,11 @@ conversation start as it is."
   :group 'harness)
 
 (defun harness-cowboy--choice (value)
-  "Return the choice VALUE names, a symbol or its name, or nil."
+  "Return the way VALUE names, a symbol or its name, or nil.
+A setting may name a way the menu does not offer, `brief' or `ignore'."
   (let ((sym (cond ((and value (symbolp value)) value)
                    ((stringp value) (intern-soft (downcase (string-trim value)))))))
-    (and (assq sym harness-cowboy-choices) sym)))
+    (and sym (harness-carry-way sym) sym)))
 
 (defun harness-cowboy-label (choice)
   "Return the label of CHOICE, a symbol."
@@ -202,6 +210,16 @@ conversation start as it is."
   "Return the choice taken unasked: `harness-cowboy-default', or `brief'."
   (let ((choice (harness-cowboy--choice harness-cowboy-default)))
     (if (and choice (not (eq choice 'hold))) choice 'brief)))
+
+(defun harness-cowboy--menu-default (estimate)
+  "Return the way the question marks as its default, as ESTIMATE prices it.
+That is `harness-cowboy--default' when the menu offers it and it can be
+made as things are; otherwise the transcript file, which asks no model."
+  (let ((chosen (harness-cowboy--default)))
+    (if (and (memq chosen harness-carry-menu-ways)
+             (harness-carry-available-p chosen estimate))
+        chosen
+      'transcript)))
 
 ;;;; When to ask
 
@@ -349,15 +367,15 @@ is `harness-carry-cost-text', which both share.")
 Another session's agent goes by its session's name, else a short id:
 a person reads the question."
   (pcase (harness-sender-kind from)
-    ('nil "Your message")
+    ('nil "your message")
     ('session
      (let ((name (plist-get from :name))
            (id (format "%s" (or (plist-get from :id) "?"))))
-       (format "A message from session %s"
+       (format "message · session %s"
                (if (and (stringp name) (not (string-blank-p name)))
                    (format "%S" name)
                  (substring id 0 (min 8 (length id)))))))
-    (_ (format "A message from %s" (harness-sender-description from)))))
+    (_ (format "message · %s" (harness-sender-description from)))))
 
 (defun harness-cowboy--question-text (session estimate from &optional note)
   "Return the question about SESSION's cold cache.
@@ -375,48 +393,41 @@ the new conversation the redaction made has no cache to be had."
          (context (or (plist-get estimate :context) (plist-get (plist-get session :usage) :context)))
          (carry (plist-get estimate :carry-on))
          (cached (plist-get estimate :carry-on-cached)))
-    (concat
-     (if note (concat note "  ") "")
-     (cond
-      (stale
-       (format (concat "%s waits: this session's prompt cache is cold.  It is held for %s,"
-                       " which this session no longer uses, so %s has none of it.")
-               (harness-cowboy--sender-text from)
-               (harness-cowboy--model-label stale)
-               (harness-cowboy--model-label (plist-get session :model))))
-      (dropped
-       (format (concat "%s waits: a redaction dropped this session's provider conversation at %s,"
-                       " so no prompt cache holds it.")
-               (harness-cowboy--sender-text from)
-               (harness-cowboy--clock dropped)))
-      (fresh
-       (format (concat "%s waits: this conversation has never been sent, so no prompt cache holds"
-                       " any of it, and it is no new subject: its first request would send all of it.")
-               (harness-cowboy--sender-text from)))
-      (t
-       (format "%s waits: this session's prompt cache lapsed at %s, %s ago."
-               (harness-cowboy--sender-text from)
-               (harness-cowboy--clock expires)
-               (harness-cowboy--duration (- (float-time) expires)))))
-     (format "  Carrying on sends the whole conversation%s uncached%s."
-             (if (and (numberp context) (> context 0)) (format ", ~%s tokens," (harness-format-tokens context)) "")
-             (if (and (not dropped) (numberp carry) (numberp cached) (> carry cached))
-                 (format ": about %s instead of %s" (harness-format-cost carry) (harness-format-cost cached))
-               ""))
-     (concat
-      "  A summary reads all of it uncached as well, on a request of its own;"
-      " a transcript file and a fresh start ask no model.")
-     "  What goes first?  Answer \"always\" with a choice to make it the default and stop asking.")))
+    (string-join
+     (delq nil
+           (list
+            (if note note)
+            (cond
+             (stale
+              (format "Cache · cold · %s · session model %s"
+                      (harness-cowboy--model-label stale)
+                      (harness-cowboy--model-label (plist-get session :model))))
+             (dropped
+              (format "Cache · dropped · %s · redaction" (harness-cowboy--clock dropped)))
+             (fresh "First message · no cache")
+             (t
+              (format "Cache · cold · %s · %s"
+                      (harness-cowboy--clock expires)
+                      (harness-cowboy--duration (- (float-time) expires)))))
+            (concat "Message · " (harness-cowboy--sender-text from))
+            (and (numberp context) (> context 0)
+                 (format "~%s tokens uncached" (harness-format-tokens context)))
+            (and (not dropped) (numberp carry) (numberp cached) (> carry cached)
+                 (format "%s uncached · %s cached"
+                         (harness-format-cost carry) (harness-format-cost cached)))))
+     " · ")))
 
-(defun harness-cowboy--option (choice estimate default)
-  "Return the option offering CHOICE, with its cost as ESTIMATE says.
-DEFAULT, the choice taken unasked, says so."
-  (let ((cost (harness-cowboy-cost-text estimate choice)))
-    (concat (harness-cowboy-label choice)
-            (cond ((and cost (eq choice default)) (format " (%s, the default)" cost))
+(defun harness-cowboy--option (choice default)
+  "Return the option offering CHOICE, a menu choice, with DEFAULT marked.
+DEFAULT is the name of the way the question marks as its default, or
+nil; an unavailable choice says it is not offered in place of its
+price."
+  (let ((cost (plist-get choice :cost-text))
+        (default (and default (equal (plist-get choice :choice) default))))
+    (concat (plist-get choice :label)
+            (cond ((and cost default) (format " (%s · default)" cost))
                   (cost (format " (%s)" cost))
-                  ((eq choice default) " (the default)")
-                  (t "")))))
+                  (default " (default)")))))
 
 (defun harness-cowboy--preview (text)
   "Return the first line of message TEXT worth showing, or nil.
@@ -462,36 +473,37 @@ would have said; nil otherwise."
           :history (and (fboundp 'harness-compaction-history-p)
                         (harness-compaction-history-p session-id)
                         t)
-          :choices (harness-carry-choices (mapcar #'car harness-cowboy-choices) estimate))))
+          :choices (harness-carry-menu estimate))))
 
 ;;;; Reading the answer
 
 (defconst harness-cowboy--words
   '((hold "not now" "hold" "later" "cancel" "skip" "dismiss")
-    (ignore "ignore" "send whole context" "send the whole context" "send whole conversation"
-            "send the whole conversation" "send it all" "nothing" "leave it")
     (fresh "afresh" "fresh" "from scratch")
-    (carry-on "carry on" "carry-on" "carryon" "continue" "keep going" "go on" "as is" "full")
+    (carry-on "carry on" "carry-on" "carryon" "continue" "keep going" "go on" "as is" "full"
+              "ignore" "silence" "send whole context" "send the whole context" "send whole conversation"
+              "send the whole conversation" "send it all" "nothing" "leave it")
     (transcript "transcript" "file")
-    (brief "brief" "cheap")
-    (summary "summary" "summarise" "summarize"))
+    (summary "summary" "summarise" "summarize" "brief" "cheap"))
   "Words that name a choice in a typed answer, the first choice to match winning.
 `hold' comes first, so an answer that says not to do anything does
-not; `ignore' before `carry-on', so \"ignore, send it all\" ignores
-rather than carries on with a note; `brief' before `summary', so \"brief
-summary\" is brief.")
+not.  `ignore' is `carry-on' now that the menu has one way to send
+everything, and `brief' is `summary' now that the menu writes one
+summary; a setting may still name either.")
 
 (defconst harness-cowboy--keys
   (append (mapcar (lambda (way) (cons (char-to-string (harness-carry-key way)) way))
-                  (harness-carry-names))
-          '(("h" . hold) ("n" . hold)))
-  "One-letter answers: the keys of the panel (`harness-carry-ways'), and h and n.")
+                  harness-carry-menu-ways)
+          '(("h" . hold) ("n" . hold) ("i" . carry-on)))
+  "One-letter answers: the keys of the panel (`harness-carry-menu-ways').
+h and n answer not now, and i answers carry on, as it did when the
+menu offered \"ignore\".")
 
 (defun harness-cowboy-parse-answer (text)
   "Return the choice TEXT answers, as (CHOICE . ALWAYS), or nil.
 ALWAYS is non-nil when TEXT says \"always\": the choice becomes the
 default and the question stops.  TEXT may be a choice's name (brief,
-carry-on), its label or an option as offered (\"Brief summary (~$0.01)\"),
+carry-on), its label or an option as offered (\"Brief (~$0.01)\"),
 its number among the options, its key (b, s, t, f, c, i, q) or words
 naming it (see `harness-cowboy--words').  Nil when it names none."
   (let* ((case-fold-search t)
@@ -561,10 +573,8 @@ cannot be saved, as when the policy sets it."
 
 (defun harness-cowboy--decision-text (choice)
   "Return what an \"always\" answer of CHOICE does, in words."
-  (format "Always %s when the prompt cache is cold, without asking"
-          (if (eq choice 'ignore)
-              "ignore it and send the whole context"
-            (harness-cowboy--choice-text choice nil))))
+  (format "%s · cache · cold · default"
+          (harness-cowboy-label (if (eq choice 'ignore) 'carry-on choice))))
 
 (defun harness-cowboy--record-decision (session-id choice before &optional question)
   "Keep the \"always\" answer of CHOICE in SESSION-ID as a lasting decision.
@@ -607,12 +617,12 @@ the policy sets, say, which then stays as it is."
   (let* ((before (plist-get record :before))
          (old (harness-cowboy--choice (plist-get before :default)))
          (default (and old (not (eq old (harness-cowboy--choice (plist-get record :choice))))
-                       (format "“%s” is the default again" (harness-cowboy-label old)))))
+                       (format "“%s” · default" (harness-cowboy-label old)))))
     (cond ((harness-json-true-p (plist-get before :ask))
-           (concat "Undone: asking again what goes first when the prompt cache is cold"
-                   (if default (concat ", and " default) "")))
-          (default (format "Undone: %s when the prompt cache is cold" default))
-          (t "Undone: the cold-cache settings are as they were before it"))))
+           (concat "Undo · question"
+                   (if default (concat " · " default) "")))
+          (default (format "Undo · %s · cache" default))
+          (t "Undo · no change"))))
 
 (defun harness-cowboy--decision-undo (decision)
   "Undo the \"always\" answer DECISION keeps: the `:undo' of the kind `cowboy'.
@@ -625,8 +635,8 @@ held before it.  Return (OUTCOME . MESSAGE), as
            (harness-cowboy--set-settings (plist-get record :before))
            (cons 'undone (harness-cowboy--undone-text record)))
           ((harness-cowboy--settings-equal now (plist-get record :before))
-           (cons 'changed "Not undone: the cold-cache settings were put back since, so they stay as they are"))
-          (t (cons 'changed "Not undone: the cold-cache settings changed since (in Settings, say), so they stay as they are")))))
+           (cons 'changed "not undone · settings put back"))
+          (t (cons 'changed "not undone · settings changed")))))
 
 (defun harness-cowboy--decision-redo (decision)
   "Redo the \"always\" answer DECISION keeps: the `:redo' of the kind `cowboy'.
@@ -639,8 +649,8 @@ answer set again.  Return (OUTCOME . MESSAGE), as
            (harness-cowboy--set-settings (plist-get record :after))
            (list 'done))
           ((harness-cowboy--settings-equal now (plist-get record :after))
-           (cons 'changed "Not redone: the cold-cache settings are so again already (another answer, say), so they stay as they are"))
-          (t (cons 'changed "Not redone: the cold-cache settings changed since (in Settings, say), so they stay as they are")))))
+           (cons 'changed "not redone · settings already so"))
+          (t (cons 'changed "not redone · settings changed")))))
 
 (defvar harness-cowboy--changes (make-hash-table :test 'equal)
   "Decision id -> the pending id of the question that asks it again.")
@@ -741,10 +751,13 @@ without asking."
                  ((memq (car checked) '(changed gone))
                   ;; What the decision left is not there any more: it ends
                   ;; here, as it would on a redo, and nothing is changed.
-                  (let ((message (if (string-prefix-p "Not undone: " (cdr checked))
-                                     (concat "Not changed: "
-                                             (substring (cdr checked) (length "Not undone: ")))
-                                   (cdr checked))))
+                  (let ((message (cond ((string-prefix-p "Not undone: " (cdr checked))
+                                        (concat "Not changed: "
+                                                (substring (cdr checked) (length "Not undone: "))))
+                                       ((string-prefix-p "not undone · " (cdr checked))
+                                        (concat "not changed · "
+                                                (substring (cdr checked) (length "not undone · "))))
+                                       (t (cdr checked)))))
                     (harness-call 'decision/revise id
                                   :state (car checked) :result message
                                   :moved-at (float-time))
@@ -865,10 +878,10 @@ An answer that names no choice asks again, NOTE then saying so; a
 dismissed question holds the message."
   (let* ((message (plist-get value :message))
          (from (plist-get message :from))
-         (default (harness-cowboy--default))
-         (choices (mapcar #'car harness-cowboy-choices))
+         (default (harness-cowboy--menu-default estimate))
+         (choices (harness-carry-menu estimate))
          (question (list :question (harness-cowboy--question-text session estimate from note)
-                         :options (mapcar (lambda (c) (harness-cowboy--option c estimate default)) choices)
+                         :options (mapcar (lambda (c) (harness-cowboy--option c (symbol-name default))) choices)
                          :allow-free-text t
                          :cowboy (harness-cowboy--info session-id session estimate from default message)
                          :waiting-message message))
@@ -881,27 +894,46 @@ dismissed question holds the message."
              (setq answered t)
              (when (equal (plist-get (gethash session-id harness-cowboy--asking) :pid) pid)
                (remhash session-id harness-cowboy--asking))
-             (let ((parsed (and (not dismissed) (harness-cowboy-parse-answer text))))
+             (let* ((parsed (and (not dismissed) (harness-cowboy-parse-answer text)))
+                    ;; The menu writes one summary and one way to send
+                    ;; everything: the ways it no longer offers answer as
+                    ;; those.
+                    (choice (pcase (car parsed)
+                              ('ignore 'carry-on)
+                              ('brief 'summary)
+                              (other other)))
+                    (menu-choice (and choice
+                                      (cl-find (symbol-name choice) choices
+                                               :key (lambda (c) (plist-get c :choice))
+                                               :test #'equal))))
                (cond
                 ((or dismissed (not (harness-call 'session/exists-p session-id)))
                  (funcall settle 'hold 'user))
-                ((null parsed)
+                ((null menu-choice)
                  (condition-case err
                      (harness-cowboy--ask session-id (harness-call 'session/get session-id) value estimate settle
-                                          (format "“%s” is not one of the choices."
+                                          (format "“%s” · no choice"
                                                   (harness-truncate-end (harness-first-line text) 60)))
                    (error (harness-log 'warn "cowboy: could not ask %s again: %s"
                                        session-id (harness-error-short-message err))
                           (funcall settle 'hold 'user))))
-                ((and (cdr parsed) (not (eq (car parsed) 'hold)))
-                 (let* ((saved (harness-cowboy--remember (car parsed) session-id question))
+                ((plist-get menu-choice :unavailable)
+                 (condition-case err
+                     (harness-cowboy--ask session-id (harness-call 'session/get session-id) value estimate settle
+                                          (format "%s · no cache"
+                                                  (plist-get menu-choice :label)))
+                   (error (harness-log 'warn "cowboy: could not ask %s again: %s"
+                                       session-id (harness-error-short-message err))
+                          (funcall settle 'hold 'user))))
+                ((and (cdr parsed) (not (eq choice 'hold)))
+                 (let* ((saved (harness-cowboy--remember choice session-id question))
                         (failed (plist-get saved :failed)))
                    (when failed
                      (harness-call 'session/hint session-id
-                                   (format "Could not make %s the default: %s"
-                                           (downcase (harness-cowboy-label (car parsed))) failed)))
-                   (funcall settle (car parsed) (if failed 'user 'always) (plist-get saved :decision))))
-                (t (funcall settle (car parsed) 'user)))))))
+                                   (format "%s · default · save failure · %s"
+                                           (harness-cowboy-label choice) failed)))
+                   (funcall settle choice (if failed 'user 'always) (plist-get saved :decision))))
+                (t (funcall settle choice 'user)))))))
     (unless answered
       (puthash session-id (list :pid pid :settle settle) harness-cowboy--asking)
       (harness-cowboy--show-waiting session-id harness-cowboy--waiting-for-answer)
@@ -911,34 +943,27 @@ dismissed question holds the message."
 ;;;; Doing what was chosen
 
 (defconst harness-cowboy--hold-reason
-  "not now: the prompt cache is cold, and the message waits; the next one sends it too"
+  "cache cold · message hold"
   "Why a held turn did not start, as the hint after it says.")
 
-(defun harness-cowboy--choice-text (choice context)
-  "Return in words what CHOICE does first.
-CONTEXT, a number of tokens or nil, is what carrying on sends again."
+(defun harness-cowboy--choice-text (choice &optional _context)
+  "Return in words what CHOICE does first."
   (pcase choice
-    ('brief "compacting into a brief summary first")
-    ('summary "compacting into a summary first")
-    ('transcript "writing the conversation to a transcript file first")
-    ('fresh "starting afresh")
-    ('ignore (format "ignoring the cold cache and carrying on with the whole conversation%s"
-                     (if (and (numberp context) (> context 0))
-                         (format ", ~%s tokens uncached" (harness-format-tokens context))
-                       "")))
-    (_ (format "carrying on with the whole conversation%s"
-               (if (and (numberp context) (> context 0))
-                   (format ", ~%s tokens uncached" (harness-format-tokens context))
-                 "")))))
+    ('brief "brief")
+    ('summary "summary")
+    ('transcript "transcript")
+    ('fresh "fresh start")
+    ('ignore "silence")
+    (_ "continuation")))
 
 (defun harness-cowboy--by-text (by)
   "Return in words why BY, who decided what goes first, decided as it did."
   (pcase by
-    ('user "as you chose")
-    ('always "as you chose, from now on without asking (harness-cowboy-ask turns asking back on)")
-    ('non-interactive "the default for a session that does not wait for you (harness-cowboy-default)")
-    ('unasked "the default, as the question could not be asked (harness-cowboy-default)")
-    (_ "the default, as asking is off (harness-cowboy-ask)")))
+    ('user "answer")
+    ('always "default")
+    ('non-interactive "default · non-interactive")
+    ('unasked "default · unasked")
+    (_ "default")))
 
 (defun harness-cowboy--hint-text (choice by session estimate)
   "Return the hint saying CHOICE goes first in SESSION, as BY decided.
@@ -950,19 +975,24 @@ cache went cold."
         (expires (plist-get (plist-get session :cache) :expires))
         (stale (harness-cowboy--cache-model session))
         (dropped (harness-cowboy--dropped session)))
-    (format "%s: %s, %s"
-            (cond (stale (format "Prompt cache cold: held for %s, not %s"
+    (string-join
+     (delq nil
+           (list
+            (cond (stale (format "Cache · cold · %s · session model %s"
                                  (harness-cowboy--model-label stale)
                                  (harness-cowboy--model-label (plist-get session :model))))
-                  (dropped (format "Prompt cache dropped at %s by a redaction"
+                  (dropped (format "Cache · dropped · %s · redaction"
                                    (harness-cowboy--clock dropped)))
-                  ((numberp expires) (format "Prompt cache cold since %s" (harness-cowboy--clock expires)))
-                  (t "No warm prompt cache holds this conversation"))
-            (harness-cowboy--choice-text choice context)
-            (harness-cowboy--by-text by))))
+                  ((numberp expires) (format "Cache · cold · %s" (harness-cowboy--clock expires)))
+                  (t "Cache · cold"))
+            (harness-cowboy--choice-text choice)
+            (and (memq choice '(carry-on ignore)) (numberp context) (> context 0)
+                 (format "~%s tokens uncached" (harness-format-tokens context)))
+            (harness-cowboy--by-text by)))
+     " · ")))
 
 (defconst harness-cowboy--uncacheable-reason
-  "not now: the conversation is too large to send uncached, and compacting it failed; make room, or write it to a transcript by hand"
+  "context too large · no compaction · message hold"
   "Why a message is held when the conversation could not be compacted at all.")
 
 (defun harness-cowboy--compact (session-id choice by)
@@ -980,9 +1010,7 @@ decided, is no warmth."
         (failed (lambda (msg)
                   (when (harness-call 'session/exists-p session-id)
                     (harness-call 'session/hint session-id
-                                  (format (concat "No compaction (%s), and the whole conversation will"
-                                                  " not be sent uncached")
-                                          msg)))
+                                  (format "Compaction failure · %s · message hold" msg)))
                   :failed)))
     (harness-catch
      (harness-call-async 'compaction/compact session-id
@@ -997,8 +1025,8 @@ decided, is no warmth."
                   (harness-call 'session/exists-p session-id))
              (progn
                (harness-call 'session/hint session-id
-                             (format "No %s (%s): writing the conversation to a transcript file instead"
-                                     (downcase (harness-cowboy-label choice)) msg))
+                             (format "%s · no compaction · transcript · %s"
+                                     (harness-cowboy-label choice) msg))
                (harness-catch
                 (harness-call-async 'compaction/compact session-id
                                     (list :kind 'transcript :meta (funcall meta msg)))

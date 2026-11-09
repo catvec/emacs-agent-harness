@@ -31,10 +31,11 @@
     (should (= (length names) (length (delete-dups (mapcar #'harness-carry-label names)))))
     (dolist (way names)
       (should (stringp (harness-carry-label way)))
-      (should (string-match-p "[^ ]" (harness-carry-property way :what)))
-      ;; Nouns and imperatives, no sentences: a segment after another.
+      ;; One noun or adjective, or a noun phrase of two short words.
+      (should (string-match-p "\\`[a-z][a-z -]*\\'" (harness-carry-property way :what)))
+      ;; Nouns and adjectives, no sentences: a segment after another.
       (should-not (string-match-p "[.!?] \\|[.!?]\\'" (harness-carry-property way :what))))
-    (should (equal "Transcript file" (harness-carry-label 'transcript)))
+    (should (equal "Transcript" (harness-carry-label 'transcript)))
     (should (eq 'transcript (harness-carry-by-key ?t)))
     (should (eq 'hold (harness-carry-by-key "q")))
     (should-not (harness-carry-by-key ?z))
@@ -42,14 +43,11 @@
     (should (eq 'brief (harness-carry-way "Brief")))
     (should-not (harness-carry-way "nothing"))))
 
-(ert-deftest harness-carry-the-two-summaries-keep-the-first-and-last-messages ()
-  "The wording of both summaries says the first and last messages are kept,
-as the compaction does (`harness-compaction--with-verbatim-ends'): the
-options never left it out because the compaction did not do it."
-  (dolist (way '(brief summary))
-    (should (string-match-p "first and last messages kept" (harness-carry-property way :what))))
-  (dolist (way '(transcript fresh carry-on ignore hold))
-    (should-not (string-match-p "first and last" (harness-carry-property way :what)))))
+(ert-deftest harness-carry-wording-is-a-noun-or-adjective ()
+  "Every way's wording is one short noun or adjective, not a sentence.
+What the compaction does is the help's and the docs', not the row's."
+  (dolist (way '(brief summary transcript fresh carry-on ignore hold))
+    (should (string-match-p "\\`[a-z][a-z]*\\'" (harness-carry-property way :what)))))
 
 (ert-deftest harness-carry-cost-reads-the-same-wherever-it-is-said ()
   "A way that asks no model is free, the rest cost what the estimate says,
@@ -114,6 +112,39 @@ how that reads, the model that writes it and the context after it."
   (let ((choices (harness-carry-choices '(brief transcript) nil)))
     (should-not (plist-get (nth 0 choices) :cost-text))
     (should (equal "free" (plist-get (nth 1 choices) :cost-text)))))
+
+(ert-deftest harness-carry-menu-is-one-list-for-both-questions ()
+  "The menu both questions show is the five ways, in that order.
+A way that cannot be made is kept and marked, never left out: a cold
+cache shows the summary, not offered, with no price and no writer, and a
+conversation past the window shows carrying on so."
+  (let* ((warm (harness-carry-test--estimate))
+         (kinds (mapcar (lambda (k)
+                          (if (eq (harness-carry-way (plist-get k :kind)) 'summary)
+                              (plist-put (copy-sequence k) :cached t)
+                            k))
+                        (plist-get warm :kinds)))
+         (warm (plist-put (copy-sequence warm) :kinds kinds))
+         (menu (harness-carry-menu warm)))
+    (should (equal '("summary" "transcript" "fresh" "carry-on" "hold")
+                   (mapcar (lambda (c) (plist-get c :choice)) menu)))
+    (should-not (cl-some (lambda (c) (plist-get c :unavailable)) menu))
+    ;; The cold summary is the same row, minus its price and its writer.
+    (let* ((cold (harness-carry-test--estimate))
+           (row (cl-find "summary" (harness-carry-menu cold)
+                         :key (lambda (c) (plist-get c :choice)) :test #'equal)))
+      (should (equal "s" (plist-get row :key)))
+      (should (plist-get row :unavailable))
+      (should (equal "no cache" (plist-get row :cost-text)))
+      (should-not (plist-get row :cost))
+      (should-not (plist-get row :by))
+      (should (equal "context · uncached" (plist-get row :what)))
+      (should (equal "no cache" (plist-get row :why))))
+    ;; Carrying on is offered past the window too: the user's to choose.
+    (let ((row (cl-find "carry-on" (harness-carry-menu warm)
+                        :key (lambda (c) (plist-get c :choice)) :test #'equal)))
+      (should-not (plist-get row :unavailable))
+      (should (equal "context" (plist-get row :what))))))
 
 (provide 'harness-carry-test)
 ;;; harness-carry-test.el ends here

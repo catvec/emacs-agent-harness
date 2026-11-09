@@ -24,28 +24,33 @@ of what the session ever cost, paid at once for a cache nothing reads.
 Cowboy compaction is the quick way out a switch of provider offers
 (harness-handoff.el): replace the conversation with something small
 before the message goes, rather than send it all again.  The ways to
-do it are the ones the switch offers, from one table
+do it are the ones the questions share, from one table
 (harness-carry.el): the same keys, the same words, the same prices
 (`harness-cowboy-cost-text` is its `harness-carry-cost-text`), and
-one panel (harness-ui-carry.el) asks both questions.  This module makes it part of every turn.  Its
+one panel (harness-ui-carry.el) asks both questions -- the question
+before an automatic compaction and this one, the same five rows for
+different reasons.  This module makes it part of every turn.  Its
 `agent/before-turn` gate (`harness-cowboy--gate`) holds a turn whose
 session's cache lapsed -- or is held for a model the session no
 longer uses, which caches nothing for the model the message goes to
 -- whoever sent the message, and asks what goes first
-(`harness-cowboy-choices`):
+(`harness-carry-menu`):
 
-- `brief`      a brief summary by a cheap model, from the whole
-               narrative, tool calls in brief: cents;
-- `summary`    a summary by the session's model, which reads all of
-               the conversation again uncached;
+- `summary`    a summary by the session's model, which reads the
+               conversation from the prompt cache while it lasts --
+               and a cold cache holds none of it, so the row says it
+               has no cache;
 - `transcript` the conversation written to a file the model reads as
                it needs; no model asked;
 - `fresh`      nothing carried over: the model starts afresh and looks
                back when it needs to; no model asked;
 - `carry-on`   the whole conversation, uncached, as before;
-- `ignore`     the same, and nothing else: no note, no compaction,
-               nothing added to the conversation at all;
 - `hold`       not now: the message is kept and the turn does not start.
+
+A setting may name `brief` -- a brief summary by a cheap model, from
+the whole narrative, which no cache covers and the menu therefore
+leaves out -- or `ignore`, the whole conversation with nothing
+added; taken unasked, they do what they always did.
 
 Whatever goes first, the conversation stays on record: a compaction
 ends in a line pointing the model at the session_history tool
@@ -80,12 +85,14 @@ A session that never waits for the user (`harness-non-interactive`) is
 not asked, and neither is any session once asking is off: no judge
 model weighs the choices, the default is taken.  The default default
 is the transcript file: it asks no model, so it cannot send the whole
-conversation uncached.  A summary, `brief` or `summary`, does: it
-reads the whole conversation on a request of its own, whose system
-prompt and tool list no cache of the conversation holds, and its small
-output does not make that input small.  A summary that cannot be made
-falls back to the transcript, and that to carrying on: the message
-always goes, unless held.
+conversation uncached.  A summary is offered only where the estimate
+says its own request reads the cache (`harness-carry-available-p`),
+and a cold cache holds none of it: the question shows the same five
+ways the one before an automatic compaction does
+(`harness-carry-menu`), the summary in it saying it has no cache,
+and the ways that ask no model offered.  A summary that cannot be
+made falls back to the transcript, and that to carrying on: the
+message always goes, unless held.
 
 The message waiting for the answer is not in the transcript yet: the
 turn appends it once the gate settles, after the compaction (see

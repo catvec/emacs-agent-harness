@@ -441,32 +441,32 @@ cached, at list prices: clock times, never an age that goes stale."
     (let* ((cache (list :at (- expires 300) :ttl 300 :expires expires))
            (s (harness-ui-cache-test--session :cache cache))
            (text (harness-ui-cache-test--banner s (+ expires 600))))
-      (should (string-match-p "Prompt cache expired  at 14:07, 5 minutes after its last use$" text))
+      (should (string-match-p "Cache  expired · 14:07 · 5 minutes · .* · ~84\\.0k tokens$" text))
       ;; 84000 tokens written to the cache again at 3.75, against read at 0.3.
-      (should (string-match-p "^   Your next message re-sends ~84\\.0k tokens uncached: about \\$0\\.315 instead of \\$0\\.025, at list prices\\.$"
+      (should (string-match-p "^   Cost  ~\\$0\\.315 uncached · ~\\$0\\.025 cached$"
                               text))
       ;; Drawn on a later day, the time says its day.
-      (should (string-match-p "at Oct 7, 14:07, 5 minutes"
+      (should (string-match-p "Oct 7, 14:07 · 5 minutes"
                               (harness-ui-cache-test--banner s (harness-ui-cache-test--local 9 0 8))))
       ;; The hour Claude Code keeps a subscription's cache.
-      (should (string-match-p "at 14:07, 1 hour after its last use"
+      (should (string-match-p "14:07 · 1 hour"
                               (harness-ui-cache-test--banner
                                (harness-ui-cache-test--session :cache (list :at (- expires 3600) :ttl 3600
                                                                             :expires expires))
                                (+ expires 60))))
       ;; A model priced without cache writes sends it again at its input price.
-      (should (string-match-p "about \\$0\\.168 instead of \\$0\\.042"
+      (should (string-match-p "~\\$0\\.168 uncached · ~\\$0\\.042 cached"
                               (harness-ui-cache-test--banner
                                (harness-ui-cache-test--session :cache cache :model "test:plain")
                                (+ expires 60))))
       ;; A model the catalogue does not price: no cost.
-      (should (string-match-p "re-sends ~84\\.0k tokens uncached\\.$"
+      (should (string-match-p "~84\\.0k tokens$"
                               (harness-ui-cache-test--banner
                                (harness-ui-cache-test--session :cache cache :model "nobody:m")
                                (+ expires 60))))
       ;; The tooltip explains.
       (let ((banner (harness-ui-cache--banner (harness-ui-cache--state s (+ expires 60)) (+ expires 60))))
-        (should (string-match-p "cached for 5 minutes after a request uses it"
+        (should (string-match-p "cache · 5 minutes · last use "
                                 (get-text-property 0 'help-echo banner)))
         (should (get-text-property 0 'harness-ui-cache-panel banner))))))
 
@@ -518,14 +518,14 @@ first request costs uncached against cached, at its own list prices."
              harness-ui--models)
     (let* ((s (harness-ui-cache-test--session :model "test:other"))
            (text (harness-ui-cache-test--banner s 1100.0)))
-      (should (string-match-p (format "Prompt cache cold  cached for %s, not %s$"
+      (should (string-match-p (format "Cache  cold · cache of %s · session %s · ~84\\.0k tokens$"
                                       (regexp-quote (harness-ui-model-label "test:m"))
                                       (regexp-quote (harness-ui-model-label "test:other")))
                               text))
       ;; 84000 tokens written to the new model's cache at 1.25, against read at 0.1.
-      (should (string-match-p "^   Your next message re-sends ~84\\.0k tokens uncached: about \\$0\\.105 instead of \\$0\\.0084, at list prices\\.$"
+      (should (string-match-p "^   Cost  ~\\$0\\.105 uncached · ~\\$0\\.0084 cached$"
                               text))
-      (should (string-match-p "for one model only"
+      (should (string-match-p "cache · cold · .* · session model"
                               (get-text-property 0 'help-echo (harness-ui-cache--banner
                                                                (harness-ui-cache--state s 1100.0) 1100.0)))))))
 
@@ -590,31 +590,34 @@ next message does.  Clock times only, with the day when it is not today's."
            (now (+ dropped 600))
            (banner (harness-ui-cache--banner (harness-ui-cache--state s now) now)))
       ;; 84000 tokens written to the cache again at 3.75: what carrying on costs.
-      (should (equal (concat " " icon " Prompt cache dropped  at 14:03, by a redaction\n"
-                             "   Your next message re-sends ~84.0k tokens uncached: about $0.315, at list prices.\n")
+      (should (equal (concat " " icon " Cache  dropped · 14:03 · redaction · "
+                             (harness-ui-model-label "test:m") " · ~84.0k tokens\n"
+                             "   Cost  ~$0.315 uncached\n\n"
+                             "   Options\n"
+                             "       Summary      no cache  context\n"
+                             "    t  Transcript   free      file\n"
+                             "    f  Fresh start  free      empty\n"
+                             "   Box key · C-c . t\n")
                      (substring-no-properties banner)))
-      (should (equal (concat "A redaction took a secret out of this conversation at "
-                             (format-time-string "%H:%M:%S" dropped)
-                             " and dropped the provider's copy of it, and its prompt cache with it.\n"
-                             "Your next message sends the whole context, 84.0k tokens, at the uncached rate,"
-                             " and caches it again.")
+      (should (equal (concat "cache · dropped · " (format-time-string "%H:%M:%S" dropped)
+                             " · redaction · cost · ~84.0k tokens")
                      (get-text-property 0 'help-echo banner)))
       (should (get-text-property 0 'harness-ui-cache-panel banner))
       ;; Nothing of the lapsed cache's words, nor of a price to compare with.
       (should-not (string-match-p "expired\\|lapsed\\|instead of\\|after its last use"
                                   (concat banner (get-text-property 0 'help-echo banner))))
       ;; Drawn on a later day, the time says its day.
-      (should (string-match-p "dropped  at Oct 7, 14:03, by a redaction$"
+      (should (string-match-p "Oct 7, 14:03 · redaction · "
                               (harness-ui-cache-test--banner s (harness-ui-cache-test--local 9 0 8))))
       ;; A model priced without cache writes sends it again at its input price.
-      (should (string-match-p "tokens uncached: about \\$0\\.168, at list prices\\.$"
+      (should (string-match-p "~\\$0\\.168 uncached$"
                               (harness-ui-cache-test--banner
                                (harness-ui-cache-test--session
                                 :model "test:plain" :cache (list :at (- dropped 60) :ttl 300 :expires dropped
                                                                  :dropped dropped))
                                now)))
       ;; A model the catalogue does not price: no cost.
-      (should (string-match-p "re-sends ~84\\.0k tokens uncached\\.$"
+      (should (string-match-p "~84\\.0k tokens$"
                               (harness-ui-cache-test--banner
                                (harness-ui-cache-test--session
                                 :model "nobody:m" :cache (list :at (- dropped 60) :ttl 300 :expires dropped
@@ -643,17 +646,18 @@ as the new model has none of it either way."
            (banner (harness-ui-cache--banner state now)))
       (should (equal (list :at (- expires 300) :ttl 300 :expires expires :context 84000 :model "test:m" :from nil)
                      state))
-      (should (equal (concat " " icon " Prompt cache expired  at 14:07, 5 minutes after its last use\n"
-                             "   Your next message re-sends ~84.0k tokens uncached:"
-                             " about $0.315 instead of $0.025, at list prices.\n")
+      (should (equal (concat " " icon " Cache  expired · 14:07 · 5 minutes · "
+                             (harness-ui-model-label "test:m") " · ~84.0k tokens\n"
+                             "   Cost  ~$0.315 uncached · ~$0.025 cached\n\n"
+                             "   Options\n"
+                             "       Summary      no cache  context\n"
+                             "    t  Transcript   free      file\n"
+                             "    f  Fresh start  free      empty\n"
+                             "   Box key · C-c . t\n")
                      (substring-no-properties banner)))
-      (should (equal (concat "The provider keeps the start of a conversation cached for 5 minutes"
-                             " after a request uses it.\n"
-                             "This session's requests last used the cache at "
-                             (format-time-string "%H:%M:%S" (- expires 300)) ", so it lapsed at "
-                             (format-time-string "%H:%M:%S" expires) ".\n"
-                             "Your next message sends the whole context, 84.0k tokens, at the uncached rate,"
-                             " and caches it again.")
+      (should (equal (concat "cache · 5 minutes · last use " (format-time-string "%H:%M:%S" (- expires 300))
+                             " · expiry " (format-time-string "%H:%M:%S" expires)
+                             " · cost · ~84.0k tokens")
                      (get-text-property 0 'help-echo banner))))
     ;; Another model's: the same, whether or not the redaction dropped it as well.
     (dolist (cache '((:at 1000.0 :ttl 300 :expires 1300.0 :model "test:m")
@@ -664,15 +668,17 @@ as the new model has none of it either way."
              (model-m (harness-ui-model-label "test:m"))
              (model-o (harness-ui-model-label "test:other")))
         (should (equal "test:m" (plist-get state :from)))
-        (should (equal (concat " " icon " Prompt cache cold  cached for " model-m ", not " model-o "\n"
-                               "   Your next message re-sends ~84.0k tokens uncached:"
-                               " about $0.105 instead of $0.0084, at list prices.\n")
+        (should (equal (concat " " icon " Cache  cold · cache of " model-m " · session " model-o
+                               " · ~84.0k tokens\n"
+                               "   Cost  ~$0.105 uncached · ~$0.0084 cached\n\n"
+                               "   Options\n"
+                               "       Summary      no cache  context\n"
+                               "    t  Transcript   free      file\n"
+                               "    f  Fresh start  free      empty\n"
+                               "   Box key · C-c . t\n")
                        (substring-no-properties banner)))
-        (should (equal (concat "A provider caches a conversation for one model only.\n"
-                               "This session's requests last used the cache of " model-m ", at "
-                               (format-time-string "%H:%M:%S" 1000.0) "; " model-o " has none of it.\n"
-                               "Your next message sends the whole context, 84.0k tokens, at the uncached rate,"
-                               " and caches it again.")
+        (should (equal (concat "cache · cold · " model-m " · session model " model-o
+                               " · cost · ~84.0k tokens")
                        (get-text-property 0 'help-echo banner)))))))
 
 (ert-deftest harness-ui-cache-stays-away-while-the-switch-asks ()
@@ -698,7 +704,7 @@ for them) charges the input for what is sent again uncached."
   (let ((harness-ui--models (make-hash-table :test 'equal)))
     (puthash "test:ds" '(:id "test:ds" :pricing (:input 0.15 :output 0.6 :cache-read 0.003 :cache-write 0.0))
              harness-ui--models)
-    (should (string-match-p "^   Your next message re-sends ~84\\.0k tokens uncached: about \\$0\\.013 instead of \\$0\\.0003, at list prices\\.$"
+    (should (string-match-p "^   Cost  ~\\$0\\.013 uncached · ~\\$0\\.0003 cached$"
                             (harness-ui-cache-test--banner
                              (harness-ui-cache-test--session
                               :model "test:ds" :cache '(:at 1000.0 :ttl 300 :expires 1300.0 :model "test:ds"))
@@ -716,55 +722,68 @@ for them) charges the input for what is sent again uncached."
                    :kept-tokens 2000 :dropped-tokens 84000)))
   "What compacting costs, as `compaction/estimate' answers over ACP.")
 
-(ert-deftest harness-ui-cache-offers-to-compact ()
-  "Below what the next message costs, the panel offers to compact the
-conversation first: a button for each kind, the cheap brief summary
-first, with what it costs as the harness estimates it, and its key on
-that line.  Before the estimate comes the buttons only name the kinds.
-While a compaction the panel started runs, the line says so."
+(ert-deftest harness-ui-cache-offers-to-clear ()
+  "The panel is the questions' panel: its rows offer to compact the
+conversation first, with what each costs as the harness estimates it and
+its key.  A summary is not offered: with the cache cold it would read the
+conversation uncached, as carrying on would.  Before the estimate comes
+the rows only name the ways.  The line under them says how to press a key
+from the compose box.  While a compaction the panel started runs, it says
+so instead."
   (require 'harness-ui-chat)
   (with-temp-buffer
-    (let ((state (harness-ui-cache--state (harness-ui-cache-test--session) 2000.0))
-          (case-fold-search nil)
-          (chosen nil))
-      ;; Nobody to ask (no session here): the kinds, and the free one's cost.
-      ;; The line under them says how to press a key from the compose box.
-      (should (equal (concat "   Compact it first   b  Brief summary   s  Summary   t  Transcript file (free)"
-                             "   f  Fresh start (free)   c  Cut old context (free)\n"
-                             "   from the box: C-c . b\n")
-                     (substring-no-properties (harness-ui-cache--offer state))))
-      (setq harness-ui-cache--estimate (cons state harness-ui-cache-test--estimate))
-      (let ((line (harness-ui-cache--offer state)))
-        (should (equal (concat "   Compact it first   b  Brief summary (~$0.011)   s  Summary (~$0.463)"
-                               "   t  Transcript file (free)   f  Fresh start (free)"
-                               "   c  Cut old context (free)\n"
-                               "   from the box: C-c . b\n")
-                       (substring-no-properties line)))
+    (let ((harness-ui--models (make-hash-table :test 'equal)))
+      (puthash "test:m" '(:id "test:m" :pricing (:input 3.0 :output 15.0 :cache-read 0.3 :cache-write 3.75))
+               harness-ui--models)
+      (let* ((expires (harness-ui-cache-test--local 14 7))
+           (cache (list :at (- expires 300) :ttl 300 :expires expires))
+           (state (harness-ui-cache--state (harness-ui-cache-test--session :cache cache)
+                                           (+ expires 60)))
+           (now (+ expires 60))
+           (case-fold-search nil)
+           (chosen nil)
+           (icon (harness-ui-icon 'harness-icon-clock)))
+      (let ((banner (harness-ui-cache--banner state now)))
+        (should (equal (concat " " icon " Cache  expired · 14:07 · 5 minutes · "
+                               (harness-ui-model-label "test:m") " · ~84.0k tokens\n"
+                               "   Cost  ~$0.315 uncached · ~$0.025 cached\n\n"
+                               "   Options\n"
+                               "       Summary      no cache  context\n"
+                               "    t  Transcript   free      file\n"
+                               "    f  Fresh start  free      empty\n"
+                               "   Box key · C-c . t\n")
+                       (substring-no-properties banner)))
         ;; Both lines are a panel of the compose box (`harness-compose-panel-key'),
         ;; and the keys answer on either.
-        (should (cl-loop for i from 0 below (length line)
-                         always (eq 'cache (get-text-property i 'harness-compose-panel line))))
-        (should (eq (lookup-key (get-text-property 0 'keymap line) "t")
-                    (lookup-key (get-text-property (string-match "from the box" line) 'keymap line) "t")))
-        ;; Each key on the line compacts as its kind, and so does a click.
-        (cl-letf (((symbol-function 'harness-ui-cache--compact) (lambda (_buffer kind) (push kind chosen))))
-          (dolist (key '("b" "s" "t" "f" "c"))
-            (funcall (lookup-key (get-text-property 0 'keymap line) key)))
-          (funcall (get-text-property (string-match "Summary" line) 'harness-chat-action line)))
-        (should (equal '(summary truncate fresh transcript summary brief) chosen))
-        ;; A button's tooltip says what it does.
-        (should (string-prefix-p "Brief summary (~$0.011): Small reads the conversation's narrative"
-                                 (get-text-property (string-match "Brief summary" line) 'help-echo line)))
-        ;; Last on the panel, which it is part of.
-        (let ((banner (harness-ui-cache--banner state 2000.0 line)))
-          (should (string-suffix-p (substring-no-properties line) (substring-no-properties banner)))
-          (should (get-text-property (1- (length banner)) 'harness-ui-cache-panel banner))
-          (should (string-match-p "lapsed at" (get-text-property 0 'help-echo banner)))
-          (should (string-prefix-p "Summary (~$0.463): Big reads"
-                                   (get-text-property (string-match "Summary" banner) 'help-echo banner)))))
-      (setq harness-ui-cache--compacting 'brief)
-      (should (equal "   Compacting the conversation into a brief summary…\n"
-                     (substring-no-properties (harness-ui-cache--offer state)))))))
+        (should (cl-loop for i from 0 below (length banner)
+                         always (equal "cache" (get-text-property i 'harness-compose-panel banner))))
+        (should (eq (lookup-key (get-text-property 0 'keymap banner) "t")
+                    (lookup-key (get-text-property (string-match "Box key" banner) 'keymap banner) "t")))
+        ;; Each key compacts as its way, and so does a click.
+        (cl-letf (((symbol-function 'harness-ui-cache--compact)
+                   (lambda (_buffer kind) (push kind chosen))))
+          (dolist (key '("t" "f"))
+            (funcall (lookup-key (get-text-property 0 'keymap banner) key)))
+          (funcall (get-text-property (string-match "Fresh start" banner) 'harness-ui-action banner)))
+        (should (equal '(fresh fresh transcript) chosen))
+        ;; A row's tooltip says what it does, in nouns, and how to press it.
+        (should (equal "Transcript · free · file · key · t · button"
+                       (get-text-property (string-match "Transcript" banner) 'help-echo banner)))
+        (should (equal "Fresh start · free · empty · key · f · button"
+                       (get-text-property (string-match "Fresh start" banner) 'help-echo banner)))
+        (should (string-match-p "cache · 5 minutes" (get-text-property 0 'help-echo banner)))
+        (should (get-text-property (1- (length banner)) 'harness-ui-cache-panel banner)))
+      ;; With the estimate, the prices come in and the rows keep their order.
+      (setq harness-ui-cache--estimate (cons state harness-ui-cache-test--estimate))
+      (let ((banner (harness-ui-cache--banner state now)))
+        (should (string-match-p "Summary      no cache" banner))
+        (should (string-match-p "Transcript   free" banner))
+        (should (string-match-p "Fresh start  free" banner)))
+      (setq harness-ui-cache--compacting 'transcript)
+      (should (equal (concat " " icon " Cache  expired · 14:07 · 5 minutes · "
+                             (harness-ui-model-label "test:m") " · ~84.0k tokens\n"
+                             "   Compaction · transcript\n")
+                     (substring-no-properties (harness-ui-cache--banner state now))))))))
 
 (ert-deftest harness-ui-cache-duration-in-words ()
   "Cache lifetimes read as words."
@@ -894,9 +913,9 @@ cache lapses again."
       ;; It comes on its own.
       (harness-ui-cache-test--expire buffer)
       (should (>= (float-time) (plist-get (plist-get (harness-ui-session sid) :cache) :expires)))
-      (should (string-match-p "Prompt cache expired  at [0-9:]+, 2 seconds after its last use"
+      (should (string-match-p "Cache  expired · [0-9:]+ · 2 seconds"
                               (harness-ui-cache-test--text buffer)))
-      (should (string-match-p "Your next message re-sends ~84\\.5k tokens uncached"
+      (should (string-match-p "~84\\.5k tokens"
                               (harness-ui-cache-test--text buffer)))
       (with-current-buffer buffer (should-not harness-ui-cache--timer))
       ;; Sent again, it goes with the message, before the UI has heard the
@@ -973,9 +992,9 @@ lapses, without any input, as for a session whose turn ended by itself."
             ;; The panel comes by itself once the cache lapsed.
             (harness-ui-cache-test--expire buffer)
             (should (>= (float-time) (plist-get (plist-get (harness-ui-session sid) :cache) :expires)))
-            (should (string-match-p "Prompt cache expired  at [0-9:]+, 3 seconds after its last use"
+            (should (string-match-p "Cache  expired · [0-9:]+ · 3 seconds"
                                     (harness-ui-cache-test--text buffer)))
-            (should (string-match-p "Your next message re-sends ~84\\.5k tokens uncached"
+            (should (string-match-p "~84\\.5k tokens"
                                     (harness-ui-cache-test--text buffer))))
         (remhash 'late harness-providers)
         (harness-provider--forget 'late)))))
@@ -1004,7 +1023,7 @@ panel, however long they wait; one that used the cache does, meanwhile."
       (cl-incf harness-test-clock-offset 1.5)
       (dolist (buffer (list new-buffer plain-buffer))
         (should-not (harness-ui-cache-test--shows-p buffer))
-        (should-not (string-match-p "Prompt cache expired" (harness-ui-cache-test--text buffer)))
+        (should-not (string-match-p "Cache expired" (harness-ui-cache-test--text buffer)))
         (with-current-buffer buffer (should-not harness-ui-cache--timer))))))
 
 (ert-deftest harness-ui-cache-panel-after-a-switch ()
@@ -1022,8 +1041,8 @@ for it, and the panel goes for good."
       (should-not (harness-ui-cache-test--shows-p buffer))
       (harness-call 'session/update sid :model "demo:other" :silent t)
       (harness-test-wait (lambda () (harness-ui-cache-test--shows-p buffer)) 5 "the cache panel")
-      (should (string-match-p "Prompt cache cold  cached for .*, not " (harness-ui-cache-test--text buffer)))
-      (should (string-match-p "Your next message re-sends ~84\\.5k tokens uncached"
+      (should (string-match-p "Cache  cold · cache of .* · session " (harness-ui-cache-test--text buffer)))
+      (should (string-match-p "~84\\.5k tokens"
                               (harness-ui-cache-test--text buffer)))
       (with-current-buffer buffer (should-not harness-ui-cache--timer))
       (harness-call 'session/update sid :model "demo:scripted" :silent t)
@@ -1092,23 +1111,22 @@ is set for the new lapse."
             (should (< (plist-get cache :dropped) (+ (plist-get cache :at) 600)))
             (with-current-buffer buffer (should-not harness-ui-cache--timer)))
           (let ((text (harness-ui-cache-test--text buffer)))
-            (should (string-match-p "Prompt cache dropped  at [0-9:]+, by a redaction\n" text))
-            (should (string-match-p (concat "\n   Your next message re-sends ~430 tokens uncached:"
-                                            " about \\$[0-9.]+, at list prices\\.\n")
+            (should (string-match-p "Cache  dropped · [0-9:]+ · redaction" text))
+            (should (string-match-p (concat "\n   Cost  ~\\$[0-9.]+ uncached\n")
                                     text))
-            (should-not (string-match-p "Prompt cache expired\\|instead of" text))
-            (should (string-match-p "\n   Compact it first   b  Brief summary" text)))
+            (should-not (string-match-p "Cache expired\\|instead of" text))
+            (should (string-match-p "\n   Options" text))
+            (should (string-match-p "Summary      no cache" text)))
           (with-current-buffer buffer
             (let ((help (get-text-property (harness-ui-cache-test--shows-p buffer) 'help-echo)))
-              (should (string-match-p "\\`A redaction took a secret out of this conversation at [0-9:]+ and dropped the provider's copy of it, and its prompt cache with it\\.\n"
-                                      help))
-              (should (string-suffix-p "caches it again." help))))
+              (should (string-match-p "\\`cache · dropped · [0-9:]+ · redaction · cost · ~430 tokens\\'" help))
+              (should-not (string-match-p "\n" help))))
           ;; The next message's request writes the new conversation's cache.
           (harness-ui-cache-test--send buffer "carry on")
           (should-not (plist-get (plist-get (harness-ui-session sid) :cache) :dropped))
           (harness-test-wait (lambda () (not (harness-ui-cache-test--shows-p buffer))) 5 "the panel to go")
           (with-current-buffer buffer (should (timerp harness-ui-cache--timer)))
-          (should-not (string-match-p "Prompt cache dropped" (harness-ui-cache-test--text buffer)))
+          (should-not (string-match-p "Cache dropped" (harness-ui-cache-test--text buffer)))
           ;; A buffer opened later does not show the old drop either.
           (kill-buffer buffer)
           (should-not (harness-ui-cache-test--shows-p (harness-ui-cache-test--open sid))))
@@ -1129,18 +1147,17 @@ the conversation is compacted, as nothing of it is cached any more."
            (buffer (harness-ui-cache-test--open sid)))
       (harness-ui-cache-test--send buffer "first")
       (harness-ui-cache-test--expire buffer)
-      ;; The demo model is priced: the estimate gives both summaries a cost.
-      (harness-test-wait (lambda () (string-match-p "Brief summary (~\\$" (harness-ui-cache-test--text buffer)))
-                         5 "the costs")
-      (should (string-match-p (concat "\n   Compact it first   b  Brief summary (~\\$[0-9.]+)   s  Summary (~\\$[0-9.]+)"
-                                      "   t  Transcript file (free)   f  Fresh start (free)"
-                                      "   c  Cut old context (free)\n")
-                              (harness-ui-cache-test--text buffer)))
+      ;; The ways that ask no model, free, and their keys.
+      (harness-test-wait (lambda () (string-match-p "Options" (harness-ui-cache-test--text buffer)))
+                         5 "the offer")
+      (should (string-match-p "Summary      no cache" (harness-ui-cache-test--text buffer)))
+      (should (string-match-p "t  Transcript   free" (harness-ui-cache-test--text buffer)))
+      (should (string-match-p "f  Fresh start  free" (harness-ui-cache-test--text buffer)))
       (with-current-buffer buffer
         (goto-char (point-min))
-        (search-forward "Compact it first")
+        (search-forward "Options")
         (execute-kbd-macro "t")
-        (should (string-match-p "\n   Compacting the conversation into a transcript file…\n"
+        (should (string-match-p "\n   Compaction · transcript\n"
                                 (harness-ui-cache-test--text buffer))))
       (harness-test-wait (lambda () (not (harness-ui-cache-test--shows-p buffer))) 5 "the panel to go")
       (should (equal "transcript"
@@ -1165,7 +1182,7 @@ does point, at the offset it had, though the tail is drawn again."
            (buffer (harness-ui-cache-test--open sid)))
       (harness-ui-cache-test--send buffer "first")
       (harness-ui-cache-test--expire buffer)
-      (should (string-match-p "\n   from the box: C-c \\. b\n" (harness-ui-cache-test--text buffer)))
+      (should (string-match-p "\n   Box key · C-c \\. t\n" (harness-ui-cache-test--text buffer)))
       (with-current-buffer buffer
         (goto-char harness-compose-end)
         (insert "draft")
@@ -1176,7 +1193,7 @@ does point, at the offset it had, though the tail is drawn again."
         (goto-char (+ harness-compose-start 2))
         ;; Pressed from it, t compacts as a transcript file.
         (execute-kbd-macro (kbd "C-c . t"))
-        (should (string-match-p "\n   Compacting the conversation into a transcript file…\n"
+        (should (string-match-p "\n   Compaction · transcript\n"
                                 (harness-ui-cache-test--text buffer)))
         (should (equal "drtaft" (harness-compose-text)))
         (should (= (point) (+ harness-compose-start 2))))
@@ -1262,7 +1279,7 @@ lapsed, it is back."
         (harness-ui-cache-test--end-turn sid)
         (harness-test-wait (lambda () (not (harness-ui-prompt-in-flight-p sid))) 10 "the prompt's answer")
         (harness-test-wait (lambda () (harness-ui-cache-test--shows-p buffer)) 10 "the cache panel again")
-        (should (string-match-p "Prompt cache expired" (harness-ui-cache-test--text buffer)))))))
+        (should (string-match-p "Cache  expired" (harness-ui-cache-test--text buffer)))))))
 
 (ert-deftest harness-ui-cache-prompt-ends-with-its-connection ()
   "A connection that closes rejects the requests pending on it: a prompt

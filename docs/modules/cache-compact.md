@@ -15,15 +15,16 @@ A conversation whose prompt cache is about to lapse is going to be
 sent again, whole and uncached, by whoever writes to it next -- or,
 when the cold-cache question is on, compacted first (harness-cowboy.el),
 with the user waiting for it.  Compacting it before the cache lapses
-would be cheaper only if the summarising model's request began with
-the prefix the cache holds.  It does not: a compaction request has a
-system prompt of its own and no tools (`harness-compaction--summary-request`),
-so no cache of the chat covers it.  Its input is sent uncached, and a
-small summary does not make that input small -- for a long
-conversation it can cost more than the turn it was meant to save
-(`harness-compaction--estimate-brief` says `:cached` nil for the same
-reason).  This module therefore does nothing unless the estimate for
-the chosen kind says that kind's own request is cached.  It does not
+is cheaper when the summarising model's request begins with the
+prefix the cache holds.  A `summary` now does: it is sent as the
+conversation's next step would be, same system prompt, tools and
+conversation, with the instruction appended
+(`harness-compaction--summary-request`), so the conversation reads
+from the cache while it lasts.  A `brief` summary renders the
+narrative anew, and a hosted loop holds its own conversation; no
+cache of the chat covers those, and their input is sent uncached.
+This module therefore does nothing unless the estimate for the
+chosen kind says that kind's own request is cached.  It does not
 infer that from the session's `:cache`, from the last request or from
 a time to live: those describe the chat's prefix, not the
 compaction's.  It is off by default; the `transcript` and `fresh`

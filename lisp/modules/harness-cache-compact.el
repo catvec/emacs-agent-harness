@@ -6,15 +6,16 @@
 ;; sent again, whole and uncached, by whoever writes to it next -- or,
 ;; when the cold-cache question is on, compacted first (harness-cowboy.el),
 ;; with the user waiting for it.  Compacting it before the cache lapses
-;; would be cheaper only if the summarising model's request began with
-;; the prefix the cache holds.  It does not: a compaction request has a
-;; system prompt of its own and no tools (`harness-compaction--summary-request'),
-;; so no cache of the chat covers it.  Its input is sent uncached, and a
-;; small summary does not make that input small -- for a long
-;; conversation it can cost more than the turn it was meant to save
-;; (`harness-compaction--estimate-brief' says `:cached' nil for the same
-;; reason).  This module therefore does nothing unless the estimate for
-;; the chosen kind says that kind's own request is cached.  It does not
+;; is cheaper when the summarising model's request begins with the
+;; prefix the cache holds.  A `summary' now does: it is sent as the
+;; conversation's next step would be, same system prompt, tools and
+;; conversation, with the instruction appended
+;; (`harness-compaction--summary-request'), so the conversation reads
+;; from the cache while it lasts.  A `brief' summary renders the
+;; narrative anew, and a hosted loop holds its own conversation; no
+;; cache of the chat covers those, and their input is sent uncached.
+;; This module therefore does nothing unless the estimate for the
+;; chosen kind says that kind's own request is cached.  It does not
 ;; infer that from the session's `:cache', from the last request or from
 ;; a time to live: those describe the chat's prefix, not the
 ;; compaction's.  It is off by default; the `transcript' and `fresh'
@@ -62,10 +63,9 @@
 
 (defcustom harness-cache-precompact nil
   "Non-nil to compact a conversation just before its prompt cache lapses.
-Off by default: a compaction is a model request with a system prompt and
-tool list of its own, so the chat's cache does not cover it.  Its input
-is read uncached -- the whole conversation -- and its summary is small
-only in what it writes, not in what it reads.  Turning this on does
+Off by default: a compaction is a model request of its own, and only a
+`summary' reads the conversation from the chat's cache while that
+lasts; a `brief' one reads it uncached.  Turning this on does
 nothing unless `compaction/estimate' says the chosen kind's own request
 is cached; it never infers that from the session's `:cache', the last
 request or a time to live.  When it does run, it compacts as the user

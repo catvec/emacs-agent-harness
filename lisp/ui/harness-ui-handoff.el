@@ -86,14 +86,14 @@ as the cache panel says it.  Nil when nothing is known."
          (n (length checks)))
     (cond
      ((= cold 0) (and (cl-every (lambda (s) (eq s 'warm)) states) "cache warm"))
-     ((< cold n) (format "uncached where the cache lapsed (%d of %d)" cold n))
+     ((< cold n) (format "cache lapsed · %d of %d uncached" cold n))
      ((> n 1) "caches expired · all uncached")
      ((eq (car states) 'other) "cache cold · all uncached")
      (t (let* ((cache (plist-get (car checks) :cache))
                (clock (harness-ui-format-clock (plist-get cache :expires) now)))
           (if (plist-get cache :dropped)
-              (format "cache dropped at %s by a redaction · all uncached" clock)
-            (format "cache expired at %s · all uncached" clock)))))))
+              (format "cache · dropped · %s · redaction · all uncached" clock)
+            (format "cache · expired · %s · all uncached" clock)))))))
 
 ;;;; The choices
 
@@ -195,12 +195,12 @@ a turn runs, and for a batch which sessions lose their conversation."
      (when (and (= total 1) (plist-get first :cache-cost))
        (list (list "Cache cost" (format "%s (list prices)" (plist-get first :cache-cost)))))
      (when running
-       (list (list "Turn" "running · switch at its next step")))
+       (list (list "Turn" "running · switch at next step")))
      (when (> total 1)
        (list (list "Sessions"
                    (string-join (append (cl-subseq labels 0 (min (length labels) harness-ui-handoff--listed))
                                         (and (> more 0) (list (format "%d more" more)))
-                                        (list (format "%d of %d change" (length checks) total)))
+                                        (list (format "%d of %d changed" (length checks) total)))
                                 " · ")))))))
 
 (defun harness-ui-handoff--spec (checks label total)
@@ -213,14 +213,14 @@ summary is true as of then."
          (first (car checks))
          (from (harness-ui-handoff--from-label first)))
     (list :id "switch"
-          :icon 'harness-icon-system :title "Switch model"
+          :icon 'harness-icon-system :title "Model switch"
           :detail (if (= 1 total)
                       (format "%s → %s" from label)
                     (format "%d sessions → %s" total label))
           :detail-face 'bold
           :lines (list (harness-ui-carry-text (plist-get first :reason)))
           :rows (harness-ui-handoff--facts checks total)
-          :ask "Choose how to hand over"
+          :ask "Options"
           :choices (harness-ui-handoff--choices checks label))))
 
 ;;;; Asking
@@ -236,7 +236,7 @@ is cancelled: the minibuffer is never asked."
       (harness-ui-carry-show target "switch"
                              (lambda () (harness-ui-handoff--spec checks label total))
                              (lambda (name) (funcall callback (harness-ui-handoff--mode checks name))))
-    (message "Model unchanged: no buffer to ask in")
+    (message "Model unchanged · no buffer")
     (funcall callback 'cancel)))
 
 ;;;; Setup

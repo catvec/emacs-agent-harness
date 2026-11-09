@@ -5906,7 +5906,7 @@ message does, the model answers it, and nothing is queued."
            (sid (harness-ui-chat-test-session))
            (buf (harness-ui-chat-test-open sid))
            (waiting (harness-ui-chat-test-state-line 'waiting))
-           (waits "Compacting the conversation.*1 message waits: “and now the lexer”"))
+           (waits "Compacting.*1 message waits: “and now the lexer”"))
       (harness-call 'session/append sid '(:kind user :content "please refactor the parser"))
       (harness-call 'session/append sid '(:kind assistant :content "Done: parser.el rewritten"))
       (let ((compaction (cl-letf (((symbol-function 'harness-compaction-request-warm-p)
@@ -6014,7 +6014,7 @@ cancelled, and nothing of either reaches the model."
          (list :sessionUpdate "_harness/activity"
                :activity (list :phase "compacting" :since (float-time)
                                :detail "2 messages wait"))))
-      (should (string-match-p "Compacting the conversation.* \N{U+00B7} 2 messages wait"
+      (should (string-match-p "Compacting.* \N{U+00B7} 2 messages wait"
                               (harness-ui-chat-test-activity-line buf))))))
 
 (defun harness-ui-chat-test-hold-turn (buf gates)
@@ -7537,7 +7537,7 @@ real cold-cache layer, end to end."
     (let ((harness-cowboy-ask t)
           (harness-cowboy-default 'brief)
           (harness-compaction-brief-model "demo:scripted")
-          (text "Always starting afresh when the prompt cache is cold, without asking"))
+          (text "Fresh start · cache · cold · default"))
       (cl-letf (((symbol-function 'harness-save-user-option) (lambda (sym value) (set sym value))))
         (let* ((cold (lambda (name)
                        (let ((id (harness-ui-chat-test-session name)))
@@ -7556,7 +7556,7 @@ real cold-cache layer, end to end."
                           (list :answer "always start afresh"))
             (harness-test-await p 10))
           (should-not harness-cowboy-ask)
-          (harness-ui-chat-test--both (list buf) "as you chose, from now on without asking (harness-cowboy-ask turns asking back on)  [Undo] [Change]\n")
+          (harness-ui-chat-test--both (list buf) "fresh start · default  [Undo] [Change]\n")
           (harness-test-await (harness-call 'agent/prompt other "go on") 10)
           (should-not (harness-call 'question/pending other))
           (harness-ui-chat-test--both (list buf2) (concat "    decided by: " text "  [Undo] [Change]\n"))
@@ -7565,18 +7565,18 @@ real cold-cache layer, end to end."
                            (get-text-property (- (harness-ui-chat-test-find buf2 (concat "decided by: " text "  [Undo]")) 2)
                                               'help-echo))))
           ;; Undone from the session it was not made in: asking is back on.
-          (should (member "Undone: asking again what goes first when the prompt cache is cold, and “Brief summary” is the default again"
+          (should (member "Undo · question · “Brief” · default"
                           (harness-ui-chat-test--click buf2 "[Undo]")))
           (should (eq t harness-cowboy-ask))
           (should (eq 'brief harness-cowboy-default))
-          (harness-ui-chat-test--both (list buf) "(harness-cowboy-ask turns asking back on)  [Redo] [Change]\n")
+          (harness-ui-chat-test--both (list buf) "fresh start · default  [Redo] [Change]\n")
           (harness-ui-chat-test--both (list buf2) (concat "    decided by: " text "  [Redo] [Change]\n"))
           ;; Redone from its own note: the default and the silence are back.
-          (should (member (concat "Redone: always starting afresh when the prompt cache is cold, without asking")
+          (should (member "Redone: fresh start · cache · cold · default"
                           (harness-ui-chat-test--click buf "[Redo]")))
           (should-not harness-cowboy-ask)
           (should (eq 'fresh harness-cowboy-default))
-          (harness-ui-chat-test--both (list buf) "(harness-cowboy-ask turns asking back on)  [Undo] [Change]\n")
+          (harness-ui-chat-test--both (list buf) "fresh start · default  [Undo] [Change]\n")
           (harness-ui-chat-test--both (list buf2) (concat "    decided by: " text "  [Undo] [Change]\n")))))))
 
 (ert-deftest harness-ui-chat-the-judgement-note-offers-its-actions ()
@@ -7712,8 +7712,7 @@ The real compaction module, end to end."
           (should (harness-ui-chat-test-face-at (- (harness-ui-chat-test-find buf "[Revert]") 2) 'button)))
         ;; Reverted: the model is sent the conversation before it.
         (funcall click "[Revert]")
-        (should (string-match-p "\\`Reverted the compaction: the model sees the conversation before it again"
-                                (car shown)))
+        (should (string-match-p "\\`Compaction · reverted · ~" (car shown)))
         (harness-test-wait (lambda () (harness-ui-chat-test-find buf "[Go post-compaction]")) 5
                            "the note redrawn with its way back")
         (should (string-match-p "words), reverted  \\[Go post-compaction\\]\n" (funcall header (plist-get first :id))))
@@ -7722,12 +7721,12 @@ The real compaction module, end to end."
           ;; Struck through, as the text of an undone decision is.
           (should (memq :strike-through
                         (flatten-tree (get-text-property (harness-ui-chat-test-find buf "context compacted") 'face))))
-          (should (string-match-p "Reverted the compaction"
+          (should (string-match-p "Compaction · reverted · ~"
                                   (plist-get (car (last (harness-call 'session/nodes sid))) :content))))
         (should (= 2 (length (harness-call 'session/messages sid))))
         ;; And back, as often as asked.
         (funcall click "[Go post-compaction]")
-        (should (string-match-p "\\`Back to the compaction" (car shown)))
+        (should (string-match-p "\\`Compaction · restored · ~" (car shown)))
         (harness-test-wait (lambda () (string-match-p "\\[Revert\\]" (funcall header (plist-get first :id))))
                            5 "the note redrawn with [Revert] again")
         (should-not (string-match-p "reverted" (funcall header (plist-get first :id))))

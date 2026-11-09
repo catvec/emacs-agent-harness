@@ -40,102 +40,159 @@
 
 ;;;; The panel, from a record
 
-(defun harness-ui-compaction-ask-test--choices ()
-  "Return the choices of a priced question, as they come over the wire.
-The harness sends them as a list; a vector is how a list travels."
+(defun harness-ui-compaction-ask-test--choices (&optional cold)
+  "Return the menu as it comes over the wire.
+COLD makes the summary the one a cold prompt cache holds none of: shown,
+not offered.  The harness sends the choices as a list; a vector is how a
+list travels."
   (apply #'vector
-         (list (list :choice "brief" :key "b" :label "Brief summary"
-                     :what "narrative, tool calls in brief · read uncached · first and last messages kept"
-                     :cost 0.004 :cost-text "~$0.0040" :after 900)
-               (list :choice "summary" :key "s" :label "Summary"
-                     :what "whole conversation · read uncached · first and last messages kept"
-                     :cost 0.33 :cost-text "~$0.330" :after 1500)
-               (list :choice "transcript" :key "t" :label "Transcript file"
-                     :what "whole conversation as a file the model reads"
-                     :cost 0.0 :cost-text "free" :after 200)
-               (list :choice "fresh" :key "f" :label "Start afresh"
-                     :what "nothing carried over" :cost 0.0 :cost-text "free" :after 90)
-               (list :choice "truncate" :key "x" :label "Cut old context"
-                     :what "oldest messages dropped · newest kept as they are"
-                     :cost 0.0 :cost-text "free" :after 9000)
-               (list :choice "carry-on" :key "c" :label "Carry on"
-                     :what "whole conversation again, uncached"
-                     :cost 0.315 :cost-text "~$0.315 uncached")
-               (list :choice "hold" :key "q" :label "Not now"
-                     :what "message waits"))))
+         (append
+          (list (if cold
+                    (list :choice "summary" :key "s" :label "Summary"
+                          :what "context · uncached"
+                          :cost-text "no cache" :unavailable t :why "no cache")
+                  (list :choice "summary" :key "s" :label "Summary"
+                        :what "context · cached"
+                        :cost 0.33 :cost-text "~$0.330" :after 1500)))
+          (list (list :choice "transcript" :key "t" :label "Transcript"
+                      :what "file" :cost 0.0 :cost-text "free")
+                (list :choice "fresh" :key "f" :label "Fresh start"
+                      :what "empty" :cost 0.0 :cost-text "free")
+                (list :choice "carry-on" :key "c" :label "Continuation"
+                      :what "context" :cost (if cold 0.315 0.025)
+                      :cost-text (if cold "~$0.315 uncached" "~$0.025 cached")
+                      :default t)
+                (list :choice "hold" :key "q" :label "Pause"
+                      :what "pause")))))
 
-(defun harness-ui-compaction-ask-test--record (&rest overrides)
-  "Return a compaction question record as the UI keeps it, with OVERRIDES.
-Its `:compaction' is as it comes over the wire: names for symbols,
-vectors for lists."
-  (harness-plist-merge
-   (list :id "p1" :kind "question" :session-id "s1"
-         :question "The conversation is ~84.0k tokens of this model's ~100k window.  …"
-         :options ["Brief summary (~$0.0040)" "Summary (~$0.330, the default)" "Transcript file (free)"
-                   "Start afresh (free)" "Cut old context (free)" "Carry on (~$0.315 uncached)" "Not now"]
-         :allow-free-text t
-         :compaction (list :reason "context" :where "turn" :context 84000 :window 100000
-                           :usable 80000 :model "demo:scripted" :model-label "Demo scripted"
-                           :cached t :carry-on 0.315 :carry-on-cached 0.025 :default "summary"
-                           :choices (harness-ui-compaction-ask-test--choices)))
-   overrides))
+(defun harness-ui-compaction-ask-test--record (&optional cold)
+  "Return the question record, as it comes over the wire.
+Its `:compaction' is as a client reads it: names for symbols, vectors
+for lists.  COLD makes it the question a cold prompt cache asks."
+  (list :id "p-kind" :kind "question" :session-id "s1"
+        :question "…"
+        :options (if cold
+                     ["Summary (no cache)" "Transcript (free)"
+                      "Fresh start (free)" "Continuation (~$0.315 uncached · default)" "Pause"]
+                   ["Summary (~$0.330)" "Transcript (free)"
+                    "Fresh start (free)" "Continuation (~$0.025 cached · default)" "Pause"])
+        :allow-free-text t
+        :compaction (list :reason "context" :where "turn"
+                          :context 84000 :window 100000 :usable 80000
+                          :model "demo:scripted" :model-label "Demo scripted"
+                          :cached (not cold) :carry-on (if cold 0.315 0.025)
+                          :carry-on-cached 0.025
+                          :default "carry-on"
+                          :always '("carry-on")
+                          :choices (harness-ui-compaction-ask-test--choices cold))))
 
 (defun harness-ui-compaction-ask-test--lines (string)
   "Return the lines of STRING without its properties, trailing blanks trimmed."
   (mapcar (lambda (l) (string-trim-right l)) (split-string (substring-no-properties string) "\n")))
 
+(defun harness-ui-compaction-ask-test--page-lines (&optional cold)
+  "Return the lines of the panel, as the question sends it.
+COLD makes it the question a cold prompt cache asks."
+  (cl-letf (((symbol-function 'harness-compaction-history-p) (lambda (_id) t)))
+    (harness-ui-compaction-ask-test--lines
+     (harness-ui-compaction-ask-panel-string
+      "s1" (harness-ui-compaction-ask-test--record cold)))))
+
 (ert-deftest harness-ui-compaction-ask-panel-says-what-each-choice-costs ()
-  "The panel says how full the context is, what carrying on costs against
-the cache, and a row per choice: its key, its button, its cost and what
-it does, the default marked.  It offers no \"always\": every automatic
-compaction is the user's to decide."
+  "The panel says how full the context is, whether the prompt cache is
+warm, and a row for each of the five ways -- its key, its button, its
+cost and what it does, the default marked.  It is the same list the
+cold-cache question asks, for its own reason.  Carrying on is the
+default, and its capital is the one lasting answer: \"always carry on\"."
   (harness-test-reset-bus)
   (harness-test-load-module 'ui)
-  (let* ((string (cl-letf (((symbol-function 'harness-compaction-history-p)
+  (let* ((lines (harness-ui-compaction-ask-test--page-lines))
+         (string (cl-letf (((symbol-function 'harness-compaction-history-p)
                             (lambda (_id) t)))
                    (harness-ui-compaction-ask-panel-string
-                    "s1" (harness-ui-compaction-ask-test--record))))
-         (lines (harness-ui-compaction-ask-test--lines string)))
-    (should (string-match-p "\\` .*Context nearly full  ~84\\.0k of 100k tokens · Demo scripted\\'"
-                            (nth 0 lines)))
-    (should (equal "   Carry on  $0.315 uncached against $0.025 cached" (nth 1 lines)))
-    (should (equal "" (nth 2 lines)))
-    (should (equal "   Choose what goes first" (nth 3 lines)))
-    (should (equal '("    b  Brief summary    ~$0.0040          narrative, tool calls in brief · read uncached · first and last messages kept"
-                     "    s  Summary          ~$0.330           whole conversation · read uncached · first and last messages kept · default"
-                     "    t  Transcript file  free              whole conversation as a file the model reads"
-                     "    f  Start afresh     free              nothing carried over"
-                     "    x  Cut old context  free              oldest messages dropped · newest kept as they are"
-                     "    c  Carry on         ~$0.315 uncached  whole conversation again, uncached"
-                     "    q  Not now                            message waits")
-                   (seq-subseq lines 4 11)))
-    (should (equal "" (nth 11 lines)))
-    ;; No capitals line: nothing here is answered "always".
-    (should (equal "   Left out: searchable with session_history" (nth 12 lines)))
-    (should (equal "   from the box: C-c . b" (nth 13 lines)))
+                    "s1" (harness-ui-compaction-ask-test--record)))))
+    (should (equal "  Context  ~84.0k of 100k tokens · Demo scripted · cached"
+                   (nth 0 lines)))
+    (should (equal "" (nth 1 lines)))
+    (should (equal "   Options" (nth 2 lines)))
+    (should (equal '("    s  Summary       ~$0.330         context · cached"
+                     "    t  Transcript    free            file"
+                     "    f  Fresh start   free            empty"
+                     "    c  Continuation  ~$0.025 cached  context · default"
+                     "    q  Pause                         pause")
+                   (seq-subseq lines 3 8)))
+    (should (equal "" (nth 8 lines)))
+    ;; The capital of the one lasting answer, carrying on.
+    (should (equal "    C   default" (nth 9 lines)))
+    (should (equal "   session_history" (nth 10 lines)))
+    (should (equal "   Box key · C-c . s" (nth 11 lines)))
     ;; A session without the session_history tool says nothing about it.
     (should-not (string-match-p
                  "session_history"
                  (harness-ui-compaction-ask-panel-string
                   "s1" (harness-ui-compaction-ask-test--record))))
     ;; Nothing is a sentence: no line ends in a full stop.
-    (should-not (cl-some (lambda (l) (string-match-p "[.!?]\\'" l)) lines))
+    (should-not (cl-some (lambda (l) (string-match-p "[.!?]'" l)) lines))
     ;; Every character belongs to the panel, amber.
-    (should (equal "p1" (get-text-property 0 'harness-ui-compaction-ask-panel string)))
-    (should (equal "p1" (get-text-property 0 'harness-ui-carry-panel string)))
+    (should (equal "p-kind" (get-text-property 0 'harness-ui-compaction-ask-panel string)))
+    (should (equal "p-kind" (get-text-property 0 'harness-ui-carry-panel string)))
     (should (memq 'harness-ui-carry-face (ensure-list (get-text-property 0 'face string))))
-    ;; A choice's button says more when hovered.
-    (let* ((at (string-search "Brief summary" string))
+    ;; A choice's button says more when hovered, in one exact line.
+    (let* ((at (string-search "Summary" string))
            (help (get-text-property at 'help-echo string)))
-      (should (string-prefix-p "Brief summary (~$0.0040) · narrative, tool calls in brief" help))
-      (should (string-suffix-p " · Press b on this panel, or click" help)))))
+      (should (equal "Summary · ~$0.330 · context · cached · ~1.5k tokens · key · s · button"
+                     help)))
+    (let* ((at (string-search "Continuation" string))
+           (help (get-text-property at 'help-echo string)))
+      (should (equal (concat "Continuation · ~$0.025 cached · context · default"
+                             " · key · c · default · C · button")
+                     help)))))
+
+(ert-deftest harness-ui-compaction-ask-panel-is-one-page ()
+  "The question is one page: five rows, and no span, messages, tool
+detail or count page behind them."
+  (harness-test-reset-bus)
+  (harness-test-load-module 'ui)
+  (let ((lines (harness-ui-compaction-ask-test--page-lines)))
+    (should (= 13 (length lines)))
+    (should-not (cl-some (lambda (line) (string-match-p "Back\\|Done\\|Compact ·" line))
+                         lines))))
+
+(ert-deftest harness-ui-compaction-ask-panel-shows-a-cold-summary-as-not-offered ()
+  "A cold prompt cache holds no summary: the same menu is shown, the
+summary as a row without a key, marked not offered, and carrying on is
+the default, as it is for the warm menu."
+  (harness-test-reset-bus)
+  (harness-test-load-module 'ui)
+  (let* ((lines (harness-ui-compaction-ask-test--page-lines t))
+         (string (cl-letf (((symbol-function 'harness-compaction-history-p)
+                            (lambda (_id) nil)))
+                   (harness-ui-compaction-ask-panel-string
+                    "s1" (harness-ui-compaction-ask-test--record t)))))
+    (should (equal "  Context  ~84.0k of 100k tokens · Demo scripted · uncached"
+                   (nth 0 lines)))
+    (should (equal "   Options" (nth 2 lines)))
+    (should (equal '("       Summary       no cache          context · uncached"
+                     "    t  Transcript    free              file"
+                     "    f  Fresh start   free              empty"
+                     "    c  Continuation  ~$0.315 uncached  context · default"
+                     "    q  Pause                           pause")
+                   (seq-subseq lines 3 8)))
+    ;; The summary has no key: pressing s does nothing.
+    (let* ((at (string-search "Summary" string))
+           (keymap (get-text-property at 'keymap string)))
+      (should-not (and keymap (lookup-key keymap "s"))))
+    ;; The one button it has says it is not offered.
+    (should (equal "no cache"
+                   (get-text-property (string-search "Summary" string) 'help-echo string)))))
 
 (ert-deftest harness-ui-compaction-ask-panel-is-only-for-its-own-question ()
   "The panel stands in for the ordinary one only for the question that
 asks what goes first before an automatic compaction."
   (harness-test-reset-bus)
   (harness-test-load-module 'ui)
-  (should (harness-ui-compaction-ask--info (harness-ui-compaction-ask-test--record)))
+  (should (harness-ui-compaction-ask--info
+           (harness-ui-compaction-ask-test--record "kind")))
   (should-not (harness-ui-compaction-ask--info
                (list :id "p2" :kind "question" :payload '(:question "Sure?"))))
   (should-not (harness-ui-compaction-ask--insert-panel
@@ -205,7 +262,8 @@ after it, and the turn answers."
       (harness-call 'session/append sid '(:kind user :content "please refactor the parser"))
       (harness-call 'session/append sid '(:kind assistant :content "Done: parser.el rewritten"))
       ;; Over the limit: an 8000 window keeps 7000 usable.
-      (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 3000 :context 7500))
+      ;; No cache stamp: a cold cache, as after a night away.
+      (harness-call 'session/usage-add sid '(:input 4000 :output 10 :context 7500))
       (setq buffer (harness-chat-buffer sid))
       (set-window-buffer (selected-window) buffer)
       (harness-test-wait (lambda () (with-current-buffer buffer
@@ -218,16 +276,23 @@ after it, and the turn answers."
       (harness-test-wait (lambda () (harness-ui-compaction-ask-test--panel buffer)) 5 "the compaction panel")
       (with-current-buffer buffer
         (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-          (should (string-match-p "Context nearly full" text))
-          (should (string-match-p "Choose what goes first" text))
-          (should (string-match-p "Transcript file  free" text)))
+          (should (string-match-p "  Context  ~7\\.5k of 8\\.0k tokens" text))
+          (should (string-match-p "   Options" text))
+          ;; The same menu: a summary shown, not offered, and the ways that
+          ;; ask no model.
+          (should (string-match-p "Summary" text))
+          (should (string-match-p "no cache" text))
+          (should (string-match-p "Transcript" text))
+          (should (string-match-p "Fresh start" text))
+          (should (string-match-p "Continuation" text)))
         ;; The ordinary question panel is not drawn as well.
         (should-not (string-search "Answer \"always\" with a choice"
                                    (buffer-substring-no-properties (point-min) (point-max))))
         (should (harness-ui-compaction-ask-waiting-p sid))
-        ;; t, with point on the panel.
-        (let ((at (harness-ui-compaction-ask-test--panel buffer)))
-          (call-interactively (lookup-key (get-text-property at 'keymap) "t"))))
+        ;; t: the transcript file.
+        (let* ((at (harness-ui-compaction-ask-test--panel buffer))
+               (keymap (get-text-property at 'keymap)))
+          (call-interactively (lookup-key keymap "t"))))
       (harness-test-wait (lambda () (eq 'idle (plist-get (harness-call 'session/get sid) :status)))
                          10 "the turn to end")
       (should (equal "transcript" (harness-node-compaction-kind

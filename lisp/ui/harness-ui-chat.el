@@ -6225,7 +6225,7 @@ that does not report one, it is \"Working\"."
        ("waiting" "Waiting for the model")
        ("thinking" "Thinking")
        ("writing" "Writing")
-       ("compacting" "Compacting the conversation")
+       ("compacting" "Compacting")
        ("tool-input" (concat "Preparing " (if tool (harness-ui-tool-label tool) "a tool call")))
        ("tool" (if (harness-json-true-p (plist-get activity :checking))
                    (concat "Checking permission for " call)

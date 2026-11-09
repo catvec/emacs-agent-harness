@@ -141,7 +141,7 @@
 (defun harness-ui-handoff-test--asking-p (buffer)
   "Non-nil when BUFFER shows the switch question."
   (and (buffer-live-p buffer)
-       (string-match-p "Switch model" (harness-ui-handoff-test--text buffer))))
+       (string-match-p "Model switch" (harness-ui-handoff-test--text buffer))))
 
 (defun harness-ui-handoff-test--list-text ()
   "Return the text of the session list, or nil when there is none."
@@ -154,10 +154,10 @@
     (let* ((sid (harness-ui-handoff-test--session))
            (chat (harness-ui-handoff-test--chat sid)))
       (harness-ui-handoff-test--choose-hosted (lambda () (harness-set-model sid)))
-      (harness-ui-handoff-test--wait-text chat "Switch model")
+      (harness-ui-handoff-test--wait-text chat "Model switch")
       (with-current-buffer chat
         (let* ((text (harness-ui-handoff-test--text chat))
-               (heading (string-match "Switch model" text)))
+               (heading (string-match "Model switch" text)))
           (should (string-match-p (regexp-quote (harness-ui-model-label "hosted:m")) text))
           (should (string-match-p "Demo scripted" text))
           (should (string-match-p "Hosted: own conversation · only the user messages after the model's last reply"
@@ -168,16 +168,16 @@
           (should (string-match-p "^   Cache cost +.*list prices" text))
           ;; The ways to carry it over are those of the cold-cache question,
           ;; with their keys and what each costs.
-          (should (string-match-p "^   Choose how to hand over$" text))
-          (dolist (row '("^    b  Brief summary +~\\$[0-9.]+ +new model .* · narrative, tool calls in brief · read uncached · first and last messages kept$"
-                         "^    s  Summary +~\\$[0-9.]+ +current model Demo scripted · whole conversation · read uncached · first and last messages kept$"
-                         "^    t  Transcript file +free +whole conversation as a file the model reads$"
-                         "^    f  Start afresh +free +nothing carried over$"
-                         "^    q  Cancel +model unchanged$"))
+          (should (string-match-p "^   Options$" text))
+          (dolist (row '("^    b  Brief +~\\$[0-9.]+ +new model .* · narrative · uncached$"
+                         "^    s  Summary +~\\$[0-9.]+ +current model Demo scripted · context · uncached$"
+                         "^    t  Transcript +free +file$"
+                         "^    f  Fresh start +free +empty$"
+                         "^    q  No switch +model unchanged$"))
             (should (string-match-p row text)))
           ;; The keys type in the compose box: the last line says how to
           ;; press one from there, and all of it is a panel of the box.
-          (should (string-match-p "\n   from the box: C-c \\. b\n" text))
+          (should (string-match-p "\n   Box key · C-c \\. b\n" text))
           (let ((start (harness-ui-carry-position)))
             (should (cl-loop for i from start
                              below (next-single-property-change start 'harness-ui-carry-panel nil (point-max))
@@ -204,7 +204,7 @@
     (let* ((sid (harness-ui-handoff-test--session))
            (chat (harness-ui-handoff-test--chat sid)))
       (harness-ui-handoff-test--choose-hosted (lambda () (harness-set-model sid)))
-      (harness-ui-handoff-test--wait-text chat "Switch model")
+      (harness-ui-handoff-test--wait-text chat "Model switch")
       (harness-ui-handoff-test--press chat "q")
       (harness-test-wait (lambda () (not (harness-ui-handoff-test--asking-p chat))) 5 "the panel to go")
       (should (equal "demo:scripted" (plist-get (harness-call 'session/get sid) :model)))
@@ -218,7 +218,7 @@ though the panel goes and the tail is drawn again."
     (let* ((sid (harness-ui-handoff-test--session))
            (chat (harness-ui-handoff-test--chat sid)))
       (harness-ui-handoff-test--choose-hosted (lambda () (harness-set-model sid)))
-      (harness-ui-handoff-test--wait-text chat "Switch model")
+      (harness-ui-handoff-test--wait-text chat "Model switch")
       (with-current-buffer chat
         (goto-char harness-compose-end)
         (insert "draft")
@@ -252,7 +252,7 @@ the question shows: the minibuffer is never asked."
           (harness-ui-handoff-test--choose-hosted #'harness-set-model))
         (harness-test-wait (lambda () (with-current-buffer list (harness-ui-carry-position))) 5 "the panel in the list")
         (should-not (harness-ui-handoff-test--asking-p chat))
-        (should (string-match-p "Switch model  Demo scripted → " (harness-ui-handoff-test--list-text)))
+        (should (string-match-p "Model switch  Demo scripted → " (harness-ui-handoff-test--list-text)))
         (let ((said nil))
           (cl-letf (((symbol-function 'message)
                      (lambda (format-string &rest args)
@@ -291,11 +291,11 @@ asks in the session list, shown for it, and not in the minibuffer."
            (chat (harness-ui-handoff-test--chat one)))
       (with-current-buffer chat
         (harness-ui-handoff-test--choose-hosted #'harness-set-model-all))
-      (harness-ui-handoff-test--wait-text chat "Switch model")
+      (harness-ui-handoff-test--wait-text chat "Model switch")
       (with-current-buffer chat
         (let ((text (harness-ui-handoff-test--text chat)))
           (should (string-match-p "2 sessions" text))
-          (should (string-match-p "^   Sessions +.* · 2 of 2 change$" text))))
+          (should (string-match-p "^   Sessions +.* · 2 of 2 changed$" text))))
       (harness-ui-handoff-test--press chat "t")
       (harness-test-wait (lambda () (and (equal "hosted:m" (plist-get (harness-call 'session/get one) :model))
                                          (equal "hosted:m" (plist-get (harness-call 'session/get two) :model))))
@@ -320,8 +320,8 @@ switches them all."
                          5 "the panel in the session list")
       (let* ((list (get-buffer "*harness sessions*"))
              (text (harness-ui-handoff-test--list-text)))
-        (should (string-match-p "Switch model  2 sessions → " text))
-        (should (string-match-p "^   Sessions +.* · 2 of 2 change$" text))
+        (should (string-match-p "Model switch  2 sessions → " text))
+        (should (string-match-p "^   Sessions +.* · 2 of 2 changed$" text))
         ;; The panel is above the rows; point is on it.
         (should (< (harness-ui-carry-position list) (string-match-p " idle " text)))
         (should (with-current-buffer list (harness-ui-carry-on-panel-p)))
@@ -353,7 +353,7 @@ the rows of the list the command ran in, and cancelling changes nothing."
           (harness-ui-sessions--mark two)
           (harness-ui-handoff-test--choose-hosted #'harness-set-model))
         (harness-test-wait (lambda () (with-current-buffer list (harness-ui-carry-position))) 5 "the panel in the list")
-        (should (string-match-p "Switch model  2 sessions → " (harness-ui-handoff-test--list-text)))
+        (should (string-match-p "Model switch  2 sessions → " (harness-ui-handoff-test--list-text)))
         (harness-ui-handoff-test--press list "q")
         (harness-test-wait (lambda () (with-current-buffer list (not (harness-ui-carry-position)))) 5 "the panel to go")
         (dolist (sid (list one two))
@@ -397,23 +397,23 @@ conversation has nothing cached and no panel shows."
            (sid (harness-ui-handoff-test--session))
            (chat (harness-ui-handoff-test--chat sid)))
       (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 900 :context 920))
-      (harness-ui-handoff-test--wait-text chat "Prompt cache expired")
+      (harness-ui-handoff-test--wait-text chat "Cache  expired")
       (harness-ui-handoff-test--choose-hosted (lambda () (harness-set-model sid)))
-      (harness-ui-handoff-test--wait-text chat "Switch model")
+      (harness-ui-handoff-test--wait-text chat "Model switch")
       (let ((text (harness-ui-handoff-test--text chat)))
-        (should (string-match-p "current model Demo scripted · whole conversation · read uncached · first and last messages kept · cache expired at [0-9:]+ · all uncached"
+        (should (string-match-p "current model Demo scripted · context · uncached · cache · expired · [0-9:]+ · all uncached"
                                 text))
         (should-not (string-match-p "cache warm" text))
-        (should-not (string-match-p "Prompt cache expired" text)))
+        (should-not (string-match-p " ◷ Cache  expired" text)))
       (harness-ui-handoff-test--press chat "q")
-      (harness-ui-handoff-test--wait-text chat "Prompt cache expired")
+      (harness-ui-handoff-test--wait-text chat "Cache  expired")
       (should-not (harness-ui-handoff-test--asking-p chat))
       (harness-ui-handoff-test--choose-hosted (lambda () (harness-set-model sid)))
-      (harness-ui-handoff-test--wait-text chat "Switch model")
+      (harness-ui-handoff-test--wait-text chat "Model switch")
       (harness-ui-handoff-test--press chat "t")
       (harness-test-wait (lambda () (equal "hosted:m" (plist-get (harness-call 'session/get sid) :model)))
                          10 "the switch")
-      (harness-test-wait (lambda () (not (string-match-p "Switch model\\|Prompt cache"
+      (harness-test-wait (lambda () (not (string-match-p "Model switch\\| ◷ Cache"
                                                          (harness-ui-handoff-test--text chat))))
                          5 "the panel and the cache panel to go")
       (should-not (plist-get (harness-call 'session/get sid) :cache)))))
@@ -446,11 +446,11 @@ every cache warm it says so."
     (should (equal "cache warm" (funcall note warm warm)))
     (should-not (funcall note unknown))
     (should-not (funcall note warm unknown))
-    (should (equal (format "cache expired at %s · all uncached" (harness-ui-format-clock 9300.0 now))
+    (should (equal (format "cache · expired · %s · all uncached" (harness-ui-format-clock 9300.0 now))
                    (funcall note expired)))
     (should (equal "cache cold · all uncached" (funcall note other)))
     (should (equal "caches expired · all uncached" (funcall note expired other)))
-    (should (equal "uncached where the cache lapsed (1 of 3)" (funcall note warm expired unknown)))
+    (should (equal "cache lapsed · 1 of 3 uncached" (funcall note warm expired unknown)))
     ;; Nouns, not sentences.
     (dolist (text (list (funcall note expired) (funcall note other) (funcall note expired other)
                         (funcall note warm expired unknown)))
@@ -471,13 +471,13 @@ turn does, and so does a cache that is warm."
          (warm '(:from "a:m" :running t :cache (:at 9900.0 :ttl 300 :expires 10200.0 :model "a:m")))
          (note (lambda (&rest checks) (harness-ui-handoff--cache-note checks now))))
     ;; The same stamp, said of an idle session, is a lapsed cache.
-    (should (equal (format "cache expired at %s · all uncached" (harness-ui-format-clock 9300.0 now))
+    (should (equal (format "cache · expired · %s · all uncached" (harness-ui-format-clock 9300.0 now))
                    (funcall note idle)))
     (should-not (funcall note expired))
     (should (equal "cache warm" (funcall note warm)))
     (should (equal "cache cold · all uncached" (funcall note other)))
     ;; A batch counts the lapsed caches of the sessions that wait.
-    (should (equal "uncached where the cache lapsed (1 of 2)" (funcall note idle expired)))
+    (should (equal "cache lapsed · 1 of 2 uncached" (funcall note idle expired)))
     (should-not (funcall note expired expired))))
 
 (ert-deftest harness-ui-handoff-cache-note-says-when-a-redaction-dropped-the-cache ()
@@ -495,18 +495,18 @@ a batch, and a cache that still lasts."
          (note (lambda (&rest checks) (harness-ui-handoff--cache-note checks now)))
          (clock (harness-ui-format-clock 10100.0 now)))
     ;; The drop is said with its moment, which is the cache's `:expires', and by whom.
-    (should (equal (format "cache dropped at %s by a redaction · all uncached" clock) (funcall note dropped)))
-    (should (equal (format "cache dropped at %s by a redaction · all uncached"
+    (should (equal (format "cache · dropped · %s · redaction · all uncached" clock) (funcall note dropped)))
+    (should (equal (format "cache · dropped · %s · redaction · all uncached"
                            (harness-ui-format-clock 10100.0 10200.0))
                    (harness-ui-handoff--cache-note (list dropped) 10200.0)))
     ;; Not the words for a cache that lapsed by itself, which read as they did.
-    (should (equal (format "cache expired at %s · all uncached" (harness-ui-format-clock 9300.0 now))
+    (should (equal (format "cache · expired · %s · all uncached" (harness-ui-format-clock 9300.0 now))
                    (funcall note lapsed)))
     (should (equal "cache cold · all uncached" (funcall note other)))
     ;; A batch says only how many lapsed, as ever.
     (should (equal "caches expired · all uncached" (funcall note dropped lapsed)))
     (should (equal "caches expired · all uncached" (funcall note dropped dropped)))
-    (should (equal "uncached where the cache lapsed (1 of 2)" (funcall note warm dropped)))
+    (should (equal "cache lapsed · 1 of 2 uncached" (funcall note warm dropped)))
     (should (equal "cache warm" (funcall note warm)))))
 
 (ert-deftest harness-ui-handoff-the-summary-costs-what-its-cache-lets-it ()
@@ -555,7 +555,7 @@ that brings no choices gets the table's, with the same modes."
                    (mapcar (lambda (c) (plist-get c :choice)) choices)))
     (should (equal '("new model Model B" "current model Model A" nil nil nil)
                    (mapcar (lambda (c) (plist-get c :by)) choices)))
-    (should (equal "Cancel" (plist-get (car (last choices)) :label)))
+    (should (equal "No switch" (plist-get (car (last choices)) :label)))
     (should (equal "model unchanged" (plist-get (car (last choices)) :what)))
     (dolist (entry '(("brief" . compact-new) ("summary" . compact) ("transcript" . transcript)
                      ("fresh" . none) ("hold" . cancel) ("nonsense" . cancel)))
@@ -579,7 +579,7 @@ the others, and says how many change in all: one fact, not a page."
                          (number-sequence 1 10)))
          (row (cadr (assoc "Sessions" (harness-ui-handoff--facts checks 14)))))
     (should (equal (concat "“Task 1” · “Task 2” · “Task 3” · “Task 4” · “Task 5” · “Task 6”"
-                           " · 4 more · 10 of 14 change")
+                           " · 4 more · 10 of 14 changed")
                    row))
     ;; One session names no batch, and shows what the new model's cold cache costs.
     (let ((facts (harness-ui-handoff--facts (list (harness-ui-handoff-test--check
@@ -589,7 +589,7 @@ the others, and says how many change in all: one fact, not a page."
                                             1)))
       (should (equal '(("Timing" "next step, not mid-step")
                        ("Cache cost" "1k tokens: $0.01 to write, $0.001 to read (list prices)")
-                       ("Turn" "running · switch at its next step"))
+                       ("Turn" "running · switch at next step"))
                      facts)))))
 
 (ert-deftest harness-ui-handoff-cancels-when-nothing-can-show-the-question ()
@@ -604,7 +604,7 @@ word, and nothing is asked in the minibuffer."
       (harness-ui-handoff--ask (list (harness-ui-handoff-test--check nil)) "Model B" 1 "s1" nil
                                (lambda (mode) (setq answer mode))))
     (should (eq 'cancel answer))
-    (should (equal '("Model unchanged: no buffer to ask in") said))))
+    (should (equal '("Model unchanged · no buffer") said))))
 
 (provide 'harness-ui-handoff-test)
 ;;; harness-ui-handoff-test.el ends here

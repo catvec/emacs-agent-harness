@@ -91,13 +91,12 @@
 ;; (`harness-supervisor--conversation-tokens', recorded on the plan as
 ;; `:fork-tokens') `submit_plan' refuses fork steps, and a fork step of
 ;; an older plan past it fails before a worker or a request exists, as
-;; does one whose size cannot be measured.  Nothing compacts it first:
-;; the compaction's own request has a different system prompt and tool
-;; list from the conversation's, so no prompt cache covers it, and it
-;; reads the whole conversation cold and then writes a summary -- often
-;; more than the turn it would save.  The way out is a fresh step, whose
-;; brief is the plan's summary and its own prompt, never the
-;; conversation.  The window of both is capped as
+;; does one whose size cannot be measured.  Nothing compacts it first: a
+;; compaction replaces the supervisor's conversation, which every step
+;; after it reads, and its summary costs a model request before the fork
+;; it would save -- while the worker would inherit a summary rather than
+;; the plan's conversation.  The way out is a fresh step, whose brief is
+;; the plan's summary and its own prompt, never the conversation.  The window of both is capped as
 ;; `harness-tools-agent-context-limit' says, and never silently: a hint
 ;; in the worker's transcript says so
 ;; (`harness-supervisor--limit-hint').  The worker's reply is the step's
@@ -374,9 +373,10 @@ prompt and tools a fresh worker has too
 \(`harness-supervisor--conversation-tokens'), `submit_plan' refuses
 fork steps, and a fork step of a plan made before, or past a limit
 lowered since, fails before a worker is made.  It is not compacted into
-a summary first: the compaction's request has a different system prompt
-and tool list, so its input is uncached too.  Make the step fresh
-instead.  Nil puts no limit on forks.  It is on the settings page, under
+a summary first: a compaction replaces the supervisor's conversation,
+which every step after it reads, and its summary costs a model request
+before the fork it would save.  Make the step fresh instead.  Nil puts
+no limit on forks.  It is on the settings page, under
 Supervisor mode."
   :type '(choice (const :tag "No limit" nil) (integer :tag "Tokens"))
   :safe (lambda (v) (or (null v) (and (integerp v) (>= v 0))))
@@ -2152,9 +2152,9 @@ A fork step of a plan whose conversation is past the limit
 its size, or a limit lowered since; `submit_plan' refuses such a fork in
 a new plan), or whose size cannot be measured, fails the promise before
 a fork or a request exists.  Nothing compacts it first: a compaction
-reads the whole conversation cold on a request whose system prompt and
-tool list no prompt cache holds, and then writes a summary -- often more
-than the turn it would save.  The way out is a fresh step.
+replaces the supervisor's conversation, which every step after it reads,
+and its summary costs a model request before the fork it would save.
+The way out is a fresh step.
 
 Every worker's context window is capped as a sub-agent's is
 \(`harness-supervisor--context-limit'), and once the worker exists a

@@ -27,8 +27,9 @@ handoff to another provider carries a conversation over
 (harness-handoff.el), here on the session's own provider:
 
 - `summary`: the session's own model writes a thorough handoff
-  summary of the whole conversation.  It reads all of it again, from
-  the prompt cache while that lasts and uncached once it lapsed.
+  summary, on a request that starts as the conversation's next step
+  would, so it reads the conversation from the prompt cache while
+  that lasts and uncached once it lapsed.
 - `brief`: a cheap model (`harness-compaction-brief-model`, by
   default the simple tier of the session's provider) summarises the
   conversation's narrative, as a handoff's new model does
@@ -136,7 +137,9 @@ wait (`agent/show-waiting`, `harness-compaction-show-waiting`): a UI
 draws it as a queued message, above its compose box, with the buttons
 that take it back, and it leaves the list as it is recorded.
 
-The summarisation request has no tools.  An API provider gets the
+A summary is the chat's next request, so it has the chat's own tools;
+the instruction tells the model not to call one.  A brief summary is a
+request of its own, with no tools.  An API provider gets the
 transcript as ordinary messages.  A hosted-loop provider keeps the
 conversation itself and is only sent the newest user messages, so it
 summarises on a fork of the session's provider state (as naming
@@ -155,26 +158,37 @@ message, each tool call and result in one line -- so a summary can be
 made on the new provider without that provider's context taking the
 whole conversation, payloads and all, at once.
 
-A summary and a brief summary read the whole conversation as the input
-of a request of their own -- a system prompt and, for a summary, no
-tools -- so no cache of the chat covers that request, and the size of
-what the model writes says nothing about the size of what it reads.  A
-cold one is therefore as expensive as the turn it would save, and can
-cost more.  Only an estimate that says that request's own prefix is
-cached (`harness-compaction-request-warm-p`, which no chat's cache
-satisfies) lets one be sent: every automatic path asks
-`harness-compaction--effective-kind` for the kind it may use, and a
-summary or brief whose own request is not cached becomes a transcript.
-`compaction/compact`
+A summary is made as the conversation's next step would be: the same
+model, system prompt, tools, thinking level and conversation, with the
+summarisation instruction appended as its last user message
+(`harness-compaction--prefix-request`).  A provider's prompt cache
+reads a request only as far as it starts like the one that wrote the
+cache, so the conversation is read at the cache price while the cache
+lasts; only the instruction is uncached input.  The question before
+an automatic compaction asks one flat list, the same the cold-cache
+question asks (`harness-compaction--ask`): Summary, Transcript,
+Fresh start, Continuation and Pause.  A summary is shown, no cache,
+when the estimate says its own request would read the conversation
+uncached, and its row says so.  A `brief` summary renders the
+conversation's narrative anew, and a hosted loop is sent the
+instruction as its newest message of a conversation it holds itself:
+no cache of the chat covers either, so a brief is for a handoff, and
+neither is made without an estimate that says its own request's prefix
+is cached (`harness-compaction--prefix-cache-p`).  Every automatic
+path asks `harness-compaction--effective-kind` for the kind it may use,
+and a summary or brief whose own request is not cached becomes a
+transcript.  `compaction/compact`
 is the single place that decides (`harness-compaction--compact-now`), so
 a queued compaction, a stale caller or a new one cannot bypass it: OPTS
 `:fallback` is the kind that asks no model to use instead, and without
 one a summary whose own request is not cached is refused before a
 request exists.  No choice, approval or saved answer is warmth: a user
-who picks a summary, a saved always answer, a handoff mode and the
-compact panel all fail closed the same way.  When neither the transcript
-nor a cut can be made, the turn is held rather than the whole
-conversation sent uncached.
+who picks a summary, a saved always answer and the compact panel all
+fail closed the same way.  A handoff's OPTS `:transfer` is the one
+exception, as the conversation is going to a provider that never saw
+it and no cache can hold it.  When neither the transcript nor a cut
+can be made, the turn is held rather than the whole conversation sent
+uncached.
 
 `compaction/status` grades how full the window is so a UI can colour
 the token count progressively.
@@ -200,6 +214,7 @@ the token count progressively.
 
 - `harness-compaction-ask` — Non-nil to ask before an automatic compaction, where the user can be asked.
 - `harness-compaction-brief-model` — Model that writes a brief summary, as PROVIDER:NAME, or `auto`.
+- `harness-compaction-carry-on` — Non-nil to carry on when a conversation nears its context window.
 - `harness-compaction-kind` — How a conversation that nears its model's context window is compacted.
 - `harness-compaction-mid-turn` — Non-nil to compact in the middle of a turn that outgrew its context limit.
 
@@ -211,6 +226,7 @@ the token count progressively.
 - `agent/note-activity` ([agent](agent.md))
 - `agent/running` ([agent](agent.md))
 - `agent/show-waiting` ([agent](agent.md))
+- `config/set` ([config](config.md)), when it is loaded
 - `provider/capabilities` ([provider](provider.md))
 - `provider/fork` ([provider](provider.md))
 - `provider/model` ([provider](provider.md))

@@ -76,68 +76,116 @@ what, the costs going beside them."
     ;; A cut old context asks no model either.
     (should (equal "free" (harness-ui-compact-cost-text e 'truncate)))
     (should (equal "free" (harness-ui-compact-cost-text nil 'truncate)))
-    (should (equal "Cut old context" (harness-ui-compact-label 'truncate)))
-    (should (equal (concat "The oldest 17 nodes (~84.5k tokens) are dropped and the most recent 3"
-                           " (~2.0k tokens) are kept as they were; a note says what went."
-                           "  No model is asked anything.")
+    (should (equal "Context cut" (harness-ui-compact-label 'truncate)))
+    (should (equal "17 nodes dropped · ~2.0k tokens kept · no request"
                    (harness-ui-compact-describe e 'truncate)))
     ;; Nothing to cut: the whole conversation already fits.
     (let ((nothing (list :kinds (list (list :kind "truncate" :cost 0.0 :after 900 :kept 2 :dropped 0)))))
-      (should (string-match-p "\\`Nothing can be cut: the whole conversation already fits"
-                              (harness-ui-compact-describe nothing 'truncate))))
+      (should (equal "nothing cut · fits window · no request"
+                   (harness-ui-compact-describe nothing 'truncate))))
     (should (equal "Fresh start" (harness-ui-compact-label 'fresh)))
-    (should (string-match-p (concat "\\`Nothing of the conversation is carried over: .* note of ~90 tokens"
-                                    ".* with session_history .*No model is asked anything\\.\\'")
-                            (harness-ui-compact-describe e 'fresh)))
+    (should (equal "fresh · ~90 tokens note · session_history · no request"
+                   (harness-ui-compact-describe e 'fresh)))
     (should-not (harness-ui-compact-cost-text nil 'brief))
     (let ((unpriced (list :kinds (list (list :kind "brief" :model "x:y" :cost nil)))))
       (should-not (harness-ui-compact-cost-text unpriced 'brief)))
-    (should (equal "Brief summary" (harness-ui-compact-label 'brief)))
-    (should (equal "Transcript file" (harness-ui-compact-label 'transcript)))
-    (should (equal (concat "Small reads the conversation's narrative, ~725 tokens in all."
-                           "  Tool payloads are left out, which the summary says.")
+    (should (equal "Brief" (harness-ui-compact-label 'brief)))
+    (should (equal "Transcript" (harness-ui-compact-label 'transcript)))
+    (should (equal "Small · narrative · ~725 tokens · no tool payloads"
                    (harness-ui-compact-describe e 'brief)))
-    (should (equal "Big reads the whole conversation again, ~84.5k tokens uncached."
+    (should (equal "Big · context · ~84.5k tokens · uncached"
                    (harness-ui-compact-describe e 'summary)))
-    ;; A summary on a fork of a warm hosted conversation reads it from the cache.
+    ;; A summary whose own request the prompt cache holds reads it there,
+    ;; and says what the recipe keeps.
     (let ((warm (list :context 84500
-                      :kinds (list (list :kind "summary" :model-label "Big" :input 84541 :cached t :cost 0.1)))))
-      (should (string-suffix-p "~84.5k tokens mostly from the cache." (harness-ui-compact-describe warm 'summary))))
-    (should (string-match-p "\\`The whole conversation goes to a file .* note of ~84 tokens .*No model is asked anything\\.\\'"
-                            (harness-ui-compact-describe e 'transcript)))
-    (should (equal "the next message sends ~84.5k tokens uncached, about $0.422"
+                      :kinds (list (list :kind "summary" :model-label "Big" :input 84541
+                                        :cached t :available t :cost 0.1)))))
+      (should (equal "Big · context · ~84.5k tokens · cached"
+                     (harness-ui-compact-describe warm 'summary))))
+    (should (equal "file · ~84 tokens note · no request"
+                   (harness-ui-compact-describe e 'transcript)))
+    (should (equal "~84.5k tokens · uncached · $0.422"
                    (harness-ui-compact-carry-on-text e)))
-    (should (equal "the next message sends ~84.5k tokens from the prompt cache"
+    (should (equal "~84.5k tokens · cached"
                    (harness-ui-compact-carry-on-text '(:context 84500 :cached t))))))
 
-(ert-deftest harness-ui-compact-asks-with-the-costs ()
-  "The question offers each kind with its cost, the cheap one first, and
-cancel; the help it shows first is a table of who writes what for how
-much, and what carrying on costs."
-  (let (asked)
+(defun harness-ui-compact-test--warm-estimate ()
+  "Return the estimate with the prompt cache warm: a summary can be made."
+  (plist-put
+   (plist-put (copy-sequence harness-ui-compact-test--estimate) :cached t)
+   :kinds
+   (mapcar (lambda (k)
+             (if (equal (plist-get k :kind) "summary")
+                 (plist-put (plist-put (copy-sequence k) :cached t) :available t)
+               k))
+           (plist-get harness-ui-compact-test--estimate :kinds))))
+
+(ert-deftest harness-ui-compact-asks-one-page ()
+  "The question is one page, the same menu the automatic question shows:
+Summary, Transcript, Fresh start and Continuation, with what each
+costs.  Carry on answers nothing, as cancelling did."
+  (let ((answers '(?s ?c))
+        (pages nil))
     (cl-letf (((symbol-function 'read-multiple-choice)
                (lambda (prompt choices &optional help show-help &rest _)
-                 (setq asked (list prompt choices help show-help))
-                 (assq ?b choices))))
-      (should (eq 'brief (harness-ui-compact-read '(:id "s1" :name "Parser work")
-                                                  harness-ui-compact-test--estimate))))
-    (pcase-let ((`(,prompt ,choices ,help ,show-help) asked))
-      (should (equal "Compact the conversation" prompt))
-      (should (equal '((?b "brief summary (~$0.011)") (?s "summary (~$0.463)")
-                       (?t "transcript file (free)") (?f "fresh start (free)")
-                       (?c "cut old context (free)") (?q "cancel"))
-                     (mapcar (lambda (c) (list (car c) (cadr c))) choices)))
+                 (push (list prompt choices help show-help) pages)
+                 (assq (pop answers) choices))))
+      (should (eq 'summary
+                  (harness-ui-compact-read '(:id "s1" :name "Parser work")
+                                           (harness-ui-compact-test--warm-estimate)))))
+    (setq pages (nreverse pages))
+    (should (= 1 (length pages)))
+    (pcase-let ((`(,prompt ,choices ,help ,show-help) (nth 0 pages)))
+      (should (equal "Options" prompt))
+      (should (equal '((?s "Summary (~$0.463)") (?t "Transcript (free)")
+                       (?f "Fresh start (free)") (?c "Continuation (~$0.422 cached)"))
+                     (mapcar (lambda (c) (list (car c) (nth 1 c))) choices)))
       (should (equal "*Harness compaction*" show-help))
-      (should (string-match-p "Session +“Parser work”" help))
-      (should (string-match-p "Model +Big" help))
-      (should (string-match-p "Carry on +the next message sends ~84\\.5k tokens uncached, about \\$0\\.422" help))
-      (should (string-match-p "^  b +brief summary +Small +~\\$0\\.011 +Small reads the conversation's narrative" help))
-      (should (string-match-p "^  s +summary +Big +~\\$0\\.463 +Big reads the whole" help))
-      (should (string-match-p "^  t +transcript file +- +free +The whole conversation" help))
-      (should (string-match-p "^  f +fresh start +- +free +Nothing of the conversation" help))
-      (should (string-match-p "^  c +cut old context +- +free +The oldest 17 nodes" help)))
-    (cl-letf (((symbol-function 'read-multiple-choice) (lambda (_p choices &rest _) (assq ?q choices))))
-      (should-not (harness-ui-compact-read '(:id "s1") harness-ui-compact-test--estimate)))))
+      (should (string-match-p "Session · “Parser work”" help))
+      (should (string-match-p "Model · Big" help))
+      (should (string-match-p "Cache · warm" help))
+      (should (string-match-p "Continuation · ~84\\.5k tokens · cached"
+                              help))
+      (should (equal "context · cached"
+                     (nth 2 (assq ?s choices))))
+      (should (equal "file"
+                     (nth 2 (assq ?t choices)))))
+    ;; Carry on answers nothing, as cancelling did.
+    (cl-letf (((symbol-function 'read-multiple-choice)
+               (lambda (_prompt choices &rest _) (assq ?c choices))))
+      (should-not (harness-ui-compact-read '(:id "s1")
+                                           (harness-ui-compact-test--warm-estimate))))))
+
+(ert-deftest harness-ui-compact-a-cold-summary-is-shown-not-offered ()
+  "The question shows the same menu when the prompt cache does not hold
+the summary's request: the summary is a row with no price but \"not
+offered\", choosing it says so and asks again, and the transcript file
+is what is made."
+  (let ((answers '(?s ?t))
+        (pages nil)
+        (messages nil))
+    (cl-letf (((symbol-function 'read-multiple-choice)
+               (lambda (prompt choices &optional help &rest _)
+                 (push (list prompt choices help) pages)
+                 (assq (pop answers) choices)))
+              ((symbol-function 'message)
+               (lambda (format &rest args) (push (apply #'format format args) messages))))
+      (should (eq 'transcript
+                  (harness-ui-compact-read '(:id "s1" :name "Parser work")
+                                           harness-ui-compact-test--estimate))))
+    (setq pages (nreverse pages))
+    (should (= 2 (length pages)))
+    (let ((first (nth 0 pages)))
+      (should (equal "Options" (nth 0 first)))
+      (should (equal '((?s "Summary (no cache)") (?t "Transcript (free)")
+                       (?f "Fresh start (free)") (?c "Continuation (~$0.422 uncached)"))
+                     (mapcar (lambda (c) (list (car c) (nth 1 c))) (nth 1 first))))
+      (should (string-match-p "Summary · no cache"
+                              (nth 2 first))))
+    ;; The same page again, and t makes a transcript.
+    (should (equal "Options" (nth 0 (nth 1 pages))))
+    (should (cl-some (lambda (m) (string-match-p "\\`Summary · no cache" m))
+                     messages))))
 
 (ert-deftest harness-ui-compact-kind-from-words ()
   "/compact takes a kind by name or by its key; nothing asks."
@@ -156,25 +204,28 @@ much, and what carrying on costs."
 (ert-deftest harness-ui-compact-says-what-it-did ()
   "The outcome names the kind, how much it compacted, and the file or
 the model."
-  (should (equal "Compacted ~84.5k tokens into /tmp/p/.harness/transcripts/t.md"
+  (should (equal "Compaction · ~84.5k tokens · transcript · /tmp/p/.harness/transcripts/t.md"
                  (harness-ui-compact-outcome
                   '(:kind "compaction"
                     :meta (:compaction "transcript" :file "/tmp/p/.harness/transcripts/t.md" :input-tokens 84500)))))
-  (should (equal (format "Compacted ~84.5k tokens into a brief summary by %s" (harness-ui-model-label "demo:scripted"))
+  (should (equal (format "Compaction · ~84.5k tokens · brief · %s" (harness-ui-model-label "demo:scripted"))
                  (harness-ui-compact-outcome
                   '(:kind "compaction" :meta (:compaction "brief" :model "demo:scripted" :input-tokens 84500)))))
-  (should (equal "Compacted ~2.0k tokens into a summary"
+  (should (equal "Compaction · ~2.0k tokens · summary"
                  (harness-ui-compact-outcome '(:kind "compaction" :meta (:compaction "summary" :input-tokens 2000)))))
-  (should (equal "Compacted the conversation into a summary"
+  (should (equal "Compaction · ~84.5k tokens · summary"
+                 (harness-ui-compact-outcome
+                  '(:kind "compaction" :meta (:compaction "summary" :input-tokens 84500)))))
+  (should (equal "Compaction · conversation · summary"
                  (harness-ui-compact-outcome '(:kind "compaction" :meta nil))))
-  (should (equal "Started afresh, leaving ~84.5k tokens behind; session_history reaches it"
+  (should (equal "Fresh start · ~84.5k tokens"
                  (harness-ui-compact-outcome '(:kind "compaction" :meta (:compaction "fresh" :input-tokens 84500)))))
-  (should (equal "Cut ~84.5k tokens of older conversation away, keeping the most recent"
+  (should (equal "Context cut · ~84.5k tokens"
                  (harness-ui-compact-outcome
                   '(:kind "compaction" :meta (:compaction "truncate" :input-tokens 84500)))))
-  (should (equal "Starting afresh…" (harness-ui-compact-doing 'fresh)))
-  (should (equal "Cutting the oldest context away…" (harness-ui-compact-doing 'truncate)))
-  (should (equal "Compacting the conversation into a brief summary…" (harness-ui-compact-doing 'brief))))
+  (should (equal "Fresh start" (harness-ui-compact-doing 'fresh)))
+  (should (equal "Context cut" (harness-ui-compact-doing 'truncate)))
+  (should (equal "Compaction · brief" (harness-ui-compact-doing 'brief))))
 
 (ert-deftest harness-ui-compact-asks-how-when-the-turn-is-running ()
   "A session running a turn is asked to interrupt the step and compact
@@ -198,7 +249,7 @@ cancelling does nothing.  An idle session still compacts now."
               ((symbol-function 'read-multiple-choice)
                (lambda (prompt choices &rest _) (setq asked (list prompt choices)) (list ?q nil))))
       (harness-compact "s1" 'transcript)
-      (should (equal "Compacting “Parser work”, which is running a turn" (car asked)))
+      (should (equal "Compaction · “Parser work” · running" (car asked)))
       (should (equal '(?i ?q ?c) (mapcar #'car (cadr asked))))
       (should (equal '(:kind "transcript" :fallback "transcript" :queue t)
                      (plist-get (cadr (car calls)) :opts))))
@@ -233,9 +284,9 @@ cancelling does nothing.  An idle session still compacts now."
   "The summary the demo provider writes.")
 
 (defvar harness-ui-compact-test--warm t
-  "Whether the estimate is simulated as proving the compaction request cached.
+  "Whether the prompt cache is simulated as holding a summary's request.
 The panel and slash-command mechanics leave it t; a test of the cold rule
-binds it nil and the real `harness-compaction-request-warm-p' decides.")
+binds it nil and the real `harness-compaction--prefix-cache-p' decides.")
 
 (defmacro harness-ui-compact-test-with (&rest body)
   "Load the state layer with compaction, the demo provider and the chat, run BODY."
@@ -259,11 +310,14 @@ binds it nil and the real `harness-compaction-request-warm-p' decides.")
        (dolist (m '(ui ui-compose ui-markdown ui-chat ui-compact))
          (harness-test-load-module m))
        (clrhash harness-ui--sessions)
-       (cl-letf* ((warm (symbol-function 'harness-compaction-request-warm-p))
-                  ((symbol-function 'harness-compaction-request-warm-p)
-                   (lambda (session-id kind &optional model)
-                     (or harness-ui-compact-test--warm
-                         (funcall warm session-id kind model)))))
+       (cl-letf* ((warm (symbol-function 'harness-compaction--prefix-cache-p))
+                  ((symbol-function 'harness-compaction--prefix-cache-p)
+                   (lambda (session)
+                     (if harness-ui-compact-test--warm
+                         (and (not (harness-compaction--hosted-model-p
+                                    (plist-get session :model)))
+                              t)
+                       (funcall warm session)))))
         (unwind-protect
            (progn ,@body)
          (maphash (lambda (_ b) (when (buffer-live-p b) (kill-buffer b))) harness-chat--buffers)
@@ -348,25 +402,24 @@ what kind of compaction it was.  /compact alone asks, with the costs."
           (cl-letf (((symbol-function 'find-file-other-window) (lambda (f &rest _) (setq visited f))))
             (funcall action))
           (should (equal file visited))))
-      ;; Asked: the estimate's costs, and a brief summary chosen.
-      (let (choices)
+      ;; Asked: one page, with the costs, and a summary chosen.
+      (let (choices (answers '(?s)))
         (cl-letf (((symbol-function 'read-multiple-choice)
-                   (lambda (_prompt offered &rest _) (setq choices offered) (assq ?b offered))))
+                   (lambda (_prompt offered &rest _)
+                     (unless choices (setq choices offered))
+                     (assq (pop answers) offered))))
           (harness-ui-compact-test--send buffer "/compact")
           (harness-test-wait (lambda () (= 2 (length (harness-ui-compact-test--compactions sid)))) 10
-                             "the brief summary"))
-        (should (equal '(?b ?s ?t ?f ?c ?q) (mapcar #'car choices)))
-        ;; The demo model is priced: both summaries say what they cost.
-        (should (string-match-p "\\`brief summary (~\\$[0-9.]+)\\'" (cadr (assq ?b choices))))
-        (should (string-match-p "\\`summary (~\\$[0-9.]+)\\'" (cadr (assq ?s choices))))
-        (should (equal "transcript file (free)" (cadr (assq ?t choices)))))
+                             "the summary"))
+        (should (equal '(?s ?t ?f ?c) (mapcar #'car choices)))
+        ;; The demo model is priced: the summary says what it costs.
+        (should (string-match-p "\\`Summary (~\\$[0-9.]+)\\'" (nth 1 (assq ?s choices)))))
       (let ((node (cadr (harness-ui-compact-test--compactions sid))))
-        (should (equal "brief" (harness-node-compaction-kind node)))
-        (should (string-prefix-p "BRIEF SUMMARY\n\nHarness note:" (plist-get node :content))))
-      (harness-test-wait (lambda () (harness-ui-compact-test--shows
-                                     buffer (format "context compacted into a brief summary by %s"
-                                                    (harness-ui-model-label "demo:scripted"))))
-                         5 "the brief summary in the chat")
+        (should (equal "summary" (harness-node-compaction-kind node)))
+        (should (string-prefix-p "BRIEF SUMMARY" (plist-get node :content)))
+        (should-not (plist-get (plist-get node :meta) :recipe)))
+      (harness-test-wait (lambda () (harness-ui-compact-test--shows buffer "context compacted"))
+                         5 "the summary in the chat")
       (with-current-buffer buffer (should (equal "" (harness-compose-text))))
       ;; A fresh start: no request, a note saying nothing was carried over.
       (harness-ui-compact-test--send buffer "/compact fresh")
@@ -385,7 +438,7 @@ what kind of compaction it was.  /compact alone asks, with the costs."
         (should (equal "/compact sideways" (harness-compose-text)))
         (harness-chat--clear-compose)))))
 
-(ert-deftest harness-ui-compact-a-panel-summary-cannot-make-a-cold-one ()
+(ert-deftest harness-ui-compact-a-chat-does-not-offer-a-cold-summary ()
   "A summary chosen in the compact panel is a choice, not warmth.
 The chat writes a transcript instead and says what it did; no summariser
 request is made."
@@ -393,21 +446,25 @@ request is made."
     (let* ((harness-ui-compact-test--warm nil)
            (sid (harness-ui-compact-test--session))
            (buffer (harness-ui-compact-test--open sid))
-           (requests nil))
+           (requests nil)
+           (offered nil)
+           (answers '(?s ?t)))
       (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
                  ((symbol-function 'harness-method/provider/complete)
                   (lambda (req) (push req requests) (funcall orig req)))
                  ((symbol-function 'read-multiple-choice)
-                  (lambda (_prompt offered &rest _) (assq ?s offered))))
+                  (lambda (_prompt choices &rest _)
+                    (unless offered (setq offered choices))
+                    (assq (pop answers) choices))))
         (harness-ui-compact-test--send buffer "/compact")
         (harness-test-wait (lambda () (harness-ui-compact-test--compactions sid)) 10
                            "the transcript"))
+      (should (string-match-p "no cache" (nth 1 (assq ?s offered))))
       (should-not (cl-some (lambda (req)
                              (string-match-p "handoff summary" (or (plist-get req :system) "")))
                            requests))
       (let ((node (car (harness-ui-compact-test--compactions sid))))
-        (should (equal "transcript" (harness-node-compaction-kind node)))
-        (should (equal "summary" (plist-get (plist-get node :meta) :requested-kind))))
+        (should (equal "transcript" (harness-node-compaction-kind node))))
       (harness-test-wait (lambda () (harness-ui-compact-test--shows
                                      buffer "context compacted into a transcript file"))
                          5 "the transcript in the chat"))))
@@ -452,8 +509,8 @@ called compact goes to the session as usual.  / completion offers it."
     (should (equal "~$0.310" (harness-ui-compact-cost-text e 'brief api)))
     (should (equal "~$0.310" (harness-ui-compact-cost-text e 'brief)))
     (should (equal "free" (harness-ui-compact-cost-text e 'transcript plan)))
-    (should (string-match-p ", about 0\\.5%\\'" (harness-ui-compact-carry-on-text e plan)))
-    (should (string-match-p ", about \\$0\\.250\\'" (harness-ui-compact-carry-on-text e api)))))
+    (should (string-match-p " · 0\\.5%\\'" (harness-ui-compact-carry-on-text e plan)))
+    (should (string-match-p " · \\$0\\.250\\'" (harness-ui-compact-carry-on-text e api)))))
 
 (provide 'harness-ui-compact-test)
 ;;; harness-ui-compact-test.el ends here

@@ -87,6 +87,34 @@ A question's payload leaves out what it does not know, or says it blank."
   "Return the choices of SPEC, a list, whatever way they came."
   (cl-remove-if-not #'consp (append (plist-get spec :choices) nil)))
 
+(defun harness-ui-carry-choice (entry session)
+  "Return ENTRY, a choice the harness sent, as the panel draws it for SESSION.
+Its label, wording, key, cost and the context after it come from the
+harness; where the cost is a sum of money and SESSION has plan rates,
+it reads as a share of the plan's windows, with the cache word the
+harness gave it."
+  (let* ((cost (plist-get entry :cost))
+         (text (harness-ui-carry-text (plist-get entry :cost-text)))
+         (choice (list :choice (format "%s" (plist-get entry :choice))
+                       :key (harness-ui-carry-text (plist-get entry :key))
+                       :label (harness-ui-carry-text (plist-get entry :label))
+                       :what (harness-ui-carry-text (plist-get entry :what)))))
+    (when (numberp (plist-get entry :after))
+      (setq choice (plist-put choice :after (plist-get entry :after))))
+    (when (plist-get entry :unavailable)
+      (setq choice (plist-put choice :unavailable t)))
+    (when (plist-get entry :why)
+      (setq choice (plist-put choice :why (plist-get entry :why))))
+    (when text
+      (setq choice (plist-put choice :cost-text
+                              (if (and (numberp cost) session (not (equal text "free")))
+                                  (let ((cache (and (string-match "\\(cached\\|uncached\\)\\'" text)
+                                                    (match-string 1 text))))
+                                    (concat "~" (harness-ui-estimate-text cost session)
+                                            (if cache (concat " " cache) "")))
+                                text))))
+    choice))
+
 (defun harness-ui-carry--heading (spec)
   "Return the first line of the panel of SPEC: its icon, its title and its detail."
   (concat " " (propertize (concat (harness-ui-icon (or (plist-get spec :icon) 'harness-icon-system))
@@ -146,13 +174,21 @@ no WIDTH the segments are one line, which the window wraps."
       (string-join (nreverse lines) (concat "\n" (make-string indent ?\s))))))
 
 (defun harness-ui-carry--always-p (spec choice)
-  "Non-nil when SPEC lets CHOICE be answered \"always\": its capital key."
-  (and (plist-get spec :always) (not (equal (plist-get choice :choice) "hold"))))
+  "Non-nil when SPEC lets CHOICE be answered \"always\": its capital key.
+`:always' is t for every choice, or a list of the names it allows.  A
+choice shown but not offered -- a summary whose own request the prompt
+cache does not hold -- cannot be any lasting answer."
+  (let ((always (plist-get spec :always)))
+    (and always
+         (or (eq always t)
+             (member (plist-get choice :choice) always))
+         (not (plist-get choice :unavailable))
+         (not (equal (plist-get choice :choice) "hold")))))
 
 (defun harness-ui-carry--help (choice spec)
   "Return the tooltip of CHOICE's button in the panel of SPEC, in one line.
-It names the choice and its cost, what it does, the context after it and
-the keys that answer it."
+It is segments: the choice and its cost, what it does, the context after
+it and the keys that answer it."
   (let ((name (plist-get choice :choice))
         (key (plist-get choice :key))
         (cost (harness-ui-carry-text (plist-get choice :cost-text)))
@@ -160,20 +196,29 @@ the keys that answer it."
     (harness-ui-one-line
      (string-join
       (delq nil
-            (list (concat (plist-get choice :label) (if cost (format " (%s)" cost) ""))
+            (list (concat (plist-get choice :label) (if cost (format " · %s" cost) ""))
                   (string-join (harness-ui-carry--segments choice spec) " · ")
                   (and (numberp after) (> after 0) (not (member name '("carry-on" "ignore" "hold")))
-                       (format "After: ~%s tokens" (harness-format-tokens after)))
-                  (concat (format "Press %s on this panel, or click" key)
-                          (if (harness-ui-carry--always-p spec choice)
-                              (format "; %s: default for every session, no asking" (upcase key))
-                            ""))))
+                       (format "~%s tokens" (harness-format-tokens after)))
+                  (format "key · %s" key)
+                  (and (harness-ui-carry--always-p spec choice)
+                       (format "default · %s" (upcase key)))
+                  "button"))
       " · "))))
+
+(defun harness-ui-carry--unavailable (choice)
+  "Return non-nil when CHOICE is shown by its panel but not offered.
+That is a summary whose own request the prompt cache does not hold: it
+has a row, so both questions show one menu, but no key, no button, and
+no lasting answer, and its cost column says it is not offered."
+  (and (plist-get choice :unavailable) t))
 
 (defun harness-ui-carry--options (spec)
   "Return the lines of the choices of SPEC: key, button, cost and wording.
 The labels and the costs are columns of their own, the wording wraps
-under itself, and a click on a button, or the key, answers."
+under itself, and a click on a button, or the key, answers.  A choice
+shown but not offered has a row without a key or a button, dimmed, and
+its tooltip says why."
   (let* ((choices (harness-ui-carry-choices spec))
          (answer (plist-get spec :answer))
          (width (plist-get spec :width))
@@ -187,13 +232,22 @@ under itself, and a click on a button, or the key, answers."
        (let* ((name (plist-get choice :choice))
               (key (or (plist-get choice :key) ""))
               (label (plist-get choice :label))
+              (unavailable (harness-ui-carry--unavailable choice))
               (cost (or (harness-ui-carry-text (plist-get choice :cost-text)) ""))
-              (prefix (concat harness-ui-carry--indent (harness-ui-kbd (format " %s " key)) " "))
+              (prefix (if unavailable
+                          (concat harness-ui-carry--indent
+                                  (make-string (+ 3 (length key)) ?\s))
+                        (concat harness-ui-carry--indent
+                                (harness-ui-kbd (format " %s " key)) " ")))
               (indent (+ (string-width prefix) label-width 2 cost-column))
               (what (harness-ui-carry--flow (harness-ui-carry--segments choice spec) indent width)))
          (concat prefix
-                 (harness-ui-action-button label (lambda () (when answer (funcall answer name nil)))
-                                           :help (harness-ui-carry--help choice spec))
+                 (if unavailable
+                     (propertize label 'face 'harness-dim-face
+                                 'help-echo (or (harness-ui-carry-text (plist-get choice :why))
+                                                "no cache"))
+                   (harness-ui-action-button label (lambda () (when answer (funcall answer name nil)))
+                                             :help (harness-ui-carry--help choice spec)))
                  (make-string (- (+ label-width 2) (string-width label)) ?\s)
                  cost
                  (make-string (- cost-column (string-width cost)) ?\s)
@@ -208,20 +262,24 @@ footer lines the question brings, and the line saying how to press a
 key from the compose box."
   (let* ((choices (harness-ui-carry-choices spec))
          (capitals (cl-remove-if-not (lambda (c) (harness-ui-carry--always-p spec c)) choices))
-         (footer (delq nil (plist-get spec :footer))))
+         (footer (delq nil (plist-get spec :footer)))
+         (pressable (or (cl-find-if (lambda (c) (not (harness-ui-carry--unavailable c))) choices)
+                        (car choices))))
     (concat
      (if (or capitals footer) "\n" "")
      (if capitals
          (concat (propertize harness-ui-carry--indent 'wrap-prefix harness-ui-carry--indent)
                  (mapconcat (lambda (c) (harness-ui-kbd (format " %s " (upcase (plist-get c :key)))))
                             capitals " ")
-                 (propertize "  default for every session, no asking\n" 'face 'harness-dim-face))
+                 (propertize "  default\n" 'face 'harness-dim-face))
        "")
      (harness-ui-carry--lines footer)
      ;; The keys type in the compose box: this is how to press one there.
      (if (if (plist-member spec :hint) (plist-get spec :hint) t)
          (propertize (concat harness-ui-carry--indent
-                             (harness-compose-panel-hint (or (plist-get (car choices) :key) "b"))
+                             "Box key · "
+                             (harness-ui-kbd (format "%s %s" (harness-compose-panel-keys)
+                                                     (or (plist-get pressable :key) "b")))
                              "\n")
                      'wrap-prefix harness-ui-carry--indent)
        ""))))
@@ -261,7 +319,9 @@ line, the way to press a key from the compose box, for a host with no box."
   (let* ((string (concat (harness-ui-carry--heading spec)
                          (harness-ui-carry--lines (plist-get spec :lines))
                          (harness-ui-carry--rows (plist-get spec :rows))
-                         "\n"
+                         (if (or (harness-ui-carry-text (plist-get spec :ask))
+                                 (harness-ui-carry-choices spec))
+                             "\n" "")
                          (if-let* ((ask (harness-ui-carry-text (plist-get spec :ask))))
                              (propertize (concat harness-ui-carry--indent ask "\n")
                                          'face 'bold 'wrap-prefix harness-ui-carry--indent)
@@ -284,7 +344,8 @@ a keymap, is under it: the digits of a question, say."
       (let ((name (plist-get choice :choice))
             (key (plist-get choice :key))
             (always (harness-ui-carry--always-p spec choice)))
-        (when (and answer (stringp key) (= (length key) 1))
+        (when (and answer (not (harness-ui-carry--unavailable choice))
+                   (stringp key) (= (length key) 1))
           (define-key map key (lambda () (interactive) (funcall answer name nil)))
           (when always
             (define-key map (upcase key) (lambda () (interactive) (funcall answer name t)))))))

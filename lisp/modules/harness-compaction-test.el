@@ -13,6 +13,7 @@
 (defvar harness-compaction--pending)
 (defvar harness-compaction--revert-hold)
 (defvar harness-compaction-kind)
+(defvar harness-compaction-carry-on)
 (defvar harness-compaction-brief-model)
 (defvar harness-compaction-mid-turn)
 (defvar harness-compaction--mid-turn)
@@ -20,6 +21,7 @@
 (defvar harness-compaction--carried-on)
 (defvar harness-compaction--request-text)
 (defvar harness-compaction--summary-output)
+(defvar harness-non-interactive)
 (defvar harness-cache-ttl)
 (defvar harness-cache-ttl-overrides)
 (declare-function harness-define-provider "harness-provider")
@@ -30,14 +32,10 @@
 (declare-function harness-compaction--messages-text "harness-compaction" (messages))
 
 (defvar harness-compaction-test--warm t
-  "Whether a compaction request is simulated as known to be cached.
-Tests of what the harness does on its own -- before a turn, in the
-middle of one, from a queued one -- and of a user's choice bind it nil:
-then the real `harness-compaction-request-warm-p' decides, and the
-estimate says a summary's or brief's own request is not cached, as the
-real one does.  Tests of the summary mechanics themselves leave it t:
-they are not about warmth, and a provider that proves that request's
-own prefix cached would let it be made.")
+  "Whether the prompt cache is simulated as holding a compaction's request.
+Most tests are of the summary mechanics, not of warmth: they leave this
+t, and a summary is made.  A test of the cold rule binds it nil, and
+`harness-compaction--prefix-cache-p' decides from the session's cache.")
 
 (defmacro harness-compaction-test-with (&rest body)
   "Load the state layer with the demo provider and compaction, run BODY."
@@ -60,11 +58,16 @@ own prefix cached would let it be made.")
            (default-directory dir))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
-       (cl-letf* ((warm (symbol-function 'harness-compaction-request-warm-p))
-                  ((symbol-function 'harness-compaction-request-warm-p)
-                   (lambda (session-id kind &optional model)
-                     (or harness-compaction-test--warm
-                         (funcall warm session-id kind model)))))
+       (cl-letf* ((real-prefix-cache-p
+                   (symbol-function 'harness-compaction--prefix-cache-p))
+                  ((symbol-function 'harness-compaction--prefix-cache-p)
+                   (lambda (session)
+                     (if harness-compaction-test--warm
+                         ;; A hosted loop is sent the instruction, not the chat.
+                         (and (not (harness-compaction--hosted-model-p
+                                    (plist-get session :model)))
+                              t)
+                       (funcall real-prefix-cache-p session)))))
          ,@body))))
 
 (defconst harness-compaction-test-script
@@ -107,6 +110,14 @@ own prefix cached would let it be made.")
                (mapconcat (lambda (b) (or (plist-get b :text) "")) (plist-get m :content) "\n"))
              (plist-get request :messages) "\n"))
 
+(defun harness-compaction-test-summary-request-p (request)
+  "Non-nil when REQUEST asks a model for the summary of a compaction.
+A summary sent as the chat's next request says so in its instruction; a
+one-off request of its own says so in its system prompt."
+  (or (string-match-p "handoff summary" (or (plist-get request :system) ""))
+      (string-match-p "Do not call any tool"
+                      (harness-compaction-test-request-text request))))
+
 (defmacro harness-compaction-test-recording (&rest body)
   "Run BODY with every request the provider is sent noted; return them, oldest first."
   (declare (indent 0))
@@ -146,21 +157,25 @@ own prefix cached would let it be made.")
           (should (eq 'full (plist-get (plist-get n :meta) :context)))
           (should (numberp (plist-get (plist-get n :meta) :input-tokens)))
           (should (equal (list (list id (plist-get n :id))) done))))
-      ;; The request: no tools, no provider state, transcript then the ask.
+      ;; The request starts as the conversation's next step would: the same
+      ;; system prompt, tools and conversation, with the ask appended.
       (should (= 1 (length requests)))
       (let* ((req (car requests))
              (last (car (last (plist-get req :messages)))))
-        (should (null (plist-get req :tools)))
+        (should (equal (harness-agent--system-prompt (harness-call 'session/get id))
+                       (plist-get req :system)))
         (should (null (plist-get req :provider-state)))
-        (should (string-match-p "handoff summary" (plist-get req :system)))
         (should (eq 'user (plist-get last :role)))
-        (should (string-match-p "Summarize the conversation above"
+        (should (string-match-p "conversation above"
                                 (plist-get (car (last (plist-get last :content))) :text)))
+        (should (string-match-p "Do not call any tool"
+                                (plist-get (car (last (plist-get last :content))) :text)))
+        ;; The conversation, then the ask as the user message a step would send.
         (should (= 3 (length (plist-get req :messages)))))
       ;; Transcript: hints around the node, messages restart at the summary.
       (should (equal '(user assistant hint compaction hint) (harness-compaction-test-kinds id)))
-      (should (equal "Compacting context…" (car (harness-compaction-test-hints id))))
-      (should (string-match-p "\\`Compacted: [0-9.k]+ tokens → summary\\'" (cadr (harness-compaction-test-hints id))))
+      (should (equal "Compaction" (car (harness-compaction-test-hints id))))
+      (should (string-match-p "\\`Compaction · ~[0-9.k]+ tokens · summary\\'" (cadr (harness-compaction-test-hints id))))
       (should (= 1 (length (harness-call 'session/messages id))))
       (should (string-prefix-p "Summary of the conversation so far:\n\nSUMMARY TEXT"
                                (harness-compaction-test-first-text id)))
@@ -262,13 +277,13 @@ provider is never forked."
         ;; A sampled context is not forked: the summariser gets the sample.
         (harness-call 'session/set-provider-state id '(:conv "c9" :provider "forky"))
         (setq forks nil)
-        (harness-await (harness-call 'compaction/compact id (list :context "sample")))
+        (harness-await (harness-call 'compaction/compact id (list :context "sample" :transfer t)))
         (should-not forks)
         (should-not (plist-get (car requests) :provider-state))
         ;; Another provider's state: no fork, no state, and it stays.
         (harness-call 'session/set-provider-state id '(:conv "c9" :provider "other"))
         (setq forks nil)
-        (harness-await (harness-call 'compaction/compact id))
+        (harness-await (harness-call 'compaction/compact id (list :transfer t)))
         (should-not forks)
         (should-not (plist-get (car requests) :provider-state))
         (should (equal '(:conv "c9" :provider "other")
@@ -302,7 +317,9 @@ does the cache stamp, however the summary was made."
                                                           :cache-at 1000.0 :cache-ttl 3600)))))
       (harness-call 'session/update id :model "forky:m" :silent t)
       (harness-on 'session/provider-state-changed (lambda (sid state) (push (list sid state) changed)))
-      (dolist (opts (list nil (list :kind "brief") (list :model "forky:n") (list :kind "transcript")))
+      (dolist (opts (list nil (list :kind "brief" :transfer t)
+                          (list :model "forky:n" :transfer t)
+                          (list :kind "transcript")))
         (funcall stamp id)
         (should (plist-get (harness-call 'session/get id) :cache))
         (setq changed nil)
@@ -349,7 +366,7 @@ narrative, whatever the session's model is."
              (list :cancel #'ignore)))
       (let* ((id (harness-compaction-test-long-session))
              (_ (harness-call 'session/update id :model "tiered:big" :silent t))
-             (node (harness-await (harness-call 'compaction/compact id (list :kind "brief"))))
+             (node (harness-await (harness-call 'compaction/compact id (list :kind "brief" :transfer t))))
              (meta (plist-get node :meta)))
         (should (equal "tiered:small" (plist-get (car requests) :model)))
         (should (= 21 (length (plist-get (car requests) :messages))))
@@ -359,8 +376,8 @@ narrative, whatever the session's model is."
         (should (equal "tiered:small" (plist-get meta :model)))
         (should (string-prefix-p "BRIEF\n\nHarness note: Small wrote this summary from the conversation's user and assistant"
                                  (plist-get node :content)))
-        (should (equal "Compacting context: a brief summary by Small…" (car (harness-compaction-test-hints id))))
-        (should (string-match-p "\\`Compacted: [0-9.k]+ tokens → brief summary\\'"
+        (should (equal "Compaction · brief · Small" (car (harness-compaction-test-hints id))))
+        (should (string-match-p "\\`Compaction · ~[0-9.k]+ tokens · brief\\'"
                                 (cadr (harness-compaction-test-hints id))))
         (should (string-prefix-p "Summary of the conversation so far:\n\nBRIEF\n\nHarness note:"
                                  (harness-compaction-test-first-text id))))
@@ -368,7 +385,7 @@ narrative, whatever the session's model is."
       (setq requests nil)
       (let* ((id (harness-compaction-test-long-session))
              (_ (harness-call 'session/update id :model "tiered:big" :silent t))
-             (node (harness-await (harness-call 'compaction/compact id (list :context "sample" :caveat nil)))))
+             (node (harness-await (harness-call 'compaction/compact id (list :context "sample" :caveat nil :transfer t)))))
         (should (equal "brief" (plist-get (plist-get node :meta) :compaction)))
         (should (string-prefix-p "BRIEF\n\nThe conversation opened with" (plist-get node :content))))
       ;; The setting picks the model: the session's own, or one named.
@@ -377,14 +394,14 @@ narrative, whatever the session's model is."
         (let ((harness-compaction-brief-model (car case))
               (id (harness-compaction-test-long-session)))
           (harness-call 'session/update id :model "tiered:big" :silent t)
-          (harness-await (harness-call 'compaction/compact id (list :kind 'brief)))
+          (harness-await (harness-call 'compaction/compact id (list :kind 'brief :transfer t)))
           (should (equal (cdr case) (plist-get (car requests) :model)))))
       ;; A provider with no cheaper model writes it with the session's.
       (setq requests nil)
       (let ((id (harness-compaction-test-long-session))
             (harness-provider-demo-script-override harness-compaction-test-script))
         (should (string-prefix-p "SUMMARY TEXT\n\nHarness note: Demo scripted wrote"
-                                 (plist-get (harness-await (harness-call 'compaction/compact id (list :kind "brief")))
+                                 (plist-get (harness-await (harness-call 'compaction/compact id (list :kind "brief" :transfer t)))
                                             :content)))))
     ;; An unknown kind is refused.
     (should-error (harness-await (harness-call 'compaction/compact (harness-compaction-test-session)
@@ -506,7 +523,7 @@ whole transcript."
         :capabilities '(:hosted-loop t))
       (let* ((id (harness-compaction-test-tool-session))
              (_ (harness-call 'session/update id :model "hosty:m" :silent t))
-             (node (harness-await (harness-call 'compaction/compact id (list :kind 'brief))))
+             (node (harness-await (harness-call 'compaction/compact id (list :kind 'brief :transfer t))))
              (req (car requests))
              (text (harness-compaction-test-request-text req)))
         ;; The request the provider is sent serializes: no raw bytes.
@@ -529,7 +546,7 @@ replaces.  Automatic compaction runs inside the turn, and does not ask."
             (should (harness-call 'agent/running id))
             (let ((err (should-error (harness-call 'compaction/compact id (list :kind "transcript" :idle t))
                                      :type 'harness-error)))
-              (should (string-match-p "running a turn" (harness-error-message err))))
+              (should (string-match-p "session running" (harness-error-message err))))
             (should-not (memq 'compaction (harness-compaction-test-kinds id)))
             (should-not (gethash id harness-compaction--running)))
         (remhash id harness-agent--turns))
@@ -572,7 +589,7 @@ on, as it is, and an unanswered message still follows it."
                                  (insert-file-contents (expand-file-name ".harness/transcripts/.gitignore" cwd))
                                  (buffer-string))))
           (let ((text (with-temp-buffer (insert-file-contents file) (buffer-string))))
-            (should (string-prefix-p "# Compacted conversation\n" text))
+            (should (string-prefix-p "# Compaction\n" text))
             (should (string-match-p "\\[user\\] please refactor the parser" text))
             (should (string-match-p "\\[assistant\\] Done: parser.el rewritten" text)))
           (should (string-match-p (regexp-quote file) (plist-get node :content)))
@@ -583,7 +600,7 @@ on, as it is, and an unanswered message still follows it."
             (should (= 1 (length messages)))
             (should (equal (list (plist-get node :content) "and now the lexer")
                            (mapcar (lambda (b) (plist-get b :text)) (plist-get (car messages) :content)))))
-          (should (equal (format "Compacted: 420 tokens → transcript in %s" (abbreviate-file-name file))
+          (should (equal (format "Compaction · ~420 tokens · transcript · %s" (abbreviate-file-name file))
                          (car (last (harness-compaction-test-hints id)))))
           (let ((s (harness-call 'session/get id)))
             (should-not (plist-get s :cache))
@@ -631,15 +648,17 @@ without it there is no pointer, and the fresh note says to ask the user."
 
 (ert-deftest harness-compaction-estimate ()
   "The estimate prices each kind of compaction against carrying on.
-A summary reads all of the context uncached, whatever the cache: it is
-a prompt of its own, with its own system prompt and tools, and no cache
-of the chat covers it -- not even on a fork of a hosted loop's
-conversation.  A brief one is the cheap model's, of a sample, also
-uncached; a transcript, a fresh start and a truncation cost nothing."
+A summary reads the conversation from the chat's prompt cache while it
+lasts, because it is sent as the chat's next request with the
+instruction appended; once the cache lapses, and on a hosted loop that
+holds the conversation itself, it reads all of it uncached.  A brief one
+is the cheap model's, of a sample, and is never cached; a transcript, a
+fresh start and a truncation cost nothing."
   (harness-compaction-test-with
+    (let ((harness-compaction-test--warm nil))
     (harness-compaction-test-tiered-provider)
     (let* ((id (harness-compaction-test-long-session))
-           (ask (harness-estimate-tokens harness-compaction--request-text))
+           (ask (harness-compaction--instruction-tokens "tiered:big"))
            (near (lambda (a b) (< (abs (- a b)) 1e-9))))
       (harness-call 'session/update id :model "tiered:big" :silent t)
       (harness-call 'session/usage-add id '(:input 10 :output 10 :cache-read 100000 :context 100000 :cache-at 1000.0))
@@ -665,7 +684,10 @@ uncached; a transcript, a fresh start and a truncation cost nothing."
                        (mapcar (lambda (k) (plist-get k :kind)) kinds)))
         (should (equal "tiered:big" (plist-get summary :model)))
         (should-not (plist-get summary :cached))
-        (should (funcall near (/ (+ (* (+ 100000 ask) 12.5) (* harness-compaction--summary-output 50.0)) 1e6)
+        (should-not (plist-get summary :available))
+        (should (funcall near (/ (+ (* (plist-get summary :input) 12.5)
+                                    (* harness-compaction--summary-output 50.0))
+                                 1e6)
                          (plist-get summary :cost)))
         ;; Uncached already: what it costs once the cache lapses is the same.
         (should (funcall near (plist-get summary :cost) (plist-get summary :cost-uncached)))
@@ -688,36 +710,50 @@ uncached; a transcript, a fresh start and a truncation cost nothing."
         (should-not (plist-get truncate :model))
         (should (equal 0 (plist-get truncate :dropped)))
         (should (equal 100000 (plist-get truncate :after))))
-      ;; While the cache lasts, carrying on reads it.  A summary on an API
-      ;; model still reads none of it.
+      ;; While the cache lasts, carrying on reads it, and so does a summary
+      ;; sent as the chat's next request: only the instruction is new input.
       (harness-call 'session/usage-add id (list :input 10 :output 10 :cache-read 100000 :context 100000
                                                 :cache-at (float-time) :cache-ttl 3600))
       (let* ((e (harness-call 'compaction/estimate id))
              (summary (car (plist-get e :kinds))))
         (should (plist-get e :cached))
         (should (funcall near 0.1 (plist-get e :carry-on)))
-        (should-not (plist-get summary :cached))
-        (should (> (plist-get summary :cost) 1.25))))
+        (should (plist-get summary :cached))
+        (should (plist-get summary :available))
+        (should (funcall near (/ (+ (* 100000 1.0)
+                                    (* (- (plist-get summary :input) 100000) 10.0)
+                                    (* harness-compaction--summary-output 50.0))
+                                 1e6)
+                         (plist-get summary :cost)))
+        (should (funcall near (/ (+ (* (plist-get summary :input) 12.5)
+                                    (* harness-compaction--summary-output 50.0))
+                                 1e6)
+                         (plist-get summary :cost-uncached)))
+        (should (> (plist-get summary :cost-uncached) (plist-get summary :cost)))))
     ;; A hosted loop with the session's conversation summarises a fork of
     ;; it, and that warm chat cache covers none of the summary's own
     ;; request: it reads the whole context uncached.
     (harness-compaction-test-tiered-provider '(:hosted-loop t :fork t :compaction hosted))
     (let ((id (harness-compaction-test-long-session))
-          (ask (harness-estimate-tokens harness-compaction--request-text)))
+          (ask (harness-compaction--instruction-tokens "tiered:big")))
       (harness-call 'session/update id :model "tiered:big" :silent t)
       (harness-call 'session/set-provider-state id '(:conv "c9" :provider "tiered"))
       (harness-call 'session/usage-add id (list :input 10 :output 10 :cache-read 100000 :context 100000
                                                 :cache-at (float-time) :cache-ttl 3600))
       (let* ((e (harness-call 'compaction/estimate id))
              (summary (car (plist-get e :kinds))))
-        ;; The chat's own cache is warm, and still none of it is the
-        ;; summary's.
+        ;; The chat's own cache is warm, and the summary is served by the
+        ;; fork of the conversation the provider holds: it is available.
         (should (plist-get e :cached))
-        (should-not (plist-get summary :cached))
-        (should (< (abs (- (/ (+ (* (+ 100000 ask) 12.5) (* harness-compaction--summary-output 50.0)) 1e6)
+        (should (plist-get summary :cached))
+        (should (plist-get summary :available))
+        (should (< (abs (- (/ (+ (* 100000 1.0)
+                                 (* (- (plist-get summary :input) 100000) 10.0)
+                                 (* harness-compaction--summary-output 50.0))
+                              1e6)
                            (plist-get summary :cost)))
                    1e-9))
-        (should (< (abs (- (plist-get summary :cost) (plist-get summary :cost-uncached))) 1e-9))))
+        (should (> (plist-get summary :cost-uncached) (plist-get summary :cost)))))
     ;; No catalogue prices: no costs, but the transcript's.
     (harness-define-provider 'unpriced
       :models (lambda () (harness-resolved (list (list :name "m" :context-window 100000))))
@@ -729,7 +765,7 @@ uncached; a transcript, a fresh start and a truncation cost nothing."
         (should-not (plist-get e :carry-on))
         (should-not (plist-get (car (plist-get e :kinds)) :cost))
         (should-not (plist-get (cadr (plist-get e :kinds)) :cost))
-        (should (eql 0.0 (plist-get (nth 2 (plist-get e :kinds)) :cost)))))))
+        (should (eql 0.0 (plist-get (nth 2 (plist-get e :kinds)) :cost))))))))
 
 (ert-deftest harness-compaction-estimate-prices-the-brief-summary-on-another-model ()
   "A model switch has the new model write the brief summary, so it asks
@@ -793,7 +829,7 @@ rather than a start and an end with the middle left out."
       (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
                  ((symbol-function 'harness-method/provider/complete)
                   (lambda (req) (push req requests) (funcall orig req))))
-        (let* ((node (harness-await (harness-call 'compaction/compact id (list :context "sample"))))
+        (let* ((node (harness-await (harness-call 'compaction/compact id (list :context "sample" :transfer t))))
                (text (harness-compaction-test-request-text (car requests))))
           (should (eq 'sample (plist-get (plist-get node :meta) :context)))
           (should (= 21 (length (plist-get (car requests) :messages))))
@@ -838,7 +874,7 @@ context goes inside a single message of structured text instead."
                     (list :cancel #'ignore))
         :capabilities '(:hosted-loop t :compaction hosted))
       (let ((id (harness-compaction-test-long-session)))
-        (let ((node (harness-await (harness-call 'compaction/compact id (list :model "hostedsum:m"))))
+        (let ((node (harness-await (harness-call 'compaction/compact id (list :model "hostedsum:m" :transfer t))))
               (text (harness-compaction-test-request-text (car requests)))
               (messages (plist-get (car requests) :messages)))
           (should (eq 'full (plist-get (plist-get node :meta) :context)))
@@ -853,7 +889,7 @@ context goes inside a single message of structured text instead."
       (setq requests nil)
       (let* ((id (harness-compaction-test-long-session))
              (node (harness-await (harness-call 'compaction/compact
-                                                id (list :model "hostedsum:m" :context "sample"))))
+                                                id (list :model "hostedsum:m" :context "sample" :transfer t))))
              (text (harness-compaction-test-request-text (car requests))))
         (should (eq 'sample (plist-get (plist-get node :meta) :context)))
         (should (= 1 (length (plist-get (car requests) :messages))))
@@ -869,7 +905,7 @@ context goes inside a single message of structured text instead."
       (harness-on 'compaction/failed (lambda (sid msg) (push (list sid msg) failed)))
       (should-error (harness-await (harness-call 'compaction/compact id)))
       (should (equal '(user assistant hint hint) (harness-compaction-test-kinds id)))
-      (should (equal "Compaction failed: boom" (cadr (harness-compaction-test-hints id))))
+      (should (equal "Compaction failure · boom" (cadr (harness-compaction-test-hints id))))
       (should (equal (list (list id "boom")) failed))
       (should (zerop (hash-table-count harness-compaction--running))))))
 
@@ -962,7 +998,7 @@ context goes inside a single message of structured text instead."
       ;; says it is compacting, the node, and the one that says what was made.
       (should (equal '(user assistant hint hint compaction hint user assistant)
                      (harness-compaction-test-kinds id)))
-      (should (string-prefix-p "Context nearly full: compacting into a summary first, as harness-compaction-kind says (nobody to ask)"
+      (should (string-prefix-p "Context · summary · automatic"
                                (car (harness-compaction-test-hints id))))
       ;; The user's message follows the compaction node exactly once.
       (should (equal "next question" (plist-get (nth 6 (harness-call 'session/nodes id)) :content)))
@@ -991,15 +1027,20 @@ context goes inside a single message of structured text instead."
                                    (cl-find 'compaction (harness-call 'session/nodes id)
                                             :key (lambda (n) (plist-get n :kind)))))))))
 
-(ert-deftest harness-compaction-auto-never-summarises-a-warm-chat ()
-  "A warm chat cache does not make a summary warm: the automatic compaction is a transcript.
-The summary's request has a system prompt and a tool list of its own,
-so no cache of the chat covers it, and nobody chose to pay for it.  The
-only model call is the turn, which starts from the note."
+(ert-deftest harness-compaction-auto-summarises-a-warm-chat ()
+  "A warm chat cache serves the automatic summary: it is the chat's next request.
+The summary's request starts as the conversation's next step would, so
+the provider reads the conversation from its cache and only the
+instruction is new input.  The turn then starts from the summary."
   (harness-compaction-test-with
-    (let* ((id (harness-compaction-test-session))
-           (harness-compaction-test--warm nil)
+    (harness-compaction-test-tiered-provider)
+    (let* ((harness-compaction-ask nil)
+           (id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                        :model "tiered:big" :context-window 8000)
+                          :id))
            (harness-provider-demo-script-override harness-compaction-test-script))
+      (harness-call 'session/append id '(:kind user :content "please refactor the parser"))
+      (harness-call 'session/append id '(:kind assistant :content "Done: parser.el rewritten"))
       ;; A long turn in the middle, so what the compaction keeps verbatim
       ;; is not it.
       (harness-call 'session/append id (list :kind 'user :content (make-string 4000 ?x)))
@@ -1008,20 +1049,24 @@ only model call is the turn, which starts from the note."
                                             :cache-at (float-time) :cache-ttl 3600))
       (let* ((estimate (harness-call 'compaction/estimate id))
              (summary (car (plist-get estimate :kinds))))
-        ;; The chat is warm; the summary's own request is not.
+        ;; The chat is warm, and the summary reads it.
         (should (plist-get estimate :cached))
-        (should-not (plist-get summary :cached)))
+        (should (plist-get summary :cached))
+        (should (plist-get summary :available)))
       (let ((requests (harness-compaction-test-recording
                         (harness-await (harness-call 'agent/prompt id "next question")))))
-        ;; The turn only: no summary request reads the long conversation.
-        (should (= 1 (length requests)))
-        (should-not (string-match-p "xxxxxxxxxx" (harness-compaction-test-requests-text requests))))
-      (should (equal "transcript"
+        ;; The summary, then the turn from it.
+        (should (= 2 (length requests)))
+        (let ((summary-request (car requests)))
+          (should (string-match-p "Do not call any tool"
+                                  (harness-compaction-test-request-text summary-request)))
+          (should (string-match-p "please refactor the parser"
+                                  (harness-compaction-test-request-text summary-request))))
+        (should (string-match-p "SUMMARY" (harness-compaction-test-request-text (cadr requests))))
+        (should (string-match-p "next question" (harness-compaction-test-request-text (cadr requests)))))
+      (should (equal "summary"
                      (harness-node-compaction-kind
-                      (car (harness-compaction-test-compactions id)))))
-      (should (cl-some (lambda (hint)
-                         (string-match-p "writing the conversation to a transcript file first" hint))
-                       (harness-compaction-test-hints id))))))
+                      (car (harness-compaction-test-compactions id))))))))
 
 (ert-deftest harness-compaction-auto-a-question-that-cannot-be-asked-is-a-transcript ()
   "When the question cannot be asked, nobody chose a summary: a transcript is written.
@@ -1029,8 +1074,8 @@ The error settles the choice as unasked, and no model reads the whole
 conversation."
   (harness-compaction-test-with
     (harness-test-load-module 'tools-question)
-    (let* ((id (harness-compaction-test-session))
-           (harness-compaction-test--warm nil)
+    (let* ((harness-compaction-test--warm nil)
+           (id (harness-compaction-test-session))
            (harness-provider-demo-script-override harness-compaction-test-script))
       (harness-register-method 'question/ask
                                (lambda (&rest _)
@@ -1043,7 +1088,7 @@ conversation."
                      (harness-node-compaction-kind
                       (car (harness-compaction-test-compactions id)))))
       (should (cl-some (lambda (hint)
-                         (string-match-p "as harness-compaction-kind says (nobody to ask)" hint))
+                         (string-match-p "Context · transcript · fallback" hint))
                        (harness-compaction-test-hints id))))))
 
 (ert-deftest harness-compaction-auto-a-dismissed-question-holds-the-message ()
@@ -1053,7 +1098,6 @@ conversation is not sent uncached."
   (harness-compaction-test-with
     (harness-test-load-module 'tools-question)
     (let* ((id (harness-compaction-test-session))
-           (harness-compaction-test--warm nil)
            (harness-provider-demo-script-override harness-compaction-test-script)
            (started 0))
       (harness-on 'agent/turn-started (lambda (_) (cl-incf started)))
@@ -1076,9 +1120,7 @@ conversation is not sent uncached."
 
 (defun harness-compaction-test-summary-requests (requests)
   "Return the REQUESTS that read the conversation to write a summary."
-  (cl-remove-if-not (lambda (req)
-                      (string-match-p "handoff summary" (or (plist-get req :system) "")))
-                    requests))
+  (cl-remove-if-not #'harness-compaction-test-summary-request-p requests))
 
 (defun harness-compaction-test-estimate-with-warmth (real warmth)
   "Return an estimate function like REAL's, with the model kinds' warmth as WARMTH.
@@ -1123,7 +1165,6 @@ no proof, and no model reads the whole conversation."
             (harness-register-method 'compaction/estimate
                                      (harness-compaction-test-estimate-with-warmth real answer))
             (let* ((id (harness-compaction-test-session))
-                   (harness-compaction-test--warm nil)
                    (harness-provider-demo-script-override harness-compaction-test-script))
               (harness-call 'session/usage-add id '(:context 7500))
               (let ((requests (harness-compaction-test-recording
@@ -1135,7 +1176,7 @@ no proof, and no model reads the whole conversation."
                              (harness-node-compaction-kind
                               (car (harness-compaction-test-compactions id)))))
               (should (cl-some (lambda (hint)
-                                 (string-match-p "would read the whole conversation uncached" hint))
+                                 (string-match-p "no cache" hint))
                                (harness-compaction-test-hints id)))))
         (harness-register-method 'compaction/estimate real)))))
 
@@ -1147,7 +1188,6 @@ whole conversation."
   (harness-compaction-test-with
     (let ((real (harness-method-fn (gethash 'compaction/estimate harness--methods)))
           (id (harness-compaction-test-session))
-          (harness-compaction-test--warm nil)
           (harness-provider-demo-script-override harness-compaction-test-script))
       (harness-register-method 'compaction/estimate
                                (harness-compaction-test-estimate-with-warmth real 'warm))
@@ -1172,7 +1212,6 @@ no model reads the conversation."
   (harness-compaction-test-with
     (let ((real (harness-method-fn (gethash 'compaction/estimate harness--methods)))
           (id (harness-compaction-test-session))
-          (harness-compaction-test--warm nil)
           (harness-provider-demo-script-override harness-compaction-test-script))
       (harness-register-method 'compaction/estimate
                                (harness-compaction-test-estimate-with-warmth real 'warm))
@@ -1194,7 +1233,6 @@ would really be made is refused to a transcript; with the brief's
 cached, that request is made."
   (harness-compaction-test-with
     (let ((real (harness-method-fn (gethash 'compaction/estimate harness--methods)))
-          (harness-compaction-test--warm nil)
           (harness-provider-demo-script-override harness-compaction-test-script))
       (unwind-protect
           (progn
@@ -1230,8 +1268,8 @@ A caller that says the user chose it -- a panel, a question answer, an
 agent, a saved default -- cannot put the conversation on a summariser's
 wire, and no model is asked anything."
   (harness-compaction-test-with
+    (let ((harness-compaction-test--warm nil))
     (let* ((id (harness-compaction-test-session))
-           (harness-compaction-test--warm nil)
            (harness-provider-demo-script-override harness-compaction-test-script))
       (let ((requests (harness-compaction-test-recording
                         (harness-await (harness-call 'compaction/compact
@@ -1243,8 +1281,8 @@ wire, and no model is asked anything."
         (should (equal "summary" (plist-get (plist-get node :meta) :requested-kind)))
         (should (eq t (plist-get (plist-get node :meta) :not-warm))))
       (should (cl-some (lambda (hint)
-                         (string-match-p "would read the whole conversation uncached" hint))
-                       (harness-compaction-test-hints id))))))
+                         (string-match-p "no cache" hint))
+                       (harness-compaction-test-hints id)))))))
 
 (ert-deftest harness-compaction-auto-a-failed-summary-falls-back-to-a-transcript ()
   "A summary whose request is cached, and then fails, is a transcript instead.
@@ -1256,8 +1294,7 @@ to send the conversation uncached."
     (let* ((id (harness-compaction-test-session))
            (harness-provider-demo-script-override
             (lambda (req)
-              (if (string-prefix-p "You are writing a handoff summary"
-                                   (or (plist-get req :system) ""))
+              (if (harness-compaction-test-summary-request-p req)
                   '((:type text :delta "half") (:type done :stop-reason error :error "boom"))
                 harness-compaction-test-script)))
            (turn nil)
@@ -1274,21 +1311,21 @@ to send the conversation uncached."
       (should (equal "transcript"
                      (harness-node-compaction-kind
                       (car (harness-compaction-test-compactions id)))))
-      (should (cl-some (lambda (hint) (string-prefix-p "Compaction failed: boom" hint))
+      (should (cl-some (lambda (hint) (string-prefix-p "Compaction failure · boom" hint))
                        (harness-compaction-test-hints id))))))
 
 (ert-deftest harness-compaction-a-request-that-is-not-cached-without-a-fallback-refuses ()
   "A summary nobody chose, with nowhere to fall back to, is refused before a request exists.
 The error names the kinds that ask no model."
   (harness-compaction-test-with
+    (let ((harness-compaction-test--warm nil))
     (let* ((id (harness-compaction-test-session))
-           (harness-compaction-test--warm nil)
            (harness-provider-demo-script-override harness-compaction-test-script)
            (requests (harness-compaction-test-recording
                       (should-error (harness-await
                                      (harness-call 'compaction/compact id '(:kind "summary")))))))
       (should (zerop (length requests)))
-      (should-not (harness-compaction-test-compactions id)))))
+      (should-not (harness-compaction-test-compactions id))))))
 
 (ert-deftest harness-compaction-auto-idle-below-threshold ()
   (harness-compaction-test-with
@@ -1326,8 +1363,8 @@ The error names the kinds that ask no model."
 The conversation is too large to send uncached, so the turn does not
 start and no model is asked anything."
   (harness-compaction-test-with
-    (let* ((id (harness-compaction-test-session))
-           (harness-compaction-test--warm nil)
+    (let* ((harness-compaction-test--warm nil)
+           (id (harness-compaction-test-session))
            (harness-provider-demo-script-override harness-compaction-test-script)
            (requests nil)
            (started 0))
@@ -1343,7 +1380,7 @@ start and no model is asked anything."
       (should (= 0 started))
       (should (zerop (length requests)))
       (should (cl-some (lambda (hint)
-                         (string-match-p "too large to send uncached" hint))
+                         (string-match-p "context too large · no compaction · message hold" hint))
                        (harness-compaction-test-hints id)))
       (should-not (memq 'compaction (harness-compaction-test-kinds id))))))
 
@@ -1364,10 +1401,10 @@ start and no model is asked anything."
                 (list :answer text)))
 
 (ert-deftest harness-compaction-auto-asks-before-it-compacts ()
-  "Automatic compaction asks first, with what each kind costs, and does as answered.
-Nothing is compacted, and nothing is paid, before the answer; the kinds
-offered are the five compactions, carrying on and not now, each with its
-price; the transcript says what was chosen."
+  "Automatic compaction asks first, in one list, and does as answered.
+Nothing is compacted, and nothing is paid, before the answer; the
+question offers the same five ways the cold-cache question does, with
+their prices; the transcript says what was chosen."
   (harness-compaction-test-with
     (harness-test-load-module 'tools-question)
     (harness-compaction-test-tiered-provider)
@@ -1376,65 +1413,75 @@ price; the transcript says what was chosen."
                          :id)))
       (harness-call 'session/append id '(:kind user :content "please refactor the parser"))
       (harness-call 'session/append id '(:kind assistant :content "Done: parser.el rewritten"))
-      (harness-call 'session/usage-add id '(:context 7500))
+      (harness-call 'session/usage-add id (list :context 7500 :input 10 :output 10
+                                                :cache-read 7500 :cache-at (float-time)
+                                                :cache-ttl 3600))
       (should (harness-compaction-needed-p (harness-call 'session/get id)))
       (let ((turn (harness-call 'agent/prompt id "next question")))
         (let* ((question (harness-compaction-test-question id))
                (payload (plist-get question :payload))
                (options (append (plist-get payload :options) nil)))
-          (should (string-match-p "7\\.5k tokens of this model's ~8\\.0k window"
+          (should (string-match-p "Context · ~7\\.5k of ~8\\.0k tokens"
                                   (plist-get payload :question)))
-          (should (string-match-p "Carrying on sends it again" (plist-get payload :question)))
-          (should (= 7 (length options)))
-          (should (string-match-p "\\`Brief summary (~\\$" (car options)))
-          (should (string-match-p "\\`Summary (~\\$" (cadr options)))
-          (should (equal "Transcript file (free)" (nth 2 options)))
-          (should (equal "Start afresh (free)" (nth 3 options)))
-          (should (equal "Cut old context (free)" (nth 4 options)))
-          (should (string-match-p "\\`Carry on (~\\$" (nth 5 options)))
-          (should (equal "Not now" (nth 6 options)))
+          (should (= 5 (length options)))
+          (should (string-match-p "\\`Summary (~\\$" (car options)))
+          (should (equal "Transcript (free)" (cadr options)))
+          (should (equal "Fresh start (free)" (nth 2 options)))
+          (should (string-match-p "\\`Continuation (~\\$" (nth 3 options)))
+          (should (string-match-p " · default)" (nth 3 options)))
+          (should (equal "Pause" (nth 4 options)))
+          (should (equal "carry-on" (plist-get (plist-get payload :compaction) :default)))
           ;; Nothing is compacted while the question waits.
           (should-not (member 'compaction (harness-compaction-test-kinds id)))
-          (harness-call 'question/answer id (plist-get question :id) '(:answer "transcript")))
+          ;; The transcript file, in the same list.
+          (harness-call 'question/answer id (plist-get question :id) '(:answer "t")))
         (should (eq 'end-turn (plist-get (harness-await turn 10) :stop-reason))))
       (let ((node (car (harness-compaction-test-compactions id))))
         (should (equal "transcript" (harness-node-compaction-kind node)))
         (should (equal '(:choice "transcript" :by "user")
                        (plist-get (plist-get node :meta) :auto))))
-      (should (equal "Context nearly full: writing the conversation to a transcript file first, as you chose"
+      (should (equal "Context · transcript · answer"
                      (car (harness-compaction-test-hints id)))))))
 
 (ert-deftest harness-compaction-a-question-answer-cannot-make-a-cold-summary ()
-  "Answering the question with a summary is a choice, not warmth: a transcript is written.
-The turn goes on from it, no summariser request is made, and the hint
-says what was made instead."
+  "The same menu is shown when the prompt cache is cold, the summary in
+it saying it is not offered.  Asking for a summary by name asks again,
+saying why, and the transcript is what can be made."
   (harness-compaction-test-with
     (harness-test-load-module 'tools-question)
-    (let* ((id (harness-compaction-test-session))
-           (harness-compaction-test--warm nil)
+    (let* ((harness-compaction-test--warm nil)
+           (id (harness-compaction-test-session))
            (harness-provider-demo-script-override harness-compaction-test-script)
            (requests nil))
       (harness-call 'session/usage-add id '(:context 7500))
       (let ((turn (harness-call 'agent/prompt id "next question"))
             (value nil))
+        (let* ((question (harness-compaction-test-question id))
+               (options (append (plist-get (plist-get question :payload) :options) nil)))
+          (should (equal "Summary (no cache)" (car options)))
+          (should (equal "Transcript (free)" (cadr options)))
+          (should (string-match-p "\\`Continuation (~.+ · default)" (nth 3 options)))
+          (harness-call 'question/answer id (plist-get question :id) '(:answer "summary")))
+        (harness-test-wait
+         (lambda ()
+           (let ((q (harness-compaction-test-question id)))
+             (and (string-prefix-p "Summary · no cache"
+                                   (plist-get (plist-get q :payload) :question))
+                  q)))
+         5 "the question again")
         (setq requests
               (harness-compaction-test-recording
-                (harness-compaction-test-answer id "summary")
+                (harness-compaction-test-answer id "t")
                 (setq value (harness-await turn 10))))
         (should (eq 'end-turn (plist-get value :stop-reason))))
       ;; The turn only.
       (should (= 1 (length requests)))
       (should-not (harness-compaction-test-summary-requests requests))
       (let ((node (car (harness-compaction-test-compactions id))))
-        (should (equal "transcript" (harness-node-compaction-kind node)))
-        (should (equal "summary" (plist-get (plist-get node :meta) :requested-kind))))
+        (should (equal "transcript" (harness-node-compaction-kind node))))
       (should (string-match-p
-               (concat "\\`Context nearly full: writing the conversation to a transcript file first,"
-                       " as you chose")
-               (car (harness-compaction-test-hints id))))
-      (should (cl-some (lambda (hint)
-                         (string-match-p "would read the whole conversation uncached" hint))
-                       (harness-compaction-test-hints id))))))
+               "\\`Context · transcript · answer"
+               (car (harness-compaction-test-hints id)))))))
 
 (ert-deftest harness-compaction-auto-carries-on-when-answered ()
   "Answering the question with carrying on compacts nothing, and says so.
@@ -1450,11 +1497,58 @@ free; it is the user's call, and the transcript records it."
         (should (eq 'end-turn (plist-get (harness-await turn 10) :stop-reason))))
       (should-not (member 'compaction (harness-compaction-test-kinds id)))
       (should (string-match-p
-               "\\`Context nearly full: carrying on with the whole conversation, ~7\\.5k tokens uncached, as you chose"
+               "\\`Context · continuation · ~7\\.5k tokens uncached · answer"
                (car (harness-compaction-test-hints id)))))))
 
+(ert-deftest harness-compaction-always-carry-on-is-saved-and-stops-the-asking ()
+  "The capital of Continuation saves carrying on, and the question stops.
+The message it was asked about goes as it is, and a later message to
+the same near-full session is not asked about at all: the user chose
+not to be nagged, and the provider, not the harness, is left to refuse
+a conversation it cannot send."
+  (harness-compaction-test-with
+    (harness-test-load-module 'tools-question)
+    (let* ((id (harness-compaction-test-session))
+           (harness-compaction-carry-on nil)
+           (questions 0)
+           (harness-provider-demo-script-override harness-compaction-test-script))
+      (harness-on 'compaction/asked (lambda (&rest _) (cl-incf questions)))
+      (harness-call 'session/usage-add id '(:context 7500))
+      (let ((turn (harness-call 'agent/prompt id "next question")))
+        (harness-compaction-test-answer id "always carry on")
+        (should (eq 'end-turn (plist-get (harness-await turn 10) :stop-reason))))
+      (should harness-compaction-carry-on)
+      (should (= 1 questions))
+      (should (string-match-p
+               "\\`Context · continuation · ~7\\.5k tokens uncached · default"
+               (car (harness-compaction-test-hints id))))
+      ;; The next message goes on unasked, near the window as the first was.
+      (harness-call 'session/usage-add id '(:context 7600))
+      (should (eq 'end-turn
+                  (plist-get (harness-await (harness-call 'agent/prompt id "and the lexer")
+                                            10)
+                             :stop-reason)))
+      (should (= 1 questions))
+      (should-not (member 'compaction (harness-compaction-test-kinds id))))))
+
+(ert-deftest harness-compaction-always-carry-on-does-not-reach-a-session-nobody-asks ()
+  "A lasting \"always carry on\" stops where nobody waits for the user.
+An unattended session still compacts as `harness-compaction-kind` says:
+no one is there to notice a provider refusing an overgrown request, and
+its work must not stall."
+  (harness-compaction-test-with
+    (harness-test-load-module 'tools-question)
+    (let ((harness-compaction-carry-on t)
+          (harness-non-interactive t)
+          (harness-provider-demo-script-override harness-compaction-test-script))
+      (let ((id (harness-compaction-test-session)))
+        (harness-call 'session/usage-add id '(:context 7500))
+        (let ((turn (harness-call 'agent/prompt id "next question")))
+          (should (eq 'end-turn (plist-get (harness-await turn 10) :stop-reason))))
+        (should (member 'compaction (harness-compaction-test-kinds id)))))))
+
 (ert-deftest harness-compaction-auto-not-now-holds-the-message ()
-  "Not now keeps the message: no turn, no compaction, and the next message asks again."
+  "Pause keeps the message: no turn, no compaction, and the next message asks again."
   (harness-compaction-test-with
     (harness-test-load-module 'tools-question)
     (let* ((id (harness-compaction-test-session))
@@ -1494,7 +1588,7 @@ transcript records what was done and why nobody was asked."
       (should-not (harness-call 'question/pending id))
       (should (equal "transcript" (harness-node-compaction-kind
                                    (car (harness-compaction-test-compactions id)))))
-      (should (equal "Context nearly full: writing the conversation to a transcript file first, as harness-compaction-kind says (nobody to ask)"
+      (should (equal "Context · transcript · automatic"
                      (car (harness-compaction-test-hints id)))))))
 
 (ert-deftest harness-compaction-mid-turn-asks-once-and-carries-on-when-answered ()
@@ -1513,7 +1607,7 @@ it is not asked again at the next step, and the turn goes on."
       (should (= 1 questions))
       (should-not (member 'compaction (harness-compaction-test-kinds id)))
       (should (string-match-p
-               "\\`Context nearly full: carrying on with the whole conversation, ~7\\.5k tokens uncached, as you chose"
+               "\\`Context · continuation · ~7\\.5k tokens uncached · answer"
                (car (harness-compaction-test-hints id)))))))
 
 (ert-deftest harness-compaction-mid-turn-carried-on-is-not-asked-again ()
@@ -1543,11 +1637,11 @@ one it was answered at."
       (should (= 1 questions))
       (should (gethash id harness-compaction--carried-on)))))
 
-(ert-deftest harness-compaction-mid-turn-past-the-window-asks-at-once ()
-  "A step past the window is asked about at once, not after the cooldown.
-A conversation carried on with at 7.5k which reaches 8.1k at its next
-step cannot be sent at all: the question comes back at once, and not
-after the three boundaries a try that did not help waits for."
+(ert-deftest harness-compaction-mid-turn-carried-on-stands-past-the-window ()
+  "A step past the window goes on unasked when the user chose to carry on.
+The answer stands (`harness-compaction--carried-on'), so the boundary
+does not put the question after the three boundaries a try that did not
+help waits for: the conversation is the user's to send."
   (harness-compaction-test-with
     (harness-test-load-module 'tools-question)
     (harness-compaction-test-define-echo)
@@ -1558,17 +1652,16 @@ after the three boundaries a try that did not help waits for."
       (harness-on 'compaction/asked (lambda (&rest _) (cl-incf questions)))
       (let ((turn (harness-call 'agent/prompt id "go")))
         (harness-compaction-test-answer id "carry on")
-        ;; Past the window at the next boundary: the question comes at once.
-        (harness-compaction-test-answer id "not now")
-        (should (eq 'blocked (plist-get (harness-await turn 20) :stop-reason))))
-      (should (= 2 questions))
+        (should (eq 'end-turn (plist-get (harness-await turn 20) :stop-reason))))
+      (should (= 1 questions))
       (should-not (member 'compaction (harness-compaction-test-kinds id))))))
 
-(ert-deftest harness-compaction-carried-on-ends-past-the-window ()
-  "Past the window the question comes back, and carrying on is not offered.
-Carrying on then is a request the model cannot take; the new answer ends
-the earlier one, and the question comes back when it is near the limit
-again."
+(ert-deftest harness-compaction-carried-on-stands-past-the-window ()
+  "The answer to carry on stands past the model's window.
+A user who chose to carry on is not asked again, the message goes as it
+is, and a provider that cannot send a conversation that large says so.
+The answer is forgotten once the context has been under the limit since
+\(`harness-compaction-carried-on-is-forgotten-under-the-limit')."
   (harness-compaction-test-with
     (harness-test-load-module 'tools-question)
     (let* ((id (harness-compaction-test-session))
@@ -1581,20 +1674,13 @@ again."
         (should (eq 'end-turn (plist-get (harness-await turn 10) :stop-reason))))
       (should (= 1 questions))
       (should (gethash id harness-compaction--carried-on))
-      ;; Past the 8.0k window: the question comes back, without carrying on.
+      ;; Past the 8.0k window: no question, and the message goes as it is.
       (harness-call 'session/usage-add id '(:context 8100))
-      (let ((turn (harness-call 'agent/prompt id "go on")))
-        (let* ((question (harness-compaction-test-question id))
-               (payload (plist-get question :payload))
-               (options (append (plist-get payload :options) nil)))
-          (should (= 2 questions))
-          (should (string-match-p "more than this model\'s ~8\\.0k window"
-                                  (plist-get payload :question)))
-          (should (= 6 (length options)))
-          (should-not (cl-some (lambda (option) (string-prefix-p "Carry on" option)) options))
-          (harness-call 'question/answer id (plist-get question :id) '(:answer "not now")))
-        (should (eq 'blocked (plist-get (harness-await turn 10) :stop-reason))))
-      (should-not (gethash id harness-compaction--carried-on)))))
+      (should (eq 'end-turn
+                  (plist-get (harness-await (harness-call 'agent/prompt id "go on") 10)
+                             :stop-reason)))
+      (should (= 1 questions))
+      (should (gethash id harness-compaction--carried-on)))))
 
 (ert-deftest harness-compaction-carried-on-is-forgotten-under-the-limit ()
   "Once the context is under the limit the answer to carry on is forgotten.
@@ -1639,7 +1725,7 @@ hand does, and the question takes nothing of that away."
            (harness-provider-demo-script-override harness-compaction-test-script))
       (harness-call 'session/usage-add id '(:context 7500))
       (let ((turn (harness-call 'agent/prompt id "next question")))
-        (harness-compaction-test-answer id "brief")
+        (harness-compaction-test-answer id "summary")
         (should (eq 'end-turn (plist-get (harness-await turn 10) :stop-reason))))
       (let ((node (car (harness-compaction-test-compactions id))))
         (should (eq 'reverted (plist-get (harness-call 'compaction/revert id) :state)))
@@ -1727,7 +1813,7 @@ the first."
       (harness-compaction-test--running id)
       (harness-await (harness-call 'compaction/compact id '(:kind "summary" :queue t)))
       (should (equal '(:queued t :kind "brief" :interrupt nil)
-                     (harness-await (harness-call 'compaction/compact id '(:kind "brief" :queue t)))))
+                     (harness-await (harness-call 'compaction/compact id '(:kind "brief" :queue t :transfer t)))))
       (should-not (harness-compaction-test-compactions id))
       ;; The next step boundary runs it.
       (harness-await (harness-run-filter-async 'agent/step (list :proceed t) (harness-call 'session/get id)))
@@ -1744,7 +1830,7 @@ runs as soon as the turn ends."
     (let* ((id (harness-compaction-test-session))
            (harness-provider-demo-script-override harness-compaction-test-script))
       (harness-compaction-test--running id)
-      (harness-await (harness-call 'compaction/compact id '(:kind "brief" :queue t)))
+      (harness-await (harness-call 'compaction/compact id '(:kind "brief" :queue t :transfer t)))
       (should-not (harness-compaction-test-compactions id))
       (remhash id harness-agent--turns)
       (harness-emit 'agent/turn-ended id 'end-turn)
@@ -1759,8 +1845,8 @@ runs as soon as the turn ends."
 The queue is not an approval, and no model reads the whole conversation;
 the node keeps what was asked for in its `:meta'."
   (harness-compaction-test-with
-    (let* ((id (harness-compaction-test-session))
-           (harness-compaction-test--warm nil)
+    (let* ((harness-compaction-test--warm nil)
+           (id (harness-compaction-test-session))
            (harness-provider-demo-script-override harness-compaction-test-script))
       (harness-compaction-test--running id)
       (should (equal '(:queued t :kind "transcript" :interrupt nil)
@@ -1777,7 +1863,7 @@ the node keeps what was asked for in its `:meta'."
         (should (equal "summary" (plist-get (plist-get node :meta) :requested-kind)))
         (should (eq t (plist-get (plist-get node :meta) :not-warm))))
       (should (cl-some (lambda (hint)
-                         (string-match-p "would read the whole conversation uncached" hint))
+                         (string-match-p "no cache" hint))
                        (harness-compaction-test-hints id))))))
 
 (ert-deftest harness-compaction-interrupt-cancels-the-turn ()
@@ -1830,10 +1916,6 @@ compaction once the turn is over, however it ended."
                 (lambda (req) (push req requests) (funcall orig req))))
       (funcall thunk))
     (nreverse requests)))
-
-(defun harness-compaction-test-summary-request-p (request)
-  "Non-nil when REQUEST asks a model for the summary of a compaction."
-  (string-match-p "handoff summary" (or (plist-get request :system) "")))
 
 (defun harness-compaction-test-tool-turn (contexts &optional on-summary)
   "Return a demo script for a turn that calls the tool `echo' at every step but its last.
@@ -1889,7 +1971,7 @@ work is not finished: one turn throughout, ended by its model."
         (should (= 3 (length requests)))
         (should (plist-get (nth 0 requests) :tools))
         (should (harness-compaction-test-summary-request-p (nth 1 requests)))
-        (should (null (plist-get (nth 1 requests) :tools)))
+        (should (plist-get (nth 1 requests) :tools))
         (should (plist-get (nth 2 requests) :tools))
         ;; That step sends the summary alone: the work before it is in it.
         (let* ((messages (plist-get (nth 2 requests) :messages))
@@ -1910,10 +1992,10 @@ work is not finished: one turn throughout, ended by its model."
         (should (string-suffix-p harness-compaction--mid-turn-note (plist-get node :content)))
         (should (equal (list (list id (plist-get node :id))) done)))
       (let ((hints (harness-compaction-test-hints id)))
-        (should (equal "Context nearly full: compacting into a summary first, as harness-compaction-kind says (nobody to ask)"
+        (should (equal "Context · summary · automatic"
                        (car hints)))
-        (should (equal "Compacting context in the middle of the turn…" (cadr hints)))
-        (should (string-match-p "\\`Compacted: [0-9.k]+ tokens → summary\\'" (caddr hints))))
+        (should (equal "Compaction · mid-turn" (cadr hints)))
+        (should (string-match-p "\\`Compaction · ~[0-9.k]+ tokens · summary\\'" (caddr hints))))
       ;; The chat is told the turn compacts, and then that it waits for its model again.
       (should (equal '(compacting waiting) (cl-subseq (member 'compacting (reverse phases)) 0 2)))
       (should-not (harness-agent-running-p id))
@@ -2072,8 +2154,8 @@ long, and a boundary that finds the context under the limit starts over."
 The step is not taken and the turn ends blocked; the failure is tried
 again later, not at every step."
   (harness-compaction-test-with
-    (let ((id (harness-compaction-test-session))
-          (harness-compaction-test--warm nil)
+    (let ((harness-compaction-test--warm nil)
+          (id (harness-compaction-test-session))
           (harness-provider-demo-script-override harness-compaction-test-script))
       (harness-call 'session/usage-add id '(:context 7500))
       ;; Nowhere to write a transcript, and too little conversation to cut.
@@ -2084,9 +2166,9 @@ again later, not at every step."
         ;; Refused at once, let through while it waits to try again, refused again.
         (let ((gates (cl-loop repeat 4 collect (boundary))))
           (should (equal '(nil t t nil) (mapcar (lambda (g) (and (plist-get g :proceed) t)) gates)))
-          (should (string-match-p "too large to send uncached" (plist-get (car gates) :reason)))))
+          (should (string-match-p "context too large · no compaction" (plist-get (car gates) :reason)))))
       (should-not (harness-compaction-test-compactions id))
-      (should (cl-some (lambda (hint) (string-prefix-p "Compaction failed:" hint))
+      (should (cl-some (lambda (hint) (string-prefix-p "Compaction failure ·" hint))
                        (harness-compaction-test-hints id)))
       ;; Gone with the turn, and with the session.
       (should (gethash id harness-compaction--mid-turn))
@@ -2156,16 +2238,14 @@ note that points at the file ends in the one that says the work goes on."
 The step goes on from the note, as with any automatic compaction."
   (harness-compaction-test-with
     (harness-compaction-test-define-echo)
-    (let* ((id (harness-compaction-test-session))
-           (harness-compaction-test--warm nil)
+    (let* ((harness-compaction-test--warm nil)
+           (id (harness-compaction-test-session))
            (harness-provider-demo-script-override (harness-compaction-test-tool-turn '(7500 600)))
            (requests (harness-compaction-test-recording
                       (harness-await (harness-call 'agent/prompt id "go")))))
       ;; Two steps of the turn, and not one summary request.
       (should (= 2 (length requests)))
-      (should-not (cl-some (lambda (req)
-                             (string-match-p "handoff summary" (or (plist-get req :system) "")))
-                           requests))
+      (should-not (cl-some #'harness-compaction-test-summary-request-p requests))
       (let ((node (car (harness-compaction-test-compactions id))))
         (should (equal "transcript" (harness-node-compaction-kind node)))
         (should (eq t (plist-get (plist-get node :meta) :mid-turn)))))))
@@ -2177,7 +2257,6 @@ anything and the turn ends blocked, as one whose compaction failed does."
   (harness-compaction-test-with
     (harness-test-load-module 'tools-question)
     (let* ((id (harness-compaction-test-session))
-           (harness-compaction-test--warm nil)
            (harness-provider-demo-script-override harness-compaction-test-script))
       (harness-call 'session/usage-add id '(:context 7500))
       (let ((gate (harness-run-filter-async 'agent/step (list :proceed t)
@@ -2196,8 +2275,11 @@ anything and the turn ends blocked, as one whose compaction failed does."
         (should (equal harness-compaction--held-step-reason (plist-get value :reason)))
         (should-not (harness-compaction-test-compactions id))))))
 
-(ert-deftest harness-compaction-mid-turn-names-its-brief-summary ()
-  "The hint of a brief summary made in the middle of a turn says so, and who writes it."
+(ert-deftest harness-compaction-mid-turn-names-a-brief-it-cannot-make ()
+  "A brief summary nobody chose is not made in the middle of a turn.
+A brief renders the conversation's narrative anew, which no cache of it
+covers: the step is compacted into a transcript instead, and the hints
+say what was asked for and what was made."
   (harness-compaction-test-with
     (harness-compaction-test-tiered-provider)
     (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
@@ -2207,11 +2289,12 @@ anything and the turn ends blocked, as one whose compaction failed does."
       (harness-call 'session/append id '(:kind user :content "please refactor the parser"))
       (harness-call 'session/usage-add id '(:context 7500))
       (should (plist-get (harness-compaction-test-step-gate id) :proceed))
-      (should (equal "Context nearly full: compacting into a brief summary first, as harness-compaction-kind says (nobody to ask)"
+      (should (equal "Brief · no cache · transcript"
                      (car (harness-compaction-test-hints id))))
-      (should (equal "Compacting context in the middle of the turn: a brief summary by Small…"
+      (should (equal "Context · transcript · fallback"
                      (cadr (harness-compaction-test-hints id))))
-      (should (equal "brief" (harness-node-compaction-kind (car (harness-compaction-test-compactions id))))))))
+      (should (equal "transcript" (harness-node-compaction-kind
+                                   (car (harness-compaction-test-compactions id))))))))
 
 (ert-deftest harness-compaction-mid-turn-is-a-setting ()
   "The settings page offers the switch, in the compaction section, on by default."
@@ -2249,7 +2332,7 @@ The summaries a compaction asks for are not among them.")
 
 (defun harness-compaction-test--summary-p (request)
   "Non-nil when REQUEST asks for a summary: a compaction's."
-  (string-match-p "handoff summary" (or (plist-get request :system) "")))
+  (harness-compaction-test-summary-request-p request))
 
 (defun harness-compaction-test--answer (request)
   "Answer REQUEST: the summary when it asks for one, else a short reply.
@@ -2622,7 +2705,7 @@ summary -- and the node stays where it is, marked reverted."
         (should (eq 'reverted (plist-get answer :state)))
         (should (eq t (plist-get answer :changed)))
         (should (equal (plist-get node :id) (plist-get answer :node-id)))
-        (should (string-prefix-p "Reverted the compaction" (plist-get answer :message))))
+        (should (string-prefix-p "Compaction · reverted · ~" (plist-get answer :message))))
       ;; Nothing was deleted: the node stays, marked.
       (should (equal (list (plist-get node :id))
                      (mapcar (lambda (n) (plist-get n :id)) (harness-compaction-test-compactions id))))
@@ -2630,7 +2713,7 @@ summary -- and the node stays where it is, marked reverted."
       (should (equal '("please refactor the parser" "Done: parser.el rewritten")
                      (harness-compaction-test-message-texts id)))
       ;; The transcript says so, where it happened.
-      (should (string-prefix-p "Reverted the compaction" (car (last (harness-compaction-test-hints id)))))
+      (should (string-prefix-p "Compaction · reverted · ~" (car (last (harness-compaction-test-hints id)))))
       ;; The next request is the conversation before the compaction, whole.
       (let ((text (harness-compaction-test-request-text (harness-compaction-test-turn id "and the lexer?"))))
         (should (string-match-p "please refactor the parser\nDone: parser.el rewritten\nand the lexer\\?\\'" text))
@@ -2647,7 +2730,7 @@ reverted: it is after the compaction either way."
       (let ((answer (harness-call 'compaction/restore id)))
         (should (eq 'compacted (plist-get answer :state)))
         (should (eq t (plist-get answer :changed)))
-        (should (string-prefix-p "Back to the compaction" (plist-get answer :message))))
+        (should (string-prefix-p "Compaction · restored · ~" (plist-get answer :message))))
       (should-not (harness-node-compaction-reverted-p (car (harness-compaction-test-compactions id))))
       (should (= 2 (length (harness-call 'session/messages id))))
       (let* ((request (harness-compaction-test-turn id "and the parser?"))
@@ -2835,7 +2918,7 @@ so the size the model reported when it compacted the conversation is the floor."
       (let ((answer (harness-call 'compaction/revert id)))
         (should (= 150000 (plist-get answer :context)))
         (should (= 150000 (plist-get (plist-get (harness-call 'session/get id) :usage) :context)))
-        (should (string-match-p "about 150k tokens" (plist-get answer :message))))
+        (should (string-match-p "~150k tokens" (plist-get answer :message))))
       ;; Restored, it is the summary's size again.
       (let ((answer (harness-call 'compaction/restore id)))
         (should (< (plist-get answer :context) 1000))))))
@@ -2892,7 +2975,7 @@ conversation says so, and the next message compacts it again."
         (harness-await (harness-call 'compaction/compact id)))
       (let ((answer (harness-call 'compaction/revert id)))
         (should (< 8000 (plist-get answer :context)))
-        (should (string-match-p "more than its 8k window, so the next message compacts it again"
+        (should (string-match-p "window 8k"
                                 (plist-get answer :message))))
       (should-not (gethash id harness-compaction--revert-hold))
       (harness-compaction-test-turn id "and now?")

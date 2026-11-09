@@ -177,10 +177,16 @@ A switch that loses nothing brings none, and neither does the check
       (should (equal '("b" "s" "t" "f" "q") (mapcar (lambda (c) (plist-get c :key)) choices)))
       (should (equal '("compact-new" "compact" "transcript" "none" "cancel")
                      (mapcar (lambda (c) (plist-get c :mode)) choices)))
-      (should (equal '("Brief summary" "Summary" "Transcript file" "Start afresh" "Cancel")
+      (should (equal '("Brief" "Summary" "Transcript" "Fresh start" "No switch")
                      (mapcar (lambda (c) (plist-get c :label)) choices)))
-      ;; The words are those of the table, but the switch's own for cancelling.
-      (dolist (way '(brief summary transcript fresh))
+      ;; The words are those of the table, with where each read the
+      ;; conversation said after them, but the switch's own for cancelling.
+      (dolist (way '(brief summary))
+        (should (equal (concat (harness-carry-property way :what) " · uncached")
+                       (plist-get (cl-find (symbol-name way) choices
+                                           :key (lambda (c) (plist-get c :choice)) :test #'equal)
+                                  :what))))
+      (dolist (way '(transcript fresh))
         (should (equal (harness-carry-property way :what)
                        (plist-get (cl-find (symbol-name way) choices
                                            :key (lambda (c) (plist-get c :choice)) :test #'equal)
@@ -423,11 +429,12 @@ reads none of."
                        (harness-call 'session/nodes sid)))
       (should (harness-node-handoff (car (last (harness-call 'session/nodes sid))))))))
 
-(ert-deftest harness-handoff-a-cold-compact-hands-over-the-transcript ()
-  "A handoff's compact modes are choices, not warmth: the transcript goes over.
-Neither the old model's summary nor the new model's brief is asked for
-when the estimate does not say its own request is cached; the hint says
-why, and no model reads the conversation to summarise it."
+(ert-deftest harness-handoff-a-cold-compact-still-hands-over-a-summary ()
+  "A handoff's compact modes are choices, not warmth: a cold cache does not stop them.
+The conversation goes to a provider that never saw it, so no cache can
+hold the summary's request; the transfer is the point, and its cost is
+what that transfer costs.  The new model's brief is the same, written
+from the narrative on the model it is going to."
   (harness-handoff-test-with
     (let* ((harness-handoff-test--warm nil)
            (sid (harness-handoff-test--session t))
@@ -436,24 +443,27 @@ why, and no model reads the conversation to summarise it."
                  ((symbol-function 'harness-method/provider/complete)
                   (lambda (req) (push req requests) (funcall orig req))))
         (let ((result (harness-test-await (harness-call 'handoff/switch sid "hosted:m" 'compact))))
-          (should (eq 'transcript (plist-get result :mode)))
-          (should (string-match-p "uncached" (plist-get result :fallback)))
-          (should (file-exists-p (plist-get result :file))))
-        (should-not (cl-some (lambda (req)
-                               (string-match-p "handoff summary" (or (plist-get req :system) "")))
-                             requests))
-        (should (cl-some (lambda (n) (string-match-p "No summary from Demo scripted"
-                                                    (or (plist-get n :content) "")))
-                         (harness-call 'session/nodes sid)))
-        (should-not (memq 'compaction (harness-handoff-test--kinds sid))))
-      ;; `compact-new' would have the new model write it: refused too.
+          (should (eq 'compact (plist-get result :mode)))
+          (should (equal "demo:scripted" (plist-get result :summarizer)))
+          (should (eq 'full (plist-get result :context))))
+        (should (= 1 (length requests)))
+        (should (cl-some (lambda (req)
+                           (string-match-p "handoff summary" (or (plist-get req :system) "")))
+                         requests))
+        (should (memq 'compaction (harness-handoff-test--kinds sid)))
+      ;; `compact-new' has the new model write the brief, from the narrative.
       (let ((sid (harness-handoff-test--session t)))
-        (setq harness-handoff-test--requests nil)
+        (setq requests nil)
         (let ((result (harness-test-await (harness-call 'handoff/switch sid "hosted:m" 'compact-new))))
-          (should (eq 'transcript (plist-get result :mode)))
-          (should (string-match-p "uncached" (plist-get result :fallback)))
-          (should-not harness-handoff-test--requests)
-          (should-not (memq 'compaction (harness-handoff-test--kinds sid))))))))
+          (should (eq 'compact-new (plist-get result :mode)))
+          (should (equal "hosted:m" (plist-get result :summarizer)))
+          (should (eq 'sample (plist-get result :context))))
+        (should (= 1 (length requests)))
+        (should (equal "hosted:m" (plist-get (car requests) :model)))
+        (should (cl-some (lambda (req)
+                           (string-match-p "handoff summary" (or (plist-get req :system) "")))
+                         requests))
+        (should (memq 'compaction (harness-handoff-test--kinds sid))))))))
 
 (ert-deftest harness-handoff-waits-for-the-next-step-of-a-running-turn ()
   "Switched while a turn runs, the handoff lands after that step's tool results.

@@ -13,9 +13,12 @@ The cold-cache question as a panel: what goes first, at what cost.
 ## About
 
 A message to a session whose prompt cache went cold waits while the
-harness asks what goes first (harness-cowboy.el): a brief summary, a
-summary, a transcript file, a fresh start, the whole conversation as
-it is, or not now.  The question is a pending question like any
+harness asks what goes first (harness-cowboy.el): the same one-page
+list the question before an automatic compaction shows -- a summary,
+a transcript file, a fresh start, a continuation and a pause.  The
+summary is shown, no cache, as a cold cache holds none of its
+request: it would read the conversation uncached, as carrying on
+would, and its row says so.  The question is a pending question like any
 other; its payload's `:cowboy` says when the cache lapsed (or that it
 is held for a model the session no longer uses, or that a redaction
 dropped it, and when), what carrying on costs and what each choice
@@ -32,12 +35,14 @@ against the cache it lost -- and what an answer does.  The choices,
 their keys and their wording are those of harness-carry.el, as the
 harness sends them; what the payload leaves out of one is the table's.
 
-A key answers once -- b, s, t, f, c, i -- and its capital always: B,
-S, T, F, C or I makes the choice `harness-cowboy-default` and stops
-the asking (`harness-cowboy-ask`), saved as any setting is.  i
-ignores the cold cache: the whole conversation goes and nothing is
-added to it.  q answers not now: the message waits, and goes with the
-next one.  The keys work while point is on the panel, a click on a
+A key answers once -- t, f, c -- and its capital always: T, F or C
+makes the choice `harness-cowboy-default` and stops the asking
+(`harness-cowboy-ask`), saved as any setting is.  The harness sends
+which ways it offers and which it shows but does not offer; a summary
+is shown without a key, as a cold cache holds none of its request,
+and a way shown without a key cannot be answered.  q answers pause: the message waits, and goes with the
+next one.  Typing \"silence\" carries on, as it did when that was a
+separate way.  The keys work while point is on the panel, a click on a
 choice from anywhere; digits pick an option as on any question, and
 text typed in the box answers it too ("transcript", "always brief");
 in the box, where the keys type, C-c . and a key press it on the

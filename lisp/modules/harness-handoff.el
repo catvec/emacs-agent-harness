@@ -392,6 +392,7 @@ result."
   (harness-then
    (harness-call-async 'compaction/compact session-id
                        (list :kind (if (eq context 'sample) 'brief 'summary)
+                             :transfer t
                              :model summarizer :context context
                              :caveat (harness-handoff--caveat plan)
                              :meta (list :handoff (list :mode (symbol-name (plist-get plan :mode))
