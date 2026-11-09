@@ -6214,8 +6214,8 @@ and tools.
 - Settings (section "Compaction"): `harness-compaction-kind`, the kind
   automatic compaction makes where nobody is asked (`summary`; any of
   the kinds, `truncate` included), `harness-compaction-ask` (on), which
-  asks before an automatic compaction where the user can be asked,
-  `harness-compaction-mid-turn` (on),
+  asks before an automatic compaction where the user can be asked (a
+  session's own answer overrides it), `harness-compaction-mid-turn` (on),
   `harness-compaction-brief-model`, and `harness-compaction-carry-on`
   (off), which makes carrying on the lasting answer to the question.
 - A summary is never made cold: it is sent as the chat's next request,
@@ -6255,10 +6255,12 @@ and tools.
   earlier (`harness-tasks-context-limit', 384k tokens by default).
   It judges the session as it is then, read again: the fallback,
   earlier in the chain, may have moved it to another model.
-- The question: compacting spends money, so with `harness-compaction-ask`
-  on, in a session that waits for the user (`harness-compaction--asks-p':
-  the setting, a session that is not non-interactive, and a
-  `question/ask'), the automatic compaction asks first
+- The question: compacting spends money, so with asking on
+  (`harness-compaction--ask-value': the session's own answer in its
+  `:ext' `:compaction-ask' when it has one, else `harness-compaction-ask'),
+  in a session that waits for the user (`harness-compaction--asks-p':
+  that, a session that is not non-interactive, and a `question/ask'), the
+  automatic compaction asks first
   (`harness-compaction--ask', event `compaction/asked').  It asks one
   flat list, the same list the cold-cache question asks
   (`harness-carry-menu`, see cowboy below), for its own reason: the
@@ -6277,7 +6279,7 @@ and tools.
   costs with and without the cache, the default and the choices, for a
   client that draws more than the question
   (`harness-ui-compaction-ask').  Its `:always' lists the choices whose
-  capital key answers "always"; only carrying on may.  The turn waits
+  capital key answers "always": the kinds, and carrying on.  The turn waits
   for the answer: a kind compacts as it says, carrying on sends the
   conversation as it is, and a dismissed question holds the message,
   with `harness-compaction--hold-reason', as Pause does.  An answer
@@ -6301,17 +6303,45 @@ and tools.
   transcript says what goes first and why
   (`harness-compaction--say': "Context · summary · chosen"), and the
   node's `:meta' `:auto' keeps the choice and who made it.
+- Always: answering the question with a capital and a kind ("S", "T",
+  "F" on the panel of `harness-ui-compaction-ask`) makes that kind
+  `harness-compaction-kind' and turns `harness-compaction-ask' off,
+  saved as Settings saves them, so every session after it compacts
+  unasked with it (`harness-compaction--remember'); the answer is a
+  lasting decision of the kind `compaction' with the settings before it
+  and after it, so its note offers [Turn off], and then [Turn on], in
+  any session (`harness-ui-decisions`).  The hint after the compaction
+  says both what was done and that it will be done without asking ("Context
+  · transcript · default", `harness-compaction--by`).  The answer
+  reaches the harness as the cowboy's does, the text "always <choice>",
+  so a client can send it as an answer's text;
+  `harness-ui-compaction-ask-answer` does.  A capital on carrying on is
+  "always carry on": it saves `harness-compaction-carry-on' and stops
+  the asking too, for a session that waits for the user.
+- A session's own answer: `harness-toggle-compaction-ask` (Session
+  settings' "Auto-compact") sets it, over ACP as
+  `_harness/compaction/set-ask', and `harness-set-compaction-ask-all'
+  ("Auto-compact for all sessions") saves the default and clears every
+  current session's answer, over ACP as
+  `_harness/compaction/set-ask-all'.  The answer is kept in the
+  session's `:ext' `:compaction-ask': `t` asks, `:false` compacts
+  unasked, and absent it follows `harness-compaction-ask`.  A session
+  the list marks can be answered for in one request; a task's session
+  keeps its answer like any other, and the answer wins over the default
+  both ways.
 - Nobody asked: a session that never waits for the user -- a task, a
   supervisor's worker, one whose `harness-non-interactive' is
-  set -- has no one to answer, so the compaction is made as
-  `harness-compaction-kind' says, with the hint saying that is why
-  ("Context · summary · automatic") -- a `summary` or `brief` there is
-  a transcript instead, since nobody chose to pay for it, and a second
-  hint says what was not made and why ("Summary · no cache ·
-  transcript", `harness-compaction--say-not-warm`).  A
-  session that never waits for the user does not take a lasting
-  "always carry on" either; unattended work is not left to fail on an
-  overgrown context.  A
+  set -- has no one to answer, and so has one whose own answer, or the
+  default, turned the asking off; the compaction is made as
+  `harness-compaction-kind' says, with the hint saying why ("Context ·
+  summary · default" where the setting turned it off,
+  `harness-compaction--by`, "Context · summary · automatic" where
+  nobody could be asked) -- a `summary` or `brief` there is a transcript
+  instead, since nobody chose to pay for it, and a second hint says what
+  was not made and why ("Summary · no cache · transcript",
+  `harness-compaction--say-not-warm`).  A session that never waits for
+  the user does not take a lasting "always carry on" either; unattended
+  work is not left to fail on an overgrown context.  A
   client that asks about a cold cache there is left to ask as it did
   (`harness-cowboy-ask'); what an automatic compaction may not do is
   spend without saying so.
@@ -6324,8 +6354,8 @@ and tools.
   while `harness-compaction-mid-turn` is on (the default), whatever the
   turn is in the middle of, with the same conditions (the gate goes on,
   `harness-compaction-needed-p`, the provider does not compact
-  on its own side).  A turn of many tool calls, an unattended task's,
-  would otherwise outgrow the window long before it ends.  The step
+  on its own side).  A turn of many tool calls, a task's as the queue
+  runs it, would otherwise outgrow the window long before it ends.  The step
   waits for `compaction/compact` of `harness-compaction-kind`, asked
   with OPTS `:meta` `(:mid-turn t)`, and goes on once it was made, or
   once a transcript or a cut was made in its place.  When neither can
@@ -13107,8 +13137,12 @@ module `ui-compaction-ask`) is that panel too, from the question's
 the model and whether the prompt cache is warm, and the choices with
 what each costs, carrying on marked the default.  It is one page -- the
 same five rows the cold-cache question shows -- with the keys of its
-choices; only Continuation has a capital, "always carry on", and a footer
-points at session_history.  A summary is dimmed, without a key and its price
+choices (s, t, f, c, q); the kinds that can be the automatic one and
+carrying on have capitals (S, T, F, C): a capital answers "always", the
+kind the default and the asking off, kept as the `compaction` decision
+whose [Turn off] asks again (`harness-compaction--remember`), or
+carrying on saved (`harness-compaction-carry-on`), and a footer points
+at session_history.  A summary is dimmed, without a key and its price
 column saying "no cache", where its own request would read the prompt
 cache cold.  Without a `:compaction` the ordinary question panel
 shows.
@@ -16087,8 +16121,10 @@ message meets a cold cache, in that panel, through
 `harness-ui-pending-panel-functions`; see "Chat buffer"), the question
 before an automatic compaction (`harness-ui-compaction-ask`: the same
 panel for a context near its window, its heading the context against
-the window, its rows what carrying on costs against the cache, its
-capital "always carry on"; see "Chat buffer"), compacting by hand
+the window, its rows what carrying on costs against the cache, and
+capitals that answer "always" and stop the asking (a kind's makes it
+the automatic one, carrying on's saves the carry-on); see "Chat buffer"),
+and compacting by hand
 (`harness-ui-compact`: `harness-compact`, `C-c h C` and "C" in the
 menu, asks one flat list with `read-multiple-choice` -- Summary,
 Transcript, Fresh start and Continuation -- the help buffer naming

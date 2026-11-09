@@ -28,6 +28,7 @@
 (declare-function harness-define-tool "harness-tools")
 (declare-function harness-compaction-needed-p "harness-compaction")
 (declare-function harness-compaction-hosted-p "harness-compaction")
+(declare-function harness-compaction--asks-p "harness-compaction" (session))
 (declare-function harness-compaction--block-text "harness-compaction" (block))
 (declare-function harness-compaction--messages-text "harness-compaction" (messages))
 
@@ -1576,8 +1577,10 @@ its work must not stall."
 
 (ert-deftest harness-compaction-a-session-nobody-is-asked-about-is-not-asked ()
   "A non-interactive session compacts as `harness-compaction-kind' says, and says so.
-A task, a seed or a worker has no user to answer a question; the
-transcript records what was done and why nobody was asked."
+A session that never waits for the user has no one to answer a
+question; the transcript records what was done and why nobody was
+asked.  So does any session whose user turned the asking off, which
+says so instead (\"default\")."
   (harness-compaction-test-with
     (harness-test-load-module 'tools-question)
     (let* ((id (harness-compaction-test-session :non-interactive t))
@@ -1590,6 +1593,154 @@ transcript records what was done and why nobody was asked."
                                    (car (harness-compaction-test-compactions id)))))
       (should (equal "Context · transcript · automatic"
                      (car (harness-compaction-test-hints id)))))))
+
+(ert-deftest harness-compaction-settings-page-has-the-asking-switch ()
+  "Settings, section Compaction, offers whether an automatic compaction asks.
+It stands beside the kind it makes, so turning the asking off, or back
+on, is in Settings and not only in an init file; the section says where
+a session's own switch is."
+  (harness-compaction-test-with
+    (let* ((d (harness-call 'config/describe (harness-test-temp-dir)))
+           (settings (plist-get d :settings))
+           (setting (lambda (key)
+                      (cl-find key settings :key (lambda (s) (plist-get s :key)) :test #'equal)))
+           (ask (funcall setting "harness-compaction-ask"))
+           (kind (funcall setting "harness-compaction-kind"))
+           (section (cl-find "compaction" (plist-get d :sections)
+                             :key (lambda (s) (plist-get s :name)) :test #'equal)))
+      (should (equal "compaction" (plist-get ask :section)))
+      (should (equal "compaction" (plist-get kind :section)))
+      (should (equal "Compaction" (plist-get section :title)))
+      (should (string-match-p "without asking" (plist-get section :doc)))
+      (should (string-match-p "Auto-compact in Session settings" (plist-get section :doc))))))
+
+(defmacro harness-compaction-test-with-defaults (&rest body)
+  "Run BODY with the compaction settings as tests set them, restoring after.
+An \"always\" answer saves them as the settings page does, which changes
+their standard values; the next test starts from the defaults again."
+  (declare (indent 0))
+  `(let ((ask-default (default-value 'harness-compaction-ask))
+         (kind-default (default-value 'harness-compaction-kind)))
+     (unwind-protect (progn ,@body)
+       (set-default 'harness-compaction-ask ask-default)
+       (set-default 'harness-compaction-kind kind-default))))
+
+(ert-deftest harness-compaction-an-always-answer-stops-asking-and-keeps-a-decision ()
+  "Answering the question \"always transcript\" compacts unasked from then on.
+The kind becomes `harness-compaction-kind', asking stops for every
+session, and the answer is a lasting decision whose [Turn off] asks
+again: the hint says both what was done and that it will be done
+without asking, and the decision's undo and redo move the settings back
+and forth."
+  (harness-compaction-test-with
+    (harness-test-load-module 'tools-question)
+    (harness-test-load-module 'decisions)
+    (harness-compaction-test-with-defaults
+      (let* ((id (harness-compaction-test-session))
+             (harness-compaction-kind 'summary)
+             (harness-compaction-ask t)
+             (harness-provider-demo-script-override harness-compaction-test-script))
+        (harness-call 'session/usage-add id '(:context 7500))
+        (let ((turn (harness-call 'agent/prompt id "next question")))
+          (harness-compaction-test-answer id "always transcript")
+          (should (eq 'end-turn (plist-get (harness-await turn 10) :stop-reason))))
+        (should-not harness-compaction-ask)
+        (should (eq 'transcript harness-compaction-kind))
+        (let ((node (car (harness-compaction-test-compactions id))))
+          (should (equal "transcript" (harness-node-compaction-kind node)))
+          (should (equal '(:choice "transcript" :by "always")
+                         (plist-get (plist-get node :meta) :auto))))
+        (should (equal "Context · transcript · default"
+                       (car (harness-compaction-test-hints id))))
+        (let* ((hint (cl-find-if (lambda (n) (and (eq (plist-get n :kind) 'hint)
+                                                  (plist-get (plist-get n :meta) :decision)))
+                                 (harness-call 'session/nodes id)))
+               (decision (and hint (harness-call 'decision/get
+                                                 (plist-get (plist-get hint :meta) :decision)))))
+          (should decision)
+          (should (eq 'compaction (plist-get decision :kind)))
+          (should (equal '(:ask t :kind "summary")
+                         (plist-get (plist-get decision :record) :before)))
+          (should (equal '(:ask :false :kind "transcript")
+                         (plist-get (plist-get decision :record) :after)))
+          (should (equal (plist-get hint :id) (plist-get decision :node)))
+          ;; [Turn off]: asking again, the kind as it was.
+          (let ((moved (harness-call 'decision/undo (plist-get decision :id))))
+            (should (eq 'undone (plist-get moved :outcome)))
+            (should harness-compaction-ask)
+            (should (eq 'summary harness-compaction-kind))
+            (should (equal "Undone: an automatic compaction asks what goes first again"
+                           (plist-get moved :message))))
+          ;; [Turn on]: unasked again, into the chosen kind.
+          (let ((moved (harness-call 'decision/redo (plist-get decision :id))))
+            (should (eq 'done (plist-get moved :outcome)))
+            (should-not harness-compaction-ask)
+            (should (eq 'transcript harness-compaction-kind))
+            (should (equal "Redone: automatic compaction is made without asking, into transcript"
+                           (plist-get moved :message)))))))))
+
+(ert-deftest harness-compaction-a-sessions-own-answer-wins-over-the-default ()
+  "A session compacts unasked while the default asks, and asks while it does not.
+`compaction/set-ask' keeps the answer with the session, where a restart
+keeps it too; the hint says what changed, and the automatic compaction
+follows it, saying that the user chose it rather than that nobody could
+be asked."
+  (harness-compaction-test-with
+    (harness-test-load-module 'tools-question)
+    (harness-compaction-test-with-defaults
+      (let* ((id (harness-compaction-test-session))
+             (harness-compaction-kind 'transcript)
+             (harness-compaction-ask t)
+             (harness-provider-demo-script-override '((:type text :delta "ok") (:type done :stop-reason end-turn))))
+        (harness-call 'compaction/set-ask id :false)
+        (should (eq :false (plist-get (plist-get (harness-call 'session/get id) :ext) :compaction-ask)))
+        (should (member "Automatic compaction: always, without asking"
+                        (harness-compaction-test-hints id)))
+        (should-not (harness-compaction--asks-p (harness-call 'session/get id)))
+        (harness-call 'session/usage-add id '(:context 7500))
+        (harness-await (harness-call 'agent/prompt id "get on with it"))
+        (should-not (harness-call 'question/pending id))
+        (should (equal "transcript"
+                       (harness-node-compaction-kind
+                        (car (harness-compaction-test-compactions id)))))
+        (should (member "Context · transcript · default"
+                        (harness-compaction-test-hints id)))
+        ;; The session's own answer is the asking one now, even though
+        ;; the default is off.
+        (harness-call 'compaction/set-ask id t)
+        (should (eq t (plist-get (plist-get (harness-call 'session/get id) :ext) :compaction-ask)))
+        (should (member "Automatic compaction: asking what goes first again"
+                        (harness-compaction-test-hints id)))
+        (should (harness-compaction--asks-p (harness-call 'session/get id)))
+        (let ((harness-compaction-ask nil))
+          (should (harness-compaction--asks-p (harness-call 'session/get id))))
+        ;; Removed again, it follows the default.
+        (harness-call 'compaction/set-ask id nil)
+        (should-not (plist-get (plist-get (harness-call 'session/get id) :ext) :compaction-ask))
+        (should (member "Automatic compaction: as the default says"
+                        (harness-compaction-test-hints id)))))))
+
+(ert-deftest harness-compaction-set-ask-all-clears-every-sessions-own-answer ()
+  "`compaction/set-ask-all' removes the answers of the sessions a filter selects.
+The default, saved by the settings page and by the question's capitals,
+then decides for all of them; the sessions that had an answer are the
+ones it says it changed."
+  (harness-compaction-test-with
+    (let* ((one (harness-compaction-test-session))
+           (two (harness-compaction-test-session))
+           (three (harness-compaction-test-session)))
+      (harness-call 'compaction/set-ask one :false)
+      (harness-call 'compaction/set-ask two t)
+      (let ((changed (harness-call 'compaction/set-ask-all nil)))
+        (should (member one changed))
+        (should (member two changed))
+        (should-not (member three changed)))
+      (should-not (plist-get (plist-get (harness-call 'session/get one) :ext) :compaction-ask))
+      (should-not (plist-get (plist-get (harness-call 'session/get two) :ext) :compaction-ask))
+      (should (member "Automatic compaction: as the default says"
+                      (harness-compaction-test-hints one)))
+      ;; Already following the default, there is nothing to change.
+      (should-not (harness-call 'compaction/set-ask-all nil)))))
 
 (ert-deftest harness-compaction-mid-turn-asks-once-and-carries-on-when-answered ()
   "The compaction in the middle of a turn asks too, once: carried on with,

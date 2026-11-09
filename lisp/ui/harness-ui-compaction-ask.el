@@ -23,10 +23,14 @@
 ;; module says is the heading -- the context against the window the
 ;; model can be sent.  A summary whose own request would read the
 ;; conversation uncached is drawn, no cache.  A key answers once; the
-;; capital of Continuation answers "always", which saves
-;; `harness-compaction-carry-on' and stops the asking.  A client that
-;; does not know `:compaction' shows the ordinary question, whose
-;; options carry their costs in their words.
+;; capitals answer "always": a kind's makes it `harness-compaction-kind'
+;; and stops the asking, kept as a lasting decision whose [Turn off] asks
+;; again (`harness-compaction--remember'), and carrying on's saves
+;; `harness-compaction-carry-on', which stops it too.  The hint after it
+;; says so, and Auto-compact in Session settings turns the asking off or
+;; on for one session or for every session.  A client that does not know
+;; `:compaction' shows the ordinary question, whose options carry their
+;; costs in their words.
 
 ;;; Code:
 
@@ -65,13 +69,17 @@
 
 (defun harness-ui-compaction-ask-answer (session-id pid choice &optional always)
   "Answer the automatic-compaction question PID of SESSION-ID with CHOICE.
-CHOICE is a choice's name, such as \"brief\"; ALWAYS non-nil makes it the
-lasting answer, which only carrying on may be."
+CHOICE is a choice's name, such as \"summary\"; ALWAYS non-nil makes it
+the lasting answer: a kind compacted unasked from now on with the asking
+off, which the harness keeps as a lasting decision (not for \"hold\", nor
+for a choice shown but not offered), or carrying on always."
   (harness-ui-pending-answer-question
-   session-id pid (if always (concat "always " choice) choice))
-  (when always
-    (message "%s · default"
-             (harness-carry-label (harness-carry-way choice)))))
+   session-id pid (if (and always (not (equal choice "hold")))
+                      (concat "always " choice) choice))
+  (when (and always (not (equal choice "hold")))
+    (let ((way (harness-carry-way choice)))
+      (message "%s · default · off in Session settings"
+               (if way (harness-carry-label way) choice)))))
 
 ;;;; The panel
 
@@ -89,6 +97,8 @@ See `harness-ui-carry-panel-string'."
           :choices (mapcar (lambda (entry) (harness-ui-carry-choice entry session))
                            (append (plist-get info :choices) nil))
           :default (plist-get info :default)
+          ;; The kinds that can be the automatic one, and carrying on:
+          ;; a brief summary is not offered here, and cannot be made.
           :always (plist-get info :always)
           :footer (list (and (fboundp 'harness-compaction-history-p)
                              (harness-compaction-history-p session-id)

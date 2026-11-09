@@ -83,7 +83,7 @@ for lists.  COLD makes it the question a cold prompt cache asks."
                           :cached (not cold) :carry-on (if cold 0.315 0.025)
                           :carry-on-cached 0.025
                           :default "carry-on"
-                          :always '("carry-on")
+                          :always '("summary" "transcript" "fresh" "carry-on")
                           :choices (harness-ui-compaction-ask-test--choices cold))))
 
 (defun harness-ui-compaction-ask-test--lines (string)
@@ -103,7 +103,9 @@ COLD makes it the question a cold prompt cache asks."
 warm, and a row for each of the five ways -- its key, its button, its
 cost and what it does, the default marked.  It is the same list the
 cold-cache question asks, for its own reason.  Carrying on is the
-default, and its capital is the one lasting answer: \"always carry on\"."
+default; the capitals are the lasting answers: a kind's makes it the
+kind compacted unasked from then on, and carrying on's is \"always carry
+on\"."
   (harness-test-reset-bus)
   (harness-test-load-module 'ui)
   (let* ((lines (harness-ui-compaction-ask-test--page-lines))
@@ -122,8 +124,8 @@ default, and its capital is the one lasting answer: \"always carry on\"."
                      "    q  Pause                         pause")
                    (seq-subseq lines 3 8)))
     (should (equal "" (nth 8 lines)))
-    ;; The capital of the one lasting answer, carrying on.
-    (should (equal "    C   default" (nth 9 lines)))
+    ;; The capitals: the kinds that can be the automatic one, and carrying on.
+    (should (equal "    S   T   F   C   default" (nth 9 lines)))
     (should (equal "   session_history" (nth 10 lines)))
     (should (equal "   Box key · C-c . s" (nth 11 lines)))
     ;; A session without the session_history tool says nothing about it.
@@ -140,13 +142,22 @@ default, and its capital is the one lasting answer: \"always carry on\"."
     ;; A choice's button says more when hovered, in one exact line.
     (let* ((at (string-search "Summary" string))
            (help (get-text-property at 'help-echo string)))
-      (should (equal "Summary · ~$0.330 · context · cached · ~1.5k tokens · key · s · button"
+      (should (equal (concat "Summary · ~$0.330 · context · cached · ~1.5k tokens"
+                             " · key · s · default · S · button")
                      help)))
     (let* ((at (string-search "Continuation" string))
            (help (get-text-property at 'help-echo string)))
       (should (equal (concat "Continuation · ~$0.025 cached · context · default"
                              " · key · c · default · C · button")
-                     help)))))
+                     help)))
+    ;; The keymap answers each capital, and only those: `Pause' is no
+    ;; lasting answer, and a key of a way does nothing in capitals.
+    (let ((map (harness-ui-carry-keymap
+                (harness-ui-compaction-ask--spec "s1" (harness-ui-compaction-ask-test--record)))))
+      (dolist (key '("S" "T" "F" "C" "s" "t"))
+        (should (commandp (lookup-key map key))))
+      (dolist (key '("B" "X" "Q"))
+        (should-not (lookup-key map key))))))
 
 (ert-deftest harness-ui-compaction-ask-panel-is-one-page ()
   "The question is one page: five rows, and no span, messages, tool
@@ -178,6 +189,9 @@ the default, as it is for the warm menu."
                      "    c  Continuation  ~$0.315 uncached  context · default"
                      "    q  Pause                           pause")
                    (seq-subseq lines 3 8)))
+    ;; A summary that is not offered is no lasting answer: the capitals
+    ;; are the ways that can be made.
+    (should (equal "    T   F   C   default" (nth 9 lines)))
     ;; The summary has no key: pressing s does nothing.
     (let* ((at (string-search "Summary" string))
            (keymap (get-text-property at 'keymap string)))
@@ -302,6 +316,56 @@ after it, and the turn answers."
       (should (string-match-p "next question"
                               (mapconcat (lambda (n) (or (plist-get n :content) ""))
                                          (harness-call 'session/nodes sid) "\n"))))))
+
+(ert-deftest harness-ui-compaction-ask-a-capital-answers-always ()
+  "A capital key answers the panel \"always\": that kind is made unasked from then on.
+A message sent to a session near its window waits on the panel; T
+answers it always transcript, so the compaction is made, the kind
+becomes `harness-compaction-kind', asking stops, and the hint says so."
+  (harness-ui-compaction-ask-test-with
+    (let ((ask-default (default-value 'harness-compaction-ask))
+          (kind-default (default-value 'harness-compaction-kind)))
+      (unwind-protect
+          (let* ((sid (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                               :model "demo:scripted" :context-window 8000)
+                                 :id))
+                 (buffer nil))
+            (harness-call 'session/append sid '(:kind user :content "please refactor the parser"))
+            (harness-call 'session/append sid '(:kind assistant :content "Done: parser.el rewritten"))
+            (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 3000 :context 7500))
+            (setq buffer (harness-chat-buffer sid))
+            (set-window-buffer (selected-window) buffer)
+            (harness-test-wait (lambda () (with-current-buffer buffer
+                                            (and (not harness-chat--loading) harness-compose-end)))
+                               5 "the session to load")
+            (with-current-buffer buffer
+              (goto-char harness-compose-end)
+              (insert "next question")
+              (harness-chat-send))
+            (harness-test-wait (lambda () (harness-ui-compaction-ask-test--panel buffer))
+                               5 "the compaction panel")
+            (with-current-buffer buffer
+              (should (string-match-p "default"
+                                      (buffer-substring-no-properties (point-min) (point-max))))
+              ;; T, with point on the panel: always transcript.
+              (let ((at (harness-ui-compaction-ask-test--panel buffer)))
+                (call-interactively (lookup-key (get-text-property at 'keymap) "T"))))
+            (harness-test-wait (lambda () (eq 'idle (plist-get (harness-call 'session/get sid) :status)))
+                               10 "the turn to end")
+            (should-not harness-compaction-ask)
+            (should (eq 'transcript harness-compaction-kind))
+            (should (equal "transcript"
+                           (harness-node-compaction-kind
+                            (cl-find 'compaction (harness-call 'session/nodes sid)
+                                     :key (lambda (n) (plist-get n :kind))))))
+            ;; The hint after it says what goes first, and that it is the
+            ;; default now.
+            (should (string-match-p
+                     "Context · transcript · default"
+                     (mapconcat (lambda (n) (or (plist-get n :content) ""))
+                                (harness-call 'session/nodes sid) "\n"))))
+        (set-default 'harness-compaction-ask ask-default)
+        (set-default 'harness-compaction-kind kind-default)))))
 
 (provide 'harness-ui-compaction-ask-test)
 ;;; harness-ui-compaction-ask-test.el ends here

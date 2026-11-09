@@ -32,10 +32,14 @@ the choices, their keys and their costs the harness's.  What this
 module says is the heading -- the context against the window the
 model can be sent.  A summary whose own request would read the
 conversation uncached is drawn, no cache.  A key answers once; the
-capital of Continuation answers "always", which saves
-`harness-compaction-carry-on` and stops the asking.  A client that
-does not know `:compaction` shows the ordinary question, whose
-options carry their costs in their words.
+capitals answer "always": a kind's makes it `harness-compaction-kind`
+and stops the asking, kept as a lasting decision whose [Turn off] asks
+again (`harness-compaction--remember`), and carrying on's saves
+`harness-compaction-carry-on`, which stops it too.  The hint after it
+says so, and Auto-compact in Session settings turns the asking off or
+on for one session or for every session.  A client that does not know
+`:compaction` shows the ordinary question, whose options carry their
+costs in their words.
 
 ## Uses
 

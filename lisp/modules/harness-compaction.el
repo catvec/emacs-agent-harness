@@ -70,7 +70,10 @@
 ;; Automatic compaction makes `harness-compaction-kind', but where the
 ;; user can be asked it asks them first, with what each kind costs and
 ;; what carrying on costs (`harness-compaction-ask'; see "Asking before
-;; compacting automatically" below).  By hand (the UI's
+;; compacting automatically" below).  Answering it "always" with a kind
+;; makes that kind the default and stops the asking, for every session,
+;; kept as a decision the UI can undo; a session's own answer is the
+;; UI's to turn either way (`harness-toggle-compaction-ask').  By hand (the UI's
 ;; `harness-compact', or the panel of a session whose prompt cache
 ;; expired) any kind, with what each costs (`compaction/estimate').  A
 ;; message to a session whose prompt cache went cold makes one of them
@@ -248,11 +251,14 @@ from the prompt cache while that lasts; a `brief' renders the narrative
 anew, which no cache covers, and is a handoff's.  Where the user can be
 asked, the question before it offers the menu both questions share
 \(`harness-carry-menu': Summary, Transcript, Fresh start, Continuation
-and Pause) with what each costs (`harness-compaction-ask'), this one
+and Pause) with what each costs (`harness-compaction-ask'), carrying on
 marked the default; a summary whose own request is not cached is shown,
 no cache.  A kind they answer is chosen, but a model kind among them
 is still made only when the estimate says its own request is cached, and
-a transcript otherwise.  Compacting by hand (`harness-compact', or the
+a transcript otherwise.  Answering it \"always\" with a kind makes that
+kind this one and turns the asking off for every session, and a
+session's own answer (`harness-toggle-compaction-ask') wins over it.
+Compacting by hand (`harness-compact', or the
 panel above the message box of a session whose prompt cache expired)
 offers the same list, less Pause, under the same rule: no choice makes
 a cold summary.  A standing exception for an informed user to buy a cold
@@ -2176,12 +2182,26 @@ decide as they would have."
 ;; conversation a few thousand tokens longer, is asking about an answer
 ;; already given.  "Always carry on" makes it lasting
 ;; (`harness-compaction-carry-on'), for every session that would wait
-;; for the user.  Where nobody is asked -- a task, a seed, a session
-;; whose user turned asking off -- it makes `harness-compaction-kind', as
-;; before, and the transcript says so.
+;; for the user.  Answering "always" with a kind makes that kind
+;; `harness-compaction-kind' and turns `harness-compaction-ask' off, so
+;; every session after it compacts unasked, and keeps the answer as a
+;; lasting decision whose [Turn off] asks again
+;; (`harness-compaction--remember').  A session's own answer
+;; (`:compaction-ask' in its `:ext') is the UI's to turn either way
+;; (`harness-toggle-compaction-ask'), and wins over the default; so why
+;; a compaction went unasked is either that the user chose it or that
+;; nobody could be asked (`harness-compaction--by').  Where nobody is
+;; asked -- asking off, a session whose own answer turns it off, a
+;; non-interactive one -- it makes `harness-compaction-kind', as before,
+;; and the transcript says so.
 ;; Whatever made it, a compaction can be taken back and made again
 ;; afterwards (`compaction/revert', `compaction/restore'); the question
 ;; takes nothing of that away.
+
+(defconst harness-compaction--ask-ext-key :compaction-ask
+  "The session's `:ext' key that answers whether its compaction asks.
+`t' asks, `:false' compacts unasked as `harness-compaction-kind' says,
+and no value follows the default, `harness-compaction-ask'.")
 
 (defcustom harness-compaction-ask t
   "Non-nil to ask before an automatic compaction, where the user can be asked.
@@ -2193,8 +2213,13 @@ on, in a session that waits for the user, the question comes first, with
 what each way costs and what carrying on costs, and the conversation is
 compacted only as they answer.  Nil compacts as `harness-compaction-kind'
 says without asking, as a session nobody is asked about always does: a
-task, a seed, a supervisor's worker, and any session whose
-`harness-non-interactive' is set."
+non-interactive one, and any session whose own answer
+\(`:compaction-ask' in its `:ext') turns asking off.  Answering the
+question \"always\" with a kind turns this off and makes the kind
+`harness-compaction-kind' (`harness-ui-compaction-ask');
+`harness-toggle-compaction-ask' turns it off or on for one session, and
+`harness-set-compaction-ask-all' for every current session, which also
+saves this option."
   :type 'boolean :safe #'booleanp :group 'harness)
 
 (defun harness-compaction--non-interactive-p (session)
@@ -2206,11 +2231,36 @@ question reads it (`harness-cowboy--non-interactive-p')."
       (harness-cowboy--non-interactive-p session)
     (harness-json-true-p (plist-get session :non-interactive))))
 
+(defun harness-compaction--session-ask (session)
+  "Return SESSION's own answer to whether an automatic compaction asks.
+That is its `:ext' `:compaction-ask': t to ask, `:false' to compact
+unasked, nil for no answer of its own."
+  (let ((value (plist-get (plist-get session :ext) harness-compaction--ask-ext-key)))
+    (and value (if (harness-json-true-p value) t :false))))
+
+(defun harness-compaction--ask-value (session)
+  "Return whether an automatic compaction of SESSION asks, before the rest.
+That is the session's own answer when it has one, else the default,
+`harness-compaction-ask'."
+  (let ((own (harness-compaction--session-ask session)))
+    (if own (harness-json-true-p own) harness-compaction-ask)))
+
 (defun harness-compaction--asks-p (session)
-  "Non-nil when an automatic compaction of SESSION is put to its user first."
-  (and harness-compaction-ask
+  "Non-nil when an automatic compaction of SESSION is put to its user first.
+It is not asked where asking is off -- the default's or the session's
+own, which wins (`harness-compaction--ask-value') -- nor of a session
+that never waits for the user, nor where no `question/ask' can be
+had."
+  (and (harness-compaction--ask-value session)
        (not (harness-compaction--non-interactive-p session))
        (harness-method-exists-p 'question/ask)))
+
+(defun harness-compaction--by (session)
+  "Return who decided that SESSION's compaction is made unasked.
+`always' when the user turned asking off -- in the default, or for the
+session -- and `unasked' when nobody could be asked, which is a
+non-interactive session or one without `question/ask'."
+  (if (not (harness-compaction--ask-value session)) 'always 'unasked))
 
 (defun harness-compaction--estimate (session-id)
   "Return `compaction/estimate''s answer for SESSION-ID, or nil."
@@ -2262,6 +2312,16 @@ NOTE, when given, opens it because the answer named no choice."
        (format "Context · ~%s of ~%s tokens"
                (harness-format-tokens context) (harness-format-tokens window)))
       (t "Context · near full")))))
+
+(defun harness-compaction--always-names (choices)
+  "Return the names of CHOICES the question lets answer \"always\".
+That is every choice but `hold', which is no lasting answer: a kind
+makes `harness-compaction-kind' and stops the asking
+\(`harness-compaction--remember'), and carrying on is
+`harness-compaction-carry-on' (`harness-compaction--save-carry-on')."
+  (mapcar (lambda (choice) (plist-get choice :choice))
+          (cl-remove-if (lambda (choice) (equal (plist-get choice :choice) "hold"))
+                        choices)))
 
 (defun harness-compaction--ask-info (session estimate where default choices)
   "Return the `:compaction' of the question before an automatic compaction.
@@ -2362,8 +2422,10 @@ The question is one page and one list, the same one the cold-cache
 question asks (`harness-carry-menu'): Summary, Transcript, Fresh start,
 Continuation and Pause.  A summary is shown, no cache, when its own
 request would read the conversation uncached, and an answer that names
-it asks again saying so.  The capital of Continuation is \"always carry
-on\", which saves `harness-compaction-carry-on' and stops the asking."
+it asks again saying so.  The capitals answer \"always\": a kind's makes
+it `harness-compaction-kind' and stops the asking
+\(`harness-compaction--remember'), and carrying on's is \"always carry
+on\", which saves `harness-compaction-carry-on' and stops it too."
   (let* ((choices (harness-carry-menu estimate))
          (default (plist-get (harness-compaction--default-choice choices) :choice))
          (answered nil)
@@ -2375,7 +2437,7 @@ on\", which saves `harness-compaction-carry-on' and stops the asking."
                  :options (mapcar (lambda (c) (harness-compaction--option-text c default)) choices)
                  :allow-free-text t
                  :compaction (append (harness-compaction--ask-info session estimate where default choices)
-                                     (list :always '("carry-on"))))
+                                     (list :always (harness-compaction--always-names choices))))
            (lambda (text dismissed)
              (setq answered t)
              (when (equal (plist-get (gethash session-id harness-compaction--asking) :pid) pid)
@@ -2397,6 +2459,9 @@ on\", which saves `harness-compaction-carry-on' and stops the asking."
                  (harness-compaction--ask-again
                   session-id estimate where settle
                   (harness-compaction--not-offered-text choice)))
+                ;; "always" makes the kind the default and stops the
+                ;; asking, kept as a decision by the answer's caller
+                ;; (`harness-compaction--decide').
                 (t (funcall settle (intern (plist-get parsed :choice))
                             (if (plist-get parsed :always) 'always 'user))))))))
     (unless answered
@@ -2412,24 +2477,38 @@ on\", which saves `harness-compaction-carry-on' and stops the asking."
   "Return a promise of what goes first before an automatic compaction.
 WHERE is `turn' or `step'.  The answer is (:choice KIND :by BY): KIND a
 compaction kind, `carry-on', `hold', or nil when the question was
-dismissed, and BY `user', `always', `dismissed' or `unasked'.  Where
-nobody is asked,
-the answer is `harness-compaction-kind', unless that asks a model and
-its own request is not known to be cached: then it is the bounded kind
-`harness-compaction--effective-kind' returns instead, since a cold
-summary is not made."
+dismissed, and BY `user', `always', `dismissed' or `unasked'.  An
+`always' answer to a kind is kept before the promise settles
+\(`harness-compaction--remember'), and the answer names its decision as
+`:decision', for the hint that follows; carrying on's is kept by the
+gate that reads the answer (`harness-compaction--save-carry-on').  Where
+nobody is asked, the answer is `harness-compaction-kind', unless that
+asks a model and its own request is not known to be cached: then it is
+the bounded kind `harness-compaction--effective-kind' returns instead,
+since a cold summary is not made."
   (if (not (harness-compaction--asks-p session))
       (harness-resolved
        (list :choice (harness-compaction--effective-kind session-id harness-compaction-kind
                                                           (list :fallback "transcript"))
-             :by 'unasked))
+             :by (harness-compaction--by session)))
     (let* ((estimate (harness-compaction--estimate session-id))
            (promise (harness-make-promise))
            (settled nil)
            (settle (lambda (choice by &optional _)
                      (unless settled
                        (setq settled t)
-                       (harness-resolve promise (list :choice choice :by by))))))
+                       ;; An "always" answer to a kind is kept before the
+                       ;; promise settles; carrying on's is kept by the gate
+                       ;; that reads the answer (`harness-compaction--save-carry-on').
+                       ;; One that could not be kept is this compaction only,
+                       ;; and says so as an answer.
+                       (let* ((kind (and (memq choice harness-compaction-kinds) choice))
+                              (kept (and kind (eq by 'always)
+                                         (harness-compaction--remember choice session-id)))
+                              (by (if (and kind (eq by 'always) (not kept)) 'user by)))
+                         (harness-resolve promise
+                                          (list :choice choice :by by
+                                                :decision (plist-get kept :decision))))))))
       (condition-case err
           (harness-compaction--ask session-id session estimate where settle)
         (error
@@ -2451,32 +2530,42 @@ summary is not made."
     ('carry-on "continuation")
     (_ "compaction")))
 
-(defun harness-compaction--say (session-id choice by session)
+(defun harness-compaction--say (session-id choice by session &optional decision)
   "Append the hint saying automatic compaction did CHOICE in SESSION-ID.
 BY is who decided it: `user', `always', `dismissed' or `unasked'.
 SESSION is the session's record, for the context that carrying on
-sends."
-  (let ((context (plist-get (plist-get session :usage) :context)))
+sends.  DECISION, when given, is the lasting decision an \"always\"
+answer kept, which the hint refers to so the chat offers its [Turn off]."
+  (let* ((context (plist-get (plist-get session :usage) :context))
+         (text
+          (string-join
+           (delq nil
+                 (list "Context"
+                       (if (eq choice 'carry-on)
+                           (concat "continuation"
+                                   (and (numberp context) (> context 0)
+                                        (format " · ~%s tokens uncached"
+                                                (harness-format-tokens context))))
+                         (harness-compaction--did-text choice))
+                       (pcase by
+                         ('user "answer")
+                         ('always "default")
+                         ('unasked
+                          ;; The configured kind only when it is the one made.
+                          (if (eq choice harness-compaction-kind) "automatic" "fallback"))
+                         (_ nil))))
+           " · ")))
     (when (harness-call 'session/exists-p session-id)
-      (harness-call
-       'session/hint session-id
-       (string-join
-        (delq nil
-              (list "Context"
-                    (if (eq choice 'carry-on)
-                        (concat "continuation"
-                                (and (numberp context) (> context 0)
-                                     (format " · ~%s tokens uncached"
-                                             (harness-format-tokens context))))
-                      (harness-compaction--did-text choice))
-                    (pcase by
-                      ('user "answer")
-                      ('always "default")
-                      ('unasked
-                       ;; The configured kind only when it is the one made.
-                       (if (eq choice harness-compaction-kind) "automatic" "fallback"))
-                      (_ nil))))
-        " · ")))))
+      (if (not (and (stringp decision) (harness-method-exists-p 'session/append)))
+          (harness-call 'session/hint session-id text)
+        (let ((node (harness-call 'session/append session-id
+                                  (list :kind 'hint :content text :meta (list :decision decision)))))
+          (when (harness-method-exists-p 'decision/attach)
+            (condition-case err
+                (harness-call 'decision/attach decision session-id (plist-get node :id))
+              (error (harness-log 'warn "compaction: could not name the note of %s: %s"
+                                  decision (harness-error-short-message err)))))
+          node)))))
 
 (defun harness-compaction--ask-meta (choice by)
   "Return the compaction node's `:meta' for CHOICE made by BY.
@@ -2537,7 +2626,8 @@ compacted, the message is held rather than sent uncached."
      (harness-compaction--decide session-id session 'turn)
      (lambda (answer)
        (let ((choice (plist-get answer :choice))
-             (by (plist-get answer :by)))
+             (by (plist-get answer :by))
+             (decision (plist-get answer :decision)))
          (harness-compaction--note-answer session-id choice)
          (when (and (eq choice 'carry-on) (eq by 'always))
            (harness-compaction--save-carry-on session-id))
@@ -2545,7 +2635,7 @@ compacted, the message is held rather than sent uncached."
           ((memq choice '(hold nil))
            (funcall next (list :proceed nil :reason harness-compaction--hold-reason)))
           ((eq choice 'carry-on)
-           (harness-compaction--say session-id choice by session)
+           (harness-compaction--say session-id choice by session decision)
            (funcall next value))
           (t
            ;; Say what will really go first: a cold summary is a
@@ -2556,8 +2646,8 @@ compacted, the message is held rather than sent uncached."
                 (harness-compaction--effective-kind
                  session-id choice (list :fallback "transcript"))
               choice)
-            by session)
-           (when (eq by 'unasked)
+            by session decision)
+           (when (memq by '(unasked always))
              (harness-compaction--say-not-warm session-id harness-compaction-kind choice))
            (harness-compaction--compact-with-bounds
             session-id choice (harness-compaction--ask-meta choice by)
@@ -2585,13 +2675,14 @@ conversation uncached."
      (harness-compaction--decide session-id session 'step)
      (lambda (answer)
        (let ((choice (plist-get answer :choice))
-             (by (plist-get answer :by)))
+             (by (plist-get answer :by))
+             (decision (plist-get answer :decision)))
          (harness-compaction--note-answer session-id choice)
          (when (and (eq choice 'carry-on) (eq by 'always))
            (harness-compaction--save-carry-on session-id))
          (cond
           ((eq choice 'carry-on)
-           (harness-compaction--say session-id 'carry-on by session)
+           (harness-compaction--say session-id 'carry-on by session decision)
            (funcall carry-on))
           ((memq choice '(nil hold))
            (funcall hold))
@@ -2604,8 +2695,8 @@ conversation uncached."
                 (harness-compaction--effective-kind
                  session-id choice (list :fallback "transcript"))
               choice)
-            by session)
-           (when (eq by 'unasked)
+            by session decision)
+           (when (memq by '(unasked always))
              (harness-compaction--say-not-warm session-id harness-compaction-kind choice))
            (harness-compaction--note-activity session-id 'compacting)
            (harness-compaction--compact-with-bounds
@@ -2618,6 +2709,185 @@ conversation uncached."
               (harness-compaction--note-activity session-id nil)
               (funcall fail)))))))
      fail)))
+
+;;;; "Always": compacting without asking, and turning that off
+
+;; An "always" answer to the question changes the two settings that
+;; decide what an automatic compaction does where nobody is asked: the
+;; kind it makes (`harness-compaction-kind') and whether it asks
+;; (`harness-compaction-ask').  Like the cold-cache answer, it is a
+;; lasting decision the harness keeps (harness-decisions.el), of the
+;; kind `compaction', with the settings before it and after it; the
+;; hint written right after it names it, so the chat offers its [Turn
+;; off], and then its [Turn on].  Undo puts both settings back as they
+;; were before it while they still hold what the answer set; redo sets
+;; them again while they still hold what the undo put back.  Settings
+;; changed by hand in between are left as they are, and the decision
+;; ends there.
+
+(defun harness-compaction--settings ()
+  "Return the compaction settings as a decision records them.
+That is (:ask BOOL :kind NAME), BOOL t or `:false' and NAME a string,
+so that they travel as JSON."
+  (list :ask (if harness-compaction-ask t :false)
+        :kind (symbol-name harness-compaction-kind)))
+
+(defun harness-compaction--kind-from (kind)
+  "Return KIND, a name or a symbol from a decision, as a compaction kind."
+  (harness-compaction--kind (or kind harness-compaction-kind)))
+
+(defun harness-compaction--settings-equal (a b)
+  "Non-nil when compaction settings A and B say the same.
+Each is as `harness-compaction--settings' returns it, perhaps back from
+JSON."
+  (and (eq (and (harness-json-true-p (plist-get a :ask)) t)
+           (and (harness-json-true-p (plist-get b :ask)) t))
+       (eq (ignore-errors (harness-compaction--kind-from (plist-get a :kind)))
+           (ignore-errors (harness-compaction--kind-from (plist-get b :kind))))))
+
+(defun harness-compaction--set-settings (settings)
+  "Make the compaction settings hold SETTINGS, saved as Settings saves them.
+SETTINGS is as `harness-compaction--settings' returns it.  Signal when
+one cannot be saved, as when the policy sets it."
+  (let ((ask (and (harness-json-true-p (plist-get settings :ask)) t))
+        (kind (harness-compaction--kind-from (plist-get settings :kind))))
+    (if (harness-method-exists-p 'config/set)
+        (progn (harness-call 'config/set 'harness-compaction-kind kind :scope 'global)
+               (harness-call 'config/set 'harness-compaction-ask ask :scope 'global))
+      (harness-save-user-option 'harness-compaction-kind kind)
+      (harness-save-user-option 'harness-compaction-ask ask))))
+
+(defun harness-compaction--settings-text (settings)
+  "Return SETTINGS in words, for a decision's undo or redo message."
+  (if (harness-json-true-p (plist-get settings :ask))
+      "an automatic compaction asks what goes first again"
+    (format "automatic compaction is made without asking, into %s"
+            (harness-compaction--kind-name (harness-compaction--kind-from (plist-get settings :kind))))))
+
+(defun harness-compaction--record-decision (session-id choice before)
+  "Keep the \"always\" answer of CHOICE in SESSION-ID as a lasting decision.
+BEFORE is what the settings held before it.  Return the decision's id,
+or nil without the decisions module or when keeping it failed (logged)."
+  (when (harness-method-exists-p 'decision/record)
+    (condition-case err
+        (plist-get (harness-call 'decision/record 'compaction session-id
+                                 (format "Compacting automatically, without asking, into %s"
+                                         (harness-compaction--kind-name choice))
+                                 (list :choice (symbol-name choice) :before before
+                                       :after (harness-compaction--settings)))
+                   :id)
+      (error (harness-log 'warn "compaction: could not keep the answer in %s as a decision: %s"
+                          session-id (harness-error-short-message err))
+             nil))))
+
+(defun harness-compaction--remember (choice session-id)
+  "Make CHOICE the kind and stop asking, as an \"always\" answer says.
+Both settings are saved as the settings page saves them (`config/set'),
+and the answer, given in SESSION-ID, is kept as a lasting decision with
+the settings before it, which can be undone and redone from any session
+\(`harness-compaction--record-decision').  Return (:decision ID) once
+they are saved, ID nil when no decision was kept; nil when CHOICE is no
+compaction kind, or when the settings could not be saved (logged)."
+  (when (memq choice harness-compaction-kinds)
+    (let ((before (harness-compaction--settings)))
+      (condition-case err
+          (progn
+            (harness-compaction--set-settings (list :ask :false :kind (symbol-name choice)))
+            (list :decision (harness-compaction--record-decision session-id choice before)))
+        (error (harness-log 'warn "compaction: could not make %s the kind: %s"
+                            choice (harness-error-short-message err))
+               nil)))))
+
+(defun harness-compaction--decision-undo (decision)
+  "Undo the \"always\" answer DECISION keeps: the `:undo' of the kind `compaction'.
+While the settings hold what the answer set, they go back to what they
+held before it.  Return (OUTCOME . MESSAGE), as
+`harness-decisions-define-kind' says."
+  (let* ((record (plist-get decision :record))
+         (now (harness-compaction--settings)))
+    (cond ((harness-compaction--settings-equal now (plist-get record :after))
+           (harness-compaction--set-settings (plist-get record :before))
+           (cons 'undone (format "Undone: %s"
+                                 (harness-compaction--settings-text (plist-get record :before)))))
+          ((harness-compaction--settings-equal now (plist-get record :before))
+           (cons 'changed "Not undone: the compaction settings were put back since, so they stay as they are"))
+          (t (cons 'changed "Not undone: the compaction settings changed since (in Settings, say), so they stay as they are")))))
+
+(defun harness-compaction--decision-redo (decision)
+  "Redo the \"always\" answer DECISION keeps: the `:redo' of the kind `compaction'.
+While the settings hold what its undo put back, they hold what the
+answer set again.  Return (OUTCOME . MESSAGE), as
+`harness-decisions-define-kind' says."
+  (let* ((record (plist-get decision :record))
+         (now (harness-compaction--settings)))
+    (cond ((harness-compaction--settings-equal now (plist-get record :before))
+           (harness-compaction--set-settings (plist-get record :after))
+           (cons 'done (format "Redone: %s"
+                               (harness-compaction--settings-text (plist-get record :after)))))
+          ((harness-compaction--settings-equal now (plist-get record :after))
+           (cons 'changed "Not redone: automatic compaction is made without asking again already, so it stays so"))
+          (t (cons 'changed "Not redone: the compaction settings changed since (in Settings, say), so they stay as they are")))))
+
+(declare-function harness-decisions-define-kind "harness-decisions" (kind &rest spec))
+
+(with-eval-after-load 'harness-decisions
+  (harness-decisions-define-kind 'compaction
+                                 :undo #'harness-compaction--decision-undo
+                                 :redo #'harness-compaction--decision-redo))
+
+;;;; The session's own answer, and the default for every session
+
+(defun harness-compaction--ask-value-name (ask)
+  "Return ASK as a session keeps it: t, `:false' or nil for no answer."
+  (cond ((null ask) nil)
+        ((harness-json-true-p ask) t)
+        (t :false)))
+
+(defun harness-compaction--ask-value-hint (value)
+  "Return what setting a session's answer to VALUE changed, in words."
+  (cond ((eq value t) "Automatic compaction: asking what goes first again")
+        ((eq value :false) "Automatic compaction: always, without asking")
+        (t "Automatic compaction: as the default says")))
+
+(harness-defmethod compaction/set-ask (session-id ask)
+  "Set whether SESSION-ID is asked before an automatic compaction.
+ASK true asks, `:false' compacts unasked as `harness-compaction-kind'
+says, and nil removes the session's own answer, so that it follows
+`harness-compaction-ask'.  The answer is kept in the session's `:ext'
+\(`harness-compaction--ask-ext-key'), where it survives a restart and
+wins over the default; the transcript says what changed, and
+`session/ext-changed' announces it.  Only the user does this, from the
+chat or the session list (`harness-toggle-compaction-ask'), over ACP as
+`_harness/compaction/set-ask' with `:sessionId' and `:ask'; the agent
+has no tool for it.  Return the session's plist."
+  (let ((value (harness-compaction--ask-value-name ask)))
+    (harness-call 'session/set-ext session-id harness-compaction--ask-ext-key value
+                  (harness-compaction--ask-value-hint value))
+    (harness-call 'session/get session-id)))
+
+(harness-defmethod compaction/set-ask-all (ask &optional filter)
+  "Set whether every session FILTER selects is asked before a compaction.
+ASK is as for `compaction/set-ask': nil removes the sessions' own
+answers, so that they follow the default.  FILTER is the one of
+`session/select', nil for every session; the sessions of completed
+tasks are left out, as `session/select' leaves them out when it is
+asked for the current ones.  Each change goes the way
+`compaction/set-ask' does -- the same `:ext' setting, transcript hint
+and `session/ext-changed' event -- and a session already at the value
+asked for is left alone.  Only the user does this, over ACP as
+`_harness/compaction/set-ask-all' with `:ask' and `:filter', through
+`harness-set-compaction-ask-all' and the session list.  Return the ids
+changed, newest first."
+  (let ((value (harness-compaction--ask-value-name ask))
+        changed)
+    (dolist (session (harness-call 'session/select (or filter '(:active t :tasks t))))
+      (let* ((id (plist-get session :id))
+             (now (harness-compaction--session-ask session)))
+        (unless (eq (or now 'none) (or value 'none))
+          (harness-call 'session/set-ext id harness-compaction--ask-ext-key value
+                        (harness-compaction--ask-value-hint value))
+          (push id changed))))
+    (nreverse changed)))
 
 ;;;; Automatic compaction
 
@@ -2668,12 +2938,13 @@ every session (`harness-compaction-carry-on')."
       (harness-compaction--asked-before-turn id session value next))
      (t
       (let ((kind (harness-compaction--effective-kind id harness-compaction-kind
-                                                      (list :fallback "transcript"))))
+                                                      (list :fallback "transcript")))
+            (by (harness-compaction--by session)))
         (harness-compaction-show-waiting id)
         (harness-compaction--say-not-warm id harness-compaction-kind kind)
-        (harness-compaction--say id kind 'unasked session)
+        (harness-compaction--say id kind by session)
         (harness-compaction--compact-with-bounds
-         id kind (harness-compaction--ask-meta kind 'unasked)
+         id kind (harness-compaction--ask-meta kind by)
          (lambda (_node) (funcall next value))
          (lambda (&rest _)
            (funcall next (list :proceed nil :reason harness-compaction--uncacheable-reason))))))))
@@ -2779,11 +3050,12 @@ again first: a handler earlier in the chain may have changed its model."
          (t
           (let* ((kind (harness-compaction--effective-kind id harness-compaction-kind
                                                            (list :fallback "transcript")))
-                 (meta (append (harness-compaction--ask-meta kind 'unasked)
+                 (by (harness-compaction--by session))
+                 (meta (append (harness-compaction--ask-meta kind by)
                                (list :mid-turn t))))
             (harness-compaction--note-activity id 'compacting)
             (harness-compaction--say-not-warm id harness-compaction-kind kind)
-            (harness-compaction--say id kind 'unasked session)
+            (harness-compaction--say id kind by session)
             (harness-compaction--compact-with-bounds
              id kind meta
              (lambda (_node)

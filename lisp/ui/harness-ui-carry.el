@@ -175,15 +175,16 @@ no WIDTH the segments are one line, which the window wraps."
 
 (defun harness-ui-carry--always-p (spec choice)
   "Non-nil when SPEC lets CHOICE be answered \"always\": its capital key.
-`:always' is t for every choice, or a list of the names it allows.  A
+`:always' t allows every choice but `hold'; a list allows the choices it
+names, for a question only some of which can be made the default.  A
 choice shown but not offered -- a summary whose own request the prompt
 cache does not hold -- cannot be any lasting answer."
   (let ((always (plist-get spec :always)))
     (and always
+         (not (equal (plist-get choice :choice) "hold"))
          (or (eq always t)
-             (member (plist-get choice :choice) always))
-         (not (plist-get choice :unavailable))
-         (not (equal (plist-get choice :choice) "hold")))))
+             (member (plist-get choice :choice) (append always nil)))
+         (not (plist-get choice :unavailable)))))
 
 (defun harness-ui-carry--help (choice spec)
   "Return the tooltip of CHOICE's button in the panel of SPEC, in one line.
@@ -310,7 +311,8 @@ labelled facts, (LABEL TEXT) each, aligned.  `:ask' is the imperative
 line over the choices, which are `:choices': plists as
 `harness-carry-choice' makes them, one row each, in order, with
 `:default', the name of the one marked so.  `:always' lets a capital key
-answer \"always\" (not for `hold'), and says so.  `:footer' are lines
+answer \"always\" (not for `hold'; a list names the choices that can), and
+says so.  `:footer' are lines
 under the choices.  `:answer' is called with the name of the choice and
 whether it was answered \"always\".  `:width' breaks the wording of a
 choice between its segments at that many columns, for a buffer that
@@ -335,8 +337,9 @@ line, the way to press a key from the compose box, for a host with no box."
 
 (defun harness-ui-carry-keymap (spec &optional parent)
   "Return the keymap of the panel of SPEC: each choice's key answers it.
-With `:always' its capital answers \"always\" (not for `hold').  PARENT,
-a keymap, is under it: the digits of a question, say."
+With `:always' its capital answers \"always\" (not for `hold'; a list
+names the choices that can).  PARENT, a keymap, is under it: the digits
+of a question, say."
   (let ((map (make-sparse-keymap))
         (answer (plist-get spec :answer)))
     (when parent (set-keymap-parent map parent))

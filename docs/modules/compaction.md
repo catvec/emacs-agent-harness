@@ -81,7 +81,10 @@ compaction's note and follow its update.
 Automatic compaction makes `harness-compaction-kind`, but where the
 user can be asked it asks them first, with what each kind costs and
 what carrying on costs (`harness-compaction-ask`; see "Asking before
-compacting automatically" below).  By hand (the UI's
+compacting automatically" below).  Answering it "always" with a kind
+makes that kind the default and stops the asking, for every session,
+kept as a decision the UI can undo; a session's own answer is the
+UI's to turn either way (`harness-toggle-compaction-ask`).  By hand (the UI's
 `harness-compact`, or the panel of a session whose prompt cache
 expired) any kind, with what each costs (`compaction/estimate`).  A
 message to a session whose prompt cache went cold makes one of them
@@ -202,6 +205,8 @@ the token count progressively.
 - `compaction/resend-cost` (session-id) — Say what sending SESSION-ID's context costs, read from the cache and not.
 - `compaction/restore` (session-id &optional node-id) — Go back to the latest compaction of SESSION-ID, reverted before.
 - `compaction/revert` (session-id &optional node-id) — Go back to the conversation before the latest compaction of SESSION-ID.
+- `compaction/set-ask` (session-id ask) — Set whether SESSION-ID is asked before an automatic compaction.
+- `compaction/set-ask-all` (ask &optional filter) — Set whether every session FILTER selects is asked before a compaction.
 - `compaction/status` (session-id) — Describe how full the context of SESSION-ID is.
 
 ### Events
@@ -227,6 +232,8 @@ the token count progressively.
 - `agent/running` ([agent](agent.md))
 - `agent/show-waiting` ([agent](agent.md))
 - `config/set` ([config](config.md)), when it is loaded
+- `decision/attach` ([decisions](decisions.md)), when it is loaded
+- `decision/record` ([decisions](decisions.md)), when it is loaded
 - `provider/capabilities` ([provider](provider.md))
 - `provider/fork` ([provider](provider.md))
 - `provider/model` ([provider](provider.md))
@@ -240,6 +247,8 @@ the token count progressively.
 - `session/messages` ([session](session.md))
 - `session/nodes` ([session](session.md))
 - `session/provider-state` ([session](session.md))
+- `session/select` ([session](session.md))
+- `session/set-ext` ([session](session.md))
 - `session/set-provider-state` ([session](session.md))
 - `session/update-node` ([session](session.md))
 - `session/usage-add` ([session](session.md))

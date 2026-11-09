@@ -36,10 +36,12 @@ again, in the session it was answered in, with the choices it had,
 and the answer changes what the decision records
 (`harness-decision-change`).  A decision that is a switch says so in
 its words: the compaction before a prompt cache lapses (kind
-`precompact`) is [Turn off] while it is on and [Turn on] once it was
-turned off (`harness-ui-decision-labels`); a switch keeps no prompt,
-so it offers no change.  The buttons run `harness-decision-undo`,
-`harness-decision-redo` and `harness-decision-change`, which M-x also
+`precompact`) and compacting automatically without asking (kind
+`compaction`) are [Turn off] while they are on and [Turn on] once they
+were turned off (`harness-ui-decision-labels`); a switch keeps no
+prompt, so it offers no change.  The buttons run
+`harness-decision-undo`, `harness-decision-redo` and
+`harness-decision-change`, which M-x also
 offers: they ask which decision, of those that can move that way,
 newest first, so a decision can be moved even where no note of it is
 on screen.

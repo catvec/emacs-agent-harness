@@ -523,6 +523,7 @@ it takes its part of the report and the banner out.
 - `harness-ui-patch-review-expand-all` — Open every folded directory of the review at point.
 - `harness-ui-patch-review-expand-all-threads` — Open every file's threads and every thread of the review at point.
 - `harness-ui-patch-review-import-manual` — Make the replies you wrote by hand for this task threads of its review.
+- `harness-ui-patch-review-keys` — Show every key of the review, grouped, in a buffer of its own.
 - `harness-ui-patch-review-mouse-ediff` — Compare the file clicked on in EVENT in Ediff.
 - `harness-ui-patch-review-mouse-toggle-directory` — Fold or unfold the directory clicked on in EVENT.
 - `harness-ui-patch-review-new-thread` — Compose a new thread of the review, with nothing quoted.
@@ -601,5 +602,6 @@ it takes its part of the report and the banner out.
 - `harness-ui-review-pending-known-functions` → `harness-ui-patch-review--pending-known-p`
 - `post-command-hook` → `harness-ui-patch-review--side-command`
 - `window-scroll-functions` → `harness-ui-patch-review--side-scrolled`
+- `window-size-change-functions` → `harness-ui-patch-review--control-resized`
 - `window-size-change-functions` → `harness-ui-patch-review--side-resized`
 

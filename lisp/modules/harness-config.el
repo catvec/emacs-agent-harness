@@ -208,7 +208,7 @@ reader of the layers skips it (see `harness-config--layered-keys').")
      :keys (harness-budget harness-responses-codex-quota-account))
     (compaction
      :title "Compaction"
-     :doc "What stands in for a conversation that grew too long, whether an automatic compaction asks first, whether a turn that outgrows its context limit is compacted in its middle or only before the next one, which model writes a brief summary, and whether a session that waits for you carries on instead.  \"Always carry on\" to the question saves the last; a session nobody asks still compacts.  Compacting by hand offers every kind, with what each costs."
+     :doc "What stands in for a conversation that grew too long, whether an automatic compaction asks what goes first or compacts without asking, whether a turn that outgrows its context limit is compacted in its middle or only before the next one, and which model writes a brief summary.  Compacting by hand offers every kind, with what each costs.  Answering the question \"always\" with a kind turns asking off and makes that kind the one made unasked; \"always carry on\" saves the carry-on; Auto-compact in Session settings turns asking off or on for one session, and for every session."
      :keys (harness-compaction-kind harness-compaction-ask harness-compaction-mid-turn
             harness-compaction-brief-model harness-compaction-carry-on))
     (cowboy

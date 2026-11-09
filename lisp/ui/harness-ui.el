@@ -6911,6 +6911,150 @@ either the command asks for a session, so the label has no state."
                     (if (harness-json-true-p (harness-ui--setting-get target :non-interactive)) "on" "off")))))
       "Non-interactive"))
 
+
+;;;; Auto-compact: asking what goes first, or compacting without asking
+
+(defun harness-ui--compaction-ask-default ()
+  "Return whether an automatic compaction asks by default, as this Emacs knows it.
+The default is the harness's `harness-compaction-ask'; an Emacs that
+has not loaded the compaction module assumes it asks."
+  (if (boundp 'harness-compaction-ask) (and harness-compaction-ask t) t))
+
+(defun harness-ui--compaction-state (session)
+  "Return SESSION's auto-compact state: `ask', `always' or `default'.
+`default' is the session's own answer absent, following
+`harness-compaction-ask'."
+  (let ((own (plist-get (plist-get session :ext) :compaction-ask)))
+    (cond ((null own) 'default)
+          ((harness-json-true-p own) 'ask)
+          (t 'always))))
+
+(defun harness-ui--compaction-state-name (state)
+  "Return STATE, an auto-compact state, in words."
+  (pcase state
+    ('ask "ask")
+    ('always "always")
+    (_ (format "default (%s)" (if (harness-ui--compaction-ask-default) "ask" "always")))))
+
+(defun harness-ui--compaction-asks-p (session)
+  "Return non-nil when an automatic compaction of SESSION asks, as the UI read it."
+  (pcase (harness-ui--compaction-state session)
+    ('ask t)
+    ('always nil)
+    (_ (harness-ui--compaction-ask-default))))
+
+(defun harness-ui--compaction-marked-ids ()
+  "Return the session list's marked ids when the command came from it, else nil.
+Nil in every other buffer, and when nothing is marked there."
+  (when (fboundp 'harness-ui-sessions--marked-ids)
+    (with-current-buffer (if (and (boundp 'transient--original-buffer)
+                                  (buffer-live-p transient--original-buffer))
+                             transient--original-buffer
+                           (current-buffer))
+      (when (derived-mode-p 'harness-ui-sessions-mode)
+        (harness-ui-sessions--marked-ids)))))
+
+(defun harness-ui--compaction-ask-menu-label ()
+  "Return the label of `harness-toggle-compaction-ask' in the harness menus.
+It says what the command changes from the buffer the menu was opened
+from: the session's own answer, or the default when it has none.  From
+a buffer without a session it leaves the state out."
+  (or (ignore-errors
+        (with-current-buffer (if (and (boundp 'transient--original-buffer)
+                                      (buffer-live-p transient--original-buffer))
+                                 transient--original-buffer
+                               (current-buffer))
+          (when-let* ((target (or (and harness-ui-setting-target-function
+                                       (funcall harness-ui-setting-target-function))
+                                  harness-ui-session-id)))
+            (cond
+             ((stringp target)
+              (when-let* ((session (harness-ui-session target)))
+                (format "Auto-compact: %s"
+                        (harness-ui--compaction-state-name (harness-ui--compaction-state session)))))
+             ((consp target)
+              (let ((own (plist-get (car target) :compaction-ask)))
+                (format "Auto-compact: %s"
+                        (harness-ui--compaction-state-name
+                         (cond ((null own) 'default)
+                               ((harness-json-true-p own) 'ask)
+                               (t 'always))))))))))
+      "Auto-compact"))
+
+;;;###autoload
+(defun harness-toggle-compaction-ask (&optional session-id)
+  "Toggle whether SESSION-ID is asked before an automatic compaction.
+Asking first is the default: the automatic compaction waits for the
+answer, with what each kind costs.  With it off, the session compacts
+unasked as `harness-compaction-kind' says, at its next turn or in the
+middle of one.  The answer is the session's own, kept with it
+\(`compaction/set-ask'), and it wins over the default.
+`harness-set-compaction-ask-all' changes every session and the default,
+and the compaction question answered \"always\" changes the default
+too.  In the session list it acts on the marked sessions, or on the one
+at point when none is marked."
+  (interactive)
+  (let ((target (harness-ui--setting-target session-id))
+        (marked (harness-ui--compaction-marked-ids)))
+    (cond
+     ((and (not (stringp target)) marked)
+      (let* ((own (plist-get (car target) :compaction-ask))
+             (now (cond ((null own) (harness-ui--compaction-ask-default))
+                        ((harness-json-true-p own) t)
+                        (t nil))))
+        (harness-ui-call "_harness/compaction/set-ask-all"
+                         (list :ask (if now :false t) :filter (list :ids marked))
+                         (lambda (changed)
+                           (message "Auto-compact: %s · %s"
+                                    (if now "always, without asking" "ask")
+                                    (harness-ui--count (length (append changed nil)) "session"))))))
+     ((not (stringp target))
+      (message "Auto-compact: a session setting · open the session"))
+     ((null (harness-ui-session target))
+      (message "Auto-compact: the harness has not sent this session yet"))
+     (t
+      (let* ((session (harness-ui-session target))
+             (now (harness-ui--compaction-asks-p session)))
+        (harness-ui-call "_harness/compaction/set-ask"
+                         (list :session-id target :ask (if now :false t))
+                         (lambda (_)
+                           (message "Auto-compact: %s"
+                                    (if now "always, without asking" "ask")))))))))
+
+;;;###autoload
+(defun harness-set-compaction-ask-all ()
+  "Choose whether every session is asked before an automatic compaction.
+It saves the default, `harness-compaction-ask', and removes every
+current session's own answer, those of current tasks included, so that
+all of them follow it.  The kind made unasked, and the summaries, are
+the Compaction section's settings.  Answering the compaction question
+with a capital turns asking off for every session and makes that kind
+the one made unasked, as a decision the UI can undo; this command is
+how to turn it back on everywhere."
+  (interactive)
+  (let* ((choices '(("ask" . "ask what goes first")
+                    ("always" . "compact without asking")))
+         (choice (completing-read "Automatic compaction for every session: "
+                                  (lambda (string pred action)
+                                    (if (eq action 'metadata)
+                                        '(metadata (display-sort-function . identity)
+                                                   (cycle-sort-function . identity))
+                                      (complete-with-action action choices string pred)))
+                                  nil t nil nil "ask"))
+         (ask (equal choice "ask")))
+    (harness-ui-call "_harness/config/set"
+                     (list :key "harness-compaction-ask" :value (prin1-to-string ask)
+                           :printed t :scope "global")
+                     (lambda (_)
+                       (harness-ui-call "_harness/compaction/set-ask-all"
+                                        (list :ask nil :filter (harness-ui--everything-filter))
+                                        (lambda (changed)
+                                          (message "Auto-compact: %s · %s follow it"
+                                                   (if ask "ask" "always, without asking")
+                                                   (harness-ui--count
+                                                    (length (append changed nil)) "session"))))))))
+
+
 ;;;###autoload
 (defun harness-rename-session (name &optional session-id)
   "Rename SESSION-ID to NAME."
@@ -7673,6 +7817,8 @@ leaves the buffer's commands out, never the whole menu."
      :if (lambda () (harness-ui--command-available-p 'harness-directories)))
     ("i" "Non-interactive" harness-toggle-non-interactive)
     ("I" "Non-interactive for all sessions" harness-set-non-interactive-all)
+    ("a" (lambda () (harness-ui--compaction-ask-menu-label)) harness-toggle-compaction-ask)
+    ("A" "Auto-compact for all sessions" harness-set-compaction-ask-all)
     ("v" "Supervisor mode" harness-toggle-supervisor
      :if (lambda () (harness-ui--command-available-p 'harness-toggle-supervisor)))
     ("V" "Supervisor mode for all sessions" harness-set-supervisor-all

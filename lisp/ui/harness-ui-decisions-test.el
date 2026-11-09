@@ -355,11 +355,12 @@ that kept no prompt offers its move alone."
 (defvar harness-ui-decision-labels)
 
 (ert-deftest harness-ui-decisions-a-switch-reads-as-one ()
-  "The decision to compact before the prompt cache lapses is a switch: its
-button says [Turn off] while it is on and [Turn on] once it was turned
-off, with a tooltip that says what a click does.  Every other kind keeps
-[Undo] and [Redo], and so does a decision the UI has not heard of; only
-a switch's notes keep their text when it is off."
+  "The decision to compact before the prompt cache lapses is a switch, and
+so is the \"always\" answer to the compaction question: the button says
+[Turn off] while it is on and [Turn on] once it was turned off, with a
+tooltip that says what a click does.  Every other kind keeps [Undo] and
+[Redo], and so does a decision the UI has not heard of; only a switch's
+notes keep their text when it is off."
   (harness-ui-decisions-test-with
     (let ((sent nil)
           (text "Compacting a conversation just before its prompt cache lapses, when the compaction request's own prefix is cached"))
@@ -367,7 +368,9 @@ a switch's notes keep their text when it is off."
                        (list :id "d-off" :kind "precompact" :state "undone" :text text)
                        (list :id "d-end" :kind "precompact" :state "changed" :text text)
                        '(:id "d-p" :kind "permission" :state "done" :text "Always allowing every bash call, in every session")
-                       '(:id "d-c" :kind "cowboy" :state "undone" :text "Always starting afresh when the prompt cache is cold")))
+                       '(:id "d-c" :kind "cowboy" :state "undone" :text "Always starting afresh when the prompt cache is cold")
+                       '(:id "d-cmp" :kind "compaction" :state "done" :text "Compacting automatically, without asking, into transcript file")
+                       '(:id "d-cmp-off" :kind "compaction" :state "undone" :text "Compacting automatically, without asking, into transcript file")))
         (harness-ui-decisions-store d))
       (let ((off (harness-ui-decision-button "d-on" 'done))
             (on (harness-ui-decision-button "d-off" 'undone)))
@@ -378,6 +381,13 @@ a switch's notes keep their text when it is off."
         (should (equal "[Turn on]" on))
         (should (equal "Compact conversations just before their prompt cache lapses again"
                        (get-text-property 0 'help-echo on)))
+        ;; The "always" answer to the compaction question is a switch too.
+        (should (equal "[Turn off]" (harness-ui-decision-button "d-cmp" 'done)))
+        (should (equal "Ask what goes first before an automatic compaction again"
+                       (get-text-property 0 'help-echo (harness-ui-decision-button "d-cmp" 'done))))
+        (should (equal "[Turn on]" (harness-ui-decision-button "d-cmp-off" 'undone)))
+        (should (equal "Compact automatically without asking again"
+                       (get-text-property 0 'help-echo (harness-ui-decision-button "d-cmp-off" 'undone))))
         (should (equal "Mine" (get-text-property 0 'help-echo (harness-ui-decision-button "d-on" 'done "Mine"))))
         ;; Ended: nothing, as for any decision.
         (should-not (harness-ui-decision-button "d-end" 'changed))
@@ -399,13 +409,15 @@ a switch's notes keep their text when it is off."
       (should (equal "[Redo]" (harness-ui-decision-button "d-c" 'undone)))
       (should (equal "[Undo]" (harness-ui-decision-button "d-nowhere" 'done)))
       (should (equal "[Redo]" (harness-ui-decision-button "d-nowhere" 'undone)))
-      (should (equal '("[Turn off]" "[Turn on]" "[Undo]" "[Redo]" "[Undo]" "[Redo]")
+      (should (equal '("[Turn off]" "[Turn on]" "[Turn off]" "[Turn on]" "[Undo]" "[Redo]" "[Undo]" "[Redo]")
                      (list (harness-ui-decision-label "d-on" 'undo) (harness-ui-decision-label "d-on" 'redo)
+                           (harness-ui-decision-label "d-cmp" 'undo) (harness-ui-decision-label "d-cmp-off" 'redo)
                            (harness-ui-decision-label "d-p" 'undo) (harness-ui-decision-label "d-c" 'redo)
                            (harness-ui-decision-label nil 'undo) (harness-ui-decision-label "d-nowhere" 'redo))))
       ;; Only a switch's notes keep their text while it is off.
       (should-not (harness-ui-decision-strikes-p "d-on"))
       (should-not (harness-ui-decision-strikes-p "d-off"))
+      (should-not (harness-ui-decision-strikes-p "d-cmp"))
       (should (harness-ui-decision-strikes-p "d-p"))
       (should (harness-ui-decision-strikes-p "d-c"))
       (should (harness-ui-decision-strikes-p "d-nowhere"))

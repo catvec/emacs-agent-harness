@@ -26,10 +26,12 @@
 ;; and the answer changes what the decision records
 ;; (`harness-decision-change').  A decision that is a switch says so in
 ;; its words: the compaction before a prompt cache lapses (kind
-;; `precompact') is [Turn off] while it is on and [Turn on] once it was
-;; turned off (`harness-ui-decision-labels'); a switch keeps no prompt,
-;; so it offers no change.  The buttons run `harness-decision-undo',
-;; `harness-decision-redo' and `harness-decision-change', which M-x also
+;; `precompact') and compacting automatically without asking (kind
+;; `compaction') are [Turn off] while they are on and [Turn on] once they
+;; were turned off (`harness-ui-decision-labels'); a switch keeps no
+;; prompt, so it offers no change.  The buttons run
+;; `harness-decision-undo', `harness-decision-redo' and
+;; `harness-decision-change', which M-x also
 ;; offers: they ask which decision, of those that can move that way,
 ;; newest first, so a decision can be moved even where no note of it is
 ;; on screen.
@@ -238,7 +240,8 @@ those that offer a change, newest first."
 ;;;; The button
 
 (defvar harness-ui-decision-labels
-  '((precompact :undo "[Turn off]" :redo "[Turn on]" :strike nil))
+  '((precompact :undo "[Turn off]" :redo "[Turn on]" :strike nil)
+    (compaction :undo "[Turn off]" :redo "[Turn on]" :strike nil))
   "How the notes of a lasting decision read, by the decision's kind.
 Each entry is (KIND . PROPS), PROPS a plist: `:undo' and `:redo' are the
 labels of the button that undoes a decision of KIND and of the one that
@@ -246,8 +249,9 @@ redoes it, [Undo] and [Redo] by default; `:strike' says whether a note's
 text is struck through once the decision was undone, t by default.
 
 A decision that is a switch reads as one: compacting a conversation
-before its prompt cache lapses (kind `precompact') is [Turn off] while it
-is on and [Turn on] once it was turned off.  Its notes record a
+before its prompt cache lapses (kind `precompact'), and compacting
+automatically without asking (kind `compaction'), are [Turn off] while
+they are on and [Turn on] once they were turned off.  Its notes record a
 compaction that happened, which turning the switch off does not take
 back, so their text stays as it was and only the button flips.  A kind
 with no entry reads [Undo] and [Redo], and its notes strike their text
@@ -288,6 +292,8 @@ says `:strike nil' of, and for a decision the UI has not heard of."
     ('(cowboy . redo) "Make this the default again, without asking")
     ('(precompact . undo) "Stop compacting conversations just before their prompt cache lapses")
     ('(precompact . redo) "Compact conversations just before their prompt cache lapses again")
+    ('(compaction . undo) "Ask what goes first before an automatic compaction again")
+    ('(compaction . redo) "Compact automatically without asking again")
     (`(,_ . undo) "Take this decision back")
     (_ "Make this decision again")))
 

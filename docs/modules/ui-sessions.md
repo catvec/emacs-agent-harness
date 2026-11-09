@@ -218,6 +218,7 @@ follows `task/changed` and `task/deleted` in between.
 
 ### Methods it calls
 
+- `compaction/set-ask-all` ([compaction](compaction.md))
 - `handoff/check-all` ([handoff](handoff.md))
 - `handoff/switch-all` ([handoff](handoff.md))
 - `priority/set-all` ([priority](priority.md))

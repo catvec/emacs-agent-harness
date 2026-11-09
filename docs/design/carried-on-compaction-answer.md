@@ -33,6 +33,14 @@ an auto compact happens and makes your session into an idiot."
 So the question has an "always" now, and carrying on is always a
 choice, past the window too.
 
+The kinds have one too, since
+`docs/design/compaction-always-from-the-menu.md`: a capital makes that
+kind the automatic one and stops the asking for every session, kept as
+a lasting decision whose [Turn off] asks again, and Auto-compact in
+Session settings turns the asking off or on for one session or for
+every session. Carrying on's capital is narrower: it applies only where
+someone can be asked, so unattended work still compacts.
+
 ## The decision
 
 An answer to carry on stands, per session, until the conversation

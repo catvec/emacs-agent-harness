@@ -1651,7 +1651,7 @@ of sessions the filters hide stay as they are."
 ;; for its next start.  The marks stay.
 
 (defconst harness-ui-sessions--setting-keys
-  '(:model :thinking :permission-mode :non-interactive :supervisor)
+  '(:model :thinking :permission-mode :non-interactive :supervisor :compaction-ask)
   "The session settings the harness's setting commands change.
 `harness-ui-sessions--marked-values' reads each of them from the marked
 sessions.")
@@ -1662,8 +1662,8 @@ The supervisor mode is the `:supervisor' of the session's `:ext', the
 plist the modules keep what they remember about a session in: t while it
 supervises, `:false' once that was turned off, and nil for a session the
 supervisor module does not govern."
-  (if (eq key :supervisor)
-      (plist-get (plist-get session :ext) :supervisor)
+  (if (memq key '(:supervisor :compaction-ask))
+      (plist-get (plist-get session :ext) key)
     (plist-get session key)))
 
 (defun harness-ui-sessions--marked-values (ids)
@@ -1706,7 +1706,7 @@ that they ask which."
   "Return VALUE of the setting KEY as a request carries it.
 The switches, non-interactive mode and supervisor mode, go as `:false'
 when they are off: nil would be no value at all."
-  (if (and (memq key '(:non-interactive :supervisor)) (not value))
+  (if (and (memq key '(:non-interactive :supervisor :compaction-ask)) (not value))
       :false
     value))
 
@@ -1737,6 +1737,9 @@ is shown by its label and a permission mode by its name."
     (:supervisor (if (harness-json-true-p value)
                      "Supervisor mode on"
                    "Supervisor mode off (hands-on)"))
+    (:compaction-ask (if (harness-json-true-p value)
+                         "Auto-compact ask"
+                       "Auto-compact always"))
     (_ (format "%s → %s" (string-remove-prefix ":" (symbol-name key)) value))))
 
 (defun harness-ui-sessions--count-ids (result)
@@ -1876,6 +1879,17 @@ and tasks changed, and a request that fails says why."
           (:model (harness-ui-sessions--switch-marked value ids done failed))
           (:supervisor (harness-ui-call "_harness/supervisor/set-all"
                                         (list :on wire :filter filter) done failed))
+          ;; The tasks' settings do not hold this: it is the session's own
+          ;; answer, and a task's next start makes a session without one.
+          (:compaction-ask
+           (harness-ui-call "_harness/compaction/set-ask-all"
+                            (list :ask wire :filter filter)
+                            (lambda (changed)
+                              (message "%s"
+                                       (harness-ui-sessions--set-text
+                                        what (length ids)
+                                        (harness-ui-sessions--count-ids changed) 0)))
+                            failed))
           (_ (harness-ui-call "_harness/session/set-all"
                               (list :settings (list key wire) :filter filter)
                               done failed)))))))

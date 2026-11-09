@@ -79,6 +79,7 @@ provides:
 - `harness-new-session` — Start a new session in DIRECTORY and show it in POSITION.
 - `harness-rename-session` — Rename SESSION-ID to NAME.
 - `harness-restart` — Restart the harness process with the current configuration.
+- `harness-set-compaction-ask-all` — Choose whether every session is asked before an automatic compaction.
 - `harness-set-context-limit` — Change the context window limit of SESSION-ID.
 - `harness-set-model` — Choose a model for SESSION-ID (default the current buffer's session).
 - `harness-set-model-all` — Choose a model and switch every current session and task to it.
@@ -89,6 +90,7 @@ provides:
 - `harness-show-log` — Show the harness log buffer.
 - `harness-switch-session` — Switch to another session, replacing the one in POSITION.
 - `harness-test-notifications` — Check the notification setup with a test notification.
+- `harness-toggle-compaction-ask` — Toggle whether SESSION-ID is asked before an automatic compaction.
 - `harness-toggle-non-interactive` — Toggle non-interactive mode for SESSION-ID.
 - `harness-ui-action-push` — Run the action of the button at point, or at the position of mouse EVENT.
 - `harness-ui-bury` — Put this buffer out of sight, bringing back what its window showed before.
@@ -121,6 +123,8 @@ provides:
 
 - `client/customize-save`
 - `client/notify`
+- `compaction/set-ask` ([compaction](compaction.md))
+- `compaction/set-ask-all` ([compaction](compaction.md))
 - `config/overrides` ([config](config.md))
 - `config/set` ([config](config.md))
 - `handoff/check` ([handoff](handoff.md))

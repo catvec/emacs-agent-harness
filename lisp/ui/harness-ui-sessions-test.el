@@ -67,8 +67,9 @@ session or make it a task, but for the sessions of
 `harness-ui-sessions-test--refused', which cannot be deleted.  A
 priority is set, for one session or for the ids of a filter, which
 change.  So is a setting, for one session or for the ids of a filter
-\(`session/set-all', `supervisor/set-all', `task/set-all' and
-`handoff/switch-all' change them all); `handoff/check-all' finds no
+\(`session/set-all', `supervisor/set-all', `task/set-all',
+`compaction/set-ask-all' and `handoff/switch-all' change them all);
+`handoff/check-all' finds no
 conversation lost and `handoff/check' none.  What
 `harness-ui-sessions-test--replies' names is answered as it says.
 Anything else, or the tasks when they are `fail', fails.  Each request is
@@ -94,8 +95,11 @@ recorded in `harness-ui-sessions-test--requests'."
         ((equal method "_harness/priority/set-all")
          (harness-resolved (plist-get (plist-get params :filter) :ids)))
         ((member method '("_harness/session/set-all" "_harness/supervisor/set-all"
-                          "_harness/task/set-all" "_harness/handoff/switch-all"))
+                          "_harness/task/set-all" "_harness/handoff/switch-all"
+                          "_harness/compaction/set-ask-all"))
          (harness-resolved (plist-get (plist-get params :filter) :ids)))
+        ((equal method "_harness/compaction/set-ask")
+         (harness-resolved (plist-get params :session-id)))
         ((equal method "_harness/handoff/check-all")
          (harness-resolved (mapcar (lambda (id) (list :id id :lossy :false))
                                    (plist-get (plist-get params :filter) :ids))))
@@ -2456,7 +2460,8 @@ non-interactive mode does."
                   (harness-ui-sessions--setting-target)))
         ;; a and b share the model, the mode and supervising, not the rest.
         (let ((target (agreed "a" "b")))
-          (should (equal '(:model "demo:scripted" :permission-mode "auto" :supervisor t)
+          (should (equal '(:model "demo:scripted" :permission-mode "auto" :supervisor t
+                           :compaction-ask nil)
                          (car target)))
           (should (equal "demo:scripted" (harness-ui--setting-get target :model)))
           (should (equal "auto" (harness-ui--setting-get target :permission-mode)))
@@ -2466,7 +2471,7 @@ non-interactive mode does."
           (should-not (plist-member (car target) :non-interactive)))
         ;; a and c share the level and being non-interactive.
         (let ((target (agreed "a" "c")))
-          (should (equal '(:thinking "high" :non-interactive t) (car target)))
+          (should (equal '(:thinking "high" :non-interactive t :compaction-ask nil) (car target)))
           (should (harness-json-true-p (harness-ui--setting-get target :non-interactive)))
           (should (equal "Non-interactive: on" (harness-ui--non-interactive-menu-label))))
         ;; The menu says off where they differ, as the command then turns it on.
@@ -2475,7 +2480,7 @@ non-interactive mode does."
         ;; d and e are off, one explicitly, and think as their models do.
         (let ((target (agreed "d" "e")))
           (should (equal '(:model "demo:scripted" :thinking nil :permission-mode "auto"
-                           :non-interactive :false :supervisor nil)
+                           :non-interactive :false :supervisor nil :compaction-ask nil)
                          (car target)))
           (should-not (harness-json-true-p (harness-ui--setting-get target :non-interactive))))
         ;; Not governed by the supervisor module and hands-on are not alike.
@@ -2487,6 +2492,44 @@ non-interactive mode does."
         (should (equal "Non-interactive: off" (harness-ui--non-interactive-menu-label)))
         (harness-ui-sessions-test--goto "a")
         (should (equal "Non-interactive: on" (harness-ui--non-interactive-menu-label)))))))
+
+(ert-deftest harness-ui-compaction-switch-names-and-sets-a-sessions-own-answer ()
+  "The auto-compact switch names the state of the session, and sets its answer.
+`harness-toggle-compaction-ask' is the menu's \"Auto-compact\": it says
+what the session at point has -- always, ask, or the default, which
+asks -- and turns it the other way over `compaction/set-ask'.  Marked,
+it is one `compaction/set-ask-all' for every one of them; where they
+disagree, it reads the default, as a setting they do not share."
+  (harness-ui-sessions-test-with-repo
+    (harness-ui-sessions-test--add "a" root :updated 300 :ext '(:compaction-ask :false))
+    (harness-ui-sessions-test--add "b" root :updated 200 :ext '(:compaction-ask t))
+    (harness-ui-sessions-test--add "c" root :updated 100 :ext nil)
+    (let ((default-directory root)) (harness-sessions))
+    (with-current-buffer harness-ui-sessions--buffer-name
+      (cl-flet ((run (command)
+                  (setq harness-ui-sessions-test--requests nil)
+                  (call-interactively command)
+                  (harness-ui-sessions-test--answers)))
+        ;; The session's own answer, both ways.
+        (harness-ui-sessions-test--goto "a")
+        (should (equal "Auto-compact: always" (harness-ui--compaction-ask-menu-label)))
+        (should (equal '(("_harness/compaction/set-ask" (:session-id "a" :ask t)))
+                       (run #'harness-toggle-compaction-ask)))
+        (harness-ui-sessions-test--goto "b")
+        (should (equal "Auto-compact: ask" (harness-ui--compaction-ask-menu-label)))
+        (should (equal '(("_harness/compaction/set-ask" (:session-id "b" :ask :false)))
+                       (run #'harness-toggle-compaction-ask)))
+        ;; No answer of its own: the default, which asks.
+        (harness-ui-sessions-test--goto "c")
+        (should (equal "Auto-compact: default (ask)" (harness-ui--compaction-ask-menu-label)))
+        (should (equal '(("_harness/compaction/set-ask" (:session-id "c" :ask :false)))
+                       (run #'harness-toggle-compaction-ask)))
+        ;; Marked, one request for all of them, whatever they answered.
+        (harness-ui-sessions-test--mark "a" "b")
+        (should (equal "Auto-compact: default (ask)" (harness-ui--compaction-ask-menu-label)))
+        (should (equal '(("_harness/compaction/set-ask-all"
+                          (:ask :false :filter (:ids ("a" "b")))))
+                       (run #'harness-toggle-compaction-ask)))))))
 
 (ert-deftest harness-ui-sessions-set-a-setting-on-the-marked-sessions-and-their-tasks ()
   "A setting changes the marked sessions together, and the tasks they work on.
