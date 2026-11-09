@@ -1,13 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/app.dart';
-import 'package:harness_client/src/models/task_chat.dart';
 import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
-import 'package:harness_client/src/ui/adaptive/layout_widgets.dart';
 import 'package:harness_client/src/ui/screens/tasks_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'support/board_navigation.dart';
 import 'support/fake_harness.dart';
 import 'support/real_fonts.dart';
 
@@ -58,41 +57,6 @@ Future<void> _openBoard(WidgetTester tester, _Rig rig) async {
   await _settle(tester, 6);
 }
 
-/// Choose the lane called [label].  The tabs are a row that scrolls, and
-/// only the ones near the screen are there: it is moved until [label] is.
-Future<void> _lane(WidgetTester tester, String label) async {
-  final tabs = find.byType(HarnessTabStrip<String>);
-  final tab = find.descendant(of: tabs, matching: find.text(label));
-  final strip = find
-      .descendant(of: tabs, matching: find.byType(Scrollable))
-      .first;
-  // From the first tab on, whichever the strip showed.
-  await tester.drag(strip, const Offset(2000, 0));
-  await tester.pump();
-  await tester.scrollUntilVisible(tab, 80, scrollable: strip);
-  // All of it, not an edge of it that a tap would miss.
-  await tester.ensureVisible(tab);
-  await tester.pump();
-  await tester.tap(tab);
-  await _settle(tester, 4);
-}
-
-/// Bring the card of [title] on the board: its lane, and its stage there.
-Future<void> _showTask(WidgetTester tester, String title) async {
-  final app = tester.widget<TasksScreen>(find.byType(TasksScreen)).app;
-  final task = app.tasks!.tasks.firstWhere((task) => task.title == title);
-  await _lane(tester, taskLaneLabel(task.laneName));
-  final lane = find
-      .descendant(
-        of: find.byType(RefreshIndicator),
-        matching: find.byType(Scrollable),
-      )
-      .first;
-  await tester.scrollUntilVisible(find.text(title), 100, scrollable: lane);
-  await tester.ensureVisible(find.text(title));
-  await tester.pump();
-}
-
 /// The card of the task called [title].
 Finder _card(String title) =>
     find.ancestor(of: find.text(title), matching: find.byType(TaskCard));
@@ -130,7 +94,7 @@ Future<void> _menu(WidgetTester tester, String label) async {
 /// Open the conversation of the task called [title] on the board: a tap on
 /// the task, where it is handled.
 Future<void> _open(WidgetTester tester, String title) async {
-  await _showTask(tester, title);
+  await showTask(tester, title);
   await tester.tap(find.text(title));
   await _settle(tester, 10);
 }
@@ -152,7 +116,7 @@ void main() {
         },
       );
       await _openBoard(tester, rig);
-      await _showTask(tester, 'Cache the model catalogue');
+      await showTask(tester, 'Cache the model catalogue');
       expect(
         _inCard(
           'Cache the model catalogue',
@@ -484,7 +448,7 @@ void main() {
 
       await _tap(tester, find.byTooltip('Archived tasks'));
       expect(find.byTooltip('Archived tasks'), findsOneWidget);
-      await _showTask(tester, 'Ship the session list');
+      await showTask(tester, 'Ship the session list');
       expect(_card('Ship the session list'), findsOneWidget);
       expect(
         _inCard('Ship the session list', find.textContaining('Archived')),

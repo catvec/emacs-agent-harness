@@ -3,13 +3,13 @@
 The task board of the Flutter client is a swimlane board: its columns are
 the stages a task travels, and its lanes are what a task waits on and the
 priorities ([flutter-task-columns.md](flutter-task-columns.md)). A wide
-screen draws every column side by side, one lane a row; a phone shows one
-lane, its columns as the sections under the lane's tab. Until now a card
+screen draws every column side by side, one lane a row; a phone draws the
+lane of what waits on the person above the stages, and the stages as one
+scroll of sections with every priority in each. Until now a card
 was only a way into the task's conversation, and the actions that move a
 task were on the bar of that conversation. This change lets a person carry
-a card with a long press and drop it on another column of the lane it is
-drawn in, which runs the harness action that puts the task in that
-column's state.
+a card with a long press and drop it on another column, which runs the
+harness action that puts the task in that column's state.
 
 ## The columns are states, not places
 
@@ -46,8 +46,10 @@ move does not exist and the column refuses the card. The mapping lives in
 **Needs input and Cancelled are not targets.** A task needs input because
 its session waits on a permission or a question, or stopped part way: that
 is its lane, not a column, and a person cannot put a task there by
-dragging, and should not be able to.  A task that waits on the person is
-carried out of the Needs input lane to a column of it like any other.
+dragging, and should not be able to. A task that waits on the person is
+carried to a column like any other, and on a phone it is carried from the
+lane above the stages. That lane is no target for the same reason: a card
+dropped on it would have nowhere to go.
 Cancelled is a task that was stopped and then marked done; the Stop action
 leaves it in Needs input until the person marks it done, so a drop there
 would not land where it was dropped.
@@ -64,15 +66,17 @@ starts the turn.
 
 Cards are `LongPressDraggable<HarnessTask>`; a column is a
 `DragTarget<HarnessTask>`, which on a wide screen is every cell of the grid
-(`_LaneCell`) and on a phone is the section of the lane shown
-(`_StageSection`). A card is carried along the lane it is drawn in, so the
-cells it can be dropped on are that lane's, and the drop reads the column
-it is over, not the lane. A long press is the gesture on every platform: an
-immediate drag would take the mouse drag that scrolls the board out from
-under the list, and a tap still has to open the conversation. A carried
-card is drawn smaller than nothing (exactly its size) and anchored below
-the finger (`_belowFinger`), so the column it is over, and the word of the
-drop, stay in sight; the card where it came from is dimmed.
+(`_LaneCell`) and on a phone is a stage section (`_StageSection`). On a wide
+screen a card is carried along the lane it is drawn in, so the cells it can
+be dropped on are that lane's, and the drop reads the column it is over, not
+the lane; a phone draws no lane rows, so every stage section takes any card,
+and the lane of what waits on the person above them takes none. A long
+press is the gesture on every platform: an immediate drag would take the
+mouse drag that scrolls the board out from under the list, and a tap still
+has to open the conversation. A carried card is drawn smaller than nothing
+(exactly its size) and anchored below the finger (`_belowFinger`), so the
+column it is over, and the word of the drop, stay in sight; the card where
+it came from is dimmed.
 
 The column under a card says what leaving it there would do, with the
 action's own label (`Start now`, `Verify and merge`, `Send back`, …) beside
@@ -88,11 +92,12 @@ sheet, and a refusal from the harness is shown in the board's error banner,
 in the harness's words, while the board reads itself again. No action is
 run directly from the board.
 
-On a phone the lane's columns are the targets. While a card is carried the
-lane shows every column, including those that hold nothing, so a task can
-be moved to an empty column; the sections the lane does not build (a
-column below the fold) are reached by scrolling the lane before the card is
-lifted, since a carried card holds the finger.
+On a phone the stage sections are the targets; the lane above them, of what
+waits on the person, is not one. While a card is carried the board shows
+every column, including those that hold nothing, so a task can be moved to
+an empty column; the sections the board does not build (a column below the
+fold) are reached by scrolling the board before the card is lifted, since a
+carried card holds the finger.
 
 ## Alternatives considered
 
@@ -105,10 +110,10 @@ lifted, since a carried card holds the finger.
   every column as a target and makes an impossible drop look possible. A
   quiet refusal is the Kanban convention, and the valid targets are the
   ones that answer.
-- **Wide screens only.** A phone's lane shows its columns as sections one
-  under the other, but they are still the columns, and the same drop works
-  there; leaving it out would make the feature invisible on the client's
-  first platform.
+- **Wide screens only.** A phone shows its columns as sections one under
+  the other, but they are still the columns, and the same drop works there;
+  leaving it out would make the feature invisible on the client's first
+  platform.
 - **A "Move to…" menu on the card.** That is a menu, not a drag, and the
   card's tap already opens the conversation where every action is. The
   actions that the bar gained (`Move to backlog`, `Put in review`) are
@@ -128,17 +133,17 @@ lifted, since a carried card holds the finger.
   every column), `_LaneCell` and `_StageSection` are the two kinds of drop
   target, `_DraggableTaskCard` carries a card, and `_moveTask` runs the
   chosen action through `TaskActionRunner`.
-- `HarnessTabStrip` takes an optional `tabWrapper`, so a tab can be wrapped
-  without the strip knowing what wraps it; the board's tabs are the lanes,
-  which take no drops, so it does not use one.
+- `HarnessTabStrip` lost its optional `tabWrapper`, which existed for the
+  board's lane tabs: the board has no tabs now, and nothing else wrapped a
+  tab.
 
 ## Pictures and checks
 
 The test `task_drag_test.dart` carries cards between columns with real
 long-press gestures, checks the calls the harness receives, the refused
 drops, the send-back sheet and the phone's sections.
-`task_drag_screenshots_test.dart` draws the wide board and a phone lane
-with a card in flight, and writes `task-board.png`, `task-board-drag.png`
+`task_drag_screenshots_test.dart` draws the wide board and the phone's
+board with a card in flight, and writes `task-board.png`, `task-board-drag.png`
 and `android-task-drag.png` to the client's `screenshots/` directory; their
 drop labels are the only new interface words.
 

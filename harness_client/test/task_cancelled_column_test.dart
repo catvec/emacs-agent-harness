@@ -7,6 +7,7 @@ import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:harness_client/src/ui/adaptive/layout_widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'support/board_navigation.dart';
 import 'support/fake_harness.dart';
 
 const _main = '/Users/noah/Code/emacs-agent-harness/';
@@ -124,7 +125,7 @@ void main() {
     });
   });
 
-  testWidgets('shows in its lane under Cancelled, with Archive and no Retry', (
+  testWidgets('shows under Cancelled, with Archive and no Retry', (
     tester,
   ) async {
     final (settings, _, app) = await _rig();
@@ -138,30 +139,10 @@ void main() {
     await _settle(tester, 8);
     await tester.tap(find.text('Tasks'));
     await _settle(tester);
-    // It is a medium-priority task: its lane is Medium priority, a tab that
-    // scrolls, and the Cancelled stage is a section in it.
-    final tabs = find.byType(HarnessTabStrip<String>);
-    final tab = find.descendant(of: tabs, matching: find.text('Medium priority'));
-    final strip = find
-        .descendant(of: tabs, matching: find.byType(Scrollable))
-        .first;
-    await tester.scrollUntilVisible(tab, 80, scrollable: strip);
-    await tester.ensureVisible(tab);
-    await tester.pump();
-    await tester.tap(tab);
-    await _settle(tester);
-    expect(find.byType(HarnessTabStrip<String>), findsOneWidget);
-    final lane = find
-        .descendant(
-          of: find.byType(RefreshIndicator),
-          matching: find.byType(Scrollable),
-        )
-        .first;
-    await tester.scrollUntilVisible(
-      find.text('Sketch the retry schedule'),
-      100,
-      scrollable: lane,
-    );
+    // A phone has no lane tabs: the Cancelled stage is a section of its one
+    // list, every priority in it.
+    expect(find.byType(HarnessTabStrip<String>), findsNothing);
+    await showTask(tester, 'Sketch the retry schedule');
     _takeOverflows(tester);
     expect(find.text('Cancelled'), findsOneWidget);
     await tester.ensureVisible(find.text('Sketch the retry schedule'));

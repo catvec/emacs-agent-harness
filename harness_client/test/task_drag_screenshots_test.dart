@@ -1,7 +1,7 @@
 // Pictures of the task board with a card being carried to another column: the
 // wide board, with every column beside the others and the drop named where the
-// card would go, and the phone, with every column of the lane shown as a
-// section while one is carried.
+// card would go, and the phone, with every column shown as a section while one
+// is carried.
 //
 //   HARNESS_SHOTS=/some/directory flutter test test/task_drag_screenshots_test.dart
 //
@@ -20,7 +20,6 @@ import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:harness_client/src/ui/screens/tasks_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'support/board_navigation.dart';
 import 'support/fake_harness.dart';
 import 'support/phone_fonts.dart';
 import 'support/real_fonts.dart';
@@ -129,9 +128,7 @@ Future<void> main() async {
           // The column it is over names what leaving it there would do.
           expect(find.text('Start now'), findsOneWidget);
         case _Scene.phoneDrag:
-          // The lane of the task at work, its columns as the sections under
-          // it.
-          await showLane(tester, 'High priority');
+          // The stages of a phone's one list, every priority in them.
           expect(find.text('Merging'), findsNothing);
           carried = await carry('task-1', find.text('Review'));
           // A column that holds nothing is a target too, while one is

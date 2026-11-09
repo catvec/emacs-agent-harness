@@ -182,7 +182,9 @@ time it opens. It asks again only when the harness does.
   computer the screen shows. Leaving the page leaves the run alone; only
   *Stop demo* stops it, and it stops its own run.
 - **Shows the rest of the harness.** The task board (the workflow's columns,
-  with Needs input and the priorities as swimlanes, queue state and slot use,
+  with Needs input and the priorities as swimlanes on a wide screen, and on
+  a phone the tasks that wait on the person in a lane above the stages,
+  every priority at once in the stages below, queue state and slot use,
   backlog mode, submit; a finished task's card has the words of its summary,
   without the Markdown it was written in), spend,
   tokens, live sessions, daily spend, per-model and per-project breakdowns,
@@ -196,11 +198,13 @@ time it opens. It asks again only when the harness does.
   column's state -- `Start now`, `Queue it`, `Move to backlog`, `Return to
   queue`, `Pause`, `Put in review`, `Verify and merge`, `Send back` or `Mark
   complete` -- with the column saying which while the card is over it. A
-  card is dropped on a column, in the lane it is drawn in; a task that waits
-  on the person is carried out of the Needs input lane, and the cancelled
-  column takes no drops, since no action puts a task there. On a phone the
-  column's section is the target, and every column shows while a card is
-  carried. See
+  card is dropped on a column, in the lane it is drawn in on a wide screen;
+  a phone draws the lane of what waits on the person above the stages, and
+  a card goes to any stage, the priority on the card. A task that waits on
+  the person is carried to a column like any other, and the cancelled column
+  takes no drops, since no action puts a task there; on a phone its lane
+  takes none either. On a phone the column's section is the target, and every
+  column shows while a card is carried. See
   [docs/flutter-task-drag.md](../docs/flutter-task-drag.md). Above the
   message box the conversation has a bar
   that says where the task stands (its column, priority and branch, what went
@@ -1639,7 +1643,7 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   (`test/task_scope_test.dart`, `task_board_widget_test.dart`); the sessions
   that internal sessions do not make the app read again
   (`test/session_events_test.dart`)
-- a task handled in its conversation: a tap on a task of any lane opens its
+- a task handled in its conversation: a tap on a task of any stage opens its
   session, a card has nothing to push, and the bar of the conversation
   verifies, sends back (by typing), starts, queues, retries, stops, completes
   and archives, says why the harness refused, follows the task's events and

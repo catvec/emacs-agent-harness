@@ -14,7 +14,6 @@ import 'package:harness_client/src/ui/adaptive/adaptive_widgets.dart';
 import 'package:harness_client/src/ui/adaptive/layout_widgets.dart';
 import 'package:harness_client/src/ui/screens/server_screen.dart';
 import 'package:harness_client/src/ui/screens/settings_screen.dart';
-import 'package:harness_client/src/ui/screens/tasks_screen.dart';
 import 'package:harness_client/src/ui/screens/usage_screen.dart';
 import 'package:harness_client/src/ui/theme/harness_theme.dart';
 import 'package:harness_client/src/ui/widgets/message_composer.dart';
@@ -212,29 +211,46 @@ void main() {
   });
 
   group('the board of tasks', () {
-    testWidgets('has its lanes as tabs, from the gutter, in one row', (
-      tester,
-    ) async {
+    testWidgets('shows the stages in one list from the gutter, every '
+        'priority on the cards', (tester) async {
       final rig = await _rig();
       await _pump(tester, rig);
       await tester.tap(find.text('Tasks'));
       await _settle(tester);
       // The header overflows with the test font's square letters, as it did
-      // before the lanes; this test is about where the strip and cards sit.
+      // before the lanes; this test is about where the stage headings and
+      // cards sit.
       final error = tester.takeException();
       if (error != null && !error.toString().contains('overflowed')) {
         throw error;
       }
-      final first = tester.getTopLeft(find.text('Needs input'));
-      final card = tester.getTopLeft(find.byType(TaskCard).first);
-      // They used to wrap, centered, in two rows that began at a different
-      // place than the cards under them.
-      expect(first.dx, closeTo(HarnessSpace.gutter, 0.5));
+      // The lanes are rows of a wide board only: the phone has no strip of
+      // them, and its stages are sections of one scroll.
+      expect(find.byType(HarnessTabStrip<String>), findsNothing);
+      // What waits on the person is the lane above the stages, its heading
+      // and card on the same edge as the stages'.
+      final lane = find.byKey(const ValueKey('task-lane-needs-input'));
+      final laneHeading = tester.getTopLeft(
+        find.descendant(of: lane, matching: find.text('Needs input')),
+      );
+      final asking = tester.getTopLeft(
+        find.byKey(const ValueKey('task-card-task-4')),
+      );
+      final stage = tester.getTopLeft(find.text('Backlog'));
+      final card = tester.getTopLeft(
+        find.byKey(const ValueKey('task-card-task-5')),
+      );
+      expect(laneHeading.dy, lessThan(asking.dy));
+      expect(asking.dy, lessThan(stage.dy));
+      // One edge down the page: the cards on the gutter, and each section's
+      // heading beside its dot on that edge too.
       expect(card.dx, closeTo(HarnessSpace.gutter, 0.5));
-      // A tab strip is one row, whatever the lane names are; a wrapped row
-      // of tabs was taller than this.
-      final strip = tester.getSize(find.byType(HarnessTabStrip<String>));
-      expect(strip.height, lessThan(100), reason: 'all on one row');
+      expect(asking.dx, closeTo(HarnessSpace.gutter, 0.5));
+      expect(stage.dx, greaterThan(card.dx));
+      expect(stage.dx, lessThan(card.dx + 24));
+      expect(laneHeading.dx, greaterThan(asking.dx));
+      expect(laneHeading.dx, lessThan(asking.dx + 24));
+      expect(stage.dy, lessThan(card.dy));
       expect(find.byType(HarnessPill), findsNothing);
     });
 

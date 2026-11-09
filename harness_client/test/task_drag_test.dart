@@ -2,7 +2,7 @@
 // the action of the harness that puts the task in the column's state, the
 // words a column says while a card is over it, and the drops it refuses.  A
 // card is carried along its lane: the columns it can be dropped on are the
-// cells of that lane, and on a phone the sections under the lane's tab.
+// cells of that lane, and on a phone the stage sections of the one list.
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,7 +11,6 @@ import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'support/board_navigation.dart';
 import 'support/fake_harness.dart';
 import 'support/real_fonts.dart';
 
@@ -22,13 +21,17 @@ class _Rig {
   final AppController app;
 }
 
-Future<_Rig> _rig({bool taskControls = true}) async {
+Future<_Rig> _rig({
+  bool taskControls = true,
+  void Function(FakeHarness harness)? arrange,
+}) async {
   SharedPreferences.setMockInitialValues({});
   final settings = SettingsController();
   await settings.load();
   final harness = FakeHarness(taskControls: taskControls)
     ..seedOtherProjectTasks()
     ..seedTaskSessions();
+  arrange?.call(harness);
   final app = AppController(settings: settings, connector: harness.connector);
   await app.connect('ws://memory/acp');
   return _Rig(settings, harness, app);
@@ -56,8 +59,8 @@ Future<void> _openWide(WidgetTester tester, _Rig rig) async {
   await _settle(tester, 6);
 }
 
-/// The board on a phone: one lane at a time, the lanes as tabs and the
-/// columns as the sections under the one shown.
+/// The board on a phone: one scroll, the columns as stage sections, every
+/// priority in them.
 Future<void> _openPhone(WidgetTester tester, _Rig rig) async {
   tester.view.physicalSize = const Size(1170, 2532);
   tester.view.devicePixelRatio = 3.0;
@@ -287,14 +290,46 @@ void main() {
   });
 
   group('a phone', () {
+    testWidgets('carries a card from the lane of what waits on the person '
+        'to a stage', (tester) async {
+      final rig = await _rig(
+        arrange: (harness) {
+          // A task that stopped part way, rather than one that asks
+          // something: it can be moved.
+          harness.sessions['s2']!['pending'] = <Map<String, Object?>>[];
+          harness.tasks['task-4']!['outcome'] = 'error';
+        },
+      );
+      await _openPhone(tester, rig);
+      // What waits on the person is the lane above the stages, and its card
+      // is carried from there like any other.
+      final lane = find.byKey(const ValueKey('task-lane-needs-input'));
+      expect(
+        find.descendant(
+          of: lane,
+          matching: _card('task-4'),
+        ),
+        findsOneWidget,
+      );
+      await _carry(
+        tester,
+        'task-4',
+        find.text('Pending'),
+        beforeDrop: () async {
+          expect(find.text('Pause'), findsOneWidget);
+        },
+      );
+      expect(rig.harness.calls('_harness/task/pause').last['id'], 'task-4');
+      expect(rig.harness.tasks['task-4']!['column'], 'pending');
+    });
+
     testWidgets('shows every column as a target while a card is carried', (
       tester,
     ) async {
       final rig = await _rig();
       await _openPhone(tester, rig);
-      // The lane the task at work is drawn in: a phone shows one lane, its
-      // columns as the sections under it.
-      await showLane(tester, 'High priority');
+      // The board is one scroll of stage sections, every priority in them.
+      // A section that holds nothing is not there until a card is carried.
       expect(find.text('Merging'), findsNothing);
       await _carry(
         tester,

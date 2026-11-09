@@ -92,8 +92,23 @@ class TaskController extends ChangeNotifier {
   int countForLane(String lane) =>
       tasks.where((task) => task.laneName == lane && _shown(task)).length;
 
+  /// The tasks that wait on the person, by priority first and then as the
+  /// harness sent them: the Needs input lane, which a wide board draws as its
+  /// first row and a phone as the lane above its stages.
+  List<HarnessTask> forAttention() => forLane(taskLanes.first);
+
+  /// The tasks at the workflow [column] that do not wait on the person, by
+  /// priority first and then as the harness sent them: a board with no lane
+  /// rows shows every priority of a stage together, and the tasks that wait
+  /// on the person in the lane above it (see [forAttention]).
+  List<HarnessTask> forStage(String column) => _priorityFirst([
+    for (final task in tasks)
+      if (task.stageName == column && !task.needsInput && _shown(task)) task,
+  ]);
+
   /// How many of the board's tasks are at the workflow [column], a task
-  /// that waits on the person included.
+  /// that waits on the person included: a wide board's heading counts every
+  /// lane of a stage.
   int countForStage(String column) =>
       tasks.where((task) => task.stageName == column && _shown(task)).length;
 

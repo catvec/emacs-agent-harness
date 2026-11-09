@@ -14,14 +14,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/app.dart';
-import 'package:harness_client/src/models/task_chat.dart';
 import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
-import 'package:harness_client/src/ui/adaptive/layout_widgets.dart';
 import 'package:harness_client/src/ui/screens/session_screen.dart';
 import 'package:harness_client/src/ui/screens/tasks_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'support/board_navigation.dart';
 import 'support/fake_harness.dart';
 import 'support/phone_fonts.dart';
 import 'support/real_fonts.dart';
@@ -173,44 +172,13 @@ Future<void> main() async {
       await tester.tap(find.text('Tasks'));
       await settle(6);
 
-      Future<void> showLane(String label) async {
-        final tabs = find.byType(HarnessTabStrip<String>);
-        final tab = find.descendant(of: tabs, matching: find.text(label));
-        final strip = find
-            .descendant(of: tabs, matching: find.byType(Scrollable))
-            .first;
-        await tester.drag(strip, const Offset(2000, 0));
-        await tester.pump();
-        await tester.scrollUntilVisible(tab, 80, scrollable: strip);
-        await tester.ensureVisible(tab);
-        await tester.pump();
-        await tester.tap(tab);
-        await settle(4);
-      }
-
-      Future<void> showTask(String title) async {
-        final task = app.tasks!.tasks.firstWhere(
-          (task) => task.title == title,
-        );
-        await showLane(taskLaneLabel(task.laneName));
-        final lane = find
-            .descendant(
-              of: find.byType(RefreshIndicator),
-              matching: find.byType(Scrollable),
-            )
-            .first;
-        await tester.scrollUntilVisible(find.text(title), 100, scrollable: lane);
-        await tester.ensureVisible(find.text(title));
-        await tester.pump();
-      }
-
       // The queue of the project has its controls on the board; a card has
       // none: it is a way in.
       Finder onCards(Finder what) =>
           find.descendant(of: find.byType(TaskCard), matching: what);
 
       Future<void> open(String task) async {
-        await showTask(task);
+        await showTask(tester, task);
         await tester.tap(find.text(task));
         await settle(10);
       }
@@ -222,7 +190,7 @@ Future<void> main() async {
           expect(onCards(find.byType(TextButton)), findsNothing);
           expect(find.byTooltip('Task actions'), findsNothing);
         case _Scene.boardReview:
-          await showTask('Review the emulator screenshots');
+          await showTask(tester, 'Review the emulator screenshots');
           expect(find.text('Review the emulator screenshots'), findsOneWidget);
           expect(find.byType(FilledButton), findsNothing);
           expect(onCards(find.byType(TextButton)), findsNothing);

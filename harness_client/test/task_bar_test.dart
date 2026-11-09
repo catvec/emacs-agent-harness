@@ -5,20 +5,19 @@
 // is pushed on the board.
 //
 // Drawn with the fonts of a phone, as the other tests of the task board are:
-// the test font, with its wide letters, squeezes the tabs of the board.
+// the test font, with its wide letters, squeezes the board's header.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/app.dart';
-import 'package:harness_client/src/models/task_chat.dart';
 import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
-import 'package:harness_client/src/ui/adaptive/layout_widgets.dart';
 import 'package:harness_client/src/ui/screens/session_screen.dart';
 import 'package:harness_client/src/ui/screens/tasks_screen.dart';
 import 'package:harness_client/src/ui/widgets/interaction_card.dart';
 import 'package:harness_client/src/ui/widgets/message_composer.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'support/board_navigation.dart';
 import 'support/fake_harness.dart';
 import 'support/real_fonts.dart';
 
@@ -68,52 +67,6 @@ Future<void> main() async {
     await _settle(tester, 8);
     await tester.tap(find.text('Tasks'));
     await _settle(tester, 6);
-  }
-
-  /// The lane called [label], scrolled to: the strip builds the tabs it
-  /// shows, and a lane is a tab.
-  Future<void> showLane(WidgetTester tester, String label) async {
-    final tabs = find.byType(HarnessTabStrip<String>);
-    final tab = find.descendant(of: tabs, matching: find.text(label));
-    final strip = find
-        .descendant(of: tabs, matching: find.byType(Scrollable))
-        .first;
-    // From the first tab on, whichever the strip showed.
-    await tester.drag(strip, const Offset(2000, 0));
-    await tester.pump();
-    await tester.scrollUntilVisible(tab, 80, scrollable: strip);
-    // All of it, not an edge of it that a tap would miss.
-    await tester.ensureVisible(tab);
-    await tester.pump();
-    await tester.tap(tab);
-    await _settle(tester, 4);
-  }
-
-  /// Bring the card of [title] on the board: its lane, and its stage there.
-  Future<void> showTask(WidgetTester tester, String title) async {
-    final app = tester.widget<TasksScreen>(find.byType(TasksScreen)).app;
-    final task = app.tasks!.tasks.firstWhere((task) => task.title == title);
-    final wide = MediaQuery.sizeOf(
-          tester.element(find.byType(TasksScreen)),
-        ).width >=
-        920;
-    if (wide) {
-      // The wide board is a grid, built whole: there are no lane tabs, and
-      // the grid's two scrolls bring the card into view.
-      await tester.ensureVisible(find.text(title));
-      await tester.pump();
-      return;
-    }
-    await showLane(tester, taskLaneLabel(task.laneName));
-    final lane = find
-        .descendant(
-          of: find.byType(RefreshIndicator),
-          matching: find.byType(Scrollable),
-        )
-        .first;
-    await tester.scrollUntilVisible(find.text(title), 100, scrollable: lane);
-    await tester.ensureVisible(find.text(title));
-    await tester.pump();
   }
 
   /// Tap [title] on the board: its conversation opens.

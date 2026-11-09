@@ -10,7 +10,9 @@
 # deterministic tasks and needs no Emacs, no account and no network.  The page
 # at the end of this script opens with the harness already connected, so the
 # task board is there: carry a task card with a long press and leave it on
-# another column (or, in a narrow window, on a column's tab) to move the task.
+# another column (or, in a narrow window, on a stage's section) to move the
+# task.  A narrow window puts what waits on the person in a lane above the
+# stages, and shows every priority at once in them.
 #
 # Ctrl-C stops the app's server and the preview harness.
 #

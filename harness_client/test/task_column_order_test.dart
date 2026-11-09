@@ -5,6 +5,7 @@ import 'package:harness_client/src/models/task.dart';
 import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
 import 'package:harness_client/src/ui/adaptive/layout_widgets.dart';
+import 'package:harness_client/src/ui/screens/tasks_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'support/fake_harness.dart';
@@ -79,8 +80,11 @@ void _takeOverflows(WidgetTester tester) {
   }
 }
 
-Future<void> _openTasks(WidgetTester tester, Size size) async {
-  final (settings, _, app) = await _rig();
+Future<(FakeHarness, AppController)> _openTasks(
+  WidgetTester tester,
+  Size size,
+) async {
+  final (settings, harness, app) = await _rig();
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 3.0;
   addTearDown(tester.view.resetPhysicalSize);
@@ -90,6 +94,7 @@ Future<void> _openTasks(WidgetTester tester, Size size) async {
   await _settle(tester, 8);
   await tester.tap(find.text('Tasks'));
   await _settle(tester, 8);
+  return (harness, app);
 }
 
 void main() {
@@ -198,7 +203,7 @@ void main() {
         expect(
           app.tasks!.countForStage('active'),
           2,
-          reason: 'the asking task too',
+          reason: 'the asking task too: a stage heading counts every lane',
         );
         // The needs-input lane has the higher priority first; the others keep
         // the harness's own order.
@@ -206,57 +211,181 @@ void main() {
           [for (final task in app.tasks!.forLane('needs-input')) task.id],
           ['task-needs-input'],
         );
+        expect(
+          [for (final task in app.tasks!.forAttention()) task.id],
+          ['task-needs-input'],
+        );
       },
     );
 
-    testWidgets('shows a lane as tabs on a phone, its stages in workflow '
-        'order inside', (tester) async {
-      await _openTasks(tester, const Size(1170, 2532));
-      final strip = tester.widget<HarnessTabStrip<String>>(
-        find.byType(HarnessTabStrip<String>),
-      );
-      // Every lane holds a task, so every lane is a tab, in this order.
-      expect([for (final tab in strip.tabs) tab.value], taskLanes);
-      expect(
-        [for (final tab in strip.tabs) tab.label],
-        const [
-          'Needs input',
-          'High priority',
-          'Medium priority',
-          'Low priority',
-        ],
-      );
-      // It opens on what waits on the person, and the task there is drawn
-      // under the stage it stopped in.
-      expect(strip.value, 'needs-input');
-      expect(find.text('Fix the import'), findsOneWidget);
-      expect(find.text('Active'), findsOneWidget);
-
-      // The medium lane's stages come in workflow order: Backlog, Review,
-      // Done.  Its tab is off the phone's screen: bring it on first.
-      final tabs = find.byType(HarnessTabStrip<String>);
-      final mediumTab = find.descendant(
-        of: tabs,
-        matching: find.text('Medium priority'),
-      );
-      final stripScroll = find
-          .descendant(of: tabs, matching: find.byType(Scrollable))
-          .first;
-      await tester.scrollUntilVisible(mediumTab, 80, scrollable: stripScroll);
-      await tester.ensureVisible(mediumTab);
-      await tester.pump();
-      await tester.tap(mediumTab);
-      await _settle(tester, 6);
-      final tops = {
-        for (final stage in ['Backlog', 'Review', 'Done'])
-          stage: tester.getTopLeft(find.text(stage)).dy,
+    test('puts what waits on the person in the lane above the stages, and '
+        'the priorities in them', () async {
+      final (_, harness, app) = await _rig();
+      addTearDown(app.dispose);
+      // A low-priority task that waits on the person, beside a high-priority
+      // one that does not: a phone's board separates them by lane, and the
+      // stage holds only the one that does not wait.
+      harness.tasks['task-needs-low'] = {
+        ..._task('needs-input', state: 'active', priority: 'low'),
+        'id': 'task-needs-low',
+        'name': 'A low one asking',
       };
-      expect(tops.keys, hasLength(3));
-      expect(tops['Backlog'], lessThan(tops['Review']!));
-      expect(tops['Review'], lessThan(tops['Done']!));
-      expect(find.text('Work in backlog'), findsOneWidget);
-      expect(find.text('Work in review'), findsOneWidget);
-      expect(find.text('Work in done'), findsOneWidget);
+      await app.tasks!.reload();
+      expect(
+        [for (final task in app.tasks!.forAttention()) task.id],
+        ['task-needs-input', 'task-needs-low'],
+        reason: 'what waits on the person is the lane above the stages, '
+            'the higher priority first',
+      );
+      expect(
+        [for (final task in app.tasks!.forStage('active')) task.id],
+        ['task-active'],
+        reason: 'the asking tasks are in the lane, not in the stage',
+      );
+      expect([for (final task in app.tasks!.forStage('review')) task.id], [
+        'task-review',
+      ]);
+      expect([for (final task in app.tasks!.forStage('pending')) task.id], [
+        'task-pending',
+      ]);
+      expect([for (final task in app.tasks!.forStage('backlog')) task.id], [
+        'task-backlog',
+      ]);
+    });
+
+    testWidgets('shows the stages of a phone in one list, every priority in '
+        'them, and no lane tabs', (tester) async {
+      final (harness, app) = await _openTasks(
+        tester,
+        const Size(1170, 2532),
+      );
+      // The lanes are rows of a wide board only: a phone has no tabs for
+      // them, and every priority is on the board at once.
+      expect(find.byType(HarnessTabStrip<String>), findsNothing);
+      // What waits on the person is the lane above the stages: one section
+      // that says why its tasks are there.
+      final lane = find.byKey(const ValueKey('task-lane-needs-input'));
+      expect(lane, findsOneWidget);
+      expect(
+        find.descendant(of: lane, matching: find.text('Needs input')),
+        findsOneWidget,
+      );
+      // The stages that hold a task are sections, in the order a task
+      // travels.
+      expect(find.text('Backlog'), findsOneWidget);
+      expect(find.text('Pending'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('Backlog')).dy,
+        lessThan(tester.getTopLeft(find.text('Pending')).dy),
+      );
+      // The lane is above every stage: a task that waits on the person is
+      // not mixed into the stage it stopped in.
+      final asking = tester.getTopLeft(find.text('Fix the import'));
+      expect(asking.dy, lessThan(tester.getTopLeft(find.text('Backlog')).dy));
+      expect(
+        find.descendant(of: lane, matching: find.text('1')),
+        findsOneWidget,
+      );
+      // Its card says where in the workflow it stands, and its priority; the
+      // lane says it waits on the person, so the card does not repeat it.
+      expect(
+        _cardMeta(tester, 'task-needs-input'),
+        'Active · High priority · emacs-agent-harness',
+      );
+      expect(
+        find.descendant(
+          of: find.byType(TaskCard),
+          matching: find.textContaining('Needs input', findRichText: true),
+        ),
+        findsNothing,
+      );
+      // A low-priority task that waits on the person is in the lane too,
+      // below the high-priority one: the lane is ordered by priority.
+      harness.tasks['task-needs-low'] = {
+        ..._task('needs-input', state: 'active', priority: 'low'),
+        'id': 'task-needs-low',
+        'name': 'A low one asking',
+      };
+      await app.tasks!.reload();
+      await _settle(tester, 6);
+      expect(
+        find.descendant(of: lane, matching: find.text('2')),
+        findsOneWidget,
+      );
+      expect(
+        tester.getTopLeft(find.text('Fix the import')).dy,
+        lessThan(tester.getTopLeft(find.text('A low one asking')).dy),
+      );
+      expect(
+        _cardMeta(tester, 'task-needs-low'),
+        'Active · Low priority · emacs-agent-harness',
+      );
+      final list = find
+          .descendant(
+            of: find.byType(RefreshIndicator),
+            matching: find.byType(Scrollable),
+          )
+          .first;
+      await tester.scrollUntilVisible(
+        find.text('Work in active'),
+        100,
+        scrollable: list,
+      );
+      await tester.pump();
+      expect(find.text('Active'), findsOneWidget);
+      expect(find.text('Review'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('Active')).dy,
+        lessThan(tester.getTopLeft(find.text('Review')).dy),
+      );
+      // Every priority is there, in its stage, without a tab to tap.
+      await tester.scrollUntilVisible(
+        find.text('Work in merging'),
+        100,
+        scrollable: list,
+      );
+      await tester.pump();
+      expect(_cardMeta(tester, 'task-active'), 'High priority · emacs-agent-harness');
+      expect(_cardMeta(tester, 'task-merging'), 'Low priority · emacs-agent-harness');
+      await tester.scrollUntilVisible(
+        find.text('Work in done'),
+        100,
+        scrollable: list,
+      );
+      await tester.pump();
+      expect(_cardMeta(tester, 'task-done'), 'Medium priority · emacs-agent-harness');
+      // The last stage a task travels is in the same list.
+      await tester.scrollUntilVisible(
+        find.text('Work in cancelled'),
+        100,
+        scrollable: list,
+      );
+      await tester.pump();
+      expect(find.text('Cancelled'), findsOneWidget);
+    });
+
+    testWidgets('leaves the stage of a task that waits on the person to the '
+        'lane, when it holds nothing else', (tester) async {
+      final (harness, app) = await _openTasks(
+        tester,
+        const Size(1170, 2532),
+      );
+      // The one other task at Active goes: the task that waits on the person
+      // is all the stage has, and the lane above says where it is.
+      harness.tasks.remove('task-active');
+      await app.tasks!.reload();
+      await _settle(tester, 6);
+      expect(find.text('Fix the import'), findsOneWidget);
+      expect(
+        find.text('Active'),
+        findsNothing,
+        reason: 'a stage section holds what does not wait on the person',
+      );
+      // The card in the lane still says the stage it stopped in.
+      expect(
+        _cardMeta(tester, 'task-needs-input'),
+        'Active · High priority · emacs-agent-harness',
+      );
     });
 
     testWidgets('shows the workflow as the columns of a wide board, the '
@@ -298,8 +427,30 @@ void main() {
       expect(active.dx, lessThan(activeLeft + 300));
       expect(active.dy, greaterThan(tops['high']!));
       expect(active.dy, lessThan(tops['medium']!));
+      // The row says the priority; a card does not repeat it, except for one
+      // that waits on the person, whose row is Needs input and not its
+      // priority's.
+      expect(find.text('Needs input'), findsOneWidget);
+      expect(find.text('High priority'), findsOneWidget);
+      expect(find.text('Low priority'), findsOneWidget);
+      expect(find.text('Medium priority'), findsOneWidget);
+      expect(
+        _cardMeta(tester, 'task-needs-input'),
+        'High priority · emacs-agent-harness',
+      );
     });
   });
+}
+
+/// The meta line of the card of [taskId], as it is rendered: what its parts
+/// say, joined as the card joins them.
+String _cardMeta(WidgetTester tester, String taskId) {
+  final meta = find.descendant(
+    of: find.byKey(ValueKey('task-card-$taskId')),
+    matching: find.byType(HarnessMetaLine),
+  );
+  final text = find.descendant(of: meta, matching: find.byType(RichText));
+  return tester.widget<RichText>(text).text.toPlainText();
 }
 
 String _stageLabel(String stage) => switch (stage) {
