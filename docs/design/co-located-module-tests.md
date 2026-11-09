@@ -102,6 +102,17 @@ directory exists.  The helper is found and the suites compile.
 the older check's `load-path` and compiles a suite that requires the
 helper.
 
+What that check compiles, it also checks for what a test run does not:
+a suite is loaded, never byte-compiled, by `scripts/test.sh`, and
+`scripts/lint.sh` compiles production sources only.  A lambda list the
+compiler refuses -- `(lambda (t) ...)` binds a constant -- therefore
+passed every test and was found only when an older harness's update
+check compiled the suite and refused the update.
+`harness-suites-have-lambda-lists-the-byte-compiler-accepts` reads
+every suite and holds its lambda lists to the compiler's own
+`byte-compile-check-lambda-list', which finds such a list in seconds
+where compiling every suite would take a minute.
+
 A harness from before the move that is already running, with
 `harness-enabled-modules` t, still takes every file under the module
 directories for a module when it reloads after such an update -- its

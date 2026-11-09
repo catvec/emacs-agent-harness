@@ -232,9 +232,9 @@ nothing else of the ACP connection is touched."
       (should (car tools))
       (should (equal "2.0" (plist-get (cdr tools) :jsonrpc)))
       (should (equal 7 (plist-get (cdr tools) :id)))
-      (should (member "screenshot" (mapcar (lambda (t) (plist-get t :name))
+      (should (member "screenshot" (mapcar (lambda (tool) (plist-get tool :name))
                                            (plist-get result :tools))))
-      (should (member "clipboard" (mapcar (lambda (t) (plist-get t :name))
+      (should (member "clipboard" (mapcar (lambda (tool) (plist-get tool :name))
                                           (plist-get result :tools)))))))
 
 (ert-deftest harness-computer-endpoint-refuses-mcp-for-another-computer ()

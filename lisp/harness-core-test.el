@@ -2064,6 +2064,70 @@ update is refused."
               (should (eql 0 status)))))
       (delete-directory out t))))
 
+(defconst harness-core-test--backquote (intern "`")
+  "The symbol a backquoted form reads with, which is not `backquote'.")
+
+(defun harness-core-test--invalid-lambda-list (form)
+  "Return the first invalid lambda list in FORM, or nil.
+FORM is read as code: data under `quote' or a backquote is not code and
+is left alone.  A lambda list is invalid when
+`byte-compile-check-lambda-list' refuses it, as it does one that binds
+a constant, such as t, nil or a keyword."
+  (cond
+   ((atom form) nil)
+   ((memq (car form) (list 'quote harness-core-test--backquote)) nil)
+   ((eq (car form) 'function)
+    (harness-core-test--invalid-lambda-list (car-safe (cdr form))))
+   ((memq (car form) '(lambda defun))
+    (let ((args (if (eq (car form) 'lambda) (cadr form) (caddr form)))
+          (body (if (eq (car form) 'lambda) (cddr form) (cdddr form))))
+      (or (condition-case err
+              (progn (byte-compile-check-lambda-list args) nil)
+            (error (error-message-string err)))
+          (harness-core-test--invalid-lambda-list body))))
+   (t (or (harness-core-test--invalid-lambda-list (car form))
+          (harness-core-test--invalid-lambda-list (cdr form))))))
+
+(ert-deftest harness-suites-have-lambda-lists-the-byte-compiler-accepts ()
+  "Every suite binds only lambda variables the byte compiler accepts.
+A harness older than the move of the suites into lisp/
+\(docs/design/co-located-module-tests.md) byte-compiles every
+harness-*.el under lisp/ when it checks an update, the suites among
+them: a suite that binds a constant, as (lambda (t) ...) does, is a
+problem of the check, and the update is refused as broken and not
+installed.  Compiling every suite to find such a list takes about a
+minute, so this reads the suites and checks each lambda list with the
+compiler's own `byte-compile-check-lambda-list' instead."
+  (require 'bytecomp)
+  (let ((files (directory-files-recursively
+                (expand-file-name "lisp" harness-test-root)
+                "\\`harness-.*-test\\.el\\'"))
+        (problems nil))
+    ;; The suites that were broken once are among those read, and every
+    ;; other suite beside a module.
+    (dolist (file '("lisp/harness-computer-endpoint-test.el" "lisp/modules/harness-acp-test.el"))
+      (should (member (expand-file-name file harness-test-root) files)))
+    (dolist (file files)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (condition-case err
+            (while t
+              (let ((line (line-number-at-pos))
+                    (form (read (current-buffer))))
+                (when-let ((problem (harness-core-test--invalid-lambda-list form)))
+                  (push (format "%s:%d: %s" (file-relative-name file harness-test-root)
+                                line problem)
+                        problems))))
+          (end-of-file nil)
+          (error (push (format "%s: %s" (file-relative-name file harness-test-root)
+                               (error-message-string err))
+                       problems)))))
+    (let ((problems (nreverse problems)))
+      (ert-info ((format "%d problem(s):\n%s" (length problems)
+                         (string-join problems "\n")))
+        (should-not problems)))))
+
 (ert-deftest harness-library-files-are-there ()
   "Every library file the harness loads exists, the vendored compose-quote among them.
 The compose box quotes with it, so it loads compiled at start and again
