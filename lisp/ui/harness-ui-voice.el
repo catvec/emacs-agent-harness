@@ -52,6 +52,7 @@
 (defvar harness-voice-live--status-names-target)
 
 (require 'harness-ui-voice-providers)
+(require 'harness-ui-voice-output)
 
 (defcustom harness-voice-transcribe-command nil
   "Command transcribing a WAV into UTF-8 text on stdout.
@@ -975,7 +976,10 @@ sequence runs past the map's bindings, so the key is free."
   (harness-voice--claim-key harness-compose-map "C-c v" #'harness-voice-dictate)
   (harness-voice--claim-key harness-compose-map "C-c V" #'harness-voice-interrupt)
   (ignore-errors (transient-remove-suffix 'harness-session-menu "v"))
-  (transient-append-suffix 'harness-session-menu "r" '("v" "Voice chat" harness-voice)))
+  (transient-append-suffix 'harness-session-menu "r" '("v" "Voice chat" harness-voice))
+  (transient-append-suffix 'harness-session-menu "v"
+    '("V" "Output voice" harness-voice-output
+      :if (lambda () (harness-ui--command-available-p 'harness-voice-output)))))
 
 (defun harness-voice--shutdown ()
   "Stop all client audio and remove the optional module's hooks and keys."

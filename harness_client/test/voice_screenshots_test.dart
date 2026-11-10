@@ -20,6 +20,7 @@ import 'package:harness_client/src/ui/theme/harness_theme.dart';
 import 'package:harness_client/src/ui/widgets/voice_settings_sheet.dart';
 import 'package:harness_client/src/voice/voice_backend.dart';
 import 'package:harness_client/src/voice/voice_models.dart';
+import 'package:harness_client/src/voice/voice_output.dart';
 import 'package:harness_client/src/voice/voice_settings.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -38,6 +39,8 @@ class _Case {
     this.approval = false,
     this.settings = false,
     this.paused = false,
+    this.outputVoice,
+    this.voicesFailed = false,
   });
 
   final String file;
@@ -49,7 +52,26 @@ class _Case {
   final bool approval;
   final bool settings;
   final bool paused;
+
+  /// The output voice section of the setup sheet: which state it is drawn in.
+  final _OutputVoice? outputVoice;
+
+  /// Whether the device's voice list could not be read.
+  final bool voicesFailed;
 }
+
+/// The states the output voice section is pictured in.  Every one is a
+/// fixture: the voices and the rate range are what a platform reports, and
+/// the audition is a scripted engine, not a microphone or a speech service.
+enum _OutputVoice { loaded, playing, failed, unavailable }
+
+const _voices = <VoiceOutputVoice>[
+  VoiceOutputVoice(name: 'Anna', locale: 'de-DE', quality: '1'),
+  VoiceOutputVoice(name: 'Daniel', locale: 'en-GB', quality: '2'),
+  VoiceOutputVoice(name: 'Samantha', locale: 'en-US', quality: '3'),
+];
+
+const _range = VoiceRateRange(min: 0.25, normal: 0.5, max: 2.0);
 
 const _cases = [
   _Case(
@@ -130,6 +152,50 @@ const _cases = [
   ),
   _Case('voice-settings', 430, 932, live: true, settings: true),
   _Case(
+    'voice-settings-output-voices',
+    430,
+    1100,
+    settings: true,
+    outputVoice: _OutputVoice.loaded,
+  ),
+  _Case(
+    'voice-settings-output-playing',
+    430,
+    1100,
+    settings: true,
+    outputVoice: _OutputVoice.playing,
+  ),
+  _Case(
+    'voice-settings-output-failed',
+    430,
+    1100,
+    settings: true,
+    outputVoice: _OutputVoice.failed,
+  ),
+  _Case(
+    'voice-settings-output-unavailable',
+    430,
+    1100,
+    settings: true,
+    live: true,
+    outputVoice: _OutputVoice.unavailable,
+  ),
+  _Case(
+    'voice-settings-output-no-voices',
+    430,
+    1100,
+    settings: true,
+    outputVoice: _OutputVoice.loaded,
+    voicesFailed: true,
+  ),
+  _Case(
+    'voice-settings-output-narrow',
+    300,
+    900,
+    settings: true,
+    outputVoice: _OutputVoice.loaded,
+  ),
+  _Case(
     'voice-wide',
     900,
     700,
@@ -192,6 +258,10 @@ Future<void> main() async {
 
       final boundary = GlobalKey();
       if (shot.settings) {
+        final engines = FakeAuditionEngines(startsImmediately: true);
+        if (shot.outputVoice == _OutputVoice.failed) {
+          engines.nextFailure = StateError('setVoice returned 0');
+        }
         await tester.pumpWidget(
           RepaintBoundary(
             key: boundary,
@@ -205,8 +275,27 @@ Future<void> main() async {
                           : VoiceProvider.clip,
                       realtimeEndpoint: 'https://api.openai.com/v1',
                       realtimeModel: 'gpt-live-1',
+                      clipDelivery: ClipDelivery.audioPrompt,
+                      outputVoice: shot.outputVoice == null
+                          ? ''
+                          : 'Samantha',
+                      outputVoiceLocale: shot.outputVoice == null
+                          ? ''
+                          : 'en-US',
+                      speechRate: shot.outputVoice == null ? null : 0.75,
+                      speechPitch: shot.outputVoice == null ? 1.0 : 1.2,
                     ),
                     harnessAddress: 'ws://192.168.1.5:9999/acp',
+                    catalogue: FakeVoiceCatalogue(
+                      voices: _voices,
+                      rateRange: _range,
+                      voicesError: shot.voicesFailed
+                          ? const VoiceOutputException(
+                              'TextToSpeech is not ready',
+                            )
+                          : null,
+                    ),
+                    engineFactory: (_) => engines(),
                   ),
                 ),
               ),
@@ -214,6 +303,12 @@ Future<void> main() async {
           ),
         );
         await tester.pump();
+        await tester.pump();
+        if (shot.outputVoice == _OutputVoice.playing ||
+            shot.outputVoice == _OutputVoice.failed) {
+          await tester.tap(find.byKey(const Key('voice-audition')));
+          await tester.pump();
+        }
       } else {
         final rig = Rig(
           settings: shot.live

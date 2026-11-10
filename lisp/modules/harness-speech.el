@@ -36,9 +36,25 @@
 ;;   `speech/start'       start it; the answer is the state as it is
 ;;   `speech/stop'        stop it
 ;;   `speech/transcribe'  {audio: BASE64 WAV} -> (:text TEXT)
-;;   `speech/synthesize'  {text: TEXT} -> (:audio BASE64 WAV)
+;;   `speech/synthesize'  {text: TEXT, voice: NAME, params: {...}}
+;;                        -> (:audio BASE64 WAV)
+;;   `speech/voices'      the voices the text-to-speech service reports
+;;                        and the parameters it declares, so a client
+;;                        offers what the service really has instead of
+;;                        a list of its own
 ;;   `speech/log'         the exact command the stack last ran, where,
 ;;                        its exit status and its whole output, as text
+;;
+;; Which voices exist is the service's answer, never a list made up by a
+;; client: Kokoro-FastAPI's `/v1/audio/voices' route names them, and
+;; `speech/voices' passes that answer on with the state that says why
+;; there is none (stopped, unsupported by the endpoint, failed).  Which
+;; parameters are supported is a declaration beside that route, for the
+;; one service this module starts itself (Kokoro-FastAPI v0.8.2:
+;; `speed' 0.25 to 4.0).  A service of your own declares nothing here,
+;; so no parameter is sent to it: `speech/synthesize' refuses a
+;; parameter the selected service does not declare, as it refuses one
+;; out of its range, rather than post a value the service ignores.
 ;;
 ;; A stack that fails says so in `speech/status': `:detail' and
 ;; `:reason' name the exit status and the provider's own reason, and
@@ -151,10 +167,30 @@ the harness; `speech/changed' says how it went."
   :type 'boolean
   :group 'harness-speech)
 
+(defcustom harness-speech-voices-ttl 60
+  "Seconds a service's voice list is kept before it is asked for again.
+The list changes only when the service's voices change, so a client
+opening its voice settings twice in a minute asks once; REFRESH on
+`speech/voices' asks at once."
+  :type 'number
+  :group 'harness-speech)
+
 ;;;; State
 
 (defvar harness-speech--status nil
   "The last status plist of the local pipeline, or nil before the first ask.")
+
+(defvar harness-speech--voices-cache nil
+  "The last voice catalogue this harness answered, or nil.
+A plist of `:voices-url', `:at' (float-time) and the answer; kept for
+`harness-speech-voices-ttl' seconds so a client that opens its voice
+settings twice asks the service once.")
+
+(defvar harness-speech--voices-generation 0
+  "Bumped whenever the pipeline's state moves.
+An answer about voices that was asked for before a stop, a start or a
+model change describes a service that may be gone; it is not shown as
+the one that runs now (see `harness-speech-voices').")
 
 (defvar harness-speech--processes nil
   "Role -> process of the commands the harness runs for the pipeline.")
@@ -232,6 +268,292 @@ instead, and the reason says so rather than leaving it unexplained."
            (not (string-empty-p harness-speech-local-tts-url))
            harness-speech-local-tts-url)
     (harness-speech--endpoint 'tts "v1/audio/speech")))
+
+(defun harness-speech--voices-url ()
+  "Return the URL the text-to-speech service lists its voices at, or nil.
+The route is the one beside the speech route: a service configured with
+`harness-speech-local-tts-url' answers `/audio/voices' on the same host,
+and the bundled stack's Kokoro service answers `/v1/audio/voices'."
+  (let ((tts (harness-speech--tts-url)))
+    (when tts
+      (cond
+       ((string-match-p "/v1/audio/speech\\'" tts)
+        (replace-regexp-in-string "/v1/audio/speech\\'" "/v1/audio/voices" tts))
+       ((string-match-p "/audio/speech\\'" tts)
+        (replace-regexp-in-string "/audio/speech\\'" "/audio/voices" tts))
+       (t (concat (string-remove-suffix "/" tts) "/v1/audio/voices"))))))
+
+;;;; Output voices and what the service supports
+
+;; Which voices a service has is its own answer, never a list a client
+;; made up: Kokoro-FastAPI's `/v1/audio/voices' names them, and another
+;; OpenAI-compatible service may answer 404, a list of names, or nothing
+;; at all.  Which parameters the service accepts is a declaration, and a
+;; service the harness starts itself has one it can vouch for.  A
+;; service of your own declares nothing here, so a client offers no
+;; parameter for it and `speech/synthesize' refuses one: posting a field
+;; a server ignores would look like a setting that works and silently do
+;; nothing.
+
+(defconst harness-speech-kokoro-parameters
+  '((:key "speed" :label "Speed" :unit "×" :min 0.25 :max 4.0 :default 1.0
+     :doc "How fast the voice speaks, as a multiple of its own pace.")
+    (:key "volume_multiplier" :label "Volume" :unit "×" :min 0.0 :max 10.0
+     :default 1.0
+     :doc "How loud the reply is, as a multiple of the service's own level."))
+  "The parameters Kokoro-FastAPI v0.8.2 accepts on `/v1/audio/speech'.
+Verified against its request schema (`RATE_MIN', `RATE_MAX',
+`VOLUME_MIN' and `VOLUME_MAX' in `api/src/structures/schemas.py'):
+`speed' is 0.25 to 4.0 and `volume_multiplier' 0.0 to 10.0.  Keys are
+the service's own field names; MIN, MAX and DEFAULT are in the
+service's units, which `:unit' names for a person.")
+
+(defconst harness-speech-kokoro-models '("tts-1" "tts-1-hd" "kokoro" "gpt-4o-mini-tts")
+  "The model names Kokoro-FastAPI v0.8.2 accepts on `/v1/audio/speech'.
+`tts-1' is what the harness asks for.  All four load the same Kokoro
+weights; the names exist for OpenAI-compatible clients.")
+
+(defun harness-speech--declared-parameters ()
+  "Return the parameters the selected text-to-speech service declares.
+The bundled stack's Kokoro service declares `harness-speech-kokoro-parameters';
+a service of your own declares none, since nothing here can vouch for
+what it accepts."
+  (and (eq (harness-speech--backend) 'stack)
+       (copy-sequence harness-speech-kokoro-parameters)))
+
+(defun harness-speech-parameter (key &optional parameters)
+  "Return the declaration of parameter KEY among PARAMETERS, or nil.
+PARAMETERS defaults to the selected service's declared parameters."
+  (let ((parameters (or parameters (harness-speech--declared-parameters))))
+    (cl-find (format "%s" key) parameters :key (lambda (p) (plist-get p :key))
+             :test #'equal)))
+
+(defun harness-speech--number (value)
+  "Return VALUE as a number, or nil when it is not one."
+  (cond ((numberp value) value)
+        ((and (stringp value)
+              (string-match-p "\\`[ \t]*[-+]?[0-9]*\\.?[0-9]+\\([eE][-+]?[0-9]+\\)?[ \t]*\\'" value))
+         (string-to-number value))
+        (t nil)))
+
+(defun harness-speech-check-parameters (parameters &optional declared)
+  "Return PARAMETERS as the pairs to send, or signal.
+PARAMETERS is a plist of the service's own keys to values, as a client
+read them, and DECLARED the declarations of the service (`nil' for a
+service that declares none).  Each key must be declared, and each value
+a number inside its range; a value equal to the default is left out, so
+a request carries only what was changed.  The signal's text is the one
+line a client shows: `Speed · 5.00 outside 0.25–4.00'."
+  (let ((declared (or declared (harness-speech--declared-parameters)))
+        (out nil))
+    (cl-loop for (key value) on parameters by #'cddr
+             do (let* ((name (string-remove-prefix ":" (format "%s" key)))
+                       (decl (harness-speech-parameter name declared)))
+                  (unless decl
+                    (error "Speech parameter unsupported · %s" name))
+                  (let ((number (harness-speech--number value))
+                        (min (plist-get decl :min))
+                        (max (plist-get decl :max)))
+                    (unless number
+                      (error "%s · not a number"
+                             (or (plist-get decl :label) name)))
+                    (unless (and (<= min number) (<= number max))
+                      (error "%s · %s outside %s–%s"
+                             (or (plist-get decl :label) name)
+                             (format "%.2f" number)
+                             (format "%.2f" min) (format "%.2f" max)))
+                    (unless (equal number (plist-get decl :default))
+                      (push (cons name (float number)) out)))))
+    (nreverse out)))
+
+(defun harness-speech-parameters-json (parameters)
+  "Return the object of validated PARAMETERS, or nil.
+PARAMETERS is what `harness-speech-check-parameters' returns, an alist
+of the service's field names to numbers; nil when it is empty, so the
+request carries no parameter key at all."
+  (when parameters
+    (apply #'append (mapcar (lambda (pair) (list (intern (concat ":" (car pair)))
+                                                (cdr pair)))
+                            parameters))))
+
+(defun harness-speech--json-array-list (value)
+  "Return VALUE as a list: a vector's elements, or a list itself."
+  (cond ((vectorp value) (append value nil))
+        ((listp value) value)))
+
+(defun harness-speech--voice-names (body)
+  "Return the voice names in BODY, a voice route's answer, or nil.
+The shapes are those of the services that answer the route:
+Kokoro-FastAPI's `{\"voices\": [{\"id\": \"af_heart\", \"name\": ...}]}'
+(and its older `{\"voices\": [\"af_heart\"]}'), an OpenAI-style
+`{\"data\": [{\"id\": ...}]}', and a plain array of names.  A name that
+is neither a string nor an object with an id is skipped rather than
+invented, and a name reported twice is kept once."
+  (let* ((parsed (cond ((stringp body) (harness-speech--json-body body))
+                       ((or (hash-table-p body) (consp body) (vectorp body)) body)))
+         (items (cond ((null parsed) nil)
+                      ((hash-table-p parsed)
+                       (or (gethash "voices" parsed) (gethash "data" parsed)))
+                      ((consp parsed)
+                       (or (plist-get parsed :voices) (plist-get parsed :data)))
+                      ((vectorp parsed) parsed)))
+         (names nil))
+    (dolist (item (harness-speech--json-array-list items))
+      (let ((name (cond ((stringp item) item)
+                        ((hash-table-p item)
+                         (or (gethash "id" item) (gethash "name" item)))
+                        ((consp item)
+                         (or (plist-get item :id) (plist-get item :name)))
+                        ((vectorp item) nil))))
+        (when (and (stringp name) (not (string-empty-p (string-trim name)))
+                   (not (member name names)))
+          (push name names))))
+    (nreverse names)))
+
+(defconst harness-speech-kokoro-voice-languages
+  '(("af_" "American English" "female")
+    ("am_" "American English" "male")
+    ("bf_" "British English" "female")
+    ("bm_" "British English" "male")
+    ("ef_" "Spanish" "female")
+    ("em_" "Spanish" "male")
+    ("ff_" "French" "female")
+    ("hf_" "Hindi" "female")
+    ("hm_" "Hindi" "male")
+    ("if_" "Italian" "female")
+    ("im_" "Italian" "male")
+    ("jf_" "Japanese" "female")
+    ("jm_" "Japanese" "male")
+    ("pf_" "Brazilian Portuguese" "female")
+    ("pm_" "Brazilian Portuguese" "male")
+    ("zf_" "Mandarin Chinese" "female")
+    ("zm_" "Mandarin Chinese" "male"))
+  "The Kokoro voice prefix to its language and voice gender.
+Kokoro's names begin with the language's letter and the voice's gender
+(`af_heart', `bm_george'), so a catalogue can name them without a table
+of every voice.  A name that matches none is listed as it is.")
+
+(defun harness-speech--voice-language (name)
+  "Return (LANGUAGE GENDER) of voice NAME, or nil.
+NAME's first three characters are Kokoro's language and gender
+\(`af_' American English female); a name from another service, such as
+OpenAI's `alloy', matches no prefix."
+  (let ((prefix (substring name 0 (min 3 (length name)))))
+    (cdr (assoc prefix harness-speech-kokoro-voice-languages))))
+
+(defun harness-speech--voice-entry (name)
+  "Return the catalogue entry of voice NAME, a noun phrase and its data.
+NAME is the service's own name -- `af_heart', `alloy' -- and the label
+reads as a person reads a voice: its language's name for the Kokoro
+names this harness's own service uses (`af_' American English female,
+`am_' American English male, ...), and the name itself otherwise."
+  (let* ((known (harness-speech--voice-language name))
+         (language (nth 0 known))
+         (gender (nth 1 known))
+         (label (if known (format "%s · %s · %s" language gender name) name)))
+    (list :id name :label label :language language :gender gender)))
+
+(defun harness-speech--voice-catalogue (url names)
+  "Return the `speech/voices' answer for the service at URL with NAMES.
+The answer names the service that answered (`:service', its host and the
+route), the voices with the label a person reads, and the parameters the
+service declares (`harness-speech--declared-parameters').  A voice the
+catalogue cannot name keeps the service's own name as its label."
+  (list :voices-url url
+        :service (if (eq (harness-speech--backend) 'stack)
+                     "Kokoro" "Speech service")
+        :voices (apply #'vector (mapcar #'harness-speech--voice-entry names))
+        :parameters (apply #'vector (copy-sequence (harness-speech--declared-parameters)))
+        :supported (if (harness-speech--declared-parameters) t :false)
+        :defaults (apply #'vector
+                         (mapcar (lambda (p) (list :key (plist-get p :key)
+                                                   :value (plist-get p :default)))
+                                 (harness-speech--declared-parameters)))
+        :voices-count (length names)
+        :at (float-time)))
+
+(defun harness-speech--voice-answer (url status body err)
+  "Return the `speech/voices' answer for URL's response, STATUS, BODY, ERR.
+An answer says the service's own list, or one line saying why there is
+no list: a transport failure, a route the service does not have (it
+answers 404 or 405), a body that is not a JSON list, or an empty one."
+  (let ((why
+         (cond
+          (err (format "Voice list unavailable · %s"
+                       (if (stringp (cadr err)) (cadr err) err)))
+          ((member status '(404 405)) nil)
+          ((not (string-match-p "\\`[ \t\n]*[\\[{]" (or body "")))
+           "Voice list unsupported"))))
+    (cond
+     ;; A service that answers no such route has no list to give.
+     ((member status '(404 405))
+      (list :state "unsupported" :voices (vector) :parameters (vector)
+            :supported :false :voices-url url
+            :reason "Voice list unsupported"))
+     (why
+      (list :state "failed" :voices (vector) :parameters (vector)
+            :supported :false :voices-url url :reason why))
+     (t
+      (let ((names (harness-speech--voice-names body)))
+        (if names
+            (append (harness-speech--voice-catalogue url names)
+                    (list :state "running"))
+          (list :state "unsupported" :voices (vector) :parameters (vector)
+                :supported :false :voices-url url
+                :reason "Voice list unavailable · empty")))))))
+
+(defun harness-speech-voices (&optional refresh)
+  "Return a promise of the voices the text-to-speech service has.
+REFRESH asks the service even when the answer is cached.  The answer is
+the `speech/voices' plist: `:state' says whether there is one, as the
+string a client reads off the connection (`running', `stopped',
+`unsupported' or `failed', like `speech/status'), `:voices' the
+service's own names with a noun-phrase label and its language, and
+`:parameters' what the service declares.  A stopped pipeline, a service
+that answers no such route and one that fails each say so in `:reason',
+in the words a client shows; none of them is turned into a list of
+voices this module made up."
+  (let* ((generation harness-speech--voices-generation)
+         (url (harness-speech--voices-url))
+         (cached (and (not refresh) harness-speech--voices-cache))
+         (fresh (and cached (equal (plist-get cached :url) url)
+                     (< (- (float-time) (or (plist-get cached :at) 0))
+                        harness-speech-voices-ttl))))
+    (cond
+     ((and fresh
+           (equal "running" (plist-get (plist-get cached :answer) :state)))
+      (harness-resolved (plist-get cached :answer)))
+     ;; No address means no service: the bundled stack has none while it
+     ;; is down.  A URL of your own is asked even then, since the service
+     ;; it names may run anywhere, and its own answer is the honest one.
+     ((null url)
+      (harness-resolved
+       (list :state "stopped" :voices (vector) :parameters (vector)
+             :supported :false :reason "Local voice pipeline · stopped")))
+     (t
+      (harness-with-promise (resolve reject)
+        (let ((done nil))
+          (ignore reject)
+          (harness-http-request
+           url :method "GET" :timeout 10
+           :callback
+           (lambda (status _headers body err)
+             (unless done
+               (setq done t)
+               (let ((answer (harness-speech--voice-answer url status body err)))
+                 ;; An answer asked for before the pipeline moved
+                 ;; describes a service that may be gone; the client asks
+                 ;; again rather than showing it as the one that runs.
+                 (if (equal generation harness-speech--voices-generation)
+                     (progn
+                       (setq harness-speech--voices-cache
+                             (list :url url :at (float-time) :answer answer))
+                       (funcall resolve answer))
+                   (funcall resolve (list :state "failed" :voices (vector)
+                                          :parameters (vector) :supported :false
+                                          :voices-url url
+                                          :reason "Voice list changed")))))))
+          nil))))))
 
 (defun harness-speech--process (role)
   "Return the live process of ROLE, or nil."
@@ -315,8 +637,12 @@ the whole of it without asking again."
     status))
 
 (defun harness-speech--remember (state detail)
-  "Remember and emit the pipeline's status in STATE with DETAIL."
+  "Remember and emit the pipeline's status in STATE with DETAIL.
+A moved state also drops the voice list kept from the service that ran
+before, and marks an answer about it that is on its way stale."
   (let ((status (harness-speech--describe state detail)))
+    (cl-incf harness-speech--voices-generation)
+    (setq harness-speech--voices-cache nil)
     (harness-emit 'speech/changed status)
     status))
 
@@ -626,19 +952,28 @@ words' language, when the service takes one.  Return a promise of
        (lambda (err)
          (signal (car err) (cdr err)))))))
 
-(defun harness-speech-synthesize (text &optional voice)
-  "Speak TEXT with the local pipeline, in VOICE or its own.
-Return a promise of (:audio BASE64 :mime \"audio/wav\")."
+(defun harness-speech-synthesize (text &optional voice parameters)
+  "Speak TEXT with the local pipeline, in VOICE, with PARAMETERS.
+PARAMETERS is a plist of the service's own fields (`:speed',
+`:volume_multiplier'), validated by `harness-speech-check-parameters'
+before anything is sent: an unsupported key or an out-of-range value
+signals, and no request is made.  VOICE is passed to the service as it
+is given, its own name being what the service reported.  Return a
+promise of (:audio BASE64 :mime \"audio/wav\")."
   (let ((url (harness-speech--tts-url)))
     (unless url
       (error "Local voice pipeline · stopped"))
     (unless (and (stringp text) (not (string-empty-p (string-trim text))))
       (error "Speech text unset"))
-    (let ((payload (list :model "tts-1"
-                         :voice (or (and (stringp voice) (not (string-empty-p voice)) voice)
-                                    harness-speech-local-voice)
-                         :input (string-trim text)
-                         :response_format "wav")))
+    (let* ((chosen (or (and (stringp voice) (not (string-empty-p (string-trim voice)))
+                            (string-trim voice))
+                       harness-speech-local-voice))
+           (parameters (harness-speech-check-parameters parameters))
+           (payload (append (list :model "tts-1"
+                                  :voice chosen
+                                  :input (string-trim text)
+                                  :response_format "wav")
+                            (harness-speech-parameters-json parameters))))
       (harness-then
        (harness-speech--http url :method "POST"
                              :headers '(("Content-Type" . "application/json"))
@@ -689,10 +1024,28 @@ optional.  The audio goes to the pipeline on the harness's machine, so
 a client needs no speech model of its own."
   (harness-speech-transcribe audio format language))
 
-(harness-defmethod speech/synthesize (text &optional voice)
+(harness-defmethod speech/synthesize (text &optional voice params)
   "Speak TEXT and return a promise of (:audio BASE64 :mime \"audio/wav\").
-VOICE names the voice, the pipeline's own when nil."
-  (harness-speech-synthesize text voice))
+VOICE names the voice, the pipeline's own when nil.  PARAMS holds the
+service's own parameters (see `speech/voices'), validated here: a key
+the selected service does not declare, or a value outside its range,
+signals in the words a client shows and sends nothing."
+  (harness-speech-synthesize text voice params))
+
+(harness-defmethod speech/voices (&optional refresh)
+  "Return a promise of the text-to-speech voices and their parameters.
+The answer is (:state STATE :voices [VOICE ...] :parameters [PARAM ...]
+:defaults [(:key KEY :value V) ...] :service NAME :voices-url URL
+:voices-count N :reason REASON), where STATE is `running' when the
+service answered, `stopped' when no pipeline runs, `unsupported' when
+the service has no voice route and `failed' when it did not answer.
+REFRESH asks the service rather than the answer kept from within
+`harness-speech-voices-ttl' seconds.  VOICE is (:id NAME :label NOUN
+:language LANG :gender GENDER), the label being what a list shows.
+PARAM is (:key KEY :label NOUN :unit UNIT :min MIN :max MAX :default V
+:doc DOC), a parameter the service declares.  Vectors keep each entry
+an object on the wire, and empty when there are none."
+  (harness-speech-voices refresh))
 
 (harness-declare-event 'speech/changed
   "The local speech pipeline's state moved; the argument is its status plist.")

@@ -53,6 +53,10 @@
 ;; whisper.cpp and no Kokoro of its own, and a phone has none at all.
 
 (declare-function harness-voice--refresh "harness-ui-voice")
+(declare-function harness-voice-output "harness-ui-voice-output")
+(declare-function harness-voice-output-capability "harness-ui-voice-output")
+(declare-function harness-voice-output-saved-voice "harness-ui-voice-output")
+(declare-function harness-voice-output-voice-label "harness-ui-voice-output")
 (declare-function harness-voice-live--active-p "harness-ui-voice-live")
 (declare-function harness-voice-live-stop "harness-ui-voice-live")
 
@@ -212,6 +216,10 @@ next Emacs starts with the same provider instead of the default."
              (harness-voice-live--active-p))
     (harness-voice-live-stop))
   (harness-voice--save-choice 'harness-voice-provider provider)
+  ;; An open output voice page describes the provider that was selected,
+  ;; so its catalogue and its draft stop applying and it asks again.
+  (when (fboundp 'harness-voice-output--provider-changed)
+    (harness-voice-output--provider-changed))
   (when (fboundp 'harness-voice--refresh)
     (harness-voice--refresh))
   (harness-voice-setup--refresh)
@@ -355,6 +363,35 @@ pipeline has no speech model of its own to name."
                #'harness-voice-select-stt-model)
               "\n"))))
 
+(defun harness-voice--insert-output-voice ()
+  "Insert the output voice line: what speaks, and the page that chooses it.
+The line names the provider's voice as it is in force, and [Select] opens
+`harness-voice-output', which lists the service's own voices and
+parameters and auditions one before it is saved."
+  (require 'harness-ui-voice-output)
+  (let* ((capability (harness-voice-output-capability))
+         (saved (harness-voice-output-saved-voice capability))
+         (voice (plist-get saved :value)))
+    (insert "\n"
+            (propertize "Output voice" 'face 'harness-label-face)
+            "  "
+            (propertize (cond
+                         ((plist-get capability :audition)
+                          (or (and voice (harness-voice-output-voice-label voice))
+                              "Service default"))
+                         ((eq (plist-get capability :kind) 'provider)
+                          (or voice "Provider default"))
+                         (t (or (plist-get capability :reason) "Unavailable")))
+                        'face 'default
+                        'help-echo (or (plist-get capability :reason)
+                                       "Voice of spoken replies"))
+            "  "
+            (harness-ui-string-action
+             (propertize "[Select]" 'face 'button
+                         'help-echo "Output voice · voices, parameters and audition")
+             #'harness-voice-output)
+            "\n")))
+
 (defun harness-voice--pipeline-running-p ()
   "Non-nil when the harness reports its local voice pipeline running."
   (eq 'running (harness-voice-pipeline-state)))
@@ -478,13 +515,16 @@ than opening a process that cannot speak."
     (set-keymap-parent map special-mode-map)
     (define-key map (kbd "q") #'quit-window)
     (define-key map (kbd "c") (lambda () (interactive) (customize-group 'harness-voice)))
+    (define-key map (kbd "o") #'harness-voice-output)
     map)
-  "Key map of the voice setup buffer.")
+  "Key map of the voice setup buffer.
+RET on a provider selects it, `o' opens the output voice, `c' the voice
+settings and `q' closes the buffer.")
 
 (define-derived-mode harness-voice-setup-mode special-mode "Voice setup"
   "Mode of the voice provider list.
-RET on a provider selects it, `c' opens the voice settings and `q'
-closes the buffer."
+RET on a provider selects it, `o' opens the output voice, `c' opens the
+voice settings and `q' closes the buffer."
   (setq-local mode-line-format '(" Voice setup")))
 
 (defun harness-voice-setup ()
@@ -550,6 +590,7 @@ keep saying a running service is missing."
         (insert "\n")))
     (harness-voice--insert-pipeline)
     (harness-voice--insert-stt-model)
+    (harness-voice--insert-output-voice)
     (harness-voice--insert-audio)
     (insert "\n"
             (propertize "Effort" 'face 'harness-label-face)
@@ -879,8 +920,26 @@ the same OpenAI-compatible shape."
 (defcustom harness-voice-unmute-voice "af_heart"
   "The voice name the local provider asks the speech endpoint for.
 The bundled stack's Kokoro service warms `af_heart' at startup.  A
-different endpoint may name another voice, such as OpenAI's \"alloy\"."
+different endpoint may name another voice, such as OpenAI's \"alloy\".
+`M-x harness-voice-output' lists the voices the selected
+service reports and auditions one before it is saved here; a voice the
+service does not report is kept rather than forgotten, since a service
+of your own may know it."
   :type 'string
+  :group 'harness-voice)
+
+(defcustom harness-voice-unmute-parameters nil
+  "Parameters the local provider sends with synthesized speech, or nil.
+An alist of the selected text-to-speech service's own field names to
+numbers, exactly as the service takes them: Kokoro-FastAPI v0.8.2
+takes `speed' (0.25 to 4.0, default 1.0) and `volume_multiplier' (0.0
+to 10.0, default 1.0).  A nil value sends nothing, and a service of
+your own declares no parameters, so none is sent to it.  A parameter
+the service does not declare, or a value outside its range, is refused
+before speech is requested, in the words the settings page shows.  Set
+it through `M-x harness-voice-output'; this is client
+configuration, not a safe directory-local option."
+  :type '(alist :key-type string :value-type number)
   :group 'harness-voice)
 
 (defcustom harness-voice-unmute-threshold 0.004
@@ -944,12 +1003,24 @@ reason is one line, for the setup list."
   "Return the argv list running the bundled local pipeline sidecar.
 Speech to text comes from the harness server's pipeline unless
 `harness-voice-unmute-stt-url' names a service of your own; text to
-speech from `harness-voice-unmute-tts-url' or the same pipeline."
-  (list "python3" (harness-voice--script "harness-voice-live-unmute")
-        "--stt-url" (harness-voice-unmute--stt-url)
-        "--tts-url" (harness-voice-unmute--tts-url)
-        "--voice" harness-voice-unmute-voice
-        "--threshold" (number-to-string harness-voice-unmute-threshold)))
+speech from `harness-voice-unmute-tts-url' or the same pipeline.
+`harness-voice-unmute-parameters' reach the service as the sidecar's
+`--tts-parameter KEY=VALUE' pairs."
+  (append (list "python3" (harness-voice--script "harness-voice-live-unmute")
+                "--stt-url" (harness-voice-unmute--stt-url)
+                "--tts-url" (harness-voice-unmute--tts-url)
+                "--voice" harness-voice-unmute-voice
+                "--threshold" (number-to-string harness-voice-unmute-threshold))
+          (harness-voice-unmute-parameter-argv)))
+
+(defun harness-voice-unmute-parameter-argv ()
+  "Return the sidecar's argv pairs for the saved speech parameters."
+  (apply #'append
+         (mapcar (lambda (pair)
+                   (list "--tts-parameter"
+                         (format "%s=%s" (car pair)
+                                 (format "%s" (cdr pair)))))
+                 harness-voice-unmute-parameters)))
 
 (defun harness-voice-fixture-command ()
   "Return the argv list running the scripted fixture sidecar."

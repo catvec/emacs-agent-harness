@@ -2,6 +2,7 @@ import '../voice/clip_voice_backend.dart';
 import '../voice/live_protocol.dart';
 import '../voice/live_voice_backend.dart';
 import '../voice/voice_backend.dart';
+import '../voice/voice_output.dart';
 import '../voice/voice_settings.dart';
 import 'voice_audio_io.dart';
 import 'voice_http.dart';
@@ -41,7 +42,12 @@ VoiceBackend createVoiceBackend(
   return ClipVoiceBackend(
     microphone: RecordVoiceMicrophone(),
     transcriber: HttpVoiceTranscriber(),
-    speech: FlutterTtsVoiceSpeech(language: settings.language),
+    // A spoken reply is made with the same voice and parameters the setup
+    // sheet's audition previews, through the same application path.
+    speech: FlutterTtsVoiceSpeech(
+      language: settings.language,
+      params: VoiceOutputParams.forSettings(settings),
+    ),
     delivery: settings.clipDelivery,
     endpoint: settings.effectiveSpeechEndpoint(harnessAddress),
     model: settings.speechModel,

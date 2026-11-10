@@ -204,6 +204,30 @@ void main() {
     await rig.controller.stop();
   });
 
+  test('an output voice change restarts the call like an endpoint', () async {
+    final rig = Rig();
+    await rig.controller.start();
+    await settle();
+    expect(rig.backend.started, isTrue);
+    final next = rig.controller.settings.copyWith(
+      outputVoice: 'Samantha',
+      outputVoiceLocale: 'en-US',
+      speechRate: 1.25,
+      speechPitch: 1.4,
+      speechVolume: 0.3,
+    );
+    await rig.controller.updateSettings(next);
+    await settle();
+    expect(rig.saved, [next]);
+    expect(rig.controller.settings, next);
+    expect(rig.builtWith, next, reason: 'the backend was built again');
+    // The rig's one fake backend closes its event stream when it is stopped,
+    // so the reopened call reports no phase of its own; that it was reopened
+    // at all is what this test is about.
+    expect(rig.controller.phase, VoicePhase.connecting);
+    await rig.controller.stop();
+  });
+
   test('a change that only speaks less does not restart the stream', () async {
     final rig = Rig();
     await rig.controller.start();

@@ -146,8 +146,9 @@ class SidecarRig:
         self.stt_gate.set()
         self.transcript = "open the merge queue"
         self.transcript_queue = []
+        self.args = args()
         self.sidecar = unmute.UnmuteSidecar(
-            args(), events=self.events, player=self.player,
+            self.args, events=self.events, player=self.player,
             recorder=NullAudio(),
             post_multipart=self._stt, post_json=self._tts)
         self.sidecar.start_session({"event": "start", "protocol": 1})
@@ -1725,6 +1726,81 @@ class TtsWavTest(unittest.TestCase):
             tone(0.1, rate=24000), 24000)
         pcm = rig.sidecar.synthesize("Hello.")
         self.assertEqual(int(rig.sidecar.rate * 0.1) * 2, len(pcm))
+
+    def test_a_declared_parameter_reaches_the_service(self):
+        # The voice page's pace and volume are the service's own fields:
+        # they travel in the request, next to the voice, or not at all.
+        rig = SidecarRig()
+        rig.args.tts_parameter = {"speed": 1.5, "volume_multiplier": 0.5}
+        sent = {}
+
+        def post(url, payload, **kwargs):
+            sent.update(payload)
+            return wav_from_pcm(tone(0.1))
+
+        rig.sidecar.post_json = post
+        rig.sidecar.synthesize("Hello.")
+        self.assertEqual(1.5, sent.get("speed"))
+        self.assertEqual(0.5, sent.get("volume_multiplier"))
+        self.assertEqual("unmute", sent.get("voice"))
+
+    def test_no_declared_parameter_sends_none(self):
+        # A service of your own declares nothing, so the request carries no
+        # parameter key at all: a field a server ignores would look like a
+        # setting that works.
+        rig = SidecarRig()
+        rig.args.tts_parameter = {}
+        sent = {}
+
+        def post(url, payload, **kwargs):
+            sent.update(payload)
+            return wav_from_pcm(tone(0.1))
+
+        rig.sidecar.post_json = post
+        rig.sidecar.synthesize("Hello.")
+        self.assertNotIn("speed", sent)
+        self.assertNotIn("volume_multiplier", sent)
+
+    def test_a_parameter_argv_without_the_option_sends_none(self):
+        # The client always passes the option; a rig built without it, as a
+        # caller of the sidecar's API is, must still speak.
+        # `args()' is the shape a caller of the sidecar's own API builds;
+        # it has no `tts_parameter', as a rig written before the option did.
+        rig = SidecarRig()
+        self.assertFalse(hasattr(rig.args, "tts_parameter"))
+        sent = {}
+
+        def post(url, payload, **kwargs):
+            sent.update(payload)
+            return wav_from_pcm(tone(0.1))
+
+        rig.sidecar.post_json = post
+        self.assertIsNotNone(rig.sidecar.synthesize("Hello."))
+        self.assertNotIn("speed", sent)
+
+    def test_a_malformed_parameter_stops_the_sidecar(self):
+        # A bad pair is refused with the usage message, before a request:
+        # the service would read "fast" as text, or ignore the field.
+        parser = argparse.ArgumentParser()
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                unmute.parse_parameters(["speed=fast"], parser)
+            with self.assertRaises(SystemExit):
+                unmute.parse_parameters(["speed"], parser)
+            with self.assertRaises(SystemExit):
+                unmute.parse_parameters(["=1.0"], parser)
+            with self.assertRaises(SystemExit):
+                unmute.parse_parameters(["speed=inf"], parser)
+        self.assertEqual({"speed": 1.5, "volume_multiplier": 0.5},
+                         unmute.parse_parameters(
+                             ["speed=1.5", "volume_multiplier=0.5"], parser))
+
+    def test_the_parameter_option_is_the_documented_one(self):
+        options = unmute.parse_args(
+            ["harness-voice-live-unmute", "--tts-parameter", "speed=2"])
+        self.assertEqual({"speed": 2.0}, options.tts_parameter)
+        self.assertEqual({}, unmute.parse_args(
+            ["harness-voice-live-unmute"]).tts_parameter)
 
     def test_a_speech_server_with_no_audio_is_a_notice_not_the_end(self):
         # Kokoro answers an empty body for text it has no phonemes for.

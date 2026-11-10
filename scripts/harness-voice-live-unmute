@@ -36,6 +36,7 @@ import argparse
 import base64
 import collections
 import json
+import math
 import os
 import queue
 import re
@@ -450,11 +451,11 @@ class UnmuteSidecar(Sidecar):
         if not text:
             return None
         try:
-            body = self.post_json(
-                self.args.tts_url,
-                {"model": self.args.tts_model, "voice": self.args.voice,
-                 "input": text, "response_format": "wav"},
-                headers=self.headers(), timeout=120)
+            payload = {"model": self.args.tts_model, "voice": self.args.voice,
+                       "input": text, "response_format": "wav"}
+            payload.update(getattr(self.args, "tts_parameter", None) or {})
+            body = self.post_json(self.args.tts_url, payload,
+                                  headers=self.headers(), timeout=120)
         except Exception as error:  # noqa: BLE001 - shown in Emacs
             self.failures += 1
             self.notice("Local speech failed · %s" % error)
@@ -523,6 +524,10 @@ def parse_args(argv):
     parser.add_argument("--stt-model", default="whisper-1")
     parser.add_argument("--tts-model", default="tts-1")
     parser.add_argument("--voice", default="af_heart")
+    parser.add_argument("--tts-parameter", action="append", default=[],
+                        metavar="KEY=VALUE",
+                        help="a text-to-speech parameter the service declares, "
+                             "sent as its own field (repeatable)")
     parser.add_argument("--threshold", type=float, default=0.004,
                         help="quietest frame energy the gate calls speech")
     parser.add_argument("--hangover", type=float, default=0.85)
@@ -531,7 +536,32 @@ def parse_args(argv):
     parser.add_argument("--audio", default=AUDIO_AUTO, choices=audio_backend_names(),
                         help="audio backend (default: the first installed)")
     parser.add_argument("--self-test", action="store_true")
-    return parser.parse_args(argv[1:])
+    args = parser.parse_args(argv[1:])
+    args.tts_parameter = parse_parameters(args.tts_parameter, parser)
+    return args
+
+
+def parse_parameters(pairs, parser):
+    """Return --tts-parameter PAIRS as a {key: number} dict.
+
+    A pair is KEY=VALUE, VALUE a finite number, and KEY the service's own
+    field name.  A malformed pair ends the sidecar with the usage message
+    rather than sending a field the service would read as text or ignore.
+    """
+    parameters = {}
+    for pair in pairs:
+        key, separator, value = pair.partition("=")
+        key = key.strip()
+        if not separator or not key:
+            parser.error("--tts-parameter needs KEY=VALUE, not %r" % pair)
+        try:
+            number = float(value)
+        except ValueError:
+            parser.error("--tts-parameter %s needs a number, not %r" % (key, value))
+        if not math.isfinite(number):
+            parser.error("--tts-parameter %s needs a finite number" % key)
+        parameters[key] = number
+    return parameters
 
 
 def _self_test_tone(seconds, frequency=140.0, amplitude=0.25):
@@ -559,6 +589,8 @@ def self_test(args):
         calls["tts"].append({"url": url, "payload": payload})
         return {"data": wav_from_pcm(b"\x00\x01" * 800, LOCAL_RATE)}
 
+    # The parameters reach the service's own fields, as Emacs passes them.
+    args.tts_parameter = {"speed": 1.5, "volume_multiplier": 0.5}
     events = FakeEvents()
     player = NullAudio()
     sidecar = UnmuteSidecar(args, events=events, player=player,
@@ -609,6 +641,10 @@ def self_test(args):
         return self_test_failed("no speech request")
     if calls["tts"][0]["payload"].get("input") != "It is in place.":
         return self_test_failed("speech text")
+    if calls["tts"][0]["payload"].get("speed") != 1.5:
+        return self_test_failed("speech parameter")
+    if calls["tts"][0]["payload"].get("volume_multiplier") != 0.5:
+        return self_test_failed("speech volume parameter")
     if not player.played:
         return self_test_failed("nothing played")
     if "speaking" not in events.names():

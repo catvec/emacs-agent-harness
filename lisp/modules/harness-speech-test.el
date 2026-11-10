@@ -427,6 +427,174 @@ Stopping one that is already stopped is not an error."
                    (error-message-string
                     (should-error (harness-speech-synthesize "  ") :type 'error))))))
 
+;;;; The voices a service reports
+
+(ert-deftest harness-speech-voices-are-the-services-own ()
+  "The voice route's answer is the list, in the service's order.
+Each name keeps the service's own spelling, with the language and voice
+a person reads when the name is one of Kokoro's, so a client never has
+to invent a catalogue."
+  (harness-speech-test--python)
+  (harness-speech-test-with
+      ()
+    (harness-speech-local-start)
+    (harness-test-wait (lambda () (harness-speech-running-p))
+                       25 "the pipeline running")
+    (let ((answer (harness-test-await (harness-call 'speech/voices))))
+      (should (equal "running" (plist-get answer :state)))
+      (should (equal "Speech service" (plist-get answer :service)))
+      (should (= 10 (plist-get answer :voices-count)))
+      (let ((voices (append (plist-get answer :voices) nil)))
+        (should (equal '("af_heart" "af_alloy" "af_bella" "am_adam" "am_michael"
+                         "bf_emma" "bm_george" "ef_dora" "ff_siwis" "zf_xiaobei")
+                       (mapcar (lambda (v) (plist-get v :id)) voices)))
+        (should (equal "American English · female · af_heart"
+                       (plist-get (car voices) :label)))
+        (should (equal "British English · male · bm_george"
+                       (plist-get (nth 6 voices) :label)))
+        ;; A service of your own declares no parameters: nothing here can
+        ;; vouch for what it takes.
+        (should (equal [] (plist-get answer :parameters)))
+        (should (eq :false (plist-get answer :supported)))))))
+
+(ert-deftest harness-speech-voices-refresh-asks-again ()
+  "Refresh asks the service rather than the answer kept for a minute."
+  (harness-speech-test--python)
+  (harness-speech-test-with
+      ()
+    (harness-speech-local-start)
+    (harness-test-wait (lambda () (harness-speech-running-p))
+                       25 "the pipeline running")
+    (let ((first (harness-test-await (harness-call 'speech/voices))))
+      (should (equal "running" (plist-get first :state)))
+      ;; The cached answer is the same object's content, without a request.
+      (let ((again (harness-test-await (harness-call 'speech/voices))))
+        (should (equal (plist-get first :voices-count)
+                       (plist-get again :voices-count))))
+      (let ((fresh (harness-test-await (harness-call 'speech/voices t))))
+        (should (equal (plist-get first :voices-count)
+                       (plist-get fresh :voices-count)))))))
+
+(ert-deftest harness-speech-voices-without-the-route ()
+  "A service that answers no voice route says so, in the client's words."
+  (harness-speech-test--python)
+  (harness-speech-test-with
+      ((port (harness-speech-test--port)))
+    (let ((harness-speech-local-tts-url
+           (format "http://127.0.0.1:%d/v1/audio/speech" port))
+          (harness-speech-local-tts-command
+           (list (or (executable-find "python3") "python3")
+                 harness-speech-test--fixture "--tts-only" "--no-voices"
+                 "--port" (number-to-string port))))
+      (harness-speech-local-start)
+      (harness-test-wait
+       (lambda () (harness-speech--url-answers-p
+                   (format "http://127.0.0.1:%d/v1/audio/speech" port)))
+       20 "the service")
+      (let ((answer (harness-test-await (harness-call 'speech/voices))))
+        (should (member (plist-get answer :state) '("unsupported" "failed")))
+        (should (equal "Voice list unsupported" (plist-get answer :reason)))
+        (should (equal [] (plist-get answer :voices)))))))
+
+(ert-deftest harness-speech-voices-of-a-stopped-pipeline ()
+  "No address, no list: the answer says stopped rather than nothing.
+A URL of your own is asked even while the harness's own pipeline is
+down, because the service it names may run elsewhere; when nothing
+answers, the answer says that instead of pretending there is a list."
+  (harness-speech-test-with
+      ()
+    (let ((harness-speech-local-stt-url nil)
+          (harness-speech-local-tts-url nil)
+          (harness-speech-local-stt-command nil)
+          (harness-speech-local-tts-command nil))
+      (let ((answer (harness-test-await (harness-call 'speech/voices))))
+        (should (equal "stopped" (plist-get answer :state)))
+        (should (equal "Local voice pipeline · stopped" (plist-get answer :reason)))
+        (should (equal [] (plist-get answer :voices)))
+        (should (equal [] (plist-get answer :parameters))))))
+  ;; A configured service that is not running is a failure to ask, and
+  ;; says why in one line rather than claiming a list.
+  (harness-speech-test-with
+      ((harness-speech-local-startup-timeout 5))
+    (let ((answer (harness-test-await (harness-call 'speech/voices))))
+      (should (equal "failed" (plist-get answer :state)))
+      (should (string-prefix-p "Voice list unavailable · "
+                               (plist-get answer :reason)))
+      (should (equal [] (plist-get answer :voices))))))
+
+;;;; The parameters a service declares
+
+(ert-deftest harness-speech-kokoro-parameters-are-verified ()
+  "The bundled stack's service declares exactly what its own schema takes.
+Kokoro-FastAPI v0.8.2's `speed' is 0.25 to 4.0 and `volume_multiplier'
+0.0 to 10.0, both defaulting to 1.0; the names are the service's own."
+  (let ((harness-speech-kokoro-parameters harness-speech-kokoro-parameters))
+    (should (equal '("speed" "volume_multiplier")
+                   (mapcar (lambda (p) (plist-get p :key))
+                           harness-speech-kokoro-parameters)))
+    (let ((speed (harness-speech-parameter "speed"))
+          (volume (harness-speech-parameter "volume_multiplier")))
+      (should (equal "Speed" (plist-get speed :label)))
+      (should (equal 0.25 (plist-get speed :min)))
+      (should (equal 4.0 (plist-get speed :max)))
+      (should (equal 1.0 (plist-get speed :default)))
+      (should (equal "Volume" (plist-get volume :label)))
+      (should (equal 0.0 (plist-get volume :min)))
+      (should (equal 10.0 (plist-get volume :max)))
+      ;; Every declaration says what it is and what its unit means.
+      (dolist (decl harness-speech-kokoro-parameters)
+        (should (stringp (plist-get decl :doc)))
+        (should (plist-get decl :unit)))))
+  ;; A service of your own declares none, since nothing here can vouch
+  ;; for what it takes.  Both commands set is what makes it yours.
+  (should-not (let ((harness-speech-local-stt-command '("speech" "--stt"))
+                    (harness-speech-local-tts-command '("speech" "--tts")))
+                (harness-speech--declared-parameters)))
+  ;; The bundled stack's own service is the one it declares.
+  (should (let ((harness-speech-local-stt-command nil)
+                (harness-speech-local-tts-command nil))
+            (harness-speech--declared-parameters))))
+
+(ert-deftest harness-speech-parameters-are-checked-before-they-are-sent ()
+  "An unsupported key or an out-of-range value is refused, in the page's words.
+A value equal to its default is left out, so a request carries only the
+change, and the numbers reach the service as its own fields."
+  (harness-speech-check-parameters nil '(("speed" . 1.0)))
+  (should (equal '(("speed" . 1.5))
+                 (harness-speech-check-parameters
+                  '(:speed 1.5) harness-speech-kokoro-parameters)))
+  (should-not (harness-speech-check-parameters
+               '(:speed 1.0) harness-speech-kokoro-parameters))
+  (should (equal "Speech parameter unsupported · pitch"
+                 (error-message-string
+                  (should-error (harness-speech-check-parameters
+                                 '(:pitch 1.0) harness-speech-kokoro-parameters)
+                                :type 'error))))
+  (should (equal "Speed · not a number"
+                 (error-message-string
+                  (should-error (harness-speech-check-parameters
+                                 '(:speed "fast") harness-speech-kokoro-parameters)
+                                :type 'error))))
+  (dolist (case '((:speed 5.0 . "Speed · 5.00 outside 0.25–4.00")
+                  (:speed 0.1 . "Speed · 0.10 outside 0.25–4.00")
+                  (:volume_multiplier 11.0 . "Volume · 11.00 outside 0.00–10.00")
+                  (:volume_multiplier -1 . "Volume · -1.00 outside 0.00–10.00")))
+    (should (equal (cddr case)
+                   (error-message-string
+                    (should-error (harness-speech-check-parameters
+                                   (list (car case) (cadr case))
+                                   harness-speech-kokoro-parameters)
+                                  :type 'error)))))
+  ;; A plain number, and a numeric string a form would read, are numbers.
+  (should (equal '(("speed" . 2.0))
+                 (harness-speech-check-parameters
+                  '(:speed "2") harness-speech-kokoro-parameters)))
+  ;; What the harness takes as the object of the request.
+  (should (equal '(:speed 1.5 :volume_multiplier 0.5)
+                 (harness-speech-parameters-json
+                  '(("speed" . 1.5) ("volume_multiplier" . 0.5)))))
+  (should-not (harness-speech-parameters-json nil)))
+
 ;;;; Over ACP
 
 (defun harness-speech-test--acp-request (conn method params)

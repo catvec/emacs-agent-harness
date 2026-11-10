@@ -1,8 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:harness_client/src/voice/voice_audition.dart';
 import 'package:harness_client/src/voice/voice_backend.dart';
 import 'package:harness_client/src/voice/voice_controller.dart';
+import 'package:harness_client/src/voice/voice_output.dart';
 import 'package:harness_client/src/voice/voice_media_buttons.dart';
 import 'package:harness_client/src/voice/voice_models.dart';
 import 'package:harness_client/src/voice/voice_settings.dart';
@@ -212,4 +214,153 @@ class Rig {
   VoiceSettings? builtWith;
   String? builtAt;
   late final VoiceController controller;
+}
+
+/// A scripted device voice catalogue: the answers `FlutterTts.getVoices` and
+/// `getSpeechRateValidRange` would give, or the failures they would raise.
+class FakeVoiceCatalogue implements VoiceOutputCatalogue {
+  FakeVoiceCatalogue({
+    this.voices = const <VoiceOutputVoice>[],
+    this.rateRange,
+    this.voicesError,
+    this.rateError,
+  });
+
+  /// What the device reported, exactly as the sheet lists it.
+  List<VoiceOutputVoice> voices;
+
+  /// The range the platform accepts, or null for a platform that has none.
+  VoiceRateRange? rateRange;
+
+  /// What `getVoices` threw, when it did.
+  Object? voicesError;
+
+  /// What `getSpeechRateValidRange` threw, when it did.
+  Object? rateError;
+
+  int voiceCalls = 0;
+  int rateCalls = 0;
+
+  @override
+  Future<List<VoiceOutputVoice>> loadVoices() async {
+    voiceCalls++;
+    if (voicesError case final error?) throw error;
+    return voices;
+  }
+
+  @override
+  Future<VoiceRateRange?> loadRateRange() async {
+    rateCalls++;
+    if (rateError case final error?) throw error;
+    return rateRange;
+  }
+}
+
+/// A scripted speech engine for an audition: it records the request it was
+/// given, says it began when the test says so, and ends when the test says so
+/// (or at once, for an engine that never really speaks).
+class FakeAuditionEngine implements VoiceAuditionEngine {
+  FakeAuditionEngine({
+    this.autoFinish = false,
+    this.failure,
+    this.startsImmediately = false,
+  });
+
+  /// Whether the words end as soon as they start.
+  final bool autoFinish;
+
+  /// What the platform raised instead of speaking.
+  Object? failure;
+
+  /// Every preview this engine was asked to say, in order.
+  final List<VoiceAuditionRequest> spoken = <VoiceAuditionRequest>[];
+  int stops = 0;
+  bool started = false;
+  bool finished = false;
+  Completer<void>? _current;
+  VoidCallback? _onStart;
+
+  /// Whether the platform said the audio began as soon as it was asked to
+  /// speak.  False leaves the preview `Loading` until [begin] says otherwise,
+  /// which is what a slow engine looks like.
+  bool startsImmediately = false;
+
+  @override
+  Future<void> speak(
+    VoiceAuditionRequest request, {
+    VoidCallback? onStart,
+  }) async {
+    spoken.add(request);
+    if (failure case final error?) throw error;
+    started = true;
+    _onStart = onStart;
+    if (startsImmediately) onStart?.call();
+    if (autoFinish) {
+      finished = true;
+      return;
+    }
+    _current = Completer<void>();
+    await _current!.future;
+    finished = true;
+  }
+
+  /// The platform says the audio began (a preview that did not start at once).
+  void begin() {
+    final callback = _onStart;
+    _onStart = null;
+    callback?.call();
+  }
+
+  /// The words ended on their own.
+  void finish() {
+    final current = _current;
+    _current = null;
+    if (current != null && !current.isCompleted) current.complete();
+  }
+
+  /// The platform refused in the middle of the words.
+  void fail(Object error) {
+    final current = _current;
+    _current = null;
+    if (current != null && !current.isCompleted) current.completeError(error);
+  }
+
+  @override
+  Future<void> stop() async {
+    stops++;
+    finish();
+  }
+}
+
+/// A factory of [FakeAuditionEngine]s that keeps every engine it made, so a
+/// test can see which of them spoke and which were stopped.
+class FakeAuditionEngines {
+  FakeAuditionEngines({this.autoFinish = false, this.startsImmediately = false});
+
+  final bool autoFinish;
+  final bool startsImmediately;
+  final List<FakeAuditionEngine> engines = <FakeAuditionEngine>[];
+
+  /// What the next engine to be made raises instead of speaking; cleared
+  /// once one has.
+  Object? nextFailure;
+
+  int get made => engines.length;
+  FakeAuditionEngine get last => engines.last;
+
+  /// Every preview any engine was asked to say, in order.
+  List<VoiceAuditionRequest> get spoken => [
+    for (final engine in engines) ...engine.spoken,
+  ];
+
+  FakeAuditionEngine call() {
+    final engine = FakeAuditionEngine(
+      autoFinish: autoFinish,
+      failure: nextFailure,
+      startsImmediately: startsImmediately,
+    );
+    nextFailure = null;
+    engines.add(engine);
+    return engine;
+  }
 }

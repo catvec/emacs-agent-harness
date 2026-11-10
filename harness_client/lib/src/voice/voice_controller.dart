@@ -769,6 +769,11 @@ class VoiceController extends ChangeNotifier {
   Future<void> updateSettings(VoiceSettings next) async {
     if (_disposed || next == _settings) return;
     final wasRunning = started && !phase.finished;
+    // Everything a backend was built with is compared, endpoint changes and
+    // the output voice's own settings alike: a changed output voice, rate,
+    // pitch or volume rebuilds the clip provider's speech engine exactly as a
+    // changed endpoint reopens the provider, so ordinary replies are spoken
+    // the way the sheet previewed them.
     final restart =
         next.provider != _settings.provider ||
         next.clipDelivery != _settings.clipDelivery ||
@@ -779,7 +784,12 @@ class VoiceController extends ChangeNotifier {
         next.realtimeEndpoint != _settings.realtimeEndpoint ||
         next.realtimeModel != _settings.realtimeModel ||
         next.realtimeToken != _settings.realtimeToken ||
-        next.realtimeVoice != _settings.realtimeVoice;
+        next.realtimeVoice != _settings.realtimeVoice ||
+        next.outputVoice != _settings.outputVoice ||
+        next.outputVoiceLocale != _settings.outputVoiceLocale ||
+        next.speechRate != _settings.speechRate ||
+        next.speechPitch != _settings.speechPitch ||
+        next.speechVolume != _settings.speechVolume;
     _settings = next;
     await onSettingsChanged(next);
     if (!_disposed) notifyListeners();

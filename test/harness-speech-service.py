@@ -8,6 +8,12 @@ no audio device.  The harness runs it as the child process its speech
 module starts, so a test can start and stop the pipeline, watch it
 report `running', and transcribe and synthesize over it.
 
+The text-to-speech side also answers Kokoro's `/v1/audio/voices`, so a
+client can be given a real service's answer shape without a container:
+`{"voices": [{"id": ..., "name": ...}, ...]}`, the voices the bundled
+stack's image bakes in unless `--voices` names others.  A `--no-voices`
+run answers 404 there, which is what a service without the route does.
+
 The answers are fixed and visible in the reply: transcription says
 `harness speech fixture' (or the `text' field of a JSON body), and
 synthesis answers a short silence as a RIFF WAV.  Every request is
@@ -16,6 +22,7 @@ which route the harness posted to and what it sent.
 
 Usage: harness-speech-service.py [--port PORT] [--log FILE] [--delay S]
                            [--status CODE] [--stt-only] [--tts-only]
+                           [--no-voices] [--voices NAME,...]
                            [--announce FILE]
 
 With `--port 0' the port the kernel picked is written to stdout as
@@ -38,6 +45,14 @@ from pathlib import Path
 
 TRANSCRIPT = "harness speech fixture"
 SAMPLE_RATE = 16000
+
+# The voices Kokoro-FastAPI v0.8.2's image bakes in, a sample of them: the
+# route reports every voice the service has, and these are enough for a
+# test to see a real list, its order and its duplicates.
+DEFAULT_VOICES = [
+    "af_heart", "af_alloy", "af_bella", "am_adam", "am_michael",
+    "bf_emma", "bm_george", "ef_dora", "ff_siwis", "zf_xiaobei",
+]
 
 
 def wav_bytes(seconds: float = 0.1) -> bytes:
@@ -111,8 +126,20 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def do_GET(self):
+        service = self.server.service
         if self.path == "/health":
             self._answer(200, b'{"status":"ok"}', "application/json")
+            return
+        if self.path.split("?")[0] in ("/v1/audio/voices", "/audio/voices"):
+            if service.args.no_voices or service.args.stt_only:
+                self._answer(404, b'{"error":"not found"}', "application/json")
+                return
+            voices = service.args.voices or DEFAULT_VOICES
+            service.record({"path": self.path, "voices": len(voices)})
+            body = json.dumps({
+                "voices": [{"id": name, "name": name} for name in voices],
+            }).encode("utf-8")
+            self._answer(200, body, "application/json")
             return
         self._answer(404, b"{}", "application/json")
 
@@ -150,6 +177,9 @@ class Handler(BaseHTTPRequestHandler):
                             "input": request.get("input"),
                             "voice": request.get("voice"),
                             "model": request.get("model"),
+                            "speed": request.get("speed"),
+                            "volume_multiplier": request.get("volume_multiplier"),
+                            "keys": sorted(request),
                             "response_format": request.get("response_format")})
             if not isinstance(request.get("input"), str) or not request["input"].strip():
                 self._answer(400, b'{"error":"no input"}', "application/json")
@@ -175,7 +205,13 @@ def main(argv=None) -> int:
                         help="answer every request with this HTTP status")
     parser.add_argument("--stt-only", action="store_true", help="serve speech to text alone")
     parser.add_argument("--tts-only", action="store_true", help="serve text to speech alone")
+    parser.add_argument("--no-voices", action="store_true",
+                        help="answer 404 on the voice route, as a service without one")
+    parser.add_argument("--voices", default="",
+                        help="comma-separated voice names to report, in this order")
     args = parser.parse_args(argv)
+    if args.voices:
+        args.voices = [name.strip() for name in args.voices.split(",") if name.strip()]
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.service = Service(args)

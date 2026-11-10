@@ -113,6 +113,48 @@ inspect relevant sessions with the usual harness tools when those tools are
 enabled. A model must resolve an ambiguous target or ask which session/file
 is meant; speech recognition is not a guarantee of correct routing.
 
+### The output voice, and hearing it first
+
+`M-x harness-voice-output` (`S` on the voice list, or **Output voice** in the
+session menu) is the page that chooses the voice spoken replies use. It lists
+the voices the selected speech service itself reports -- never a list this
+project made up -- with the language and voice each name carries, and the
+parameters that service declares. A service of your own that reports no list,
+or declares no parameters, says so, and the page offers neither.
+
+Selecting a voice or changing a parameter drafts it; `[Audition]` (`a`) speaks
+a short sentence in the drafted values, including changes not saved yet, and
+`[Save]` (`S`) is the only control that changes what speaks. `[Revert]` (`r`)
+drops the draft, `[Stop]` (`s`) ends a preview, `[Retry]` is offered after a
+failure, and `[Refresh]` (`g`) asks the service again. The `Effective` row names
+the voice and parameters that speak the next reply, and where the voice comes
+from: a policy, this client's saved choice, or the option's default.
+
+The choice is kept in this client's own configuration, as the voice provider is
+(`harness-voice-unmute-voice`, `harness-voice-unmute-parameters`,
+`harness-voice-chatgpt-voice`), so it survives a reload and the next start; a
+client with no custom file keeps it for the session and Customize says so. The
+parameters are the service's own field names, sent only when the service
+declares them: the bundled Kokoro service takes `speed` (0.25 to 4.0) and
+`volume_multiplier` (0.0 to 10.0). A value outside its range, or a key the
+service does not declare, is refused before anything is sent. A saved voice the
+service no longer reports is kept and marked `Not in list` rather than silently
+replaced, since a service of your own may know it.
+
+An audition sends no prompt, writes no transcript and speaks to no session; the
+microphone is untouched and a live call keeps running. Choosing another voice,
+changing a value, reverting, saving, closing the page, a provider change and a
+reconnect all cancel a preview in flight, so a slow answer can never play an
+older voice over a newer choice. ChatGPT Live keeps the voice its server
+defines: the page says `Provider-managed voice · audition unavailable` and
+saves only the name. [Output voice: selection, audition and the parameters a
+service declares](design/output-voice-settings.md) records the capability
+sources, the precedence and what an audition sends.
+
+The Flutter client's **Settings → Voice settings** has the same section for the
+device's own engine: the voices it reports, the rate range it accepts, and the
+pitch and volume it documents, drafted, auditioned and saved the same way.
+
 ### Voice conversation and session messages
 
 A live call keeps two records. The **voice conversation** is the audio side:
