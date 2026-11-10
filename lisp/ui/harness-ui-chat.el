@@ -6827,8 +6827,8 @@ it would show as a dark box."
 (defun harness-chat--menu-help (window _object _pos)
   "Return the tooltip of the [menu] button in WINDOW's header line.
 It names the keys that open the menu, following `harness-ui-prefix-key':
-in a chat buffer `?' types into the compose box, so the groups open on
-the prefix alone.  A `help-echo' function, so the prefix option is read
+in a chat buffer `?' types into the compose box, so the menu opens on the
+prefix alone.  A `help-echo' function, so the prefix option is read
 on hover, not on every redisplay of the header line."
   (with-current-buffer (if (window-live-p window) (window-buffer window) (current-buffer))
     (format "The harness menu (%s)"
@@ -7224,8 +7224,8 @@ it."
       ;; Other modules' segments, the companion pet's face say.
       (harness-chat--header-end)
       (list
-       (list (concat "  " (harness-chat--segment "[menu]" #'harness-groups-menu #'harness-chat--menu-help 'harness-dim-face))
-             95 nil #'harness-groups-menu)
+       (list (concat "  " (harness-chat--segment "[menu]" #'harness-ui-menu #'harness-chat--menu-help 'harness-dim-face))
+             95 nil #'harness-ui-menu)
        ;; The cached flag, never `harness-chat--scrolled-up-p': measuring
        ;; the window (`pos-visible-in-window-p') formats its header line,
        ;; which would evaluate this again, and again, until
@@ -8264,7 +8264,7 @@ a new one."
   "Major mode of a harness session buffer.
 The transcript is read-only; the compose box at the bottom is editable.
 Typing anywhere goes to the box, `?' included, so the harness menu is
-on \\[harness-menu] here, or the [menu] button in the header line.  On
+on \\[harness-ui-menu] here, or the [menu] button in the header line.  On
 a request's panel its own keys answer it instead: a question's digits,
 up to its number of options, and a permission's y, s, a, n and N, e
 when it has a pattern to edit, and < and > when it lists covers or
@@ -8501,7 +8501,7 @@ Point moved onto an option of a question with diagrams shows its diagram."
   ;; A lasting decision undone or redone, from any session, redraws the
   ;; notes that refer to it (harness-ui-decisions.el keeps them).
   (add-hook 'harness-ui-decision-functions #'harness-chat--on-decision)
-  ;; The region of any buffer starts a message: C-c h > (see
+  ;; The region of any buffer starts a message: C-c h V > (see
   ;; `harness-prompt-region'); the harness menu has it too.
   ;; The chats that exist already, when the harness reloads, were started
   ;; by a mode function that did not know the mark of a suspended view.
@@ -8509,12 +8509,14 @@ Point moved onto an option of a question with diagrams shows its diagram."
              (when (buffer-live-p buf)
                (with-current-buffer buf (harness-ui-view-adopt #'harness-chat--wake))))
            harness-chat--buffers)
-  (define-key harness-ui-map (kbd ">") #'harness-prompt-region)
-  (define-key harness-ui-map (kbd "<") #'harness-thread-region)
-  (define-key harness-ui-map (kbd "o") #'harness-open-latest-session)
-  (define-key harness-ui-map (kbd "O") #'harness-open-session)
-  (ignore-errors
-    (transient-append-suffix 'harness-menu "s" '("o" "Latest session" harness-open-latest-session))))
+  (harness-ui-bind ">" #'harness-prompt-region "Region prompt"
+                   :group 'views :column "Region")
+  (harness-ui-bind "<" #'harness-thread-region "Region thread reply"
+                   :group 'views :column "Region")
+  (harness-ui-bind "o" #'harness-open-latest-session "Latest session"
+                   :group 'views :column "Sessions")
+  (harness-ui-bind "O" #'harness-open-session "Session open"
+                   :group 'views :column "Sessions"))
 
 (harness-define-module 'ui-chat
   :doc "The chat buffer: transcript, pending panel, queue, attachments and compose box."

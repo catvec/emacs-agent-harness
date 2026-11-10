@@ -181,7 +181,7 @@ stands for its socket, and what `authenticate' waits for is the promise."
           (harness-test-wait (lambda () harness-ui-acp-remote--waiting) 15 "the request")
           (should (cl-some (lambda (m) (and (string-search "asks to sign in" m)
                                             (string-search (plist-get (harness-acp-client-remote-info client) :code) m)
-                                            (string-search "C-c h y" m)))
+                                            (string-search "C-c h O y" m)))
                            told))))
       ;; Once, not at every change.
       (let ((n (length told)))
@@ -413,8 +413,8 @@ stands for its socket, and what `authenticate' waits for is the promise."
 
 (ert-deftest harness-ui-acp-remote-key-and-menu ()
   (harness-ui-acp-remote-test-with
-    (should (eq 'harness-remote-control (lookup-key harness-ui-map (kbd "P"))))
-    (should (eq 'harness-remote-approve (lookup-key harness-ui-map (kbd "y"))))
+    (should (eq 'harness-remote-control (lookup-key harness-ui-options-map (kbd "P"))))
+    (should (eq 'harness-remote-approve (lookup-key harness-ui-options-map (kbd "y"))))
     (should (get 'harness-ui-acp-remote-mode 'harness-menu-group))
     ;; q buries the page rather than quitting its window.
     (harness-ui-acp-remote-test-open)

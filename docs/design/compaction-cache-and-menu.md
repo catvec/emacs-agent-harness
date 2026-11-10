@@ -196,7 +196,7 @@ now and what it costs once the cache lapses (`:cost-uncached`).
 
 ### The manual command and the cache panel ask the same list
 
-`harness-compact` (C-c h C, C in the menu, /compact in a chat) asks one
+`harness-compact` (C-c h O C, C in the menu, /compact in a chat) asks one
 list with `read-multiple-choice`: `Summary (~$0.463)`, `Transcript
 (free)`, `Fresh start (free)`, `Continuation (~$0.422 cached)` -- the
 same menu without Pause, which has no waiting message. A cold summary is

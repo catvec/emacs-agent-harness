@@ -216,7 +216,7 @@ writes an option, a custom file or a settings document.
   validation, save, audition, rendering, keys and menu.
 - `lisp/ui/harness-ui-voice-providers.el` — `harness-voice-unmute-parameters`,
   the sidecar's `--tts-parameter` argv, the `Output voice … [Select]` line in
-  the setup list, `o` on that list, and `V` in the session menu.
+  the setup list, `o` on that list, and `C-c h V V` in the harness's keys.
 - `harness_client/lib/src/voice/voice_output.dart` — the catalogue, its
   parser, the rate range, the parameter drafts and their problems.
 - `harness_client/lib/src/voice/voice_audition.dart` — the audition engine and

@@ -2,7 +2,7 @@
 
 ## What the self-test is for
 
-`C-c h !` (`harness-provider-check`) answers two different questions
+`C-c h S !` (`harness-provider-check`) answers two different questions
 about the model in front of the user: does the generic provider API do
 what its plugin claims, and is the model good enough for the harness.
 It has always been an explicit, paid run, separate from

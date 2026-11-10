@@ -1050,7 +1050,7 @@ said, and nothing runs."
 
 ;;;; Compose focus
 
-(define-key harness-ui-map (kbd "SPC") #'harness-compose-focus)
+(harness-ui-bind "SPC" #'harness-compose-focus "Compose focus" :column "Views")
 
 (defun harness-compose--focus-area ()
   "Return the compose text bounds in this buffer, or nil.
@@ -1460,7 +1460,7 @@ where typing from outside the box does (`harness-compose--entry-point')."
 
 ;; The box quotes with the compose-quote library, the box being the
 ;; composition it quotes into (`harness-compose--quote-area'): a prompt
-;; (`harness-prompt-region', C-c h >) quotes the region in the box as
+;; (`harness-prompt-region', C-c h V >) quotes the region in the box as
 ;; Markdown, its prompt being the front of it, so a region reaching in
 ;; from above counts up to the prompt and is quoted at the box's end.
 ;; What the region selects above the box is read back into Markdown, the

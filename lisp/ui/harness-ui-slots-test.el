@@ -1126,7 +1126,7 @@ A tool row's key names when its call began, so it is found by its start."
                      ("RET" . harness-ui-slots-open) ("TAB" . harness-ui-slots-next-row)
                      ("<backtab>" . harness-ui-slots-previous-row) ("l" . harness-ui-slots-set-limit)
                      ("SPC" . harness-ui-sessions-requests)
-                     ("?" . harness-menu) ("C-c C-z" . harness-ui-bury)))
+                     ("?" . harness-ui-menu) ("C-c C-z" . harness-ui-bury)))
     (should (eq (cdr binding) (lookup-key harness-ui-slots-mode-map (kbd (car binding))))))
   ;; The menu lists them for the buffer.
   (let ((group (get 'harness-ui-slots-mode 'harness-menu-group)))
@@ -1442,7 +1442,7 @@ nothing; a hidden one is left alone, drawn when it shows."
         (should (memq #'harness-ui-slots--on-tick harness-ui-tasks-tick-hook))
         (should (memq #'harness-ui-slots--redraw-all (default-value 'harness-ui-redraw-hook)))
         ;; C-c h Q, the queue, as Q in the harness menu.
-        (should (eq #'harness-slots (lookup-key harness-ui-map (kbd "Q"))))
+        (should (eq #'harness-slots (lookup-key harness-ui-views-map (kbd "Q"))))
         ;; Started twice, as a reload may, it follows them once.
         (harness-ui-slots--init)
         (should (= 1 (cl-count #'harness-ui-slots--on-event harness-ui-event-functions)))
@@ -1451,7 +1451,7 @@ nothing; a hidden one is left alone, drawn when it shows."
         (should-not (memq #'harness-ui-slots--on-pending harness-ui-pending-changed-hook))
         (should-not (memq #'harness-ui-slots--on-tick harness-ui-tasks-tick-hook))
         (should-not (memq #'harness-ui-slots--redraw-all (default-value 'harness-ui-redraw-hook)))
-        (should-not (lookup-key harness-ui-map (kbd "Q"))))
+        (should-not (lookup-key harness-ui-views-map (kbd "Q"))))
     (harness-ui-slots--shutdown)))
 
 (ert-deftest harness-ui-slots-live-board-key-and-menu-open-the-page ()
@@ -1474,21 +1474,12 @@ A board without the page's module says what is missing."
                                                   (eq 'harness-ui-tasks-slots (nth 2 item))))
                               (append column nil)))
                    (cdr (get 'harness-ui-tasks-mode 'harness-menu-group))))
-  ;; The harness menu's Tools, behind Q as in `harness-ui-map', which no
-  ;; other command of the menu takes.
-  (let* ((plist (lambda (suffix) (if (keywordp (cadr suffix)) (cdr suffix) (car (last suffix)))))
-         (column (transient-get-suffix 'harness-menu '(0 3)))
-         (entry (cl-find "Q" (aref column (1- (length column)))
-                         :key (lambda (suffix) (plist-get (funcall plist suffix) :key)) :test #'equal))
-         (keys (cl-loop for n from 0 below 4
-                        append (let ((column (transient-get-suffix 'harness-menu (list 0 n))))
-                                 (mapcar (lambda (suffix) (plist-get (funcall plist suffix) :key))
-                                         (aref column (1- (length column))))))))
-    (should (equal "Tools" (plist-get (aref column (- (length column) 2)) :description)))
-    (should entry)
-    (should (eq 'harness-slots (plist-get (funcall plist entry) :command)))
-    (should (equal "Task slots" (plist-get (funcall plist entry) :description)))
-    (should (= 1 (cl-count "Q" keys :test #'equal)))))
+  ;; The View group's menu, behind Q as in `harness-ui-views-map', which
+  ;; no other command of the tree takes.
+  (should (equal "Task slots"
+                 (cdr (assoc "Q" (harness-ui-test--menu-lines #'harness-ui-views-menu)))))
+  (should (= 1 (cl-count "Q" (mapcar #'car (harness-ui-test--menu-lines #'harness-ui-views-menu))
+                         :test #'equal))))
 
 ;;;; The queues
 

@@ -10,7 +10,7 @@ This loads `model-complexity` in the harness process and
 `ui-model-complexity` in Emacs. It works with a remote harness too;
 enable the feature on that harness as well.
 
-Open **Model complexity** with `C-c h =` (or `M-x
+Open **Model complexity** with `C-c h S =` (or `M-x
 harness-model-complexity`). The guide lists only the models your configured
 providers make available and your model policy allows, from low to high
 estimated work complexity. Each model keeps its actual name, provider and

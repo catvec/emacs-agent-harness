@@ -446,7 +446,7 @@ dropped: a reload clears the cache, so it would carry stale data."
     (define-key map (kbd "r") #'harness-ui-worktree-assume-reset)
     (define-key map (kbd "g") #'harness-ui-worktree-refresh)
     (define-key map (kbd "q") #'harness-ui-quit-view)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-worktree-mode'.")
 
@@ -913,7 +913,7 @@ this, so the work waits for a timer."
     (with-current-buffer buf
       (add-hook 'window-buffer-change-functions #'harness-ui-worktree--shown nil t)
       (harness-ui-view-adopt #'harness-ui-worktree--shown)))
-  (define-key harness-ui-map (kbd "w") #'harness-worktrees))
+  (harness-ui-bind "w" #'harness-worktrees "Worktrees" :group 'views :column "Views"))
 
 (harness-define-module 'ui-worktree
   :doc "Git worktree list with create, remove, prune (stale records and merged worktrees), sessions and merges."

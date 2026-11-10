@@ -614,7 +614,7 @@ for `[Registration]'."
     (define-key map (kbd "V") #'harness-ui-computers-view)
     (define-key map (kbd "c") #'harness-ui-computers-control)
     (define-key map (kbd "C") #'harness-ui-computers-release)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keys of the computers page: each key has a button on the page.")
 
@@ -667,14 +667,15 @@ harness's equipment.")
 
 (defun harness-ui-computers--init ()
   "Bind the computers page key and hear when a computer changes.  Idempotent."
-  (define-key harness-ui-map (kbd harness-ui-computers--key) #'harness-computers)
+  (harness-ui-bind harness-ui-computers--key #'harness-computers "Computers"
+                   :group 'views :column "Views")
   (add-hook 'harness-ui-connected-hook #'harness-ui-computers--on-connect)
   (add-hook 'harness-ui-event-functions #'harness-ui-computers--on-event))
 
 (defun harness-ui-computers--shutdown ()
   "Unbind the computers page key and stop hearing a computer change."
-  (when (eq (lookup-key harness-ui-map (kbd harness-ui-computers--key)) #'harness-computers)
-    (define-key harness-ui-map (kbd harness-ui-computers--key) nil))
+  (when (eq (lookup-key harness-ui-views-map (kbd harness-ui-computers--key)) #'harness-computers)
+    (harness-ui-unbind harness-ui-computers--key harness-ui-views-map))
   (remove-hook 'harness-ui-connected-hook #'harness-ui-computers--on-connect)
   (remove-hook 'harness-ui-event-functions #'harness-ui-computers--on-event))
 

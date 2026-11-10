@@ -108,7 +108,7 @@ Then, in the Emacs running the UI, set the server's address and the same secret 
 
 The UI now starts no harness process of its own: it opens sessions, runs tools and shows tasks on that server. The server refuses a non-loopback address without a token of at least 16 characters. If it listens on its loopback interface instead, reach it through an ssh tunnel (`ssh -L 4276:127.0.0.1:4276 SERVER`) and point `harness-server-address` at `127.0.0.1:4276`.
 
-There is a form for this too. `C-c h c` (`harness-connect-server`) asks for the address and the token and connects at once, offers to remember the server for the next start (`harness-server-address`), and copies the settings as a `setq` for an init file. An empty address returns to this Emacs's own harness. `C-c h C` (`harness-server`) shows the harness the UI talks to: where it runs, its address and round trip, its version and Emacs, the sessions it runs and the modules it loaded — a server elsewhere or the harness on this machine. In corporate mode (`harness-corporate-mode`) the UI never leaves this machine.
+There is a form for this too. `C-c h c` (`harness-connect-server`) asks for the address and the token and connects at once, offers to remember the server for the next start (`harness-server-address`), and copies the settings as a `setq` for an init file. An empty address returns to this Emacs's own harness. `C-c h S C` (`harness-server`) shows the harness the UI talks to: where it runs, its address and round trip, its version and Emacs, the sessions it runs and the modules it loaded — a server elsewhere or the harness on this machine. In corporate mode (`harness-corporate-mode`) the UI never leaves this machine.
 
 A harness that enables `harness-acp-remote` also serves ACP to other devices, over the same host and port; its shared `harness-acp-token` works here too.
 
@@ -177,7 +177,7 @@ A non-comprehensive list of all the different functionality offered by modules s
 - [Model complexity guide](docs/model-complexity.md) (optional): model names
   sorted from Simple tasks through Very complex tasks, with Unrated models
   last. Enable with `(harness-enable-modules :features model-complexity)`;
-  open with `C-c h =`. The session/task model picker shows the same plain
+  open with `C-c h S =`. The session/task model picker shows the same plain
   level names. Rankings are editable estimates, not benchmarks.
 - Agentic sessions with tool use
   - One settings line -- below the compose box in a chat, above it on the
@@ -215,7 +215,7 @@ A non-comprehensive list of all the different functionality offered by modules s
   - A client and a computer are separate: a client speaks ACP to the harness, a computer offers tools (MCP servers a client on it keeps) and resources (git repositories, directories, displays, GPUs)
   - Register a computer from a client running on it; it authenticates with a secret the harness keeps only as a salted hash, and its MCP messages carry a token bound to the registration
   - Computer use as a fixed vocabulary of tools -- screen view, windows, pointer, keyboard, clipboard, audio -- with capabilities an implementation declares, and grants that can be narrowed to one window
-  - A page for the computers (`C-c h E`), the access view and `session_info` show what a session may use
+  - A page for the computers (`C-c h V E`), the access view and `session_info` show what a session may use
   - Access follows the ordinary permission system: defaults, project overrides, per-session grants, `request_escalation` and `drop_access`, and a stage of the chain that fails closed
 - Git worktrees 
 - Private commit attribution (optional, git-ai): which model and prompt wrote each commit, kept off the code remote
@@ -279,7 +279,7 @@ A non-comprehensive list of all the different functionality offered by modules s
 - Lasting memory (optional, `(harness-enable-modules :features memory)`)
   - Preferences, conventions, facts and references the user or the agent saves, in a user scope and a project scope, put into every session's system prompt
   - `memory_save`, `memory_search`, `memory_get`, `memory_forget` and `memory_consolidate`; saving the same text edits it, and `replaces` folds memories into one
-  - Full-text and optional semantic search over the same SQLite approach as the session search, a memory page (`C-c h M`) and quick capture (`C-c h m`)
+  - Full-text and optional semantic search over the same SQLite approach as the session search, a memory page (`C-c h T M`) and quick capture (`C-c h m`)
   - Redaction reaches memories, and consolidation asks a cheap model and applies only a valid answer
 - Configuration via customize
   - Global overridden by per-project (via `.dir-locals.el`)
@@ -296,7 +296,7 @@ A non-comprehensive list of all the different functionality offered by modules s
   - A `Graph` page in the Flutter client and a `*Workspace Graph*` buffer in Emacs show the current thread's Logseq page, its nodes with their tags, links and properties, and the pages that link back to it
   - The agent writes what a turn settled with `knowledge_write`, in that turn: a decision, a fact, a commitment or an open loop, on the thread's page with its provenance, and nothing on a turn that settled nothing; a nightly dream maintains every page, removes duplicate notes and writes a `Dreams/<date>` report, and `knowledge/dream` runs it now, as a dry run or with a report page
   - `knowledge_search` ranks by the words matched and by recency, and by meaning when `harness-workspace-knowledge-embedding-model` names an embedding model (`mode: semantic`)
-  - Enable with `(harness-enable-modules :features workspace :ui ui-workspace)`; open with `M-x harness-workspace` or `C-c h Y`
+  - Enable with `(harness-enable-modules :features workspace :ui ui-workspace)`; open with `M-x harness-workspace` or `C-c h V Y`
   - The Logseq CLI and its DB graphs, the persistent index and its vectors, the dream's review UI, the container backend, routines and voice are the staged design: [the design](docs/workspace-mode.md), [the implementation contract](docs/workspace-mode-implementation.md)
 
 # Workspace mode (first slice)

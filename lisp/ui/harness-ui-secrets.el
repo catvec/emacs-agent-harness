@@ -526,7 +526,7 @@ and a :fingerprint."
 (defvar harness-ui-secrets-report-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map harness-ui-view-map)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-secrets-report-mode'.")
 
@@ -826,7 +826,7 @@ does not show)."
     (define-key map (kbd "l") #'harness-redactions)
     (define-key map (kbd "g") #'harness-ui-secrets-reload)
     (define-key map (kbd "q") #'harness-ui-quit-view)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-secrets-sources-mode'.")
 
@@ -1239,7 +1239,7 @@ tooltip.  BUTTON, when non-nil, is (LABEL HELP ACTION) put after it."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'harness-ui-secrets--add-register)
     (define-key map (kbd "q") #'harness-ui-secrets--add-cancel)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     (define-key map (kbd "TAB") #'widget-forward)
     (define-key map (kbd "<backtab>") #'widget-backward)
     map)
@@ -1434,7 +1434,7 @@ AFTER receives the added source; ON-ERROR receives a safe failure string."
     (define-key map (kbd "s") #'harness-secrets-list-sources)
     (define-key map (kbd "g") #'harness-ui-secrets-log-reload)
     (define-key map (kbd "q") #'harness-ui-quit-view)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-secrets-log-mode'.")
 
@@ -1522,43 +1522,22 @@ other files, so it is not followed."
 
 ;;;; Module
 
-(defun harness-ui-secrets--suffix-command (key)
-  "Return the command the harness menu has at KEY, or nil."
-  (when-let* ((suffix (ignore-errors (transient-get-suffix 'harness-menu key))))
-    (plist-get (if (keywordp (cadr suffix)) (cdr suffix) (car (last suffix))) :command)))
-
-(defun harness-ui-secrets--menu-install ()
-  "Put the commands of this module in the harness menu, after Log, in Tools."
-  (condition-case err
-      (let ((after "L"))
-        (dolist (entry '(("x" "Secret redaction…" harness-redact-secret)
-                         ("E" "Secret sources" harness-secrets-list-sources)))
-          (pcase (harness-ui-secrets--suffix-command (car entry))
-            ((pred null) (transient-append-suffix 'harness-menu after entry))
-            ((pred (eq (nth 2 entry))) nil)
-            (other (harness-log 'warn "secrets: the menu key %s is %s's: %s has no entry"
-                                (car entry) other (nth 2 entry))))
-          (setq after (car entry))))
-    (error (harness-log 'warn "secrets: no menu entry: %s" (error-message-string err)))))
-
-(defun harness-ui-secrets--menu-remove ()
-  "Take the commands of this module out of the harness menu."
-  (dolist (entry '(("x" . harness-redact-secret) ("E" . harness-secrets-list-sources)))
-    (when (eq (harness-ui-secrets--suffix-command (car entry)) (cdr entry))
-      (ignore-errors (transient-remove-suffix 'harness-menu (car entry))))))
-
 (defun harness-ui-secrets--init ()
-  "Follow the redactions of the harness, and put the commands in the menu.
-`harness-redact-secret' is x in the harness menu and
-`harness-secrets-list-sources' is E; the other commands are reached from
-them and by name."
+  "Follow the redactions of the harness, and bind the commands in the Tools group.
+`harness-redact-secret' is x and `harness-secrets-list-sources' is E;
+the other commands are reached from them and by name."
   (add-hook 'harness-ui-event-functions #'harness-ui-secrets--on-event)
-  (harness-ui-secrets--menu-install))
+  (harness-ui-bind "x" #'harness-redact-secret "Secret redaction…"
+                   :group 'tools :column "Secrets")
+  (harness-ui-bind "E" #'harness-secrets-list-sources "Secret sources"
+                   :group 'tools :column "Secrets"))
 
 (defun harness-ui-secrets--shutdown ()
-  "Stop following the harness, and take the commands out of the menu."
+  "Stop following the harness, and unbind the commands."
   (remove-hook 'harness-ui-event-functions #'harness-ui-secrets--on-event)
-  (harness-ui-secrets--menu-remove))
+  (dolist (entry '(("x" . harness-redact-secret) ("E" . harness-secrets-list-sources)))
+    (when (eq (lookup-key harness-ui-tools-map (kbd (car entry))) (cdr entry))
+      (harness-ui-unbind (car entry) harness-ui-tools-map))))
 
 (harness-define-module 'ui-secrets
   :doc "Redact a secret from everything the harness stored, and name the secrets to mask."

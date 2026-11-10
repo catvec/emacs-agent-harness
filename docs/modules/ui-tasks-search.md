@@ -12,7 +12,7 @@ The task board's search: find tasks, sessions and commands or act on tasks in wo
 
 ## About
 
-/ on the task board -- or [Search] in its header line, or C-c h /
+/ on the task board -- or [Search] in its header line, or C-c h T /
 there, which is the board's own search on a board (see
 harness-ui-quick-search.el) -- turns the board's compose box into a
 search box, in colours of its own.  What the box held waits aside and

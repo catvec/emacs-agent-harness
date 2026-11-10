@@ -2860,7 +2860,7 @@ of non-interactive mode says what the marked sessions have."
       (delete-other-windows)
       (switch-to-buffer harness-ui-sessions--buffer-name)
       (cl-flet ((menu (keys)
-                  (call-interactively #'harness-menu)
+                  (call-interactively #'harness-ui-session-menu)
                   (unwind-protect
                       (prog1 (with-current-buffer transient--buffer-name
                                (buffer-substring-no-properties (point-min) (point-max)))

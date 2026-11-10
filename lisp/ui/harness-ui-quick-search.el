@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; C-c h / -- or / in the harness menu -- opens the quick search from
+;; C-c h T / -- or / in the harness menu -- opens the quick search from
 ;; any buffer: a popout at the bottom of the frame whose box takes a
 ;; line in words, the way a command palette does ("how do I attach a
 ;; file?", "where did I debug the merge queue?", "the task about the
@@ -50,7 +50,7 @@
 ;; (`harness-search-sessions').  An order to manage tasks ("stop the
 ;; docs task") is only proposed here: [Do it] does it.
 ;;
-;; On a task board, C-c h / is the board's own search
+;; On a task board, C-c h T / is the board's own search
 ;; (`harness-tasks-search'), which filters the board.  The lines of
 ;; what a search found (`harness-quick-search-session-line' and the
 ;; others) and its answer in words (`harness-quick-search-answer-text')
@@ -252,30 +252,22 @@ A function is called, its errors ignored, for the text it returns."
     (cond ((stringp prefix) (ignore-errors (kbd prefix)))
           ((vectorp prefix) prefix))))
 
-(defun harness-quick-search--suffix-plist (node)
-  "Return the properties of NODE when it is a suffix of a transient layout.
-A suffix is (CLASS . PLIST), or (LEVEL CLASS PLIST) as older transients
-have it, PLIST holding its `:command'."
-  (cond
-   ((and (consp node) (symbolp (car node)) (car node) (not (keywordp (car node)))
-         (plistp (cdr node)) (plist-get (cdr node) :command))
-    (cdr node))
-   ((and (consp node) (integerp (car node)) (consp (cdr node)) (symbolp (cadr node))
-         (consp (cddr node)) (plistp (nth 2 node)) (plist-get (nth 2 node) :command))
-    (nth 2 node))))
-
 (defun harness-quick-search--menu-suffixes ()
-  "Return the property lists of the suffixes of `harness-menu''s own groups.
-The layout is walked defensively, through vectors and lists, so a
-transient that lays it out otherwise gives fewer suffixes, not an error."
+  "Return what the harness's menus offer, as (:key :command :description).
+Every level of the harness's tree contributes its entries, the top level
+and the groups under it, each with the whole key that runs it.  The menus
+are made from those entries, so this is what they show."
   (let (out)
-    (cl-labels ((walk (node depth)
-                  (when (< depth 16)
-                    (if-let* ((plist (harness-quick-search--suffix-plist node)))
-                        (push plist out)
-                      (cond ((vectorp node) (mapc (lambda (child) (walk child (1+ depth))) node))
-                            ((proper-list-p node) (dolist (child node) (walk child (1+ depth)))))))))
-      (walk (get 'harness-menu 'transient--layout) 0))
+    (dolist (level harness-ui--level-list)
+      (let ((prefix (harness-ui--level-path level)))
+        (dolist (cell (harness-ui-level-entries level))
+          (let ((command (plist-get (cdr cell) :command)))
+            (push (list :key (concat prefix " " (key-description (car cell)))
+                        :command (if (keymapp command)
+                                     (harness-ui-level-menu (harness-ui--level command))
+                                   command)
+                        :description (plist-get (cdr cell) :label))
+                  out)))))
     (nreverse out)))
 
 (defun harness-quick-search--binding (binding)
@@ -558,14 +550,12 @@ and the modes of this buffer."
                                    :label (or (plist-get entry :label) (harness-quick-search--text label))
                                    :here (or (plist-get entry :here) here))
                              table)))))
-      ;; The menu's own groups.
-      (let ((menu (and prefix (where-is-internal 'harness-menu (list harness-ui-map) t))))
-        (dolist (suffix (harness-quick-search--menu-suffixes))
-          (let ((key (plist-get suffix :key)))
-            (add (plist-get suffix :command) "menu"
-                 (and menu (stringp key) (ignore-errors (key-description (vconcat prefix menu (kbd key)))))
-                 (harness-quick-search--label (plist-get suffix :description))
-                 t))))
+      ;; The harness's menus: every level of the tree, and what it calls
+      ;; its commands.
+      (dolist (suffix (harness-quick-search--menu-suffixes))
+        (add (plist-get suffix :command) "menu" (plist-get suffix :key)
+             (harness-quick-search--label (plist-get suffix :description))
+             t))
       ;; The keys under the prefix, from anywhere.
       (harness-quick-search--map-walk
        harness-ui-map (or prefix [])
@@ -1405,11 +1395,6 @@ Lisp, the search starts at once."
 
 ;;;; Module
 
-(defun harness-quick-search--menu-command ()
-  "Return the command of the / suffix of `harness-menu', or nil."
-  (when-let* ((suffix (ignore-errors (transient-get-suffix 'harness-menu "/"))))
-    (plist-get (harness-quick-search--suffix-plist suffix) :command)))
-
 (defun harness-quick-search--init ()
   "Bind the quick search to / under the prefix and in the harness menu.
 Also have the scan of the commands built when Emacs is idle, and built
@@ -1417,20 +1402,15 @@ again after files load (`harness-quick-search--idle-build')."
   (harness-quick-search--reset-scan)
   (add-hook 'after-load-functions #'harness-quick-search--after-load)
   (harness-quick-search--schedule-scan)
-  (define-key harness-ui-map (kbd "/") #'harness-quick-search)
-  (ignore-errors
-    (when (ignore-errors (transient-get-suffix 'harness-menu "/"))
-      (ignore-errors (transient-remove-suffix 'harness-menu "/")))
-    (transient-append-suffix 'harness-menu "a" '("/" "Quick search" harness-quick-search))))
+  (harness-ui-bind "/" #'harness-quick-search "Quick search"
+                   :group 'tools :column "Search")
+  )
 
 (defun harness-quick-search--shutdown ()
   "Take the quick search off / under the prefix and out of the harness menu.
 Also stop building the scan of the commands, and forget it."
-  (when (eq (lookup-key harness-ui-map (kbd "/")) #'harness-quick-search)
-    (define-key harness-ui-map (kbd "/") nil t))
-  (ignore-errors
-    (when (eq (harness-quick-search--menu-command) 'harness-quick-search)
-      (transient-remove-suffix 'harness-menu "/")))
+  (when (eq (lookup-key harness-ui-tools-map (kbd "/")) #'harness-quick-search)
+    (harness-ui-unbind "/" harness-ui-tools-map))
   (remove-hook 'after-load-functions #'harness-quick-search--after-load)
   (harness-quick-search--reset-scan))
 

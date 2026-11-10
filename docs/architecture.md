@@ -1261,7 +1261,7 @@ In Ediff's versions of a file in a review the same key is
 `harness-ui-patch-review-thread-reply`: the ref is the file, the side
 (whichever of the two buffers it is), the lines and the review's revision
 (`harness-ui-patch-review--region-ref`), and the card goes in the box of the
-report.  `harness-thread-region` (`C-c h <`) does it for the region of
+report.  `harness-thread-region` (`C-c h V <`) does it for the region of
 any other buffer, with a ref a buffer-specific function in
 `harness-thread-ref-functions` makes, else a `buffer` ref
 (`harness-chat--buffer-ref`), and puts the card in the box of the project's
@@ -4295,7 +4295,7 @@ stage's label, else `gate`; the access module's judgements and the
   later leaves the sessions that exist alone.  The setting decides by
   itself only for a request without a session record.
   Switching a session to non-interactive (`session/updated` with a true
-  `:non-interactive`, from `C-c h i`, the board, `C-c h I` or the
+  `:non-interactive`, from `C-c h S i`, the board, `C-c h S I` or the
   tool) hands its waiting prompts to the judge from the command loop
   (`harness-perms--judge-waiting`): each prompt's request goes again
   through the stages from 11 to 89 (`harness-perms--redecided-stages`,
@@ -12593,15 +12593,19 @@ label (`harness-ui-tool-label`, `harness-ui-tool-title`), window
 positions (`harness-ui-display-session SID &optional POSITION`; presets
 `right`, `left`, `bottom`, `full`, `other`, `fullscreen`; one session
 per position, replacing),
-the global keymap and the transient menus (the grouped
-`harness-groups-menu`, which the prefix key opens on its own after
-`harness-ui-menu-idle-delay`, as if an event no keyboard sends followed
-it, and which opens each group's commands as a directory does, the
-commands of the opt-in modules included; the flat `harness-menu`,
-which the views that bind it to `?` and the modules that append to it
-keep, and that no key of the prefix offers; and the group menus
-themselves.  A key typed after the prefix runs as it always did.  The
-flat menu has a group for
+the global keymap and the transient menus.  The keys are one tree:
+`harness-ui-map` under the prefix, and the groups under it, each a
+prefix keymap of its own (`harness-ui-define-group`).  A command is
+bound with `harness-ui-bind`, which keeps its key, its label and its
+column, and the menu of a level is made from that level's keys as it
+opens (`harness-ui-menu-columns`), so the key beside an entry is the
+key that runs it.  A level that waits for a key opens its own menu
+after `harness-ui-menu-idle-delay`, as if an event no keyboard sends
+followed it: the top level's menu on the prefix alone, a group's on its
+key alone.  The flat `harness-ui-menu`, which the views that bind it to
+`?` keep, shows the top level's keys and then the buffer's own
+commands; no key of the prefix offers it.  A key typed after the prefix
+runs as it always did.  The flat menu has a group for
 the commands of the buffer it is opened from, which each mode lists in
 its `harness-menu-group` property; opened from a side window it gets a
 side window of its own across the bottom of the frame, never in another
@@ -12629,7 +12633,7 @@ before, as the cache forgets a session before its `session/deleted`
 comes); the cache hears of them from the `_harness/session` updates.
 The session list shows them only when asked (I).
 
-The computers page (module `ui-computers`, `C-c h E`, `harness-computers`)
+The computers page (module `ui-computers`, `C-c h V E`, `harness-computers`)
 talks ACP only: `_harness/computer/list` with the page's session,
 `_harness/computer/access` for that session and
 `_harness/computer/resources` for the resources, refreshed when a
@@ -13601,7 +13605,7 @@ otherwise; the task boards do not, as no card shows a figure (a card's
 tooltip, made when it is asked for, reads the count as it stands).
 The context figure is a button (`harness-ui-context-limit-map`): in the
 chat's header it is a segment as the figures beside it are, and in the
-session list a click acts on the session the figure shows.  Mouse-1 on it, or `C-c h e` (`harness-set-context-limit`),
+session list a click acts on the session the figure shows.  Mouse-1 on it, or `C-c h S e` (`harness-set-context-limit`),
 offers that session's context window limit: the current one, a few
 round sizes under the model's own window (read from its catalogue
 entry, never assumed), and no limit, which uses the whole of it; a
@@ -13695,14 +13699,14 @@ in front of you, and offers the possible levels as a menu at the click
 -- highest first, the level in force greyed out -- setting the one
 chosen (`harness-ui-priority--ask', `--menu'); a click that chooses
 nothing changes nothing.  `y` in the
-harness keys (`C-c h y', `harness-set-priority') does the same without
+harness keys (`C-c h S y', `harness-set-priority') does the same without
 a click, reading the level in the minibuffer with the session's own as
 the default (`harness-ui-priority--choose', the one place the levels'
 order and prompt live, which the session list's `p' reads through too
 for its marked sessions); either way the request is
 `_harness/priority/set {sessionId, priority}', and the answer says what
 it is now ("Priority: high").  `+` and `-` in the harness keys
-(`C-c h +', `C-c h -', `harness-priority-raise' / `-lower') move the
+(`C-c h S +', `C-c h S -', `harness-priority-raise' / `-lower') move the
 session in front of you one level up or down, saying so, and saying it
 is high or low already at the top and the bottom; with a prefix
 argument they ask for the level instead, as the setter does, and `Y'
@@ -14002,7 +14006,7 @@ control panel; in the library's threads view, every comment.
 by setting what the `compose-quote` library (lisp/vendor/compose-quote;
 see Vendored libraries) asks of a host.  The library quotes a region in
 the box as Markdown, which a prompt uses (`harness-prompt-region`,
-`C-c h >`) and which a card's quote is edited like; it is no reply and
+`C-c h V >`) and which a card's quote is edited like; it is no reply and
 `harness-quote-reply` does not fall back to it: a target it finds none
 of says "Nothing to reply here".  The library knows nothing of the
 harness: the box is only the composition it quotes into.
@@ -14050,7 +14054,7 @@ harness: the box is only the composition it quotes into.
   (`harness-patch-review--register-thread`).  In a chat `C-c >` is
   `harness-quote-reply`, whose handler starts a thread; a prefix
   argument changes nothing, and a region in the box is no reply target:
-  the prompt's quote, `C-c h >`, is the library's where it is.
+  the prompt's quote, `C-c h V >`, is the library's where it is.
 - `compose-quote-insert-hook` has `harness-compose--quoted` on it in the
   box's buffer: the box may be out of sight, so it counts a jump
   (`harness-compose--jumps`), which makes its windows follow it again,
@@ -14060,7 +14064,7 @@ Answering inline: `compose-quote-mode` also keeps `compose-quote-inline-mode`
 on while point is in a quote in the box, and off elsewhere (on
 `post-command-hook`).  A quote is a run of lines of the box that start
 with `>`, so one typed or pasted in counts as much as a prompt's
-`C-c h >` put there, and a `>` line of the transcript never does.  In a
+`C-c h V >` put there, and a `>` line of the transcript never does.  In a
 quote `M-RET` (`compose-quote-split`) splits it where point is -- the
 part above, an empty line for the answer to it, the part below -- and
 `C-c [` (`compose-quote-elide`) replaces the region, or the rest of the
@@ -14238,7 +14242,7 @@ they are the buffer's own, so a second press goes on to the top or the
 bottom of the buffer: the transcript above the box is read, not edited,
 and what to move over in the box is the box.
 
-Prompting with the region: `harness-prompt-region` (`C-c h >`, bound in
+Prompting with the region: `harness-prompt-region` (`C-c h V >`, bound in
 `harness-ui-map` when the chat module is ready, and `>` in the harness
 menu; autoloaded) starts a message with the active region of any buffer,
 not only a harness one.  In a buffer with a live compose box -- a chat,
@@ -14424,7 +14428,7 @@ ask for a session.
 The all-sessions commands, `harness-set-model-all`,
 `harness-set-thinking-all`, `harness-set-non-interactive-all` and
 `harness-set-supervisor-all`
-(`C-c h M` `H` `I`, the menu's "Session settings" column, where the
+(`C-c h S M` `H` `I`, the menu's "Session settings" column, where the
 supervisor one is V beside I; see also supervisor), reach every
 project.  They change the sessions first, every active one and those of
 the current tasks (`harness-ui--everything-filter`, `(:active t :tasks
@@ -14456,7 +14460,7 @@ non-interactive and supervisor mode also whenever they are turned off.
 None of them rewrites
 a `.dir-locals.el`.
 
-`harness-set-priority-all` (`C-c h Y', "Priority for all sessions…" in
+`harness-set-priority-all` (`C-c h S Y', "Priority for all sessions…" in
 the menu's "Priority" column, the four priority entries' own, beside
 "Session settings") is the fourth of them, and the simplest: a
 priority is the session's, a task's included, so it is one call to
@@ -14547,7 +14551,7 @@ to the front and lists the sessions waiting for the user
 notification through `_harness/notification/send` and says in the
 echo area what each provider did with it.
 
-Remote control page (`harness-ui-acp-remote`, `C-c h P`,
+Remote control page (`harness-ui-acp-remote`, `C-c h O P`,
 `harness-remote-control`): whether the harness serves other devices
 (start or stop), the ACP address their clients connect to, the address
 of this machine in it (chosen among the interfaces), whether what devices
@@ -14563,7 +14567,7 @@ makes a token for a client that cannot sign in itself, shown once in a buffer of
 its own.  The UI follows `acp/remote-changed`: a new request is announced in
 the echo area, counted in the mode line notifier (a segment on
 `harness-ui-notify-segment-functions`, a click runs `harness-remote-approve`,
-also `C-c h y`, which asks which device when several wait and the user to
+also `C-c h O y`, which asks which device when several wait and the user to
 confirm) and, through the harness, by a desktop notification.  In corporate mode
 the page shows a notice only.  The QR encoder `harness-ui-qr` is no longer used
 by it.
@@ -14611,7 +14615,7 @@ secret it reads has a fingerprint the harness redacted
 (`harness-ui-secrets--matching`).  A harness on another machine reads
 other files, so it is not followed.
 
-Version page (`harness-ui-version`, `C-c h U`, `harness-version`): a
+Version page (`harness-ui-version`, `C-c h O U`, `harness-version`): a
 header line with the version and the verdict, then one row for each
 place a version lives -- Running (the harness process's commit, and,
 when it runs in its own process, the commit this Emacs loaded the UI
@@ -15064,7 +15068,7 @@ section shows.  A session's own board (`harness-ui-tasks--board-of-session`)
 is the project's, not this one, which lists every task.
 
 The board's search (`harness-ui-tasks-search`, `/` on the board,
-[Search] in its header, `C-c h /` on a board) turns the board's compose
+[Search] in its header, `C-c h T /` on a board) turns the board's compose
 box into a search box (`harness-tasks-search`) instead of reading the
 line in the minibuffer: the box's target becomes `(search)`
 (`harness-ui-tasks--target`, `harness-ui-tasks--searching-p`), its label
@@ -15113,8 +15117,8 @@ it (`harness-ui-tasks--focus`).  `harness-ui-tasks-search-show-plan`
 shows a plan on the board without searching, which the quick search's
 [Board] uses.
 
-Quick search (`harness-ui-quick-search`, `C-c h /` anywhere but on a
-board, `/` in the sessions group of the menu, `harness-quick-search`): a popout
+Quick search (`harness-ui-quick-search`, `C-c h T /` anywhere but on a
+board, `/` in the Tools group of the menu, `harness-quick-search`): a popout
 (`harness-ui-popout`, KEY `(quick-search)`) at the bottom of the frame,
 opened from any buffer, whose shared compose box takes the line to
 search (`harness-quick-search-box-mode`: `RET` in the box calls
@@ -15191,7 +15195,7 @@ search.
 
 Task slots page (`harness-ui-slots`, `harness-slots`: `S` on a board
 for its project -- `harness-ui-tasks-slots`, which names the module
-when it is not loaded -- `C-c h Q` and the menu's `Q` for the current one;
+when it is not loaded -- `C-c h V Q` and the menu's `Q` for the current one;
 `*harness slots*`, `harness-ui-slots-mode`): the answer of
 `_harness/task/slots` drawn with the session list's own rows: the tasks
 in slots, the longest at work first, as a table whose columns are the
@@ -15293,7 +15297,7 @@ again.  A window too narrow for the table leaves out Held, then Paused,
 before the name shrinks under eight columns or a button wraps
 (`harness-ui-slots--queue-layout`).
 
-Companion pet (`harness-ui-pet`, `C-c h z`, `harness-pet`, menu `z`):
+Companion pet (`harness-ui-pet`, `C-c h V z`, `harness-pet`, menu `z`):
 the buffer `*harness pet*`, and a few places besides.  Before it
 hatches: the egg, [Hatch it] (`h`) and what hatching does.  After: a
 card with its stars, rarity and species, the creature in its rarity's
@@ -15832,7 +15836,7 @@ meters line up: the dashboard does not wrap lines, and buttons at the
 end of a budget's long line were out of sight.  [delete] or `d` deletes
 the budget with `usage/remove-budget`, or a session's own one with
 `session/update :budget nil`, and says the Budget setting's is changed
-with `M-x harness-settings`; `harness-delete-budget` (`C-c h B`,
+with `M-x harness-settings`; `harness-delete-budget` (`C-c h T B`,
 "Budget removal" in the harness menu) does it from anywhere, the budget
 read by name (on a budget's line, that one is the default).  A hard
 budget's refusal says it is deleted there, or the setting's, where it
@@ -16193,7 +16197,7 @@ the window, its rows what carrying on costs against the cache, and
 capitals that answer "always" and stop the asking (a kind's makes it
 the automatic one, carrying on's saves the carry-on); see "Chat buffer"),
 and compacting by hand
-(`harness-ui-compact`: `harness-compact`, `C-c h C` and "C" in the
+(`harness-ui-compact`: `harness-compact`, `C-c h S C` and "C" in the
 menu, asks one flat list with `read-multiple-choice` -- Summary,
 Transcript, Fresh start and Continuation -- the help buffer naming
 the session, the model and the cache and what carrying on costs, from

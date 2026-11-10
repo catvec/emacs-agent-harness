@@ -554,7 +554,7 @@ On a session's line it opens at its best match."
     (define-key map (kbd "M") #'harness-ui-search-set-mode)
     (define-key map (kbd "a") #'harness-ui-search-toggle-scope)
     (define-key map (kbd "+") #'harness-ui-search-more)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-search-mode'.")
 
@@ -585,7 +585,7 @@ On a session's line it opens at its best match."
 
 (defun harness-ui-search--init ()
   "Bind the search to the global keys."
-  (define-key harness-ui-map (kbd "g") #'harness-search-sessions))
+  (harness-ui-bind "g" #'harness-search-sessions "Session search" :column "Sessions"))
 
 (harness-define-module 'ui-search
   :doc "Search the sessions' transcripts: words, literal text, regexps or meaning."

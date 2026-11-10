@@ -774,5 +774,113 @@ model without walking the categories."
     (or (car (all-completions model-id table))
         (error "No model %s in the picker" model-id))))
 
+(defun harness-ui-test--suffix-plist (suffix)
+  "Return the properties of SUFFIX, a suffix of a transient layout.
+Transient 0.8 and later write it (CLASS . PLIST), earlier ones (LEVEL
+CLASS PLIST)."
+  (if (keywordp (cadr suffix)) (cdr suffix) (car (last suffix))))
+
+(defun harness-ui-test--suffixes (menu)
+  "Return the property lists of the suffixes of MENU, its own groups'."
+  (let (out)
+    (cl-labels ((walk (node depth)
+                  (when (< depth 16)
+                    (cond
+                     ((and (consp node) (symbolp (car node)) (car node)
+                           (not (keywordp (car node))) (plistp (cdr node))
+                           (plist-get (cdr node) :command))
+                      (push (cdr node) out))
+                     ((and (consp node) (integerp (car node)) (consp (cdr node))
+                           (symbolp (cadr node)) (consp (cddr node))
+                           (plistp (nth 2 node)) (plist-get (nth 2 node) :command))
+                      (push (nth 2 node) out))
+                     ((vectorp node) (mapc (lambda (child) (walk child (1+ depth))) node))
+                     ((proper-list-p node) (dolist (child node) (walk child (1+ depth))))))))
+      (walk (get menu 'transient--layout) 0))
+    (nreverse out)))
+(defun harness-ui-test--menu-lines (menu)
+  "Return the lines MENU shows, as (KEY . DESCRIPTION) for each suffix.
+The menu is opened here and closed again.  Each key transient draws in
+the key face, and its description runs to the next key or the end of its
+line; a heading line has no key, and is left out."
+  (call-interactively menu)
+  (prog1 (let (lines)
+           (with-current-buffer transient--buffer-name
+             (goto-char (point-min))
+             (while (not (eobp))
+               (if (not (memq (get-text-property (point) 'face)
+                              '(transient-key transient-key-exit transient-key-stack)))
+                   (forward-char 1)
+                 (let* ((key-start (point))
+                        (key-end (next-single-property-change key-start 'face))
+                        (key (buffer-substring-no-properties key-start key-end))
+                        (end (save-excursion
+                               (goto-char key-end)
+                               (let ((limit (line-end-position))
+                                     (pos key-end))
+                                 (while (and (< pos limit)
+                                             (not (memq (get-text-property pos 'face)
+                                                        '(transient-key transient-key-exit
+                                                          transient-key-stack))))
+                                   (setq pos (1+ pos)))
+                                 pos)))
+                        (description (string-trim
+                                      (buffer-substring-no-properties key-end end))))
+                   (push (cons key description) lines)
+                   (goto-char end)))))
+           (nreverse lines))
+    (execute-kbd-macro (kbd "C-g"))))
+
+(defun harness-ui-test--save-tree ()
+  "Return a snapshot of the harness's tree of keys and its menus.
+The levels are the tree's own; their bindings are saved one cell each,
+so a group's keymap is still the group's own when it comes back."
+  (mapcar (lambda (level)
+            ;; A keymap's cdr holds its bindings and, last, the symbol
+            ;; `keymap' when it has a parent map.
+            (list level
+                  (mapcar (lambda (cell)
+                            (if (consp cell)
+                                (cons (car cell) (cdr cell))
+                              cell))
+                          (cdr (harness-ui-level-map level)))
+                  (harness-ui-level-entries level)))
+          harness-ui--level-list))
+
+(defun harness-ui-test--restore-tree (saved)
+  "Put the keys and menus of SAVED, from `harness-ui-test--save-tree', back."
+  (dolist (saved-level saved)
+    (setcdr (harness-ui-level-map (nth 0 saved-level)) (nth 1 saved-level))
+    (harness-ui--set-level-entries (nth 0 saved-level) (nth 2 saved-level))))
+
+(defun harness-ui-test--empty-tree ()
+  "Empty every level of the harness's tree in place, keys and menus.
+The levels are left, so a module that binds at one finds it."
+  (dolist (level harness-ui--level-list)
+    (harness-ui--set-level-entries level nil)
+    (setcdr (harness-ui-level-map level) nil)))
+
+(defmacro harness-ui-test--with-empty-keys (&rest body)
+  "Run BODY with the harness's keys empty, and put them back afterwards.
+Every level of the tree is emptied -- the top level and the groups under
+it -- so the levels a module binds at are there for `harness-ui-bind' to
+find.  `harness-ui-map' is bound here, so a test that sets it anew
+leaves the tree of the levels as BODY found them."
+  (declare (indent 0))
+  `(let ((harness-ui-map harness-ui-map)
+         (saved (harness-ui-test--save-tree)))
+     (unwind-protect
+         (progn (harness-ui-test--empty-tree) ,@body)
+       (harness-ui-test--restore-tree saved))))
+
+(defmacro harness-ui-test--with-keys-restored (&rest body)
+  "Run BODY as it is, with the harness's keys and menus put back afterwards.
+A test that starts and stops modules moves their keys and menu entries;
+this leaves the tree for the tests after it as BODY found it."
+  (declare (indent 0))
+  `(let ((saved (harness-ui-test--save-tree)))
+     (unwind-protect (progn ,@body)
+       (harness-ui-test--restore-tree saved))))
+
 (provide 'harness-test-helpers)
 ;;; harness-test-helpers.el ends here

@@ -794,28 +794,29 @@ it takes them away, and a key another module bound is left alone."
         (harness-ui-cache-warm--timer nil))
     (unwind-protect
         (progn
-          (should-not (lookup-key harness-ui-map (kbd "K")))
+          (should-not (lookup-key harness-ui-session-map (kbd "K")))
           (harness-ui-cache-warm--init)
           (harness-ui-cache-warm--init)
-          (should (eq #'harness-cache-keep-warm (lookup-key harness-ui-map (kbd "K"))))
-          (should (eq 'harness-cache-keep-warm (harness-ui-cache-warm--suffix-command "K")))
+          (should (eq #'harness-cache-keep-warm (lookup-key harness-ui-session-map (kbd "K"))))
           (should (equal "Cache warming"
-                         (plist-get (cdr (transient-get-suffix 'harness-menu "K")) :description)))
+                         (cdr (assoc "K" (harness-ui-test--menu-lines
+                                          #'harness-ui-session-menu)))))
           (should (memq #'harness-ui-cache-warm--header harness-chat-header-end-functions))
           (should (memq #'harness-ui-cache-warm--on-event harness-ui-event-functions))
           (should (memq #'harness-ui-cache-warm--on-connected harness-ui-connected-hook))
           ;; Taken away once, though it was put in twice: no second entry is left.
           (harness-ui-cache-warm--shutdown)
-          (should-not (lookup-key harness-ui-map (kbd "K")))
-          (should-not (harness-ui-cache-warm--suffix-command "K"))
+          (should-not (lookup-key harness-ui-session-map (kbd "K")))
+          (should-not (assoc "K" (harness-ui-test--menu-lines
+                                  #'harness-ui-session-menu)))
           (should-not (cdr (assoc "warm" harness-chat-commands)))
           (should-not (memq #'harness-ui-cache-warm--header harness-chat-header-end-functions))
           (should-not (memq #'harness-ui-cache-warm--on-event harness-ui-event-functions))
           ;; Another module's K stays.
-          (define-key harness-ui-map (kbd "K") #'ignore)
+          (define-key harness-ui-session-map (kbd "K") #'ignore)
           (harness-ui-cache-warm--shutdown)
-          (should (eq #'ignore (lookup-key harness-ui-map (kbd "K")))))
-      (define-key harness-ui-map (kbd "K") nil t)
+          (should (eq #'ignore (lookup-key harness-ui-session-map (kbd "K")))))
+      (define-key harness-ui-session-map (kbd "K") nil t)
       (harness-ui-cache-warm--shutdown))))
 
 (ert-deftest harness-ui-cache-warm-connecting-again-forgets-the-states ()

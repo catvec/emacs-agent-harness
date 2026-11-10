@@ -608,8 +608,8 @@ memory page can change to another kind."
   "Wire the memory page into the UI."
   (add-hook 'harness-ui-event-functions #'harness-ui-memories--on-event)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-memories--redraw-all)
-  (define-key harness-ui-map (kbd "M") #'harness-memories)
-  (define-key harness-ui-map (kbd "m") #'harness-remember))
+  (harness-ui-bind "m" #'harness-remember "Memory…" :group 'tools :column "Memory")
+  (harness-ui-bind "M" #'harness-memories "Memory" :group 'tools :column "Memory"))
 
 (defun harness-ui-memory--shutdown ()
   "Stop following memories, and unbind the page's keys.
@@ -618,8 +618,8 @@ A key another module bound in the meantime is left as it is."
   (remove-hook 'harness-ui-redraw-hook #'harness-ui-memories--redraw-all)
   (dolist (binding '(("M" . harness-memories)
                      ("m" . harness-remember)))
-    (when (eq (lookup-key harness-ui-map (kbd (car binding))) (cdr binding))
-      (define-key harness-ui-map (kbd (car binding)) nil))))
+    (when (eq (lookup-key harness-ui-tools-map (kbd (car binding))) (cdr binding))
+      (harness-ui-unbind (car binding) harness-ui-tools-map))))
 
 (harness-define-module 'ui-memory
   :doc "The memory page and quick capture: lasting memories seen, added, edited, forgotten, searched and consolidated."

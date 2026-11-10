@@ -301,7 +301,7 @@ LABEL is matched as it is written: [view] is not [View]."
 (ert-deftest harness-ui-computers-the-key-is-bound-and-unbound-with-the-module ()
   "E opens the page while the module is ready, and the module's keys are the page's."
   (harness-ui-computers-test-with
-    (should (eq (lookup-key harness-ui-map (kbd "E")) #'harness-computers))
+    (should (eq (lookup-key harness-ui-views-map (kbd "E")) #'harness-computers))
     (should (eq (lookup-key harness-ui-computers-mode-map (kbd "r"))
                 #'harness-ui-computers-register))
     (should (eq (lookup-key harness-ui-computers-mode-map (kbd "g"))
@@ -309,7 +309,7 @@ LABEL is matched as it is written: [view] is not [View]."
     (should (eq (lookup-key harness-ui-computers-mode-map (kbd "u"))
                 #'harness-ui-computers-unregister))
     (harness-ui-computers--shutdown)
-    (should-not (lookup-key harness-ui-map (kbd "E")))))
+    (should-not (lookup-key harness-ui-views-map (kbd "E")))))
 
 (ert-deftest harness-ui-computers-the-command-opens-the-page-and-refreshes ()
   "The command shows a buffer in the page's mode and asks the harness."

@@ -4818,7 +4818,7 @@ compose box, as every letter the board does not bind does
   ;; What the header, or a line above the box, cut off.
   (define-key map (kbd "C-c C-o") #'harness-ui-overflow-show)
   (define-key map (kbd "q") #'harness-ui-quit-view)
-  (define-key map (kbd "?") #'harness-menu))
+  (define-key map (kbd "?") #'harness-ui-menu))
 
 (defvar harness-ui-tasks-mode-map
   ;; No `special-mode-map' parent: its letters would eat typing in the compose box.
@@ -6873,8 +6873,8 @@ line."
   (add-hook 'harness-ui-notify-segment-functions #'harness-ui-tasks--notify-segment 50)
   (when (timerp harness-ui-tasks--timer) (cancel-timer harness-ui-tasks--timer))
   (setq harness-ui-tasks--timer (run-with-timer harness-ui-tasks--tick-interval harness-ui-tasks--tick-interval #'harness-ui-tasks--tick))
-  (define-key harness-ui-map (kbd "a") #'harness-tasks)
-  (define-key harness-ui-map (kbd "G") #'harness-tasks-all)
+  (harness-ui-bind "a" #'harness-tasks "Task board" :column "Sessions")
+  (harness-ui-bind "G" #'harness-tasks-all "Task board · every project" :column "Sessions")
   ;; The boards that exist already, when the harness reloads, were started
   ;; by a mode function that did not know to catch up when shown.
   (dolist (board (harness-ui-tasks--buffers))

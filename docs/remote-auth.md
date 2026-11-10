@@ -188,10 +188,10 @@ may be 64 KB, and one that does nothing to sign in is closed after two minutes.
 **Approve in Emacs.**  `initialize` gives the connection a code of four digits,
 in the description of the method, and `authenticate` with it asks the person at
 this Emacs: the mode line shows a count, a desktop notification arrives (and a
-Gotify push, if set up), and the remote control page (`C-c h P`) lists the
+Gotify push, if set up), and the remote control page (`C-c h O P`) lists the
 device with the name its client gave (ACP UI 0.9.1 · Android · Chrome), its
 address, the web page it comes from if it is one, and the code.  The person
-compares it with the one on the device, and presses Approve (`C-c h y`) or
+compares it with the one on the device, and presses Approve (`C-c h O y`) or
 Deny.  It waits 50 seconds (`harness-acp-remote-approval-timeout`; ACP UI gives
 up on a request after 60).  A request that is refused or runs out says so in its
 error; an address may ask six times a minute (a refusal counts), five devices
@@ -303,11 +303,11 @@ out more access.
 ## Signing a device in
 
 **An ACP client with a sign-in dialog (ACP UI, the harness's own app).**  In
-Emacs, `C-c h P`, then `s` to start serving.  In the client, add a remote agent
+Emacs, `C-c h O P`, then `s` to start serving.  In the client, add a remote agent
 at the ACP address the page shows (`ws://HOST:4276/acp`; typing that address is
 the one thing nothing can save you) and open it.  The client asks how to sign
 in: choose **Approve in Emacs**, check that Emacs shows the code the client
-shows, and press Approve there (`C-c h y`, or the button, or click the `?1` in
+shows, and press Approve there (`C-c h O y`, or the button, or click the `?1` in
 the mode line).  Nothing is typed or copied, and the client is not left.  The
 harness's own app keeps the secret it is handed, with the address, and goes back in with it by itself each time it opens, asking again only when the harness turns the device away (the session was revoked or ran out); ACP UI asks again next time.
 

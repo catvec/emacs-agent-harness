@@ -509,8 +509,9 @@ stopped drawing at that setting and never set its widgets up."
 
 (ert-deftest harness-ui-config-entry-points ()
   (harness-ui-config-test-with
-    (should (eq 'harness-settings (lookup-key harness-ui-map (kbd "S"))))
-    (should (transient-get-suffix 'harness-menu "S"))
+    (should (eq 'harness-settings (lookup-key harness-ui-options-map (kbd "S"))))
+    (should (equal "Settings"
+                   (cdr (assoc "S" (harness-ui-test--menu-lines #'harness-ui-options-menu)))))
     ;; From a buffer in the project the page is about the project.
     (let ((file-buffer (find-file-noselect (expand-file-name "notes.txt" root))))
       (unwind-protect

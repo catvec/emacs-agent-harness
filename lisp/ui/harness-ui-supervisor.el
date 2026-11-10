@@ -16,7 +16,7 @@
 ;; segment is fitted at `harness-ui-supervisor--priority', below every
 ;; segment of the session's own, so a window too narrow for all of it
 ;; drops the badge before it loses the model, the mode or the rest.
-;; A click there toggles it, and so does V in the harness keys (C-c h V,
+;; A click there toggles it, and so does V in the harness keys (C-c h S v,
 ;; `harness-toggle-supervisor'), which asks the harness for the change with
 ;; `_harness/supervisor/set' and says what it changed.  The header follows
 ;; the session as the harness sends it.
@@ -96,7 +96,7 @@ Only a session the supervisor plugin governs has the mode: sub-agents
 and side conversations never supervise.  The session's header line says
 which it is, and clicking there toggles too.
 
-On the task board the setting target is not a session: `C-c h V' or
+On the task board the setting target is not a session: `C-c h S v' or
 the settings line's button then turns the mode the next task starts
 with, as the board's other setting buttons do.  In the session list it
 turns the mode of every marked session, and of the session at point
@@ -183,13 +183,14 @@ nor the sessions that are already hands-on on purpose.  See
   "Show the supervisor segment in chat headers and bind the toggle to V.
 Idempotent: the header function is added to the hook only once."
   (add-hook 'harness-chat-header-functions #'harness-ui-supervisor--header)
-  (define-key harness-ui-map (kbd "V") #'harness-toggle-supervisor))
+  (harness-ui-bind "v" #'harness-toggle-supervisor "Supervisor mode"
+                   :group 'session :column "State"))
 
 (defun harness-ui-supervisor--shutdown ()
   "Take the supervisor segment out of chat headers and unbind V."
   (remove-hook 'harness-chat-header-functions #'harness-ui-supervisor--header)
-  (when (eq (lookup-key harness-ui-map (kbd "V")) #'harness-toggle-supervisor)
-    (define-key harness-ui-map (kbd "V") nil)))
+  (when (eq (lookup-key harness-ui-session-map (kbd "v")) #'harness-toggle-supervisor)
+    (harness-ui-unbind "v" harness-ui-session-map)))
 
 (harness-define-module 'ui-supervisor
   :doc "Supervisor mode: the chat header's segment and the V key that toggles it."

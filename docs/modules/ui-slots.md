@@ -159,7 +159,7 @@ than it must:
     apart, while a window shows a page with a call at work or waiting;
   - either way, a redraw that would draw the same text is skipped.
 
-S on a task board opens the page for the board's project, and C-c h Q
+S on a task board opens the page for the board's project, and C-c h V Q
 ("Task slots", Q, in the harness menu) for the current one's.
 
 ## Provides

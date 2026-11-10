@@ -4,7 +4,7 @@
 
 ;;; Commentary:
 
-;; `harness-provider-check' (C-c h !, or Model's neighbour in the
+;; `harness-provider-check' (C-c h S !, or Model's neighbour in the
 ;; harness menu) runs the live checks of the model in front of you, or
 ;; of any model the catalogue lists with a prefix argument.  It opens
 ;; the report page, which fills in as the checks settle: one line per
@@ -701,7 +701,7 @@ requests before the run starts."
     (define-key map (kbd "E") #'harness-ui-provider-check-embedding-model)
     (define-key map (kbd "S") #'harness-ui-provider-check-cache-stress)
     (define-key map (kbd "c") #'harness-ui-provider-check-cancel)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-provider-check-mode'.")
 
@@ -808,37 +808,19 @@ and c cancels the run."
 (declare-function transient-append-suffix "transient")
 (declare-function transient-remove-suffix "transient")
 
-(defun harness-ui-provider-check--suffix-command (key)
-  "Return the command the harness menu has at KEY, or nil."
-  (when-let* ((suffix (ignore-errors (transient-get-suffix 'harness-menu key))))
-    (plist-get (if (keywordp (cadr suffix)) (cdr suffix) (car (last suffix)))
-               :command)))
-
 (defun harness-ui-provider-check--init ()
   "Follow the harness's check events, and offer the command in the keys."
   (add-hook 'harness-ui-event-functions #'harness-ui-provider-check--on-event)
-  (define-key harness-ui-map (kbd "!") #'harness-provider-check)
-  (condition-case err
-      (pcase (harness-ui-provider-check--suffix-command "!")
-        ((pred null)
-         (transient-append-suffix
-          'harness-menu "m" '("!" "Provider & model check" harness-provider-check)))
-        ('harness-provider-check nil)
-        (other
-         (harness-log 'warn "provider-check: the menu key ! is %s's: no entry"
-                      other)))
-    (error
-     (harness-log 'warn "provider-check: no menu entry: %s"
-                  (error-message-string err)))))
+  (harness-ui-bind "!" #'harness-provider-check "Provider & model check"
+                   :group 'session :column "Model")
+  )
 
 (defun harness-ui-provider-check--shutdown ()
   "Stop following the harness's check events and take the keys back."
   (remove-hook 'harness-ui-event-functions #'harness-ui-provider-check--on-event)
-  (when (eq (lookup-key harness-ui-map (kbd "!")) #'harness-provider-check)
-    (define-key harness-ui-map (kbd "!") nil t))
-  (when (eq (harness-ui-provider-check--suffix-command "!")
-            #'harness-provider-check)
-    (ignore-errors (transient-remove-suffix 'harness-menu "!"))))
+  (when (eq (lookup-key harness-ui-session-map (kbd "!")) #'harness-provider-check)
+    (harness-ui-unbind "!" harness-ui-session-map))
+  )
 
 (harness-define-module 'ui-provider-check
   :doc "The provider and model check page: live checks of any model, from the harness."

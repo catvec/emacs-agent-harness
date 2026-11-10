@@ -19,11 +19,11 @@ A device signs in from its own ACP client, which lists "Approve in
 Emacs" among its sign-in methods (and OpenID Connect, when a provider
 is set up).  Choosing it asks the person here: the harness tells the
 user at once (a message, a desktop notification and a count in the mode
-line notifier), and `harness-remote-approve` (C-c h y), or the buttons of
+line notifier), and `harness-remote-approve` (C-c h O y), or the buttons of
 the remote control page, say yes after comparing the code the page
 shows with the one the client shows.
 
-`harness-remote-control` (C-c h P) shows whether the harness serves
+`harness-remote-control` (C-c h O P) shows whether the harness serves
 phones and other devices on the network (the acp-remote module), the
 ACP address their clients connect to, whether what they send is
 encrypted, the devices that wait to be approved, and the devices

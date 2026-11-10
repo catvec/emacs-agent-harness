@@ -9,11 +9,11 @@
 ;; Emacs" among its sign-in methods (and OpenID Connect, when a provider
 ;; is set up).  Choosing it asks the person here: the harness tells the
 ;; user at once (a message, a desktop notification and a count in the mode
-;; line notifier), and `harness-remote-approve' (C-c h y), or the buttons of
+;; line notifier), and `harness-remote-approve' (C-c h O y), or the buttons of
 ;; the remote control page, say yes after comparing the code the page
 ;; shows with the one the client shows.
 ;;
-;; `harness-remote-control' (C-c h P) shows whether the harness serves
+;; `harness-remote-control' (C-c h O P) shows whether the harness serves
 ;; phones and other devices on the network (the acp-remote module), the
 ;; ACP address their clients connect to, whether what they send is
 ;; encrypted, the devices that wait to be approved, and the devices
@@ -374,7 +374,7 @@ The user is told of each new one."
     (dolist (a approvals)
       (unless (member (plist-get a :id) harness-ui-acp-remote--seen)
         (push (plist-get a :id) harness-ui-acp-remote--seen)
-        (message "Harness: %s asks to sign in.  Approve it only if its client shows that code: C-c h y"
+        (message "Harness: %s asks to sign in.  Approve it only if its client shows that code: C-c h O y"
                  (harness-ui-acp-remote--describe a))))
     (unless (equal (mapcar (lambda (a) (plist-get a :id)) approvals)
                    (mapcar (lambda (a) (plist-get a :id)) harness-ui-acp-remote--waiting))
@@ -645,7 +645,7 @@ from its own screen: it presents the token as it connects."
     (define-key map (kbd "d") #'harness-ui-acp-remote-revoke)
     (define-key map (kbd "K") #'harness-ui-acp-remote-revoke-all)
     (define-key map (kbd "g") #'harness-ui-acp-remote-refresh)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-acp-remote-mode'.")
 
@@ -731,18 +731,20 @@ On `harness-ui-notify-segment-functions'."
   (add-hook 'harness-ui-event-functions #'harness-ui-acp-remote--on-event)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-acp-remote--redraw-all)
   (add-hook 'harness-ui-notify-segment-functions #'harness-ui-acp-remote--segment)
-  (define-key harness-ui-map (kbd "P") #'harness-remote-control)
-  (define-key harness-ui-map (kbd "y") #'harness-remote-approve))
+  (harness-ui-bind "P" #'harness-remote-control "Remote control"
+                   :group 'options :column "Remote" :inapt-if 'harness-corporate-p)
+  (harness-ui-bind "y" #'harness-remote-approve "Remote approval"
+                   :group 'options :column "Remote"))
 
 (defun harness-ui-acp-remote--shutdown ()
   "Unwire the page, and forget what waited."
   (remove-hook 'harness-ui-event-functions #'harness-ui-acp-remote--on-event)
   (remove-hook 'harness-ui-redraw-hook #'harness-ui-acp-remote--redraw-all)
   (remove-hook 'harness-ui-notify-segment-functions #'harness-ui-acp-remote--segment)
-  (when (eq (lookup-key harness-ui-map (kbd "P")) #'harness-remote-control)
-    (define-key harness-ui-map (kbd "P") nil t))
-  (when (eq (lookup-key harness-ui-map (kbd "y")) #'harness-remote-approve)
-    (define-key harness-ui-map (kbd "y") nil t))
+  (when (eq (lookup-key harness-ui-options-map (kbd "P")) #'harness-remote-control)
+    (harness-ui-unbind "P" harness-ui-options-map))
+  (when (eq (lookup-key harness-ui-options-map (kbd "y")) #'harness-remote-approve)
+    (harness-ui-unbind "y" harness-ui-options-map))
   (setq harness-ui-acp-remote--waiting nil
         harness-ui-acp-remote--seen nil))
 

@@ -12,7 +12,7 @@ in which the matches happened somewhere else.
 ## What the page decides
 
 The Secrets page is the fifth page of the existing Jail & permissions
-view (`C-c h j`, then `5`).  The Overview's Details section ends with a
+view (`C-c h S j`, then `5`).  The Overview's Details section ends with a
 linked summary, `Secrets  Masking on · 2 sources · 14 masked values`, so the
 state is visible without opening the page.
 

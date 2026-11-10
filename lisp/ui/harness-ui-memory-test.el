@@ -19,7 +19,7 @@
 
 (defvar harness-acp-token)
 (defvar harness-acp--server-enabled)
-(defvar harness-menu)
+(defvar harness-ui-menu)
 (defvar harness-tools-menu)
 (defvar harness-ui-map)
 (defvar harness-ui--sessions)
@@ -197,8 +197,8 @@ under User -- with the buttons and tooltips it offers."
         (should (commandp (key-binding (kbd "c"))))
         (should (commandp (key-binding (kbd "C"))))
         (should (eq (key-binding (kbd "g")) 'harness-ui-memories-refresh)))
-      (should (eq (lookup-key harness-ui-map (kbd "m")) 'harness-remember))
-      (should (eq (lookup-key harness-ui-map (kbd "M")) 'harness-memories)))))
+      (should (eq (lookup-key harness-ui-tools-map (kbd "m")) 'harness-remember))
+      (should (eq (lookup-key harness-ui-tools-map (kbd "M")) 'harness-memories)))))
 
 (ert-deftest harness-ui-memories-states-are-noun-phrases ()
   "Every state of the page reads as a noun phrase: the empty scopes, a

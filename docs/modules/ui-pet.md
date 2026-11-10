@@ -12,7 +12,7 @@ The companion pet: its buffer, and the creature and its words in chats, on the b
 
 ## About
 
-One buffer, "*harness pet*", opened with `harness-pet` (C-c h z, or
+One buffer, "*harness pet*", opened with `harness-pet` (C-c h V z, or
 z in the harness menu), shows the companion pet of the pet module:
 
   header line   [Pet] [Rename] [Mute] [Release] [Turn off], g and q;

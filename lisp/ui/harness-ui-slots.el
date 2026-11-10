@@ -149,7 +149,7 @@
 ;;     apart, while a window shows a page with a call at work or waiting;
 ;;   - either way, a redraw that would draw the same text is skipped.
 ;;
-;; S on a task board opens the page for the board's project, and C-c h Q
+;; S on a task board opens the page for the board's project, and C-c h V Q
 ;; ("Task slots", Q, in the harness menu) for the current one's.
 
 ;;; Code:
@@ -1620,7 +1620,7 @@ whose text reads the same is left alone (`harness-ui-slots--render')."
     (define-key map (kbd "U") #'harness-ui-slots-resume-tasks)
     (define-key map (kbd "s") #'harness-ui-slots-pause-queues)
     (define-key map (kbd "S") #'harness-ui-slots-resume-queues)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-slots-mode'.")
 
@@ -1921,7 +1921,7 @@ rows wait on and the task boards' clock, and
   (add-hook 'harness-ui-event-functions #'harness-ui-slots--on-event)
   (add-hook 'harness-ui-pending-changed-hook #'harness-ui-slots--on-pending)
   (add-hook 'harness-ui-tasks-tick-hook #'harness-ui-slots--on-tick)
-  (define-key harness-ui-map (kbd "Q") #'harness-slots))
+  (harness-ui-bind "Q" #'harness-slots "Task slots" :group 'views :column "Views"))
 
 (defun harness-ui-slots--shutdown ()
   "Stop following the events, the requests and the clock; take the key back."
@@ -1930,8 +1930,8 @@ rows wait on and the task boards' clock, and
   (remove-hook 'harness-ui-pending-changed-hook #'harness-ui-slots--on-pending)
   (remove-hook 'harness-ui-tasks-tick-hook #'harness-ui-slots--on-tick)
   (harness-ui-slots--tool-timer-stop)
-  (when (eq (lookup-key harness-ui-map (kbd "Q")) #'harness-slots)
-    (define-key harness-ui-map (kbd "Q") nil)))
+  (when (eq (lookup-key harness-ui-views-map (kbd "Q")) #'harness-slots)
+    (harness-ui-unbind "Q" harness-ui-views-map)))
 
 (harness-define-module 'ui-slots
   :doc "The task slots page: the tasks that hold slots as the session list lists sessions, who is using the machine's tool slots, the queue and its waits by priority."

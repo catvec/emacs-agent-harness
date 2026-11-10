@@ -418,10 +418,8 @@ ARGS names the kind (`harness-ui-compact-parse-kind'), or is empty to ask."
 
 (defun harness-ui-compact--init ()
   "Bind `harness-compact', put it in the menu and take /compact in the chat."
-  (define-key harness-ui-map (kbd "C") #'harness-compact)
-  (condition-case err
-      (transient-append-suffix 'harness-menu "f" '("C" "Context compaction" harness-compact))
-    (error (harness-log 'warn "compact: no menu entry: %s" (error-message-string err))))
+  (harness-ui-bind "C" #'harness-compact "Context compaction"
+                   :group 'session :column "Limits")
   (setf (alist-get "compact" harness-chat-commands nil nil #'equal) #'harness-ui-compact--chat-command))
 
 (harness-define-module 'ui-compact

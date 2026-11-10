@@ -82,7 +82,7 @@
     (define-key map (kbd "C-c w b") #'harness-ui-workspace-open-board)
     (define-key map (kbd "C-c w s") #'harness-ui-workspace-stop)
     (define-key map (kbd "C-c w q") #'harness-ui-bury)
-    (define-key map (kbd "C-c w ?") #'harness-menu)
+    (define-key map (kbd "C-c w ?") #'harness-ui-menu)
     map)
   "Keys of the workspace buffer.
 Letters type into the compose box; these chords act on the workspace.")
@@ -1118,7 +1118,7 @@ the `C-c w' keys act on the workspace."
   (add-hook 'harness-ui-connected-hook #'harness-ui-workspace--on-redraw)
   (add-hook 'harness-ui-pending-drawn-predicates #'harness-ui-workspace--drawn-p)
   (add-hook 'harness-ui-pending-changed-hook #'harness-ui-workspace--on-pending-changed)
-  (define-key harness-ui-map (kbd "Y") #'harness-workspace))
+  (harness-ui-bind "Y" #'harness-workspace "Workspace" :group 'views :column "Views"))
 
 (defun harness-ui-workspace--shutdown ()
   "Remove the workspace mode from the harness UI."
@@ -1128,7 +1128,7 @@ the `C-c w' keys act on the workspace."
   (remove-hook 'harness-ui-connected-hook #'harness-ui-workspace--on-redraw)
   (remove-hook 'harness-ui-pending-drawn-predicates #'harness-ui-workspace--drawn-p)
   (remove-hook 'harness-ui-pending-changed-hook #'harness-ui-workspace--on-pending-changed)
-  (define-key harness-ui-map (kbd "Y") nil))
+  (harness-ui-unbind "Y" harness-ui-views-map))
 
 (harness-define-module 'ui-workspace
   :doc "The workspace chat: one timeline over threads, with a compose box."

@@ -193,7 +193,7 @@ down, so the control shows the state the user is creating."
                                                  #'harness-voice-toggle "Spoken replies · current chat") 60 nil)
                      (list (harness-voice--button "Setup" #'harness-voice-setup
                                                  "Voice settings") 50 nil))
-             (list (harness-voice--button "Voice" #'harness-voice "Voice controls · C-c h v")))))
+             (list (harness-voice--button "Voice" #'harness-voice "Voice controls · C-c h V v")))))
       (harness-ui-settings-line
        (list items) (max 1 (- (/ (harness-compose--room) (frame-char-width)) 3))))))
 
@@ -946,15 +946,22 @@ threads, questions and permissions in the existing harness workflow."
 
 ;;;; Module
 
-(defun harness-voice--claim-key (map key command &optional stale)
+(defun harness-voice--claim-key (map key command &optional stale &rest plist)
   "Bind KEY in MAP to COMMAND unless another command owns it.
 A free key, COMMAND itself, or STALE -- a binding older code gave the
 key -- is claimed; any other command stays.  A number means the key
-sequence runs past the map's bindings, so the key is free."
+sequence runs past the map's bindings, so the key is free.  In a level
+of the harness's keys the key is claimed with `harness-ui-bind', LABEL
+and the rest of PLIST saying what the menu calls it; another map is
+bound with `define-key'."
   (let ((current (lookup-key map (kbd key))))
     (when (or (null current) (numberp current)
               (eq current command) (eq current stale))
-      (define-key map (kbd key) command))))
+      (if (harness-ui--level map)
+          (apply #'harness-ui-bind key command
+                 (or (plist-get plist :label) (symbol-name command))
+                 (append (list :map map) (cddr plist)))
+        (define-key map (kbd key) command)))))
 
 (defun harness-voice--init ()
   "Wire optional voice into compose boxes and the session menu."
@@ -969,17 +976,15 @@ sequence runs past the map's bindings, so the key is free."
   (unless (member harness-voice--mode-line global-mode-string)
     (setq global-mode-string (append (if (stringp global-mode-string) (list global-mode-string) global-mode-string)
                                     (list harness-voice--mode-line))))
-  ;; v is voice's; the version page moved to U.  An older version
-  ;; module may still have left v on `harness-version': take that over,
-  ;; but leave any other command the user bound there.
-  (harness-voice--claim-key harness-ui-map "v" #'harness-voice 'harness-version)
+  ;; v is voice's, in the View group.  An older version module may still
+  ;; have left it on `harness-version': take that over, but leave any
+  ;; other command the user bound there.
+  (harness-voice--claim-key harness-ui-views-map "v" #'harness-voice 'harness-version
+                            :label "Voice" :column "Views")
+  (harness-voice--claim-key harness-ui-views-map "V" #'harness-voice-output nil
+                            :label "Output voice" :column "Views")
   (harness-voice--claim-key harness-compose-map "C-c v" #'harness-voice-dictate)
-  (harness-voice--claim-key harness-compose-map "C-c V" #'harness-voice-interrupt)
-  (ignore-errors (transient-remove-suffix 'harness-session-menu "v"))
-  (transient-append-suffix 'harness-session-menu "r" '("v" "Voice chat" harness-voice))
-  (transient-append-suffix 'harness-session-menu "v"
-    '("V" "Output voice" harness-voice-output
-      :if (lambda () (harness-ui--command-available-p 'harness-voice-output)))))
+  (harness-voice--claim-key harness-compose-map "C-c V" #'harness-voice-interrupt))
 
 (defun harness-voice--shutdown ()
   "Stop all client audio and remove the optional module's hooks and keys."
@@ -995,12 +1000,14 @@ sequence runs past the map's bindings, so the key is free."
   (remove-hook 'delete-frame-functions #'harness-voice-live--frame-deleted)
   (remove-hook 'kill-emacs-hook #'harness-voice--reset)
   (setq global-mode-string (delete harness-voice--mode-line global-mode-string))
-  (dolist (binding `((,harness-ui-map "v" harness-voice)
+  (dolist (binding `((,harness-ui-views-map "v" harness-voice)
+                     (,harness-ui-views-map "V" harness-voice-output)
                      (,harness-compose-map "C-c v" harness-voice-dictate)
                      (,harness-compose-map "C-c V" harness-voice-interrupt)))
     (when (eq (lookup-key (car binding) (kbd (cadr binding))) (caddr binding))
-      (define-key (car binding) (kbd (cadr binding)) nil t)))
-  (ignore-errors (transient-remove-suffix 'harness-session-menu "v")))
+      (if (harness-ui--level (car binding))
+          (harness-ui-unbind (cadr binding) (car binding))
+        (define-key (car binding) (kbd (cadr binding)) nil t)))))
 
 (harness-define-module 'ui-voice
   :doc "WAV dictation or live voice through a provider, with ChatGPT Live, a local pipeline or a sidecar of your own."

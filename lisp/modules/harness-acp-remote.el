@@ -1254,7 +1254,7 @@ Return a promise the `authenticate' of the device waits for."
     (condition-case err
         (harness-call 'notification/send
                       (list :title "A device asks to sign in to the harness"
-                            :body (format "%s (%s%s) shows the code %s.  Approve it in Emacs only if the code is the one on your device: C-c h P."
+                            :body (format "%s (%s%s) shows the code %s.  Approve it in Emacs only if the code is the one on your device: C-c h O P."
                                           (plist-get approval :name) (plist-get approval :address)
                                           (if-let* ((origin (plist-get approval :origin)))
                                               (format ", from the page %s" origin)
@@ -1513,7 +1513,7 @@ shows it once, for a client that wants one in its settings."
      "A client with a field of its own for the token takes the address and the secret apart:"
      (harness-acp-remote--copy-field "a" "Address" ws)
      (harness-acp-remote--copy-field "t" "Session secret (Authorization: Bearer)" secret)
-     (format "<span class=\"warn\">This is shown once.</span> <span class=\"note\">Whoever has the secret can drive the harness until you end the session in Emacs (remote control page, C-c h P) or it goes unused for %s. %s</span>"
+     (format "<span class=\"warn\">This is shown once.</span> <span class=\"note\">Whoever has the secret can drive the harness until you end the session in Emacs (remote control page, C-c h O P) or it goes unused for %s. %s</span>"
              (harness-acp-remote--span harness-acp-remote-idle-timeout)
              (if (harness-acp-remote--secure-p)
                  ""

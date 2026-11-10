@@ -919,7 +919,8 @@ Return an ATTACHMENT plist, or nil when the clipboard holds no image."
 
 (defun harness-ui-media--init ()
   "Wire the media commands into the UI."
-  (define-key harness-ui-map (kbd "r") #'harness-record-audio))
+  (harness-ui-bind "r" #'harness-record-audio "Audio recording"
+                   :group 'views :column "Views"))
 
 (harness-define-module 'ui-media
   :doc "Audio playback and recording, video thumbnails, clipboard images."

@@ -386,8 +386,8 @@ business, and is left for whoever made it."
   '(("+" . harness-priority-raise) ("-" . harness-priority-lower)
     ("y" . harness-set-priority) ("Y" . harness-set-priority-all))
   "The harness keys this module binds, as (KEY . COMMAND).
-`p' is not one of them: it is the permission mode
-\(`harness-set-permission-mode').")
+They are the session group's; `p' is not one of them: it is the
+permission mode (`harness-set-permission-mode'), at the top level.")
 
 (defun harness-ui-priority--init ()
   "Show the priority segment in chat headers and bind the priority keys.
@@ -396,7 +396,9 @@ module asks for them."
   (add-hook 'harness-chat-header-functions #'harness-ui-priority--header)
   (add-hook 'harness-ui-event-functions #'harness-ui-priority--on-event)
   (dolist (key harness-ui-priority--keys)
-    (define-key harness-ui-map (kbd (car key)) (cdr key))))
+    (harness-ui-bind (car key) (cdr key)
+                     (harness-ui-label (cdr key)) :group 'session
+                     :column "Priority")))
 
 (defun harness-ui-priority--shutdown ()
   "Take the priority segment out of chat headers and unbind its keys.
@@ -404,8 +406,8 @@ A key another module bound in the meantime is left as it is."
   (remove-hook 'harness-chat-header-functions #'harness-ui-priority--header)
   (remove-hook 'harness-ui-event-functions #'harness-ui-priority--on-event)
   (dolist (key harness-ui-priority--keys)
-    (when (eq (lookup-key harness-ui-map (kbd (car key))) (cdr key))
-      (define-key harness-ui-map (kbd (car key)) nil))))
+    (when (eq (lookup-key harness-ui-session-map (kbd (car key))) (cdr key))
+      (harness-ui-unbind (car key) harness-ui-session-map))))
 
 (harness-define-module 'ui-priority
   :doc "A session's priority: the chat header's segment, the keys that raise, lower and set it, and the bulk command."

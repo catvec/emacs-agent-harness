@@ -338,7 +338,8 @@ Turned off, it leaves the buffer a normal session's."
 
 (defun harness-ui-btw--init ()
   "Bind `harness-btw' in `harness-ui-map'."
-  (define-key harness-ui-map (kbd "b") #'harness-btw))
+  (harness-ui-bind "b" #'harness-btw "BTW side conversation"
+                   :group 'views :column "Views"))
 
 (harness-define-module 'ui-btw
   :doc "BTW side conversations over the current session or view."

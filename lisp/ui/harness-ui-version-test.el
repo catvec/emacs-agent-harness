@@ -763,7 +763,7 @@ until one."
   (should (eq #'harness-ui-version-refresh (lookup-key harness-ui-version-mode-map (kbd "g"))))
   (should (eq #'harness-ui-version-update (lookup-key harness-ui-version-mode-map (kbd "u"))))
   (should (eq #'harness-reload (lookup-key harness-ui-version-mode-map (kbd "r"))))
-  (should (eq #'harness-menu (lookup-key harness-ui-version-mode-map (kbd "?"))))
+  (should (eq #'harness-ui-menu (lookup-key harness-ui-version-mode-map (kbd "?"))))
   (should (eq #'forward-button (lookup-key harness-ui-version-mode-map (kbd "TAB"))))
   ;; q comes from the shared view map, which buries the page.
   (should (eq harness-ui-view-map (keymap-parent harness-ui-version-mode-map)))
@@ -785,8 +785,7 @@ integer rather than nil."
   "Run BODY with fresh prefix keymaps and both shortcut modules isolated.
 Neither module has run when BODY starts; both are shut down after it."
   (declare (indent 0))
-  `(let ((harness-ui-map (make-sparse-keymap))
-         (harness-compose-map (harness-ui-version-test--compose-map))
+  `(let ((harness-compose-map (harness-ui-version-test--compose-map))
          (harness-ui-event-functions nil)
          (harness-ui-redraw-hook nil)
          (harness-ui-connected-hook nil)
@@ -803,62 +802,57 @@ Neither module has run when BODY starts; both are shut down after it."
          (harness-voice--job nil)
          (global-mode-string nil))
      (cl-letf (((symbol-function 'harness-ui-connected-p) (lambda () nil)))
-       (unwind-protect
-           (progn ,@body)
-         (harness-voice--shutdown)
-         (harness-ui-version--shutdown)))))
+       (harness-ui-test--with-empty-keys
+         (unwind-protect
+             (progn ,@body)
+           (harness-voice--shutdown)
+           (harness-ui-version--shutdown))))))
 
-(defun harness-ui-version-test--suffix-plist (suffix)
-  "Return the properties of SUFFIX, a suffix of a transient layout.
-Transient 0.8 and later write it (CLASS . PLIST), earlier ones (LEVEL
-CLASS PLIST)."
-  (if (keywordp (cadr suffix)) (cdr suffix) (car (last suffix))))
-
-(defun harness-ui-version-test--suffix (menu key)
-  "Return the properties of KEY in transient MENU, or nil."
-  (when-let* ((suffix (ignore-errors (transient-get-suffix menu key))))
-    (harness-ui-version-test--suffix-plist suffix)))
+(defun harness-ui-version-test--menu-line (menu key)
+  "Return what MENU shows beside KEY, or nil.
+The menu is opened and closed again, and the line read from its text."
+  (cdr (assoc key (harness-ui-test--menu-lines menu))))
 
 (ert-deftest harness-ui-version-owns-u-not-v ()
-  "The page binds U; v is free while voice is off, and V is not taken."
+  "The page's key is U, in the Options group of the harness's keys.
+v is voice's in the View group, and the page never takes it."
   (harness-ui-version-test-with-keys
     (harness-ui-version--init)
-    (should (eq #'harness-version (lookup-key harness-ui-map (kbd "U"))))
-    (should-not (lookup-key harness-ui-map (kbd "v")))
-    (should-not (eq #'harness-version (lookup-key harness-ui-map (kbd "V"))))
+    (should (eq #'harness-version (lookup-key harness-ui-options-map (kbd "U"))))
+    (should-not (lookup-key harness-ui-options-map (kbd "v")))
+    (should-not (lookup-key harness-ui-map (kbd "U")))
+    (should-not (lookup-key harness-ui-views-map (kbd "U")))
     (should (commandp #'harness-version))))
 
 (ert-deftest harness-ui-version-voice-keeps-v-in-either-init-order ()
-  "Voice owns v and the page owns U whichever module initialises first."
+  "Voice owns v in the View group, and the page U in Options,
+whichever module initialises first."
   (harness-ui-version-test-with-keys
     (dolist (order '(version-first voice-first))
-      (setq harness-ui-map (make-sparse-keymap)
-            harness-compose-map (harness-ui-version-test--compose-map))
-      (unwind-protect
-          (progn
-            (if (eq order 'version-first)
-                (progn (harness-ui-version--init) (harness-voice--init))
-              (harness-voice--init) (harness-ui-version--init))
-            (should (eq #'harness-voice (lookup-key harness-ui-map (kbd "v"))))
-            (should (eq #'harness-version (lookup-key harness-ui-map (kbd "U"))))
-            (should (eq #'harness-voice-dictate (lookup-key harness-compose-map (kbd "C-c v"))))
-            (should-not (lookup-key harness-ui-map (kbd "V"))))
-        (harness-voice--shutdown)
-        (harness-ui-version--shutdown)))))
+      (ert-info ((format "%s" order))
+        (if (eq order 'version-first)
+            (progn (harness-ui-version--init) (harness-voice--init))
+          (harness-voice--init) (harness-ui-version--init))
+        (should (eq #'harness-voice (lookup-key harness-ui-views-map (kbd "v"))))
+        (should (eq #'harness-version (lookup-key harness-ui-options-map (kbd "U"))))
+        (should (eq #'harness-voice-dictate (lookup-key harness-compose-map (kbd "C-c v")))))
+      (harness-voice--shutdown)
+      (harness-ui-version--shutdown))))
 
 (ert-deftest harness-ui-version-reload-keeps-the-other-modules-keys ()
-  "Initialising either module again leaves the other's key and V alone."
+  "Initialising either module again leaves the other's keys alone."
   (harness-ui-version-test-with-keys
     (harness-ui-version--init)
     (harness-voice--init)
-    (define-key harness-ui-map (kbd "V") #'harness-toggle-supervisor)
+    (harness-ui-bind "v" #'harness-toggle-supervisor "Supervisor mode"
+                     :map harness-ui-session-map :column "State")
     (harness-ui-version--init)
-    (should (eq #'harness-voice (lookup-key harness-ui-map (kbd "v"))))
+    (should (eq #'harness-voice (lookup-key harness-ui-views-map (kbd "v"))))
     (harness-voice--init)
     (harness-ui-version--init)
-    (should (eq #'harness-voice (lookup-key harness-ui-map (kbd "v"))))
-    (should (eq #'harness-version (lookup-key harness-ui-map (kbd "U"))))
-    (should (eq #'harness-toggle-supervisor (lookup-key harness-ui-map (kbd "V"))))))
+    (should (eq #'harness-voice (lookup-key harness-ui-views-map (kbd "v"))))
+    (should (eq #'harness-version (lookup-key harness-ui-options-map (kbd "U"))))
+    (should (eq #'harness-toggle-supervisor (lookup-key harness-ui-session-map (kbd "v"))))))
 
 (ert-deftest harness-ui-version-shutdowns-keep-the-other-modules-keys ()
   "Shutting one module down removes only its own binding."
@@ -866,74 +860,68 @@ CLASS PLIST)."
     (harness-ui-version--init)
     (harness-voice--init)
     (harness-ui-version--shutdown)
-    (should (eq #'harness-voice (lookup-key harness-ui-map (kbd "v"))))
-    (should-not (lookup-key harness-ui-map (kbd "U")))
+    (should (eq #'harness-voice (lookup-key harness-ui-views-map (kbd "v"))))
+    (should-not (lookup-key harness-ui-options-map (kbd "U")))
     (harness-ui-version--init)
     (harness-voice--shutdown)
-    (should (eq #'harness-version (lookup-key harness-ui-map (kbd "U"))))
-    (should-not (lookup-key harness-ui-map (kbd "v")))
+    (should (eq #'harness-version (lookup-key harness-ui-options-map (kbd "U"))))
+    (should-not (lookup-key harness-ui-views-map (kbd "v")))
     (should-not (lookup-key harness-compose-map (kbd "C-c v")))))
-
-(ert-deftest harness-ui-version-clears-only-a-stale-v-binding ()
-  "A v left on `harness-version' by older code goes; voice then takes it."
-  (harness-ui-version-test-with-keys
-    (define-key harness-ui-map (kbd "v") #'harness-version)
-    (harness-ui-version--init)
-    (should-not (lookup-key harness-ui-map (kbd "v")))
-    (should (eq #'harness-version (lookup-key harness-ui-map (kbd "U"))))
-    (harness-voice--init)
-    (should (eq #'harness-voice (lookup-key harness-ui-map (kbd "v"))))))
 
 (ert-deftest harness-ui-version-keys-leave-user-bindings-alone ()
   "Re-initialising and shutting down keep a command the user put there."
   (harness-ui-version-test-with-keys
     (harness-ui-version--init)
     (harness-voice--init)
-    (define-key harness-ui-map (kbd "v") #'ignore)
-    (define-key harness-ui-map (kbd "U") #'ignore)
+    (harness-ui-bind "v" #'ignore "Something else"
+                     :map harness-ui-views-map :column "Views" :replace t)
+    (harness-ui-bind "U" #'ignore "Something else"
+                     :map harness-ui-options-map :column "Upkeep" :replace t)
     (define-key harness-compose-map (kbd "C-c v") #'ignore)
     (harness-ui-version--init)
     (harness-voice--init)
-    (should (eq #'ignore (lookup-key harness-ui-map (kbd "v"))))
-    (should (eq #'ignore (lookup-key harness-ui-map (kbd "U"))))
+    (should (eq #'ignore (lookup-key harness-ui-views-map (kbd "v"))))
+    (should (eq #'ignore (lookup-key harness-ui-options-map (kbd "U"))))
     (should (eq #'ignore (lookup-key harness-compose-map (kbd "C-c v"))))
     (harness-voice--shutdown)
     (harness-ui-version--shutdown)
-    (should (eq #'ignore (lookup-key harness-ui-map (kbd "v"))))
-    (should (eq #'ignore (lookup-key harness-ui-map (kbd "U"))))
+    (should (eq #'ignore (lookup-key harness-ui-views-map (kbd "v"))))
+    (should (eq #'ignore (lookup-key harness-ui-options-map (kbd "U"))))
     (should (eq #'ignore (lookup-key harness-compose-map (kbd "C-c v"))))))
 
 (ert-deftest harness-ui-version-shortcut-is-in-the-menus ()
-  "Both harness menus name the page's U beside Update, and not v.
-Voice adds v to the session menu while it is enabled."
-  (harness-ui-version-test-with-keys
-    (dolist (menu '(harness-menu harness-config-menu))
-      (let ((version (harness-ui-version-test--suffix menu "U")))
-        (should (eq #'harness-version (plist-get version :command)))
-        (should (equal "Version" (funcall (plist-get version :description)))))
-      (should-not (harness-ui-version-test--suffix menu "v"))
-      (let ((update (harness-ui-version-test--suffix menu "M-u")))
-        (should (eq #'harness-update (plist-get update :command)))
-        (should (equal "Harness update" (plist-get update :description)))))
-    (harness-voice--init)
-    (let ((voice (harness-ui-version-test--suffix 'harness-session-menu "v")))
-      (should (eq #'harness-voice (plist-get voice :command)))
-      (should (equal "Voice chat" (plist-get voice :description))))
-    (harness-voice--shutdown)
-    (should-not (harness-ui-version-test--suffix 'harness-session-menu "v"))))
+  "The Options menu names the page's U beside Harness update, not v;
+the View menu's v is voice's, and goes when voice does."
+  (harness-ui-test--with-keys-restored
+   (unwind-protect
+       (progn
+         (harness-ui-version--init)
+         (should (equal "Version"
+                        (harness-ui-version-test--menu-line #'harness-ui-options-menu "U")))
+         (should (equal "Harness update"
+                        (harness-ui-version-test--menu-line #'harness-ui-options-menu "M-u")))
+         (should-not (harness-ui-version-test--menu-line #'harness-ui-options-menu "v"))
+         (harness-voice--init)
+         (should (equal "Voice"
+                        (harness-ui-version-test--menu-line #'harness-ui-views-menu "v")))
+         (harness-voice--shutdown)
+         (should-not (harness-ui-version-test--menu-line #'harness-ui-views-menu "v")))
+     (harness-voice--shutdown)
+     (harness-ui-version--shutdown))))
 
 (ert-deftest harness-ui-version-menus-leave-provider-check-its-key ()
-  "Update moves off !, so the provider check keeps its menu entry."
-  (harness-ui-version-test-with-keys
-    (harness-ui-version--init)
-    (unwind-protect
-        (progn
-          (harness-ui-provider-check--init)
-          (should (eq #'harness-provider-check
-                      (plist-get (harness-ui-version-test--suffix 'harness-menu "!") :command)))
-          (should (eq #'harness-update
-                      (plist-get (harness-ui-version-test--suffix 'harness-menu "M-u") :command))))
-      (harness-ui-provider-check--shutdown))))
+  "Update is in Options, so the provider check keeps ! in the Session menu."
+  (harness-ui-test--with-keys-restored
+   (unwind-protect
+       (progn
+         (harness-ui-provider-check--init)
+         (should (eq #'harness-provider-check
+                     (lookup-key harness-ui-session-map (kbd "!"))))
+         (should (equal "Provider & model check"
+                        (harness-ui-version-test--menu-line #'harness-ui-session-menu "!")))
+         (should (equal "Harness update"
+                        (harness-ui-version-test--menu-line #'harness-ui-options-menu "M-u"))))
+     (harness-ui-provider-check--shutdown))))
 
 (ert-deftest harness-ui-version-page-q-buries ()
   "q on the version page buries it, as it does on every harness view."
@@ -1178,7 +1166,9 @@ recipe's, so its main tracks that URL."
 
 (ert-deftest harness-ui-version-asks-the-harness-over-acp ()
   (skip-unless (executable-find "git"))
-  (harness-test-with-temp-state
+  ;; The modules it loads bind their keys; the tree is the tests' after.
+  (harness-ui-test--with-keys-restored
+   (harness-test-with-temp-state
     (harness-test-reset-bus)
     (let ((harness-acp--server-enabled nil))
       (dolist (m '(acp ui version ui-version)) (harness-test-load-module m)))
@@ -1209,7 +1199,8 @@ recipe's, so its main tracks that URL."
         (cl-letf (((symbol-function 'harness-ui-version--width) (lambda () 120)))
           (unwind-protect
               (save-window-excursion
-                (should (eq #'harness-version (lookup-key harness-ui-map (kbd "U"))))
+                (should (eq #'harness-version (lookup-key harness-ui-options-map (kbd "U"))))
+                (should (eq #'harness-version (key-binding (kbd "C-c h O U"))))
               (harness-ui-version-test--commit-in upstream "second")
               (harness-version)
               (setq page (get-buffer harness-ui-version--buffer-name))
@@ -1247,7 +1238,7 @@ recipe's, so its main tracks that URL."
             (when page (kill-buffer page))
             (harness-modules-shutdown)
             (dolist (c (copy-sequence harness-acp--clients)) (harness-acp--drop-client c))
-            (delete-directory base t)))))))
+            (delete-directory base t))))))))
 
 (provide 'harness-ui-version-test)
 ;;; harness-ui-version-test.el ends here

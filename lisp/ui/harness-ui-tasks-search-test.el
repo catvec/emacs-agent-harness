@@ -472,7 +472,7 @@ match.  / under the harness prefix stays the quick search's."
     (let ((id (harness-ui-tasks-search-test--submit board "Fix the flaky test")))
       (setq harness-ui-tasks-search-test--replies
             (list (format "{\"show\":[\"%s\"],\"do\":[]}" id)))
-      (should (eq (lookup-key harness-ui-map (kbd "/")) #'harness-quick-search))
+      (should (eq (lookup-key harness-ui-tools-map (kbd "/")) #'harness-quick-search))
       (with-current-buffer board
         ;; A task half described, point back on a card.
         (goto-char harness-compose-end)

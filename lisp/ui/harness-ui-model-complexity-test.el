@@ -174,17 +174,17 @@ providers, and a model chosen there keeps its real id and label."
   (harness-ui-model-complexity-test-with
    (harness-ui-model-complexity--init)
    (should (= 1 (cl-count #'harness-ui-model-complexity--pick harness-ui-model-picker-functions)))
-   (should (eq (lookup-key harness-ui-map (kbd "=")) #'harness-model-complexity))
+   (should (eq (lookup-key harness-ui-session-map (kbd "=")) #'harness-model-complexity))
    (let (default-picker)
      (cl-letf (((symbol-function 'harness-ui--choose-model) (lambda (_) (setq default-picker t))))
        (harness-ui-model-complexity--shutdown)
        (harness-ui-choose-model #'ignore))
      (should default-picker))
-   (should-not (lookup-key harness-ui-map (kbd "=")))
-   (define-key harness-ui-map (kbd "=") #'ignore)
+   (should-not (lookup-key harness-ui-session-map (kbd "=")))
+   (define-key harness-ui-session-map (kbd "=") #'ignore)
    (harness-ui-model-complexity--init)
    (harness-ui-model-complexity--shutdown)
-   (should (eq (lookup-key harness-ui-map (kbd "=")) #'ignore))))
+   (should (eq (lookup-key harness-ui-session-map (kbd "=")) #'ignore))))
 
 (ert-deftest harness-ui-model-complexity-hook-fetches-rankings-and-falls-back ()
   (harness-ui-model-complexity-test-with

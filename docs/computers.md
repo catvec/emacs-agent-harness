@@ -393,7 +393,7 @@ is the staged remainder; see [Not yet](#not-yet).
 ## The computers page
 
 `lisp/ui/harness-ui-computers.el` (module `ui-computers`, key
-`C-c h E`, command `harness-computers`) is the page a person uses.  It
+`C-c h V E`, command `harness-computers`) is the page a person uses.  It
 talks ACP only, so it shows the harness it is connected to, on this
 machine or another, the same way.
 
@@ -555,7 +555,7 @@ registration, the handshake that arrives before the token, capture stop
 and revocation), plus the guarded
 `test/mobile_computer_e2e_test.dart`, which starts a real harness server
 and calls the tools over ACP.  The live page is in the harness UI
-under `C-c h E`; the demo in the task's hand-in starts it with a
+under `C-c h V E`; the demo in the task's hand-in starts it with a
 registered computer.
 
 `scripts/computer-use-demo.sh start` starts the demo's private X display,

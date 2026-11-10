@@ -621,7 +621,7 @@ own, is no fork of any: its creation and deletion refresh no tree
     (define-key map (kbd "n") #'harness-ui-tree-next-in-lane)
     (define-key map (kbd "p") #'harness-ui-tree-previous-in-lane)
     (define-key map (kbd "g") #'harness-ui-tree-refresh)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-tree-mode'.")
 
@@ -813,7 +813,8 @@ run this one on."
   (add-hook 'harness-ui-update-functions #'harness-ui-tree--on-update)
   (add-hook 'harness-ui-event-functions #'harness-ui-tree--on-event)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-tree--redraw-all)
-  (define-key harness-ui-map (kbd "t") #'harness-tree))
+  (harness-ui-bind "t" #'harness-tree "Conversation tree"
+                   :group 'views :column "Views"))
 
 (harness-define-module 'ui-tree
   :doc "Conversation tree: the fork family of a session as a git-like graph."

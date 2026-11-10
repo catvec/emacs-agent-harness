@@ -535,7 +535,7 @@ nothing else."
         (let ((edges (mapcar #'window-pixel-edges (window-list nil 'nomini (frame-first-window))))
               (height (window-pixel-height window)))
           (with-selected-window window
-            (call-interactively #'harness-menu)
+            (call-interactively #'harness-ui-menu)
             (let ((menu (get-buffer-window transient--buffer-name)))
               (should (window-live-p menu))
               (should-not (eq window menu))

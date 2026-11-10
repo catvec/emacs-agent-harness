@@ -307,13 +307,11 @@
   "A opens the report from the harness keys; the report has its own.
 I is non-interactive mode for every session, beside i for one."
   (harness-ui-insights-test-with
-    (should (eq #'harness-insights (lookup-key harness-ui-map (kbd "A"))))
-    (should (eq #'harness-set-non-interactive-all (lookup-key harness-ui-map (kbd "I"))))
-    ;; The menu teaches the same key.  A suffix is (CLASS . PLIST) since
-    ;; transient 0.8, (LEVEL CLASS PLIST) before.
-    (let ((suffix (transient-get-suffix 'harness-menu "A")))
-      (should (eq 'harness-insights
-                  (plist-get (if (keywordp (cadr suffix)) (cdr suffix) (car (last suffix))) :command))))
+    (should (eq #'harness-insights (lookup-key harness-ui-views-map (kbd "A"))))
+    (should (eq #'harness-set-non-interactive-all (lookup-key harness-ui-session-map (kbd "I"))))
+    ;; The menu teaches the same key: the entry is the keymap's own.
+    (should (equal "Insights"
+                   (cdr (assoc "A" (harness-ui-test--menu-lines #'harness-ui-views-menu)))))
     (dolist (binding '(("g" . harness-ui-insights-refresh) ("t" . harness-ui-insights-cycle-period)
                        ("p" . harness-ui-insights-set-project) ("n" . harness-ui-insights-write)
                        ("RET" . harness-ui-insights-open)))

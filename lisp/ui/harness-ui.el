@@ -6893,7 +6893,7 @@ again."
                              (format "Non-interactive %s" (if now "off" "on")))))
 
 (defun harness-ui--non-interactive-menu-label ()
-  "Return the label of `harness-toggle-non-interactive' in `harness-menu'.
+  "Return the label of `harness-toggle-non-interactive' in the menu.
 It says whether what the command changes from the buffer the menu was
 opened from is non-interactive: the buffer's session, or what its
 `harness-ui-setting-target-function' names.  From a buffer without
@@ -7202,39 +7202,476 @@ The log is a harness view like any other: its own mode
 
 ;;;; Keymap, menu, global mode
 
-(defvar harness-ui-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "n") #'harness-new-session)
-    (define-key map (kbd "s") #'harness-switch-session)
-    (define-key map (kbd "m") #'harness-set-model)
-    (define-key map (kbd "M") #'harness-set-model-all)
-    (define-key map (kbd "T") #'harness-set-thinking)
-    (define-key map (kbd "H") #'harness-set-thinking-all)
-    (define-key map (kbd "p") #'harness-set-permission-mode)
-    ;; e: expand the context limit, to the model's whole window.
-    (define-key map (kbd "e") #'harness-set-context-limit)
-    (define-key map (kbd "f") #'harness-fork-session)
-    (define-key map (kbd "k") #'harness-cancel-turn)
-    (define-key map (kbd "D") #'harness-delete-session)
-    (define-key map (kbd "c") #'harness-connect-remote)
-    (define-key map (kbd "R") #'harness-reload)
-    (define-key map (kbd "L") #'harness-show-log)
-    map)
-  "Prefix keymap of the harness UI.  Other UI modules add their commands.")
+;; The harness's keys are one tree: `harness-ui-map' under
+;; `harness-ui-prefix-key', and the groups under it, each a prefix keymap
+;; of its own.  A command is bound with `harness-ui-bind', which keeps the
+;; command, its key and what the menus call it in the level's entries; the
+;; menu of a level is made from those entries as it opens, so the key
+;; beside an entry is the key that runs it, whether the menu has opened or
+;; not.  A group is a level with a menu of its own
+;; (`harness-ui-define-group'), which waiting on its key opens too.
+;;
+;; The commands used most are straight under the prefix: the sessions and
+;; the task board, the model and the permission mode, forking and
+;; cancelling a turn, the compose box and the fullscreen layout.
+;; Everything else is one key further, under the group it belongs to: the
+;; session's settings and its state (S), the views and the region's
+;; commands (V), what the harness has to show and to keep (T), and how it
+;; is set up (O).
 
-;; At top level, not in the `defvar', so a reload binds them in a running
-;; Emacs too.
-(define-key harness-ui-map (kbd "i") #'harness-toggle-non-interactive)
-;; I is i for every session, as M is m.
-(define-key harness-ui-map (kbd "I") #'harness-set-non-interactive-all)
-(define-key harness-ui-map (kbd "F") #'harness-fullscreen)
-(define-key harness-ui-map (kbd "W") #'harness-move-session)
-;; x closes the session, as it does in the session list.
-(define-key harness-ui-map (kbd "x") #'harness-close-session)
-;; X opened a view in a frame read with completion; Emacs's own window
-;; prefixes do that now (C-x 5 5 C-c h a), so a reload unbinds it.
-(when (eq (lookup-key harness-ui-map (kbd "X")) 'harness-ui-open-view-in-frame)
-  (define-key harness-ui-map (kbd "X") nil t))
+(cl-defstruct (harness-ui-level (:copier nil))
+  map title columns entries menu rows)
+
+(defvar harness-ui--levels (make-hash-table :test 'eq)
+  "The `harness-ui-level' of each keymap of the harness's tree, by keymap.")
+
+(defvar harness-ui--level-list nil
+  "The levels of the harness's tree, in the order its menus show them.
+The top level comes first.")
+
+(defvar harness-ui-map (make-sparse-keymap)
+  "Prefix keymap of the harness UI.  Other UI modules add their commands.
+They bind with `harness-ui-bind', which keeps the menu of the level in
+step with the keys, rather than with `define-key'.")
+
+(defconst harness-ui--menu-key 'harness-ui-open-menu
+  "Event the idle timer queues to open the menu of the level it waits at.
+No keyboard sends it: the pending `read-key-sequence' reads it as the
+key after the prefix, so the menu opens while the level stays a keymap,
+and no real key is spent on opening it.  Every level of the tree binds
+it, to the menu of that level.")
+
+(defun harness-ui--make-level (title columns &optional rows)
+  "Return a keymap for a level of the tree, its menu TITLE and COLUMNS.
+COLUMNS are the columns of its menu, in order; a key bound to a column
+the level does not name shows in the last of them."
+  (let* ((map (make-sparse-keymap))
+         (level (make-harness-ui-level :map map :title title :columns columns :rows rows)))
+    (setq harness-ui--level-list (append harness-ui--level-list (list level)))
+    (puthash map level harness-ui--levels)
+    map))
+
+(defun harness-ui--level (map)
+  "Return the level of MAP, or nil when no menu is made from MAP."
+  (and map (gethash map harness-ui--levels)))
+
+(defun harness-ui--set-level-entries (level entries)
+  "Make ENTRIES the menu entries of LEVEL, a level of the harness's keys.
+Tests use it too: their helper file loads before this one, where the
+`setf' of the accessor is defined."
+  (setf (harness-ui-level-entries level) entries))
+
+(defun harness-ui--reset-tree ()
+  "Forget the tree of keys and make its levels anew.
+A reload loads this file again: the levels' maps are emptied, so a key
+the new code no longer binds is not left in an old one."
+  (dolist (level harness-ui--level-list)
+    (setf (harness-ui-level-entries level) nil))
+  (clrhash harness-ui--levels)
+  (setq harness-ui--level-list nil)
+  (let ((top (make-sparse-keymap)))
+    (setq harness-ui-map top)
+    (harness-ui--make-level-at top "Harness"
+                               '("Sessions" "Settings" "Session" "Views" "Groups"))
+    top))
+
+(defun harness-ui--make-level-at (map title columns &optional rows)
+  "Make MAP a level of the tree, its menu TITLE and COLUMNS.
+ROWS, when given, are the groups of columns the menu shows, each a list
+of column titles, so that a level of many columns takes fewer lines
+than one row of all of them would need."
+  (let ((level (make-harness-ui-level :map map :title title :columns columns :rows rows)))
+    (setq harness-ui--level-list (append harness-ui--level-list (list level)))
+    (puthash map level harness-ui--levels)
+    map))
+
+(harness-ui--reset-tree)
+
+(defun harness-ui--level-column-p (level column)
+  "Non-nil when COLUMN is one of the columns of LEVEL's menu, or nil.
+A level that lays its columns out in rows names them there."
+  (member column (apply #'append (or (harness-ui-level-rows level)
+                                     (list (harness-ui-level-columns level))))))
+
+(defun harness-ui-bind (key command label &rest plist)
+  "Bind KEY to COMMAND at a level of the harness's keys, for its menu too.
+LABEL is what the menu calls the command, a noun phrase, or a function
+of no arguments returning one for a command whose name changes.  The
+rest of PLIST is `:group' (the group to bind at, such as `session';
+`harness-ui-MAP' is also taken, as `harness-ui-map' itself), `:column'
+(default the level's first), `:inapt-if' (a form the command must
+satisfy to apply at that level) and `:replace' (take KEY from the
+command that has it).
+
+The menu of the level is made from its keys, so a key bound here shows
+there at once.  A key another command has is not taken: the binding is
+left as it is and the log says so, unless `:replace' says to take it, so
+that two modules cannot bind one key to two commands by accident.  A
+column the level does not name is logged too: the key still shows, in
+the level's last column, so that a command is never lost to a typo, but
+the menu says the column is not the module's to name."
+  (let* ((group (plist-get plist :group))
+         (group (if (and group (symbolp group)) group (car-safe group)))
+         (map (or (plist-get plist :map)
+                  (and group
+                       (symbol-value (intern (format "harness-ui-%s-map" group))))
+                  harness-ui-map))
+         (keys (kbd key))
+         (level (harness-ui--level map))
+         (entry (list :command command
+                      :label (or label (symbol-name command))
+                      :column (or (plist-get plist :column)
+                                  (and level (car (harness-ui-level-columns level))))
+                      :inapt-if (plist-get plist :inapt-if)))
+         (held (lookup-key map keys)))
+    (when (and level (plist-get plist :column)
+               (not (harness-ui--level-column-p level (plist-get plist :column))))
+      (harness-log 'warn "harness-ui-bind: %s has no column %s: %s shows in its last"
+                   (harness-ui-level-title level) (plist-get plist :column)
+                   (key-description keys)))
+    (cond
+     ((null level)
+      (harness-log 'warn "harness-ui-bind: no level of the harness's keys: %s"
+                   (key-description keys))
+      nil)
+     ((and held (not (eq held command)) (not (plist-get plist :replace)))
+      (harness-log 'warn "harness-ui-bind: %s is %s's: %s is left without it"
+                   (key-description keys) held command)
+      nil)
+     (t
+      (define-key map keys command)
+      (let ((old (assoc keys (harness-ui-level-entries level))))
+        (if old
+            (setcdr old entry)
+          (setf (harness-ui-level-entries level)
+                (append (harness-ui-level-entries level) (list (cons keys entry))))))
+      command))))
+
+(defun harness-ui-unbind (key &optional map)
+  "Unbind KEY from MAP, `harness-ui-map', and from what its menu says.
+Return what the key ran, or nil."
+  (let* ((map (or map harness-ui-map))
+         (keys (kbd key))
+         (level (harness-ui--level map))
+         (held (lookup-key map keys)))
+    (when held
+      (define-key map keys nil t))
+    (when level
+      (setf (harness-ui-level-entries level)
+            (assoc-delete-all keys (copy-sequence (harness-ui-level-entries level)))))
+    held))
+
+(defun harness-ui-label (command &optional map)
+  "Return what the menu of MAP, or of any level, calls COMMAND, or nil."
+  (let (label)
+    (dolist (level harness-ui--level-list)
+      (when (or (null map) (eq map (harness-ui-level-map level)))
+        (dolist (cell (harness-ui-level-entries level))
+          (when (and (null label) (eq (plist-get (cdr cell) :command) command))
+            (setq label (plist-get (cdr cell) :label))))))
+    (when (functionp label)
+      (setq label (ignore-errors (funcall label))))
+    label))
+
+(defun harness-ui-command-key (command &optional map)
+  "Return the keys that run COMMAND at MAP, `harness-ui-map', or nil.
+The keys are those to type after MAP's own, as in its menu."
+  (when-let* ((level (harness-ui--level (or map harness-ui-map))))
+    (car (rassq command (mapcar (lambda (cell)
+                                  (cons (key-description (car cell))
+                                        (plist-get (cdr cell) :command)))
+                                (harness-ui-level-entries level))))))
+
+(defun harness-ui--level-path (level)
+  "Return the keys that open LEVEL, a level of the harness's tree.
+That is `harness-ui-prefix-key' and the key the top level gives the
+group's keymap, as \"C-c h S\" for the session group.  The top level
+itself is just the prefix."
+  (let ((prefix (key-description (harness-ui--prefix-keys harness-ui-prefix-key)))
+        (map (harness-ui-level-map level)))
+    (if (eq map harness-ui-map)
+        prefix
+      (concat prefix " "
+              (or (harness-ui-command-key map harness-ui-map) "")))))
+
+(defun harness-ui-keys (command)
+  "Return the keys that run COMMAND anywhere in the harness's tree, or nil.
+They are the whole sequence to type, `harness-ui-prefix-key' included,
+as \"C-c h O U\": the keys of the level, then the command's own."
+  (let (found)
+    (dolist (level harness-ui--level-list)
+      (when (null found)
+        (dolist (cell (harness-ui-level-entries level))
+          (when (and (null found) (eq (plist-get (cdr cell) :command) command))
+            (setq found (concat (harness-ui--level-path level) " "
+                                (key-description (car cell))))))))
+    found))
+
+(defun harness-ui-binding (keys)
+  "Return what runs at KEYS, a whole sequence from `harness-ui-prefix-key'.
+`C-c h O U' is the version page.  A level's own key returns its map."
+  (lookup-key harness-global-mode-map (kbd keys)))
+
+(defun harness-ui--entry-suffix (keys entry)
+  "Return the menu suffix of ENTRY, bound at KEYS, or nil.
+The entry of a command that is not defined -- of a module that is off --
+and of a label that is no string yet is left out, so a menu always
+opens."
+  (let* ((command (plist-get entry :command))
+         ;; A group's key takes the group's keymap, so that its own keys
+         ;; follow; the menu opens it, as it does when the key waits.
+         (command (if (keymapp command)
+                      (or (harness-ui-level-menu (harness-ui--level command)) command)
+                    command))
+         (label (plist-get entry :label)))
+    (when (functionp label)
+      (setq label (ignore-errors (funcall label))))
+    (when (and command (stringp label)
+               (or (not (symbolp command)) (harness-ui--command-available-p command)))
+      (append (list (key-description keys) label command)
+              (and (plist-get entry :inapt-if)
+                   (list :inapt-if (plist-get entry :inapt-if)))))))
+
+(defun harness-ui--level-columns (level)
+  "Return the menu of LEVEL, the transient groups made from its keys.
+A key whose `:column' the level does not name goes in its last column, so
+a module that binds a key without naming one still shows it.  The level's
+`rows' put its columns on several lines, each row of columns under the
+last; a level that names none shows them in one row."
+  (let* ((titles (harness-ui-level-columns level))
+         (entries (harness-ui-level-entries level))
+         (suffixes (lambda (cells)
+                     (delq nil (mapcar (lambda (cell)
+                                         (harness-ui--entry-suffix (car cell) (cdr cell)))
+                                       cells))))
+         (cells-of (lambda (title)
+                     (funcall suffixes
+                              (cl-remove-if-not
+                               (lambda (cell)
+                                 (equal (plist-get (cdr cell) :column) title))
+                               entries))))
+         (rest (funcall suffixes
+                        (cl-remove-if (lambda (cell)
+                                        (member (plist-get (cdr cell) :column) titles))
+                                      entries)))
+         (rows (or (harness-ui-level-rows level) (list titles)))
+         (last (car (last rows)))
+         out)
+    (dolist (row rows)
+      (let ((columns
+             (delq nil
+                   (mapcar (lambda (title)
+                             (let ((cells (funcall cells-of title)))
+                               (and cells (apply #'vector title cells))))
+                           row))))
+        ;; The keys of columns the level does not name follow its last one.
+        (when (and rest (equal row last))
+          (setq columns (append columns (list (apply #'vector (car (last titles)) rest)))))
+        (when columns
+          (push (apply #'vector :class 'transient-columns columns) out))))
+    (setq out (nreverse out))
+    (cl-mapcan (lambda (group)
+                 (condition-case err
+                     (transient-parse-suffixes 'harness-ui-menu (list group))
+                   (error (harness-log 'error "harness-ui-menu: %s: %s"
+                                       (harness-ui-level-title level)
+                                       (error-message-string err))
+                          nil)))
+               out)))
+
+(defun harness-ui-menu-columns (map)
+  "Return the columns of the menu of MAP, a level of the harness's keys.
+The menus ask for them as they open: the keys of a level are the keys of
+its menu, so the two cannot disagree."
+  (harness-ui--level-columns (or (harness-ui--level map)
+                                 (harness-ui--level harness-ui-map))))
+
+(defmacro harness-ui-define-group (name key label title doc columns &optional rows)
+  "Define the group NAME, under `harness-ui-map' at KEY.
+KEY is a key description such as \"S\".  LABEL is what the top menu
+calls the group, a noun phrase ending in an ellipsis.  TITLE heads the
+group's own menu, COLUMNS are its columns in order, ROWS the lists of
+them the menu shows on a line each (all of them in one line without
+it), and DOC describes it.  The group's keymap is
+`harness-ui-NAME-map', its menu `harness-ui-NAME-menu';
+`harness-ui-bind' binds the group's commands, each to a key its menu
+shows."
+  (declare (indent 1))
+  (let* ((name (if (symbolp name) name (intern name)))
+         (map (intern (format "harness-ui-%s-map" name)))
+         (menu (intern (format "harness-ui-%s-menu" name))))
+    `(progn
+       (defvar ,map nil
+         ,(format "Keymap of the %s group, under `%s'." title key))
+       (setq ,map (harness-ui--make-level ,title ,columns ,rows))
+       (transient-define-prefix ,menu ()
+         ,doc
+         :display-action '(harness-ui--display-menu (inhibit-same-window . t))
+         [:class transient-subgroups
+          :description ,title
+          :setup-children (lambda (_) (harness-ui-menu-columns ,map))])
+       (harness-ui--register-group ,map #',menu ,key ,label))))
+
+(defun harness-ui--register-group (map menu key label)
+  "Register MAP as the group bound at KEY, whose menu is MENU.
+LABEL names the group in the top menu.  KEY takes the group's keymap,
+not its menu: the group's own keys follow it, `C-c h S M' for one, and
+KEY alone opens the menu as any level does when it waits."
+  (setf (harness-ui-level-menu (harness-ui--level map)) menu)
+  (define-key map (vector harness-ui--menu-key) menu)
+  (harness-ui-bind key map label :column "Groups")
+  map)
+
+;;;;; The top level, and the groups under it
+
+(harness-ui-bind "n" #'harness-new-session "New session" :column "Sessions")
+(harness-ui-bind "s" #'harness-switch-session "Session switch" :column "Sessions")
+(harness-ui-bind "l" #'harness-sessions "Session list" :column "Sessions")
+(harness-ui-bind "a" #'harness-tasks "Task board" :column "Sessions")
+(harness-ui-bind "G" #'harness-tasks-all "Task board · every project" :column "Sessions")
+(harness-ui-bind "g" #'harness-search-sessions "Session search" :column "Sessions")
+(harness-ui-bind "m" #'harness-set-model "Model" :column "Settings")
+(harness-ui-bind "p" #'harness-set-permission-mode "Permission mode" :column "Settings")
+(harness-ui-bind "f" #'harness-fork-session "Session fork" :column "Session")
+(harness-ui-bind "k" #'harness-cancel-turn "Turn cancellation" :column "Session")
+(harness-ui-bind "SPC" #'harness-compose-focus "Compose focus" :column "Views")
+(harness-ui-bind "F" #'harness-fullscreen "Fullscreen overview" :column "Views")
+
+(harness-ui-define-group session "S" "Session…" "Session"
+  "The session's settings, its access, its priority and its state."
+  '("Model" "Thinking" "Permission" "Limits" "Priority" "State")
+  '(("Model" "Thinking" "Permission") ("Limits" "Priority" "State")))
+
+(harness-ui-bind "M" #'harness-set-model-all "Model for all sessions"
+                 :map harness-ui-session-map :column "Model")
+(harness-ui-bind "=" #'harness-model-complexity "Model complexity"
+                 :map harness-ui-session-map :column "Model")
+(harness-ui-bind "!" #'harness-provider-check "Provider & model check"
+                 :map harness-ui-session-map :column "Model")
+(harness-ui-bind "T" #'harness-set-thinking "Thinking"
+                 :map harness-ui-session-map :column "Thinking")
+(harness-ui-bind "H" #'harness-set-thinking-all "Thinking for all sessions"
+                 :map harness-ui-session-map :column "Thinking")
+(harness-ui-bind "j" #'harness-access "Jail & permissions"
+                 :map harness-ui-session-map :column "Permission")
+(harness-ui-bind "d" #'harness-directories "Directory access"
+                 :map harness-ui-session-map :column "Permission")
+(harness-ui-bind "i" #'harness-toggle-non-interactive
+                 #'harness-ui--non-interactive-menu-label
+                 :map harness-ui-session-map :column "Permission")
+(harness-ui-bind "I" #'harness-set-non-interactive-all "Non-interactive for all sessions"
+                 :map harness-ui-session-map :column "Permission")
+(harness-ui-bind "e" #'harness-set-context-limit "Context limit"
+                 :map harness-ui-session-map :column "Limits")
+(harness-ui-bind "C" #'harness-compact "Context compaction"
+                 :map harness-ui-session-map :column "Limits")
+(harness-ui-bind "K" #'harness-cache-keep-warm "Cache warming"
+                 :map harness-ui-session-map :column "Limits")
+(harness-ui-bind "a" #'harness-toggle-compaction-ask "Compaction ask"
+                 :map harness-ui-session-map :column "Limits")
+(harness-ui-bind "A" #'harness-set-compaction-ask-all "Compaction ask · every session"
+                 :map harness-ui-session-map :column "Limits")
+(harness-ui-bind "+" #'harness-priority-raise "Priority raise"
+                 :map harness-ui-session-map :column "Priority")
+(harness-ui-bind "-" #'harness-priority-lower "Priority lower"
+                 :map harness-ui-session-map :column "Priority")
+(harness-ui-bind "y" #'harness-set-priority "Priority…"
+                 :map harness-ui-session-map :column "Priority")
+(harness-ui-bind "Y" #'harness-set-priority-all "Priority for all sessions…"
+                 :map harness-ui-session-map :column "Priority")
+(harness-ui-bind "W" #'harness-move-session "Session move"
+                 :map harness-ui-session-map :column "State")
+(harness-ui-bind "r" #'harness-rename-session "Rename"
+                 :map harness-ui-session-map :column "State")
+(harness-ui-bind "x" #'harness-close-session "Session close"
+                 :map harness-ui-session-map :column "State")
+(harness-ui-bind "D" #'harness-delete-session "Session deletion"
+                 :map harness-ui-session-map :column "State")
+
+(harness-ui-define-group views "V" "View…" "View"
+  "The sessions' views, the tools that show one, and the region's commands."
+  '("Sessions" "Views" "Region"))
+
+(harness-ui-bind "o" #'harness-open-latest-session "Latest session"
+                 :map harness-ui-views-map :column "Sessions")
+(harness-ui-bind "O" #'harness-open-session "Session open"
+                 :map harness-ui-views-map :column "Sessions")
+(harness-ui-bind "t" #'harness-tree "Conversation tree"
+                 :map harness-ui-views-map :column "Views")
+(harness-ui-bind "b" #'harness-btw "BTW side conversation"
+                 :map harness-ui-views-map :column "Views")
+(harness-ui-bind "u" #'harness-usage "Usage & cost"
+                 :map harness-ui-views-map :column "Views")
+(harness-ui-bind "A" #'harness-insights "Insights"
+                 :map harness-ui-views-map :column "Views")
+(harness-ui-bind "Q" #'harness-slots "Task slots"
+                 :map harness-ui-views-map :column "Views")
+(harness-ui-bind "E" #'harness-computers "Computers"
+                 :map harness-ui-views-map :column "Views")
+(harness-ui-bind "Y" #'harness-workspace "Workspace"
+                 :map harness-ui-views-map :column "Views")
+(harness-ui-bind "w" #'harness-worktrees "Worktrees"
+                 :map harness-ui-views-map :column "Views")
+(harness-ui-bind "z" #'harness-pet "Companion pet"
+                 :map harness-ui-views-map :column "Views")
+(harness-ui-bind "v" #'harness-voice "Voice"
+                 :map harness-ui-views-map :column "Views")
+(harness-ui-bind "r" #'harness-record-audio "Audio recording"
+                 :map harness-ui-views-map :column "Views")
+(harness-ui-bind ">" #'harness-prompt-region "Region prompt"
+                 :map harness-ui-views-map :column "Region")
+(harness-ui-bind "<" #'harness-thread-region "Region thread reply"
+                 :map harness-ui-views-map :column "Region")
+
+(harness-ui-define-group tools "T" "Tools…" "Tools"
+  "What the harness costs and keeps, what it remembers, and its search."
+  '("Usage" "Memory" "Secrets" "Search"))
+
+(harness-ui-bind "B" #'harness-delete-budget "Budget removal"
+                 :map harness-ui-tools-map :column "Usage")
+(harness-ui-bind "m" #'harness-remember "Memory…"
+                 :map harness-ui-tools-map :column "Memory")
+(harness-ui-bind "M" #'harness-memories "Memory"
+                 :map harness-ui-tools-map :column "Memory")
+(harness-ui-bind "x" #'harness-redact-secret "Secret redaction…"
+                 :map harness-ui-tools-map :column "Secrets")
+(harness-ui-bind "E" #'harness-secrets-list-sources "Secret sources"
+                 :map harness-ui-tools-map :column "Secrets")
+(harness-ui-bind "/" #'harness-quick-search "Quick search"
+                 :map harness-ui-tools-map :column "Search")
+(harness-ui-bind "h" #'harness-chatgpt-plan-page "ChatGPT plan…"
+                 :map harness-ui-tools-map :column "Search")
+
+(harness-ui-define-group options "O" "Options…" "Options"
+  "The harness's configuration, the server it talks to, and its upkeep."
+  '("Harness" "Remote" "Upkeep"))
+
+(harness-ui-bind "S" #'harness-settings "Settings"
+                 :map harness-ui-options-map :column "Harness")
+(harness-ui-bind "O" #'harness-describe-modules "Modules"
+                 :map harness-ui-options-map :column "Harness")
+(harness-ui-bind "X" #'harness-enable-module "Module enablement"
+                 :map harness-ui-options-map :column "Harness")
+(harness-ui-bind "N" #'harness-test-notifications "Notification test"
+                 :map harness-ui-options-map :column "Harness")
+(harness-ui-bind "c" #'harness-connect-server "Server connection…"
+                 :map harness-ui-options-map :column "Remote"
+                 :inapt-if 'harness-corporate-p)
+(harness-ui-bind "C" #'harness-server "Server details"
+                 :map harness-ui-options-map :column "Remote")
+(harness-ui-bind "P" #'harness-remote-control "Remote control"
+                 :map harness-ui-options-map :column "Remote"
+                 :inapt-if 'harness-corporate-p)
+(harness-ui-bind "y" #'harness-remote-approve "Remote approval"
+                 :map harness-ui-options-map :column "Remote")
+(harness-ui-bind "U" #'harness-version "Version"
+                 :map harness-ui-options-map :column "Upkeep")
+(harness-ui-bind "M-u" #'harness-update "Harness update"
+                 :map harness-ui-options-map :column "Upkeep")
+(harness-ui-bind "R" #'harness-reload "Harness reload"
+                 :map harness-ui-options-map :column "Upkeep")
+(harness-ui-bind "L" #'harness-show-log "Log"
+                 :map harness-ui-options-map :column "Upkeep")
 
 (defvar harness-ui-view-map
   (let ((map (make-sparse-keymap)))
@@ -7256,7 +7693,7 @@ buffer.")
 (defvar harness-ui-log-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map harness-ui-view-map)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-log-mode'.")
 
@@ -7272,6 +7709,14 @@ the harness menu.
 
 (defvar harness-global-mode-map (make-sparse-keymap)
   "Keymap of `harness-global-mode': `harness-ui-map' under `harness-ui-prefix-key'.")
+
+;; A reload makes the tree's maps anew, so the keys are put under the
+;; prefix again: the global map would go on naming the map before.
+(defun harness-ui--install-keys ()
+  "Put `harness-ui-map' under `harness-ui-prefix-key' in the global map."
+  (when-let* ((prefix (harness-ui--prefix-keys harness-ui-prefix-key)))
+    (unless (eq (lookup-key harness-global-mode-map prefix) harness-ui-map)
+      (define-key harness-global-mode-map prefix harness-ui-map))))
 
 (defun harness-ui--prefix-keys (prefix)
   "Return the keys of PREFIX, a key description, or nil.
@@ -7301,7 +7746,7 @@ the harness UI loads, that is before `harness-start'."
   :set #'harness-ui--set-prefix-key)
 
 (defvar harness-ui--menu-idle-timer nil
-  "Idle timer that opens `harness-groups-menu' on `harness-ui-prefix-key' alone.")
+  "Idle timer that opens the menu of a level of the harness's keys when it waits.")
 
 (defun harness-ui--set-menu-idle-delay (symbol value)
   "Set SYMBOL, `harness-ui-menu-idle-delay', to VALUE and restart its timer.
@@ -7314,49 +7759,56 @@ there is none, and the next time it is on starts with VALUE."
          (harness-ui--stop-menu-idle-timer))))
 
 (defcustom harness-ui-menu-idle-delay 0.3
-  "Seconds `harness-ui-prefix-key' waits for a key before its menu opens.
-The grouped `harness-groups-menu' opens on the prefix alone, once the
-prefix has waited this long.  A key typed before then runs its binding
-as usual, so the menu never takes one.  Nil leaves the prefix as it was
-without the menu: it then waits for its keys."
+  "Seconds a level of the harness's keys waits for a key before its menu opens.
+`harness-ui-prefix-key' alone opens the top level's menu, once the
+prefix has waited this long, and a group's key alone its group's.  A key
+typed before then runs its binding as usual, so the menu never takes
+one.  Nil leaves the keys as they were without the menus: they then wait
+for their keys."
   :type '(choice (number :tag "Seconds")
-                 (const :tag "Never; the prefix waits for its keys" nil))
+                 (const :tag "Never; the keys wait for theirs" nil))
   :group 'harness-ui
   :set #'harness-ui--set-menu-idle-delay)
 
-(defconst harness-ui--groups-menu-key 'harness-ui-open-groups
-  "Event the idle timer queues to open `harness-groups-menu' after the prefix.
-No keyboard sends it: the pending `read-key-sequence' reads it as the
-key after the prefix, so the menu opens while `harness-ui-map' stays the
-prefix, and no real key is spent on opening it.")
-
 (defun harness-ui--prefix-menu-event (keys)
-  "Return the event that opens the grouped menu for KEYS, or nil.
+  "Return the event that opens the menu of the level KEYS wait at, or nil.
 KEYS is the keys typed so far, a vector or a string.  When they are
-exactly `harness-ui-prefix-key' and still take `harness-ui-map', the
-prefix waits for a key: `harness-ui--groups-menu-key' is the event to
-read next."
-  (let ((keys (vconcat keys))
-        (prefix (vconcat (harness-ui--prefix-keys harness-ui-prefix-key))))
-    (and harness-ui-menu-idle-delay
-         (equal keys prefix)
-         (eq (key-binding keys) harness-ui-map)
-         harness-ui--groups-menu-key)))
+`harness-ui-prefix-key' followed by the keys of a group, and still take
+that level's keymap, the level waits for a key: `harness-ui--menu-key' is
+the event to read next, if the level has a menu."
+  (let ((typed (vconcat keys))
+        (prefix (vconcat (harness-ui--prefix-keys harness-ui-prefix-key)))
+        found)
+    (when (and harness-ui-menu-idle-delay
+               (>= (length typed) (length prefix))
+               (equal (substring typed 0 (length prefix)) prefix))
+      ;; The prefix takes the top level's keymap itself, and a group's key
+      ;; after it; either one has a menu while it waits for a key.
+      (let* ((rest (substring typed (length prefix)))
+             (binding (if (zerop (length rest))
+                          harness-ui-map
+                        (and (eq (lookup-key harness-global-mode-map prefix)
+                                 harness-ui-map)
+                             (lookup-key harness-ui-map rest))))
+             (level (harness-ui--level binding)))
+        (when (and level (harness-ui-level-menu level))
+          (setq found harness-ui--menu-key))))
+    found))
 
 (defun harness-ui--menu-on-idle ()
-  "Open `harness-groups-menu' when `harness-ui-prefix-key' waits for a key.
-Runs from an idle timer: `harness-ui--groups-menu-key' is put back to
-be read as the key after the prefix, so the prefix stays a keymap of
-its own.  A key typed before the timer runs is read as usual, and the
-menu never takes it.  The minibuffer, where the prefix key types text,
-and keyboard macro playback are left alone."
+  "Open the menu of the level the keys typed so far wait at.
+Runs from an idle timer: `harness-ui--menu-key' is put back to be read as
+the key after the level, so the level stays a keymap of its own.  A key
+typed before the timer runs is read as usual, and the menu never takes
+it.  The minibuffer, where the prefix key types text, and keyboard macro
+playback are left alone."
   (when (and (not (active-minibuffer-window))
              (not executing-kbd-macro))
     (when-let* ((event (harness-ui--prefix-menu-event (this-command-keys-vector))))
       (push event unread-command-events))))
 
 (defun harness-ui--start-menu-idle-timer ()
-  "Start the idle timer that opens the groups menu on the prefix alone."
+  "Start the idle timer that opens the menu of a level that waits."
   (harness-ui--stop-menu-idle-timer)
   (when harness-ui-menu-idle-delay
     (setq harness-ui--menu-idle-timer
@@ -7364,7 +7816,7 @@ and keyboard macro playback are left alone."
                                #'harness-ui--menu-on-idle))))
 
 (defun harness-ui--stop-menu-idle-timer ()
-  "Stop the idle timer that opens the groups menu on the prefix alone."
+  "Stop the idle timer that opens the menu of a level that waits."
   (when (timerp harness-ui--menu-idle-timer)
     (cancel-timer harness-ui--menu-idle-timer))
   (setq harness-ui--menu-idle-timer nil))
@@ -7372,18 +7824,13 @@ and keyboard macro playback are left alone."
 ;;;###autoload
 (define-minor-mode harness-global-mode
   "Global keybindings for the agent harness.
-`harness-ui-prefix-key' alone opens `harness-groups-menu' after
-`harness-ui-menu-idle-delay' seconds; a key after it runs as it always
-did."
+`harness-ui-prefix-key' opens the harness's keys: a level that waits for
+one opens its menu after `harness-ui-menu-idle-delay' seconds, and a key
+after it runs as it always did."
   :global t :group 'harness-ui :keymap harness-global-mode-map
   (if harness-global-mode
       (harness-ui--start-menu-idle-timer)
     (harness-ui--stop-menu-idle-timer)))
-
-;; A reload redefines the timer's function: start it again when the mode
-;; is on, as `harness-ui--init' turns it on only the first time.
-(when harness-global-mode
-  (harness-ui--start-menu-idle-timer))
 
 (defun harness-ui--command-available-p (symbol)
   "Non-nil when the command SYMBOL is defined, so the menu may offer it.
@@ -7457,7 +7904,7 @@ above cannot spare the lines.  ALIST is the action alist."
             (window-preserve-size window nil t)
             (window--display-buffer buffer menu 'window (cons '(dedicated . t) alist)))
         (error
-         (harness-log 'error "harness-menu: no window below %s: %s" window (error-message-string err))
+         (harness-log 'error "harness-ui-menu: no window below %s: %s" window (error-message-string err))
          (if (window-live-p menu)
              (delete-window menu)
            (harness-ui--resize-back window height))
@@ -7517,7 +7964,7 @@ action alist."
 
 ;;;;; The commands of the buffer the menu is opened from
 
-;; A mode lists its own commands for `harness-menu' in its
+;; A mode lists its own commands for the menu in its
 ;; `harness-menu-group' property, (TITLE COLUMN...):
 ;;
 ;;   (put 'harness-chat-mode 'harness-menu-group
@@ -7566,15 +8013,19 @@ precedence in the buffer."
                             (harness-ui--major-mode-lineage))))
 
 (defun harness-ui--menu-key-taken-p (key)
-  "Non-nil when the groups of `harness-menu' use KEY or a prefix of it.
-KEY is a key description such as \". s\"."
+  "Non-nil when the harness's own keys use KEY or a prefix of it.
+KEY is a key description such as \". s\".  The menu's own keys are the
+top level's, made from `harness-ui-map', so a buffer's command listed
+under a key the prefix has would not run from the menu."
   (let ((events (kbd key)))
     (cl-loop for i from 1 to (length events)
-             thereis (ignore-errors
-                       (transient-get-suffix 'harness-menu (key-description (substring events 0 i)))))))
+             ;; A number means the sequence runs past the map's bindings,
+             ;; so the key is free.
+             thereis (let ((binding (lookup-key harness-ui-map (substring events 0 i))))
+                       (and binding (not (numberp binding)))))))
 
 (defun harness-ui--menu-column (column taken)
-  "Return COLUMN without the suffixes `harness-menu' cannot offer, or nil.
+  "Return COLUMN without the suffixes the menu cannot offer, or nil.
 Those run an undefined command, or have a key the menu's own groups
 use or one in TAKEN, a hash table of the keys offered already.  The
 keys kept are added to TAKEN.  Where transient can, the keys are padded
@@ -7602,7 +8053,7 @@ to line up."
                (nreverse kept)))))
 
 (defvar harness-ui--menu-heading nil
-  "Heading of the buffer's commands in `harness-menu', set as it opens.")
+  "Heading of the buffer's commands in the menu, set as it opens.")
 
 (defun harness-ui--menu-buffer-columns ()
   "Return the parsed columns of commands of this buffer, setting the heading.
@@ -7617,8 +8068,8 @@ A column that fails to parse is logged and left out."
                       (lambda (column)
                         (when-let* ((column (harness-ui--menu-column column taken)))
                           (condition-case err
-                              (transient-parse-suffixes 'harness-menu (list column))
-                            (error (harness-log 'error "harness-menu: %s commands: %s"
+                              (transient-parse-suffixes 'harness-ui-menu (list column))
+                            (error (harness-log 'error "harness-ui-menu: %s commands: %s"
                                                 mode (error-message-string err))
                                    nil))))
                       columns)))
@@ -7628,294 +8079,37 @@ A column that fails to parse is logged and left out."
     (cl-mapcan #'cdr shown)))
 
 (defun harness-ui--menu-buffer-children (_children)
-  "Return the columns of commands `harness-menu' shows for this buffer.
+  "Return the columns of commands the menu shows for this buffer.
 The menu calls this as it opens (`:setup-children'), in the buffer it
 is opened from; with nil the group is left out.  An error is logged and
 leaves the buffer's commands out, never the whole menu."
   (condition-case err
       (harness-ui--menu-buffer-columns)
-    (error (harness-log 'error "harness-menu: the buffer's commands: %s" (error-message-string err))
+    (error (harness-log 'error "harness-ui-menu: the buffer's commands: %s" (error-message-string err))
            nil)))
 
-(transient-define-prefix harness-menu ()
-  "The harness menu."
+(transient-define-prefix harness-ui-menu ()
+  "The harness menu: the harness's own keys, and this buffer's commands.
+Its own keys are those of `harness-ui-map', made from it as the menu
+opens (`harness-ui-menu-columns'), so each is the key that runs it; the
+buffer's commands come after them, as its modes list them in their
+`harness-menu-group'."
   :display-action '(harness-ui--display-menu (inhibit-same-window . t))
-  [["Sessions"
-    ("n" "New session" harness-new-session)
-    ("s" "Session switch" harness-switch-session)
-    (">" "Region prompt" harness-prompt-region
-     :if (lambda () (harness-ui--command-available-p 'harness-prompt-region)))
-    ("<" "Region thread reply" harness-thread-region
-     :if (lambda () (harness-ui--command-available-p 'harness-thread-region)))
-    ("l" "Session list" harness-sessions :if (lambda () (harness-ui--command-available-p 'harness-sessions)))
-    ("g" "Session search" harness-search-sessions
-     :if (lambda () (harness-ui--command-available-p 'harness-search-sessions)))
-    ("a" "Task mode" harness-tasks :if (lambda () (harness-ui--command-available-p 'harness-tasks)))
-    ("G" "Task mode · every project" harness-tasks-all
-     :if (lambda () (harness-ui--command-available-p 'harness-tasks-all)))
-    ("t" "Conversation tree" harness-tree :if (lambda () (harness-ui--command-available-p 'harness-tree)))
-    ("b" "BTW side conversation" harness-btw :if (lambda () (harness-ui--command-available-p 'harness-btw)))
-    ("F" (lambda () (if (harness-ui--fullscreen-layout) "Fullscreen exit" "Fullscreen overview"))
-     harness-fullscreen)
-    ("f" "Session fork" harness-fork-session)
-    ("k" "Turn cancellation" harness-cancel-turn)
-    ("D" "Session deletion" harness-delete-session)]
-   ["Session settings"
-    ("m" "Model" harness-set-model)
-    ("M" "Model for all sessions" harness-set-model-all)
-    ("=" "Model complexity" harness-model-complexity
-     :if (lambda () (harness-ui--command-available-p 'harness-model-complexity)))
-    ("T" "Thinking" harness-set-thinking)
-    ("H" "Thinking for all sessions" harness-set-thinking-all)
-    ("p" "Permission mode" harness-set-permission-mode)
-    ("e" "Context limit" harness-set-context-limit)
-    ("j" "Jail & permissions" harness-access :if (lambda () (harness-ui--command-available-p 'harness-access)))
-    ("d" "Directory access" harness-directories :if (lambda () (harness-ui--command-available-p 'harness-directories)))
-    ("i" (lambda () (harness-ui--non-interactive-menu-label)) harness-toggle-non-interactive)
-    ("I" "Non-interactive for all sessions" harness-set-non-interactive-all)
-    ("V" "Supervisor mode for all sessions" harness-set-supervisor-all
-     :if (lambda () (harness-ui--command-available-p 'harness-set-supervisor-all)))
-    ("r" "Rename" harness-rename-session)
-    ("W" "Session move" harness-move-session)]
-   ;; A priority is the session's, so its commands stand beside the
-   ;; session's other settings, in a column of their own: they are four,
-   ;; and the settings column is long already.
-   ["Priority"
-    ("+" "Priority raise" harness-priority-raise
-     :if (lambda () (harness-ui--command-available-p 'harness-priority-raise)))
-    ("-" "Priority lower" harness-priority-lower
-     :if (lambda () (harness-ui--command-available-p 'harness-priority-lower)))
-    ("y" "Priority…" harness-set-priority
-     :if (lambda () (harness-ui--command-available-p 'harness-set-priority)))
-    ("Y" "Priority for all sessions…" harness-set-priority-all
-     :if (lambda () (harness-ui--command-available-p 'harness-set-priority-all)))]
-   ["Tools"
-    ("u" "Usage & cost" harness-usage :if (lambda () (harness-ui--command-available-p 'harness-usage)))
-    ("A" "Insights" harness-insights :if (lambda () (harness-ui--command-available-p 'harness-insights)))
-    ("B" "Budget removal" harness-delete-budget :if (lambda () (harness-ui--command-available-p 'harness-delete-budget)))
-    ("w" "Worktrees" harness-worktrees :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
-    ("Q" "Task slots" harness-slots :if (lambda () (harness-ui--command-available-p 'harness-slots)))
-    ("S" "Settings" harness-settings :if (lambda () (harness-ui--command-available-p 'harness-settings)))
-    ;; Out of the box only the core modules load: these say which do
-    ;; and enable another.
-    ("O" "Modules" harness-describe-modules)
-    ("X" "Module enablement" harness-enable-module)
-    ("z" "Companion pet" harness-pet :if (lambda () (harness-ui--command-available-p 'harness-pet)))
-    ("c" "Server connection…" harness-connect-server
-     :if (lambda () (harness-ui--command-available-p 'harness-connect-server))
-     :inapt-if harness-corporate-p)
-    ("C" "Server details" harness-server
-     :if (lambda () (harness-ui--command-available-p 'harness-server)))
-    ("P" "Remote control" harness-remote-control
-     :if (lambda () (harness-ui--command-available-p 'harness-remote-control))
-     :inapt-if harness-corporate-p)
-    ("N" "Notification test" harness-test-notifications)
-    ("U" (lambda () (if (fboundp 'harness-ui-version-menu-label) (harness-ui-version-menu-label) "Version"))
-     harness-version :if (lambda () (harness-ui--command-available-p 'harness-version)))
-    ("R" "Harness reload" harness-reload)
-    ("M-u" "Harness update" harness-update)
-    ("L" "Log" harness-show-log)]]
+  [:class transient-subgroups
+   :description "Harness"
+   :setup-children (lambda (_) (harness-ui-menu-columns harness-ui-map))]
   ;; The commands of the buffer the menu is opened from, when its modes
   ;; list some in their `harness-menu-group'.
   [:class transient-columns
    :description (lambda () harness-ui--menu-heading)
    :setup-children harness-ui--menu-buffer-children])
 
-;;;; The grouped menu
-
-;; C-c h alone opens `harness-groups-menu'.  Each entry there names a
-;; group of commands, and choosing it opens that group's own menu, as a
-;; directory shows what it holds.  Every command the prefix has is in
-;; one of these groups, including those of the modules that load after
-;; this file: an entry whose command is undefined is left out.  The
-;; flat `harness-menu' above stays for the views that bind it to ? and
-;; for the modules that append to it; the prefix no longer offers it.
-
-(defun harness-ui--any-command-p (&rest symbols)
-  "Non-nil when one of SYMBOLS is a defined command."
-  (cl-some #'harness-ui--command-available-p symbols))
-
-(defun harness-ui--buffer-menu-p ()
-  "Non-nil when this buffer's modes list commands in `harness-menu-group'."
-  (harness-ui--menu-modes))
-
-(transient-define-prefix harness-groups-menu ()
-  "Harness commands, by group."
-  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
-  [["Command groups"
-    ("s" "Sessions…" harness-session-menu)
-    ("o" "Session settings…" harness-settings-menu)
-    ("p" "Priority…" harness-priority-menu
-     :if (lambda () (harness-ui--any-command-p 'harness-priority-raise
-                                               'harness-priority-lower
-                                               'harness-set-priority
-                                               'harness-set-priority-all)))
-    ("t" "Tasks…" harness-task-menu
-     :if (lambda () (harness-ui--command-available-p 'harness-task-menu)))
-    ("u" "Tools…" harness-tools-menu
-     :if (lambda () (harness-ui--any-command-p 'harness-usage 'harness-insights
-                                               'harness-delete-budget 'harness-worktrees
-                                               'harness-slots 'harness-chatgpt-plan-page
-                                               'harness-redact-secret
-                                               'harness-secrets-list-sources
-                                               'harness-memories 'harness-remember)))
-    ("c" "Config & remote…" harness-config-menu)
-    ("b" "This buffer…" harness-buffer-menu
-     :if (lambda () (harness-ui--buffer-menu-p)))]])
-
-(transient-define-prefix harness-session-menu ()
-  "Session commands."
-  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
-  [["Sessions"
-    ("n" "New" harness-new-session)
-    ("s" "Switch" harness-switch-session)
-    ("SPC" "Compose focus" harness-compose-focus
-     :if (lambda () (harness-ui--command-available-p 'harness-compose-focus)))
-    ("l" "List" harness-sessions :if (lambda () (harness-ui--command-available-p 'harness-sessions)))
-    ("g" "Search" harness-search-sessions :if (lambda () (harness-ui--command-available-p 'harness-search-sessions)))
-    ("/" "Quick search" harness-quick-search
-     :if (lambda () (harness-ui--command-available-p 'harness-quick-search)))
-    ("t" "Conversation tree" harness-tree :if (lambda () (harness-ui--command-available-p 'harness-tree)))
-    ("f" "Fork" harness-fork-session)
-    ("C" "Context compaction" harness-compact
-     :if (lambda () (harness-ui--command-available-p 'harness-compact)))
-    ("K" "Cache warming" harness-cache-keep-warm
-     :if (lambda () (harness-ui--command-available-p 'harness-cache-keep-warm)))
-    ("k" "Turn cancellation" harness-cancel-turn)
-    ("D" "Deletion" harness-delete-session)
-    ("b" "BTW side conversation" harness-btw
-     :if (lambda () (harness-ui--command-available-p 'harness-btw)))
-    ("r" "Audio recording" harness-record-audio
-     :if (lambda () (harness-ui--command-available-p 'harness-record-audio)))
-    ("F" "Fullscreen overview" harness-fullscreen)
-    (">" "Region prompt" harness-prompt-region
-     :if (lambda () (harness-ui--command-available-p 'harness-prompt-region)))
-    ("<" "Region thread reply" harness-thread-region
-     :if (lambda () (harness-ui--command-available-p 'harness-thread-region)))
-    ("o" "Latest session" harness-open-latest-session
-     :if (lambda () (harness-ui--command-available-p 'harness-open-latest-session)))
-    ("O" "Session open" harness-open-session
-     :if (lambda () (harness-ui--command-available-p 'harness-open-session)))]])
-
-(transient-define-prefix harness-settings-menu ()
-  "Session settings commands."
-  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
-  [["Session settings"
-    ("m" "Model" harness-set-model)
-    ("M" "Model for all sessions" harness-set-model-all)
-    ("=" "Model complexity" harness-model-complexity
-     :if (lambda () (harness-ui--command-available-p 'harness-model-complexity)))
-    ("!" "Provider & model check" harness-provider-check
-     :if (lambda () (harness-ui--command-available-p 'harness-provider-check)))
-    ("T" "Thinking" harness-set-thinking)
-    ("H" "Thinking for all sessions" harness-set-thinking-all)
-    ("p" "Permission mode" harness-set-permission-mode)
-    ("e" "Context limit" harness-set-context-limit)
-    ("j" "Jail & permissions" harness-access
-     :if (lambda () (harness-ui--command-available-p 'harness-access)))
-    ("d" "Directory access" harness-directories
-     :if (lambda () (harness-ui--command-available-p 'harness-directories)))
-    ("i" "Non-interactive" harness-toggle-non-interactive)
-    ("I" "Non-interactive for all sessions" harness-set-non-interactive-all)
-    ("a" (lambda () (harness-ui--compaction-ask-menu-label)) harness-toggle-compaction-ask)
-    ("A" "Auto-compact for all sessions" harness-set-compaction-ask-all)
-    ("v" "Supervisor mode" harness-toggle-supervisor
-     :if (lambda () (harness-ui--command-available-p 'harness-toggle-supervisor)))
-    ("V" "Supervisor mode for all sessions" harness-set-supervisor-all
-     :if (lambda () (harness-ui--command-available-p 'harness-set-supervisor-all)))
-    ("r" "Rename" harness-rename-session)
-    ("W" "Session move" harness-move-session)]])
-
-(transient-define-prefix harness-priority-menu ()
-  "Session priority commands."
-  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
-  [["Priority"
-    ("+" "Priority raise" harness-priority-raise
-     :if (lambda () (harness-ui--command-available-p 'harness-priority-raise)))
-    ("-" "Priority lower" harness-priority-lower
-     :if (lambda () (harness-ui--command-available-p 'harness-priority-lower)))
-    ("y" "Priority…" harness-set-priority
-     :if (lambda () (harness-ui--command-available-p 'harness-set-priority)))
-    ("Y" "Priority for all sessions…" harness-set-priority-all
-     :if (lambda () (harness-ui--command-available-p 'harness-set-priority-all)))]])
-
-(transient-define-prefix harness-tools-menu ()
-  "Usage, insight and project tools."
-  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
-  [["Usage & insight"
-    ("u" "Usage & cost" harness-usage
-     :if (lambda () (harness-ui--command-available-p 'harness-usage)))
-    ("A" "Insights" harness-insights
-     :if (lambda () (harness-ui--command-available-p 'harness-insights)))
-    ("B" "Budget removal" harness-delete-budget
-     :if (lambda () (harness-ui--command-available-p 'harness-delete-budget)))
-    ("h" "ChatGPT plan…" harness-chatgpt-plan-page
-     :if (lambda () (harness-ui--command-available-p 'harness-chatgpt-plan-page)))]
-   ["Projects"
-    ("w" "Worktrees" harness-worktrees
-     :if (lambda () (harness-ui--command-available-p 'harness-worktrees)))
-    ("Q" "Task slots" harness-slots
-     :if (lambda () (harness-ui--command-available-p 'harness-slots)))]
-   ["Memory"
-    ("m" "Memory…" harness-remember
-     :if (lambda () (harness-ui--command-available-p 'harness-remember)))
-    ("M" "Memory" harness-memories
-     :if (lambda () (harness-ui--command-available-p 'harness-memories)))]
-   ["Secrets"
-    ("x" "Secret redaction…" harness-redact-secret
-     :if (lambda () (harness-ui--command-available-p 'harness-redact-secret)))
-    ("E" "Secret sources" harness-secrets-list-sources
-     :if (lambda () (harness-ui--command-available-p 'harness-secrets-list-sources)))]])
-
-(transient-define-prefix harness-config-menu ()
-  "Harness configuration, remote access and upkeep."
-  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
-  [["Configuration"
-    ("S" "Settings" harness-settings
-     :if (lambda () (harness-ui--command-available-p 'harness-settings)))
-    ("O" "Modules" harness-describe-modules)
-    ("X" "Module enablement" harness-enable-module
-     :if (lambda () (harness-ui--command-available-p 'harness-enable-module)))
-    ("N" "Notification test" harness-test-notifications)
-    ("z" "Companion pet" harness-pet
-     :if (lambda () (harness-ui--command-available-p 'harness-pet)))]
-   ["Remote"
-    ("c" "Server connection…" harness-connect-server
-     :if (lambda () (harness-ui--command-available-p 'harness-connect-server))
-     :inapt-if harness-corporate-p)
-    ("C" "Server details" harness-server
-     :if (lambda () (harness-ui--command-available-p 'harness-server)))
-    ("P" "Remote control" harness-remote-control
-     :if (lambda () (harness-ui--command-available-p 'harness-remote-control))
-     :inapt-if harness-corporate-p)]
-   ["Upkeep"
-    ("U" (lambda () (if (fboundp 'harness-ui-version-menu-label) (harness-ui-version-menu-label) "Version"))
-     harness-version :if (lambda () (harness-ui--command-available-p 'harness-version)))
-    ("R" "Harness reload" harness-reload
-     :if (lambda () (harness-ui--command-available-p 'harness-reload)))
-    ("M-u" "Harness update" harness-update
-     :if (lambda () (harness-ui--command-available-p 'harness-update)))
-    ("L" "Log" harness-show-log)]])
-
-(transient-define-prefix harness-buffer-menu ()
-  "Buffer commands."
-  :display-action '(harness-ui--display-menu (inhibit-same-window . t))
-  [:class transient-columns
-   :description (lambda () harness-ui--menu-heading)
-   :setup-children harness-ui--menu-buffer-children])
-
-;; Clear the group and menu entries installed by older versions on
-;; reload: `?' and `=' opened a menu by hand before the prefix did.
-(dolist (binding '(("C-s" . harness-session-menu)
-                   ("C-o" . harness-settings-menu)
-                   ("C-t" . harness-task-menu)
-                   ("=" . harness-groups-menu)
-                   ("?" . harness-menu)))
-  (when (eq (lookup-key harness-ui-map (kbd (car binding))) (cdr binding))
-    (define-key harness-ui-map (kbd (car binding)) nil t)))
-;; The idle timer queues this event, which no keyboard sends, so the
-;; prefix opens the menu on its own without a key of its own.
-(define-key harness-ui-map (vector harness-ui--groups-menu-key) #'harness-groups-menu)
+;; The idle timer queues `harness-ui--menu-key', which no keyboard sends,
+;; so a level that waits for a key opens its own menu without a key of its
+;; own.  The top level and every group bind it.
+(setf (harness-ui-level-menu (harness-ui--level harness-ui-map)) #'harness-ui-menu)
+(define-key harness-ui-map (vector harness-ui--menu-key) #'harness-ui-menu)
+(harness-ui--install-keys)
 
 ;;;; Module
 

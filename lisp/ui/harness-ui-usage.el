@@ -1023,7 +1023,7 @@ so neither a refresh nor a fold scrolls it."
     (define-key map [mouse-1] #'harness-ui-usage-mouse-open)
     (define-key map (kbd "TAB") #'harness-ui-usage-tab)
     (define-key map (kbd "<backtab>") #'backward-button)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-usage-mode'.")
 
@@ -1423,7 +1423,7 @@ BACKFILLS non-nil asks only for what no provider reports."
 ;;;;; Deleting a budget
 ;;
 ;; A budget is deleted from its line on the dashboard ([delete] or d)
-;; or, from anywhere, with `harness-delete-budget' (C-c h B, "Delete
+;; or, from anywhere, with `harness-delete-budget' (C-c h T B, "Delete
 ;; budget" in the harness menu), which offers every budget by name.
 ;; The harness keeps the budgets made here; a session's own budget is a
 ;; setting of that session, so deleting one clears it there.  The Budget
@@ -1689,8 +1689,9 @@ may change its provider's quota."
   (add-hook 'harness-ui-event-functions #'harness-ui-usage--on-event)
   (add-hook 'harness-ui-quota-functions #'harness-ui-usage--on-quota)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-usage--redraw)
-  (define-key harness-ui-map (kbd "u") #'harness-usage)
-  (define-key harness-ui-map (kbd "B") #'harness-delete-budget))
+  (harness-ui-bind "u" #'harness-usage "Usage & cost" :group 'views :column "Views")
+  (harness-ui-bind "B" #'harness-delete-budget "Budget removal"
+                   :group 'tools :column "Usage"))
 
 (harness-define-module 'ui-usage
   :doc "Usage and cost dashboard with charts, plan quota and budgets."

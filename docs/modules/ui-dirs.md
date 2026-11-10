@@ -15,7 +15,7 @@ The list of the directories a session may touch was a buffer of its
 own here.  It is a section of the session's access view now
 (harness-ui-access.el), with the session's sandbox, mode, tools,
 rules and the judgements of its calls, and `harness-directories`
-(C-c h d) opens the view at its directories.  The access view loads
+(C-c h S d) opens the view at its directories.  The access view loads
 with the access module, one of the core modules.
 
 This module stays so that a configuration naming ui-dirs in

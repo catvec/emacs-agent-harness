@@ -156,7 +156,7 @@ catches up; an unchanged cell costs no redraw.
 
 ## If you are on a build without the fix
 
-Until `harness-reload` loads it, kill `*harness worktrees*` (`C-x k`; `C-c h w`
+Until `harness-reload` loads it, kill `*harness worktrees*` (`C-x k`; `C-c h V w`
 makes it again) or run
 
 ```elisp

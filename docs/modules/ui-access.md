@@ -13,7 +13,7 @@ The jail and permissions view of a session, in five pages: settings and director
 
 ## About
 
-`harness-access` (C-c h j) says what a session may reach, in one
+`harness-access` (C-c h S j) says what a session may reach, in one
 place, and changes it.  Clicking the permission mode on a chat's
 settings line (Ask, Accept Edits, Auto, YOLO) opens it too.  It is
 five pages, a buffer each, that share a strip under the title --
@@ -39,7 +39,7 @@ click away rather than all on one screen:
   what can be done with it: give it up or keep it for reading only,
   revoke a grant, restore one given up; new ones are allowed, for
   writing or for reading only, and the session moves to another
-  working directory (`harness-directories`, C-c h d, opens the page
+  working directory (`harness-directories`, C-c h S d, opens the page
   here).  Details end it: a line each for the tools, the rules, the
   judgements and the secret protection, with what they hold, each a
   link to its page.

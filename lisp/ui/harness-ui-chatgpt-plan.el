@@ -315,7 +315,7 @@ active one; the page of its own signs out whichever line point is on."
     (define-key map (kbd "o") #'harness-ui-chatgpt-plan-sign-out)
     (define-key map (kbd "g") #'harness-ui-chatgpt-plan-revert)
     (define-key map (kbd "RET") #'harness-ui-chatgpt-plan-sign-in-this)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-chatgpt-plan-mode'.")
 
@@ -442,22 +442,14 @@ as a connection opens, so it is put off a moment."
                             (with-current-buffer buf
                               (harness-ui-chatgpt-plan-refresh #'harness-ui-chatgpt-plan--redraw))))))))
 
-(defun harness-ui-chatgpt-plan--menu-install ()
-  "Put the ChatGPT-plan page in the harness menu, after Settings."
-  (condition-case err
-      (transient-append-suffix 'harness-menu "S"
-        '("h" "ChatGPT plan…" harness-chatgpt-plan-page
-          :if (lambda () (harness-ui--command-available-p 'harness-chatgpt-plan-page))))
-    (error (harness-log 'warn "chatgpt: no menu entry: %s" (error-message-string err)))))
-
 (defun harness-ui-chatgpt-plan--init ()
   "Wire the ChatGPT section into the settings page, and follow the accounts."
   (add-hook 'harness-ui-config-sections-functions #'harness-ui-chatgpt-plan--insert-section)
   (add-hook 'harness-ui-config-load-hooks #'harness-ui-chatgpt-plan-refresh)
   (add-hook 'harness-ui-event-functions #'harness-ui-chatgpt-plan--on-event)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-chatgpt-plan--on-redraw)
-  (harness-ui-chatgpt-plan--menu-install)
-  (define-key harness-ui-map (kbd "h") #'harness-chatgpt-plan-page))
+  (harness-ui-bind "h" #'harness-chatgpt-plan-page "ChatGPT plan…"
+                   :group 'tools :column "Search"))
 
 (defun harness-ui-chatgpt-plan--shutdown ()
   "Take the ChatGPT section out of the settings page, and stop following it."
@@ -465,9 +457,8 @@ as a connection opens, so it is put off a moment."
   (remove-hook 'harness-ui-config-load-hooks #'harness-ui-chatgpt-plan-refresh)
   (remove-hook 'harness-ui-event-functions #'harness-ui-chatgpt-plan--on-event)
   (remove-hook 'harness-ui-redraw-hook #'harness-ui-chatgpt-plan--on-redraw)
-  (ignore-errors (transient-remove-suffix 'harness-menu "h"))
-  (when (eq (lookup-key harness-ui-map (kbd "h")) #'harness-chatgpt-plan-page)
-    (define-key harness-ui-map (kbd "h") nil)))
+  (when (eq (lookup-key harness-ui-tools-map (kbd "h")) #'harness-chatgpt-plan-page)
+    (harness-ui-unbind "h" harness-ui-tools-map)))
 
 (harness-define-module 'ui-chatgpt-plan
   :doc "Sign in with ChatGPT from the settings page, with the accounts and what they may do."

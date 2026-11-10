@@ -277,14 +277,14 @@ shows what it changed and who it applies to."
 Shut down, both go again."
   (harness-ui-supervisor-test-with
     (should (harness-module-ready-p 'ui-supervisor))
-    (should (eq #'harness-toggle-supervisor (lookup-key harness-ui-map (kbd "V"))))
+    (should (eq #'harness-toggle-supervisor (lookup-key harness-ui-session-map (kbd "v"))))
     (should (memq #'harness-ui-supervisor--header harness-chat-header-functions))
     ;; Starting again, as a reload does, adds nothing.
     (harness-ui-supervisor--init)
-    (should (eq #'harness-toggle-supervisor (lookup-key harness-ui-map (kbd "V"))))
+    (should (eq #'harness-toggle-supervisor (lookup-key harness-ui-session-map (kbd "v"))))
     (should (= 1 (cl-count #'harness-ui-supervisor--header harness-chat-header-functions)))
     (harness-ui-supervisor--shutdown)
-    (should-not (lookup-key harness-ui-map (kbd "V")))
+    (should-not (lookup-key harness-ui-session-map (kbd "v")))
     (should-not (memq #'harness-ui-supervisor--header harness-chat-header-functions))))
 
 ;;;; Turning the mode on or off for every session

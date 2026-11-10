@@ -341,14 +341,9 @@ Separate `execute-kbd-macro' calls reset `last-command' before each macro."
       (harness-ui-compose-test--draw)
       (should (equal "Compose focus (C-c j SPC)"
                      (get-text-property (- harness-compose-start 2) 'help-echo))))
-    (dolist (menu '(harness-session-menu))
-      (call-interactively menu)
-      (unwind-protect
-          (with-current-buffer transient--buffer-name
-            (goto-char (point-min))
-            (should (re-search-forward "SPC +\\(Compose focus\\)\\(?:  \\|$\\)" nil t))
-            (should (equal "Compose focus" (match-string-no-properties 1))))
-        (execute-kbd-macro (kbd "C-g"))))
+    ;; The top level's menu teaches the key, as the prefix has it.
+    (should (equal "Compose focus"
+                   (cdr (assoc "SPC" (harness-ui-test--menu-lines #'harness-ui-menu)))))
     (harness-compose-hide)
     (let ((last-command nil))
       (should (equal '(user-error "No compose box") (should-error (harness-compose-focus) :type 'user-error))))))

@@ -260,10 +260,9 @@
   "C-c h g searches, from anywhere, and so does g in the harness menu."
   (harness-ui-search-test-with
     (should (eq (lookup-key harness-ui-map (kbd "g")) #'harness-search-sessions))
-    ;; A suffix is (CLASS . PLIST) since transient 0.8, (LEVEL CLASS PLIST) before.
-    (let ((suffix (transient-get-suffix 'harness-menu "g")))
-      (should (eq 'harness-search-sessions
-                  (plist-get (if (keywordp (cadr suffix)) (cdr suffix) (car (last suffix))) :command))))
+    ;; The menu teaches the same key: the entry is the keymap's own.
+    (should (equal "Session search"
+                   (cdr (assoc "g" (harness-ui-test--menu-lines #'harness-ui-menu)))))
     (should (eq (lookup-key harness-ui-search-mode-map (kbd "RET")) #'harness-ui-search-open))))
 
 ;;;; Opening a session at a hit

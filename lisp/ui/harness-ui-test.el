@@ -110,7 +110,7 @@ commands, it does too: `harness-ui-btw-has-the-full-chat-header'."
           (dolist (from (list (get-buffer-window chat) btw-window))
             (select-window from)
             (let ((before (harness-ui-test--layout)))
-              (call-interactively #'harness-menu)
+              (call-interactively #'harness-ui-menu)
               (unwind-protect
                   (let ((window (get-buffer-window transient--buffer-name)))
                     (should (eq window (window-in-direction 'below btw-window t)))
@@ -251,173 +251,191 @@ The menu groups BODY gives the test modes are taken back afterwards."
          (kill-buffer buffer)))))
 
 (defun harness-ui-test-menu-groups ()
-  "Return every (MODE TITLE . COLUMNS) the UI modules give `harness-menu'."
+  "Return every (MODE TITLE . COLUMNS) the UI modules give `harness-ui-menu'."
   (let (groups)
     (mapatoms (lambda (mode)
                 (when-let* ((group (get mode 'harness-menu-group)))
                   (push (cons mode group) groups))))
     groups))
 
-(defun harness-ui-test--suffix-plist (suffix)
-  "Return the properties of SUFFIX, a suffix of a transient layout.
-Transient 0.8 and later write it (CLASS . PLIST), earlier ones (LEVEL
-CLASS PLIST)."
-  (if (keywordp (cadr suffix)) (cdr suffix) (car (last suffix))))
-
 (defun harness-ui-test-menu (&optional keys)
-  "Open `harness-menu' here and return its text, then type KEYS in it.
+  "Open `harness-ui-menu' here and return its text, then type KEYS in it.
 KEYS default to C-g, which closes the menu."
-  (call-interactively #'harness-menu)
+  (call-interactively #'harness-ui-menu)
   (prog1 (with-current-buffer transient--buffer-name
            (buffer-substring-no-properties (point-min) (point-max)))
     (execute-kbd-macro (kbd (or keys "C-g")))))
 
-(ert-deftest harness-ui-grouped-shortcuts-preserve-old-bindings ()
-  ;; The menus are the prefix's own now: no key of its own opens one.
-  (dolist (key '("=" "?"))
-    (should-not (lookup-key harness-ui-map (kbd key))))
-  (should (eq (lookup-key harness-ui-map (vector harness-ui--groups-menu-key))
-              'harness-groups-menu))
-  (dolist (key '("C-s" "C-o" "C-t"))
-    (should-not (lookup-key harness-ui-map (kbd key))))
-  (let ((harness-ui-map (copy-keymap harness-ui-map)))
-    (unwind-protect
-        (progn (harness-ui-tasks--init)
-               (should-not (lookup-key harness-ui-map (kbd "C-t")))
-               (should (eq (lookup-key harness-ui-map (kbd "a")) 'harness-tasks)))
-      (harness-ui-tasks--shutdown)))
-  (should (eq (lookup-key harness-ui-map (kbd "n")) 'harness-new-session))
-  ;; The tree module installs this direct shortcut when it is enabled.
-  (let ((harness-ui-map (copy-keymap harness-ui-map)))
-    (harness-ui-tree--init)
-    (should (eq (lookup-key harness-ui-map (kbd "t")) 'harness-tree)))
-  (harness-ui-test-with-menu-buffer #'fundamental-mode
-    (let ((text (harness-ui-test-menu)))
-      (should-not (string-match-p "All groups\\|All commands" text)))
-    (call-interactively #'harness-groups-menu)
-    (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
-      (should (string-match-p "Tasks…" text))
-      (should (string-match-p "Sessions…" text)))
-    (execute-kbd-macro (kbd "C-g"))
-    (call-interactively #'harness-task-menu)
-    (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
-      (should (string-match-p "This project" text))
-      (should-not (string-match-p "Task at point" text)))
-    (execute-kbd-macro (kbd "C-g")))
-  (harness-ui-test-with-menu-buffer #'harness-ui-tasks-mode
-    (call-interactively #'harness-task-menu)
-    (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
-      (should (string-match-p "Task at point" text))
-      (should (string-match-p "Verification" text)))
+(defun harness-ui-test--menu-text (menu)
+  "Open MENU here and return its text, then close it."
+  (call-interactively menu)
+  (prog1 (with-current-buffer transient--buffer-name
+           (buffer-substring-no-properties (point-min) (point-max)))
     (execute-kbd-macro (kbd "C-g"))))
 
+(defun harness-ui-test--menu-keys (menu)
+  "Return the keys MENU shows, as the strings of its suffixes.
+MENU is opened here, and closed again.  The suffixes are the ones
+transient laid out, which is what the menu shows."
+  (call-interactively menu)
+  (prog1 (let (keys)
+           (dolist (suffix (harness-ui-test--suffixes menu))
+             (let ((key (plist-get suffix :key)))
+               (when (stringp key) (push key keys))))
+           (nreverse keys))
+    (execute-kbd-macro (kbd "C-g"))))
+
+
+
+(defun harness-ui-test--shown-keys (menu)
+  "Return the keys MENU shows, read from the menu's own text.
+Transient draws a suffix's key in the key face, so the keys are read
+from the text a person reads: a key the menu shows but the keymap does
+not have is caught here, and one the keymap has but the menu leaves out
+too."
+  (call-interactively menu)
+  (prog1 (let (keys)
+           (with-current-buffer transient--buffer-name
+             ;; The first line is the menu's title, not a key.
+             (forward-line 1)
+             (while (not (eobp))
+               (let ((face (get-text-property (point) 'face)))
+                 (if (memq face '(transient-key transient-key-exit
+                                  transient-key-stack))
+                     (let ((end (next-single-property-change (point) 'face)))
+                       (push (buffer-substring-no-properties (point) end) keys)
+                       (goto-char end))
+                   (forward-char 1)))))
+           (nreverse keys))
+    (execute-kbd-macro (kbd "C-g"))))
+
+(ert-deftest harness-ui-keys-are-one-tree ()
+  "Every key of the harness's tree runs the command its menu shows.
+The tree is `harness-ui-map' and the groups under it; a group's key
+takes the group's keymap, so its own keys follow it, and the menu of a
+level is made from that level's keys.  A key the menu shows is the key
+that runs the command, whether the menu has opened or not."
+  (let ((harness-global-mode t))
+    (dolist (level harness-ui--level-list)
+      (ert-info ((format "level %s" (harness-ui-level-title level)))
+        (dolist (cell (harness-ui-level-entries level))
+          (let* ((command (plist-get (cdr cell) :command))
+                 (keys (harness-ui-keys command)))
+            (should keys)
+            (should (eq (lookup-key harness-global-mode-map (kbd keys))
+                        command))))))))
+
+(ert-deftest harness-ui-menus-show-the-keys-of-their-level ()
+  "A level's menu shows exactly the keys of that level, and no others.
+The menu is made from the keymap, so the two cannot drift apart: every
+key the menu shows is bound there, and every key bound there is shown."
+  (dolist (level harness-ui--level-list)
+    (ert-info ((format "level %s" (harness-ui-level-title level)))
+      (let* ((map (harness-ui-level-map level))
+             (menu (harness-ui-level-menu level))
+             (shown (sort (copy-sequence (harness-ui-test--shown-keys menu)) #'string<))
+             (bound (let (keys)
+                      (dolist (cell (harness-ui-level-entries level))
+                        (let ((command (plist-get (cdr cell) :command)))
+                          (when (or (not (symbolp command))
+                                    (harness-ui--command-available-p command))
+                            (push (key-description (car cell)) keys))))
+                      (sort keys #'string<))))
+        (should (equal bound shown))
+        ;; And each one runs what the menu says it runs.
+        (dolist (suffix (harness-ui-test--suffixes menu))
+          (let ((key (plist-get suffix :key))
+                (command (plist-get suffix :command)))
+            (when (stringp key)
+              (should (eq (lookup-key map (kbd key)) command)))))))))
+
+(ert-deftest harness-ui-groups-are-real-prefix-keymaps ()
+  "A group's key is a keymap, not a command: its own keys follow it.
+`C-c h S' is the session group, so `C-c h S e' sets the context limit,
+and the group's menu opens on the key alone."
+  (let ((harness-global-mode t))
+    (dolist (level harness-ui--level-list)
+      (unless (eq (harness-ui-level-map level) harness-ui-map)
+        (ert-info ((format "group %s" (harness-ui-level-title level)))
+          (let* ((map (harness-ui-level-map level))
+                 (key (harness-ui-command-key map harness-ui-map)))
+            (should key)
+            (should (keymapp (lookup-key harness-ui-map (kbd key))))
+            (should (eq (lookup-key harness-ui-map (kbd key))
+                        (harness-ui-level-map level)))))))
+    (should (eq (lookup-key harness-global-mode-map (kbd "C-c h S e"))
+                'harness-set-context-limit))
+    (should (eq (lookup-key harness-global-mode-map (kbd "C-c h O U"))
+                'harness-version))
+    (should (eq (lookup-key harness-global-mode-map (kbd "C-c h V t"))
+                'harness-tree))))
+
+(ert-deftest harness-ui-every-key-stands-in-a-column-its-level-names ()
+  "Every key of the tree stands in a column its level names, in a row.
+A key whose `:column' a level does not name is still shown -- in its last
+column -- so a module's typo never loses a command from the menu; here
+none is left over, and every column a level names has keys in it, so no
+heading stands over an empty column."
+  (dolist (level harness-ui--level-list)
+    (ert-info ((format "level %s" (harness-ui-level-title level)))
+      (let* ((rows (or (harness-ui-level-rows level)
+                       (list (harness-ui-level-columns level))))
+             (named (apply #'append rows))
+             (used (delete-dups
+                    (mapcar (lambda (cell) (plist-get (cdr cell) :column))
+                            (harness-ui-level-entries level)))))
+        ;; Every key is in a column the level names.
+        (should (cl-subsetp used named :test #'equal))
+        ;; And every column it names has a key, so no heading is empty.
+        (should (cl-subsetp named used :test #'equal))
+        ;; A row never names a column twice.
+        (dolist (row rows)
+          (should (= (length row) (length (delete-dups (copy-sequence row))))))))))
+
+(ert-deftest harness-ui-common-commands-stay-at-the-top ()
+  "The commands used most are one key under the prefix, not in a group.
+The task board, the session list and a new session are the ones the
+user named; the model, the permission mode and a fork are beside them."
+  (let ((harness-global-mode t))
+    (dolist (entry '(("C-c h a" . harness-tasks)
+                     ("C-c h l" . harness-sessions)
+                     ("C-c h n" . harness-new-session)
+                     ("C-c h s" . harness-switch-session)
+                     ("C-c h m" . harness-set-model)
+                     ("C-c h p" . harness-set-permission-mode)
+                     ("C-c h f" . harness-fork-session)
+                     ("C-c h k" . harness-cancel-turn)))
+      (ert-info ((car entry))
+        (should (eq (lookup-key harness-global-mode-map (kbd (car entry)))
+                    (cdr entry)))))))
+
 (ert-deftest harness-ui-grouped-shortcut-dispatches-from-keyboard ()
-  "A global prefix opens a group and its next key runs in the source buffer."
+  "A group's key and the next key run the command, from the source buffer.
+The menu need not have opened: the keys are the keymap's."
   (harness-ui-test-with-menu-buffer #'fundamental-mode
     (let ((harness-global-mode t)
           (source (current-buffer))
           called)
-      (cl-letf (((symbol-function 'harness-switch-session)
+      (cl-letf (((symbol-function 'harness-set-context-limit)
                  (lambda () (interactive) (setq called (current-buffer)))))
-        (call-interactively #'harness-groups-menu)
-        (should (string-match-p "Command groups" (with-current-buffer transient--buffer-name
-                                                   (buffer-string))))
-        (execute-kbd-macro (kbd "s"))
-        (should (string-match-p "Switch" (with-current-buffer transient--buffer-name
-                                           (buffer-string))))
-        (execute-kbd-macro (kbd "s"))
+        (execute-kbd-macro (kbd "C-c h S e"))
         (should (eq called source))
         (should-not transient--prefix)))))
 
-(ert-deftest harness-ui-grouped-task-action-dispatches-with-plain-keys ()
-  "The task group runs an action from the board without another Control key."
-  (harness-ui-test-with-menu-buffer #'harness-ui-tasks-mode
-    (let ((harness-global-mode t)
-          (source (current-buffer))
-          called)
-      (cl-letf (((symbol-function 'harness-ui-tasks-verify)
-                 (lambda () (interactive) (setq called (current-buffer)))))
-        (call-interactively #'harness-groups-menu)
-        (execute-kbd-macro (kbd "t"))
-        (should (string-match-p "Task at point" (with-current-buffer transient--buffer-name
-                                                   (buffer-string))))
-        (execute-kbd-macro (kbd "v"))
-        (should (eq called source))
-        (should-not transient--prefix)))))
-
-(ert-deftest harness-ui-grouped-task-new-does-not-steal-board-deny ()
-  "The new-task group key and the board's existing `n' remain distinct."
-  (should (eq (lookup-key harness-ui-tasks-board-map (kbd "n"))
-              'harness-ui-tasks-deny))
-  (should (eq (lookup-key harness-ui-tasks-board-map (kbd "a"))
-              'harness-ui-tasks-compose))
-  (harness-ui-test-with-menu-buffer #'harness-ui-tasks-mode
-    (let ((harness-global-mode t)
-          (source (current-buffer))
-          called)
-      (cl-letf (((symbol-function 'harness-ui-tasks-compose)
-                 (lambda () (interactive) (setq called (current-buffer)))))
-        (call-interactively #'harness-groups-menu)
-        (execute-kbd-macro (kbd "t n"))
-        (should (eq called source))
-        (should-not transient--prefix)))))
-
-(ert-deftest harness-ui-groups-menu-shows-groups-not-every-command ()
-  "The menu C-c h opens lists groups, not every command at once.
-Choosing a group opens only that group's commands; a buffer with
-commands in its `harness-menu-group' gets an entry of its own."
-  (harness-ui-test-with-menu-buffer #'fundamental-mode
-    (unwind-protect
-        (progn
-          ;; Priority is a module the test file does not load: give it one
-          ;; command so the group itself can be checked here.
-          (cl-letf (((symbol-function 'harness-set-priority) (lambda () (interactive))))
-            (call-interactively #'harness-groups-menu)
-            (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
-              (should (string-match-p "Command groups" text))
-              (dolist (group '("Sessions…" "Session settings…" "Priority…" "Tasks…"
-                               "Tools…" "Config & remote…"))
-                (should (string-match-p (regexp-quote group) text)))
-              (should-not (string-match-p "This buffer…" text))
-              ;; The flat all-commands list is not offered here.
-              (should-not (string-match-p "All commands" text))
-              (should-not (string-match-p "New session\\|Model\\|Harness reload" text)))
-            (execute-kbd-macro (kbd "C-g"))
-            (should-not transient--prefix)))
-      (ignore-errors (transient-quit-all))))
-  (harness-ui-test-with-menu-buffer #'harness-chat-mode
-    (unwind-protect
-        (progn
-          (call-interactively #'harness-groups-menu)
-          (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
-            (should (string-match-p "This buffer…" text)))
-          (execute-kbd-macro (kbd "b"))
-          (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
-            (should (string-match-p "Chat" text))
-            (should (string-match-p "C-c C-c +Send" text)))
-          ;; The buffer menu's parent is still open: C-g leaves one
-          ;; level, the second closes the groups menu it came from.
-          (execute-kbd-macro (kbd "C-g C-g"))
-          (should-not transient--prefix))
-      (ignore-errors (transient-quit-all)))))
-
-(ert-deftest harness-ui-groups-menu-drills-into-a-group ()
-  "A group key opens that group's commands, and the next key runs one.
-The top level itself offers no command: c R reloads from the groups
-menu, while the top level has no R of its own."
+(ert-deftest harness-ui-grouped-menu-drills-into-a-group ()
+  "A group's menu shows that group's commands, and its key runs one.
+The top level shows the group, not the group's commands."
   (harness-ui-test-with-menu-buffer #'fundamental-mode
     (unwind-protect
         (let ((harness-global-mode t)
               called)
           (cl-letf (((symbol-function 'harness-reload)
                      (lambda () (interactive) (setq called 'reload))))
-            (call-interactively #'harness-groups-menu)
-            (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
-              (should (string-match-p "Command groups" text))
+            (let ((text (harness-ui-test--menu-text #'harness-ui-menu)))
+              (should (string-match-p "Options…" text))
               (should-not (string-match-p "Harness reload" text)))
-            (execute-kbd-macro (kbd "c"))
+            (call-interactively #'harness-ui-options-menu)
             (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
-              (should (string-match-p "Configuration" text))
               (should (string-match-p "Harness reload" text))
               (should-not (string-match-p "New session" text)))
             (execute-kbd-macro (kbd "R"))
@@ -426,68 +444,74 @@ menu, while the top level has no R of its own."
       (ignore-errors (transient-quit-all)))))
 
 (ert-deftest harness-ui-groups-show-the-modules-commands ()
-  "A module's command is in its group, without a flat list to hold it.
+  "A module's command is in its group, and left out when the module is off.
 The modules load after `harness-ui', so their entries appear when the
-command exists and are left out when the module is off."
+command exists."
   (harness-ui-test-with-menu-buffer #'fundamental-mode
     (unwind-protect
         (cl-letf (((symbol-function 'harness-compact) (lambda () (interactive)))
                   ((symbol-function 'harness-provider-check) (lambda () (interactive)))
                   ((symbol-function 'harness-chatgpt-plan-page) (lambda () (interactive)))
                   ((symbol-function 'harness-redact-secret) (lambda () (interactive))))
-          (dolist (entry '((harness-session-menu "Context compaction")
-                           (harness-settings-menu "Provider & model check")
-                           (harness-tools-menu "ChatGPT plan…")
-                           (harness-tools-menu "Secret redaction…")))
-            (call-interactively (car entry))
-            (let ((text (with-current-buffer transient--buffer-name (buffer-string))))
+          (dolist (entry '((harness-ui-session-menu "Context compaction")
+                           (harness-ui-session-menu "Provider & model check")
+                           (harness-ui-tools-menu "ChatGPT plan…")
+                           (harness-ui-tools-menu "Secret redaction…")))
+            (let ((text (harness-ui-test--menu-text (car entry))))
               (should (string-match-p (regexp-quote (cadr entry)) text)))
-            (execute-kbd-macro (kbd "C-g"))
             (should-not transient--prefix)))
       (ignore-errors (transient-quit-all)))))
 
-(ert-deftest harness-ui-menu-elsewhere-shows-only-its-own-groups ()
+(ert-deftest harness-ui-menu-elsewhere-shows-the-harness-keys ()
+  "The flat menu a view binds to ? shows the harness's own keys.
+They are the top level's, made from `harness-ui-map', so a view's menu
+and the prefix agree; the buffer's own commands follow them."
   (harness-ui-test-with-menu-buffer #'fundamental-mode
     (let ((text (harness-ui-test-menu)))
       (should (string-match-p "Sessions" text))
-      (should (string-match-p "Session settings" text))
-      (should (string-match-p "Tools" text))
-      (should-not (string-match-p "^ *\\. \\|C-c C-" text))
-      (pcase-dolist (`(,_mode ,title . ,_columns) (harness-ui-test-menu-groups))
-        (should-not (string-match-p (concat "^" (regexp-quote title) "$") text))))
+      (should (string-match-p "Settings" text))
+      (should (string-match-p "Groups" text))
+      (should (string-match-p "n +New session" text))
+      (should (string-match-p "S +Session…" text))
+      (should-not (string-match-p "^ *\\. \\|C-c C-" text)))
     (should-not transient--prefix)))
 
-(ert-deftest harness-ui-groups-menu-opens-on-the-prefix-alone ()
-  "C-c h alone opens the grouped `harness-groups-menu'.
+(ert-deftest harness-ui-menu-opens-on-the-prefix-alone ()
+  "C-c h alone opens the top level's menu, and a group's key its own.
 No key of the prefix opens a menu by hand, and every key under the
-prefix still runs as it did.  The prefix stays a keymap: the idle timer
-puts back an event no keyboard sends to be read after the prefix, so a
-key typed before the timer runs keeps its binding and the menu never
-takes it."
+prefix still runs as it did.  A level stays a keymap: the idle timer
+puts back an event no keyboard sends to be read after it, so a key typed
+before the timer runs keeps its binding and the menu never takes it."
   (let ((harness-global-mode t))
     (should (eq harness-ui-map (lookup-key harness-global-mode-map (kbd "C-c h"))))
     (dolist (key '("=" "?"))
       (should-not (lookup-key harness-ui-map (kbd key))))
     ;; The prefix waiting for a key becomes C-c h <event>; a key after it
-    ;; does not.
-    (should (eq harness-ui--groups-menu-key
+    ;; does not, and neither does a group's key with a key after it.
+    (should (eq harness-ui--menu-key
                 (harness-ui--prefix-menu-event (kbd "C-c h"))))
+    (should (eq harness-ui--menu-key
+                (harness-ui--prefix-menu-event (kbd "C-c h S"))))
     (should-not (harness-ui--prefix-menu-event (kbd "C-c h n")))
+    (should-not (harness-ui--prefix-menu-event (kbd "C-c h S e")))
     (should-not (harness-ui--prefix-menu-event (kbd "C-c x")))
-    ;; The event the idle timer queues completes the prefix as the groups menu.
+    ;; The event the idle timer queues completes the prefix as the menu.
     (let* ((event (harness-ui--prefix-menu-event (kbd "C-c h")))
            (unread-command-events (append (kbd "C-c h") (list event))))
-      (should (eq #'harness-groups-menu (key-binding (read-key-sequence nil)))))))
+      (should (eq #'harness-ui-menu (key-binding (read-key-sequence nil)))))
+    (let* ((event (harness-ui--prefix-menu-event (kbd "C-c h S")))
+           (unread-command-events (append (kbd "C-c h S") (list event))))
+      (should (eq #'harness-ui-session-menu (key-binding (read-key-sequence nil)))))))
 
 (ert-deftest harness-ui-menu-idle-timer-queues-the-menu-key ()
-  "The idle timer queues the menu's key only while the prefix waits.
+  "The idle timer queues the menu's key only while a level waits.
 A key typed after the prefix queues nothing, so the menu cannot take it."
   (let ((harness-global-mode t)
         (unread-command-events nil))
     (cl-letf (((symbol-function 'this-command-keys-vector)
                (lambda () (kbd "C-c h"))))
       (harness-ui--menu-on-idle))
-    (should (equal (list harness-ui--groups-menu-key) unread-command-events)))
+    (should (equal (list harness-ui--menu-key) unread-command-events)))
   (let ((harness-global-mode t)
         (unread-command-events nil))
     (cl-letf (((symbol-function 'this-command-keys-vector)
@@ -514,11 +538,11 @@ Changing the delay restarts a running timer, and nil stops it."
 
 (ert-deftest harness-ui-prefix-keys-run-with-the-menu-on-idle ()
   "A key after C-c h runs its own command, the menu on idle or not.
-The idle menu is a key of the prefix, not a command that replaces it.
-`C-c h R' reloads, for one, and leaves no menu behind; no key of the
-prefix opens a menu by hand."
+The idle menu is a key of the level, not a command that replaces it.
+`C-c h R' is no longer a key of the top level: a reload is in Options.
+`C-c h O R' reloads, and leaves no menu behind."
   (let ((harness-global-mode t))
-    (dolist (key '("n" "s" "R"))
+    (dolist (key '("n" "s" "S" "O"))
       (should (lookup-key harness-global-mode-map (kbd (concat "C-c h " key)))))
     (dolist (key '("=" "?"))
       (should-not (lookup-key harness-global-mode-map (kbd (concat "C-c h " key))))))
@@ -527,34 +551,39 @@ prefix opens a menu by hand."
           called)
       (cl-letf (((symbol-function 'harness-reload)
                  (lambda () (interactive) (setq called 'reload))))
-        (execute-kbd-macro (kbd "C-c h R"))
+        (execute-kbd-macro (kbd "C-c h O R"))
         (should (eq called 'reload))
         (should-not transient--prefix)))))
 
 (ert-deftest harness-ui-menu-offers-deleting-a-budget ()
-  "Deleting a budget is in the menu from any buffer, not only the dashboard,
-whose own group says d deletes the budget at point."
-  (harness-ui-test-with-menu-buffer #'fundamental-mode
-    (should (string-match-p "B +Budget removal" (harness-ui-test-menu))))
-  (harness-ui-test-with-menu-buffer #'harness-ui-usage-mode
-    (let ((text (harness-ui-test-menu)))
-      (should (string-match-p "B +Budget removal" text))
-      (should (string-match-p "\\. d +Budget removal" text)))))
+  "Deleting a budget is in the Tools group from any buffer, not only the
+dashboard, whose own group says d deletes the budget at point."
+  (dolist (mode (list #'fundamental-mode #'harness-ui-usage-mode))
+    (harness-ui-test-with-menu-buffer mode
+      (let ((text (harness-ui-test--menu-text #'harness-ui-tools-menu)))
+        (should (string-match-p "B +Budget removal" text)))
+      (should-not transient--prefix))))
 
-(ert-deftest harness-ui-menu-offers-the-supervisor-all-command-only-when-there ()
-  "The menu's V turns supervisor mode on or off for every session, beside
-the other for-all-sessions entries; a harness without the supervisor UI
-module leaves the entry out, so the menu is unharmed."
+(ert-deftest harness-ui-menu-offers-the-supervisor-command-only-when-there ()
+  "The session group's v turns supervisor mode on or off for a session;
+a harness without the supervisor UI module leaves the entry out, so the
+menu is unharmed."
   (harness-ui-test-with-menu-buffer #'fundamental-mode
     ;; The UI here does not load ui-supervisor, so there is nothing to offer.
-    (should-not (fboundp 'harness-set-supervisor-all))
-    (should-not (string-match-p "Supervisor mode for all sessions" (harness-ui-test-menu)))
+    (should-not (fboundp 'harness-toggle-supervisor))
+    (should-not (string-match-p "Supervisor mode"
+                                (harness-ui-test--menu-text #'harness-ui-session-menu)))
+    (should-not transient--prefix)
     (unwind-protect
         (progn
           (require 'harness-ui-supervisor)
-          (should (string-match-p "V +Supervisor mode for all sessions" (harness-ui-test-menu))))
+          (harness-ui-supervisor--init)
+          (should (string-match-p "v +Supervisor mode"
+                                  (harness-ui-test--menu-text #'harness-ui-session-menu)))
+          (should-not transient--prefix))
       ;; Loaded only for this test: leave the UI as it was, unbound.
-      (fmakunbound 'harness-set-supervisor-all))))
+      (harness-ui-supervisor--shutdown)
+      (fmakunbound 'harness-toggle-supervisor))))
 
 (ert-deftest harness-ui-menu-shows-the-chat-commands-in-a-chat ()
   (harness-ui-test-with-menu-buffer #'harness-chat-mode
@@ -575,7 +604,9 @@ module leaves the entry out, so the menu is unharmed."
       (should (string-match-p "M-RET +Quote split" text))
       (should (string-match-p "C-c \\[ +Quote elision" text))
       (should-not (string-match-p "C-c C-v" text))
-      (should-not (string-match-p "Task board" text)))))
+      ;; The harness's own keys come first, as the prefix has them.
+      (should (string-match-p "n +New session" text))
+      (should (string-match-p "S +Session…" text)))))
 
 (ert-deftest harness-ui-menu-in-a-btw-shows-its-keys-over-the-chats ()
   "In a BTW, C-c C-k cancels the turn as in any session, C-c M-k closes it
@@ -593,179 +624,110 @@ and C-c C-o keeps it, in the buffer and so in the menu."
       (should (string-match-p "C-c C-c +Send" text))
       (should (string-match-p "C-c > +Thread reply" text)))))
 
+
+
 (ert-deftest harness-ui-menus-are-noun-phrases ()
   "Every entry of the harness's own menus is the noun phrase of its inventory.
-The menus are the groups and their own menus; a buffer's commands are
-checked where its mode is.  The exact words are the copy inventory: a
-sentence, an imperative clause or a stray description fails here."
-  (dolist (menu
-           '(
-             (harness-groups-menu
-              ("s" . "Sessions…")
-              ("o" . "Session settings…")
-              ("p" . "Priority…")
-              ("t" . "Tasks…")
-              ("u" . "Tools…")
-              ("c" . "Config & remote…")
-              ("b" . "This buffer…")
-              )
-             (harness-session-menu
-              ("n" . "New")
-              ("s" . "Switch")
-              ("l" . "List")
-              ("g" . "Search")
-              ("/" . "Quick search")
-              ("t" . "Conversation tree")
-              ("f" . "Fork")
-              ("C" . "Context compaction")
-              ("K" . "Cache warming")
-              ("k" . "Turn cancellation")
-              ("D" . "Deletion")
-              ("b" . "BTW side conversation")
-              ("r" . "Audio recording")
-              ("F" . "Fullscreen overview")
-              (">" . "Region prompt")
-              ("<" . "Region thread reply")
-              ("o" . "Latest session")
-              ("O" . "Session open")
-              )
-             (harness-task-menu
-              ("a" . "This project")
-              ("G" . "All projects")
-              ("RET" . "Session open")
-              ("s" . "Start")
-              ("Q" . "Queue")
-              ("m" . "Message")
-              ("k" . "Stop or drop")
-              ("u" . "Pause")
-              ("U" . "Resume")
-              ("v" . "Verification")
-              ("R" . "Return")
-              ("M" . "Merge retry")
-              ("x" . "Archive or restore")
-              ("D" . "Deletion")
-              ("n" . "New task")
-              ("/" . "Search")
-              ("P" . "Queue suspension")
-              ("g" . "Refresh")
-              )
-             (harness-settings-menu
+The menus are the levels of the tree, the top level and the groups under
+it; a buffer's commands are checked where its mode is.  The exact words
+are the copy inventory: a sentence, an imperative clause or a stray
+description fails here."
+  (dolist (entry
+           '((harness-ui-menu
+              ("n" . "New session")
+              ("s" . "Session switch")
+              ("l" . "Session list")
+              ("a" . "Task board")
+              ("G" . "Task board · every project")
+              ("g" . "Session search")
               ("m" . "Model")
+              ("p" . "Permission mode")
+              ("f" . "Session fork")
+              ("k" . "Turn cancellation")
+              ("SPC" . "Compose focus")
+              ("F" . "Fullscreen overview")
+              ("S" . "Session…")
+              ("V" . "View…")
+              ("T" . "Tools…")
+              ("O" . "Options…"))
+             (harness-ui-session-menu
               ("M" . "Model for all sessions")
               ("=" . "Model complexity")
               ("!" . "Provider & model check")
               ("T" . "Thinking")
               ("H" . "Thinking for all sessions")
-              ("p" . "Permission mode")
-              ("e" . "Context limit")
               ("j" . "Jail & permissions")
               ("d" . "Directory access")
               ("i" . "Non-interactive")
               ("I" . "Non-interactive for all sessions")
-              ("v" . "Supervisor mode")
-              ("V" . "Supervisor mode for all sessions")
-              ("r" . "Rename")
-              ("W" . "Session move")
-              )
-             (harness-priority-menu
+              ("e" . "Context limit")
+              ("C" . "Context compaction")
+              ("K" . "Cache warming")
+              ("a" . "Compaction ask")
+              ("A" . "Compaction ask · every session")
               ("+" . "Priority raise")
               ("-" . "Priority lower")
               ("y" . "Priority…")
               ("Y" . "Priority for all sessions…")
-              )
-             (harness-tools-menu
+              ("W" . "Session move")
+              ("r" . "Rename")
+              ("x" . "Session close")
+              ("D" . "Session deletion")
+              ("v" . "Supervisor mode"))
+             (harness-ui-views-menu
+              ("o" . "Latest session")
+              ("O" . "Session open")
+              ("t" . "Conversation tree")
+              ("b" . "BTW side conversation")
               ("u" . "Usage & cost")
               ("A" . "Insights")
-              ("B" . "Budget removal")
-              ("h" . "ChatGPT plan…")
-              ("w" . "Worktrees")
               ("Q" . "Task slots")
+              ("E" . "Computers")
+              ("Y" . "Workspace")
+              ("w" . "Worktrees")
+              ("z" . "Companion pet")
+              ("v" . "Voice")
+              ("r" . "Audio recording")
+              (">" . "Region prompt")
+              ("<" . "Region thread reply"))
+             (harness-ui-tools-menu
+              ("B" . "Budget removal")
               ("m" . "Memory…")
               ("M" . "Memory")
               ("x" . "Secret redaction…")
               ("E" . "Secret sources")
-              )
-             (harness-config-menu
+              ("/" . "Quick search")
+              ("h" . "ChatGPT plan…"))
+             (harness-ui-options-menu
               ("S" . "Settings")
               ("O" . "Modules")
               ("X" . "Module enablement")
               ("N" . "Notification test")
-              ("z" . "Companion pet")
               ("c" . "Server connection…")
               ("C" . "Server details")
               ("P" . "Remote control")
-              ("R" . "Harness reload")
+              ("y" . "Remote approval")
+              ("U" . "Version")
               ("M-u" . "Harness update")
-              ("L" . "Log")
-              )
-             ))
-    (pcase-let ((`(,prefix . ,entries) menu))
-      (dolist (entry entries)
-        (let* ((suffix (transient-get-suffix prefix (car entry)))
-               (properties (and suffix (harness-ui-test--suffix-plist suffix))))
-          (ert-info ((format "%s %s" prefix (car entry)))
-            (should suffix)
-            (should (equal (cdr entry) (plist-get properties :description))))))))
-  ;; The flat menu, which a view's ? binds, has the same nouns.
-  (dolist (entry
-           '(             ("n" . "New session")
-             ("s" . "Session switch")
-             (">" . "Region prompt")
-             ("<" . "Region thread reply")
-             ("l" . "Session list")
-             ("g" . "Session search")
-             ("a" . "Task mode")
-             ("G" . "Task mode · every project")
-             ("t" . "Conversation tree")
-             ("b" . "BTW side conversation")
-             ("f" . "Session fork")
-             ("k" . "Turn cancellation")
-             ("D" . "Session deletion")
-             ("m" . "Model")
-             ("M" . "Model for all sessions")
-             ("=" . "Model complexity")
-             ("T" . "Thinking")
-             ("H" . "Thinking for all sessions")
-             ("p" . "Permission mode")
-             ("e" . "Context limit")
-             ("j" . "Jail & permissions")
-             ("d" . "Directory access")
-             ("I" . "Non-interactive for all sessions")
-             ("V" . "Supervisor mode for all sessions")
-             ("r" . "Rename")
-             ("W" . "Session move")
-             ("+" . "Priority raise")
-             ("-" . "Priority lower")
-             ("y" . "Priority…")
-             ("Y" . "Priority for all sessions…")
-             ("u" . "Usage & cost")
-             ("A" . "Insights")
-             ("B" . "Budget removal")
-             ("w" . "Worktrees")
-             ("Q" . "Task slots")
-             ("S" . "Settings")
-             ("O" . "Modules")
-             ("X" . "Module enablement")
-             ("z" . "Companion pet")
-             ("c" . "Server connection…")
-             ("C" . "Server details")
-             ("P" . "Remote control")
-             ("N" . "Notification test")
-             ("R" . "Harness reload")
-             ("M-u" . "Harness update")
-             ("L" . "Log")))
-    (let* ((suffix (transient-get-suffix 'harness-menu (car entry)))
-           (properties (and suffix (harness-ui-test--suffix-plist suffix))))
-      (ert-info ((format "harness-menu %s" (car entry)))
-        (should suffix)
-        (should (equal (cdr entry) (plist-get properties :description)))))))
+              ("R" . "Harness reload")
+              ("L" . "Log"))))
+    (pcase-let ((`(,menu . ,entries) entry))
+      (let ((shown (harness-ui-test--menu-lines menu)))
+        (dolist (suffix-entry entries)
+          ;; A command of a module this suite does not load is left out of
+          ;; the menu, and has no label to check here.
+          (when (assoc (car suffix-entry) shown)
+            (ert-info ((format "%s %s" menu (car suffix-entry)))
+              (should (equal (cdr suffix-entry)
+                             (cdr (assoc (car suffix-entry) shown)))))))))))
 
 (ert-deftest harness-ui-menu-closes-a-session-from-a-chat ()
   "Closing a session is in a chat's menu, and a BTW's, under one key.
-That is C-c M-k, which `C-c h x' and the menu's Sessions group leave to the
-secrets module's Redact a secret; a normal chat and a BTW bind the same
-command to it, and C-c C-k still cancels a turn."
-  (should (eq 'harness-close-session (lookup-key harness-ui-map (kbd "x"))))
+That is C-c M-k: in the session group the plain x is the session's own
+close (`C-c h S x'), and a chat binds another x, so the menu there spells
+the key out.  A normal chat and a BTW bind the same command to it, and
+C-c C-k still cancels a turn."
+  (should (eq 'harness-close-session (lookup-key harness-ui-session-map (kbd "x"))))
   (harness-ui-test-with-menu-buffer #'harness-chat-mode
     (should (eq 'harness-close-session (key-binding (kbd "C-c M-k"))))
     (should (eq 'harness-chat-cancel (key-binding (kbd "C-c C-k"))))
@@ -829,7 +791,7 @@ by a minor mode are left out; a mode left with nothing is not named."
          '("Test board"
            ["At point"
             (". s" "Start" harness-ui-test-start)
-            ("s" "Taken by Switch session" harness-ui-test-start)
+            ("S" "Group key" harness-ui-test-start)
             ("C-c C-k" "Shadowed by the minor mode" harness-ui-test-submit)
             (". u" "Undefined" harness-ui-test-no-such-command)]))
     (put 'harness-ui-test-minor-mode 'harness-menu-group
@@ -845,7 +807,7 @@ by a minor mode are left out; a mode left with nothing is not named."
     ;; With every command left out, the mode is not named either.
     (harness-ui-test-minor-mode -1)
     (put 'harness-ui-test-board-mode 'harness-menu-group
-         '("Test board" ["At point" ("s" "Taken by Switch session" harness-ui-test-start)]))
+         '("Test board" ["At point" ("S" "Group key" harness-ui-test-start)]))
     (should-not (string-match-p "Test board\\|At point" (harness-ui-test-menu)))))
 
 (ert-deftest harness-ui-menu-registrations-teach-the-buffers-keys ()
@@ -926,7 +888,7 @@ bottom side window and leaves the other windows alone."
              '("Test board" ["At point" (". s" "Start" harness-ui-test-start)])))
       (let* ((other-window (get-buffer-window other))
              (width (window-total-width other-window)))
-        (call-interactively #'harness-menu)
+        (call-interactively #'harness-ui-menu)
         (unwind-protect
             (let ((window (get-buffer-window transient--buffer-name)))
               (should (eq 'bottom (window-parameter window 'window-side)))
@@ -1854,7 +1816,7 @@ rather than F ending the layout."
               (should (harness-ui-view-p))
               (should (eq 'harness-ui-quit-view (key-binding (kbd "q"))))
               (should (eq 'harness-ui-bury (key-binding (kbd "C-c C-z"))))
-              (should (eq 'harness-menu (key-binding (kbd "?"))))
+              (should (eq 'harness-ui-menu (key-binding (kbd "?"))))
               ;; The mode makes the buffer read-only; the harness logs to it
               ;; with `inhibit-read-only' bound, so a line still lands.
               (should buffer-read-only)
@@ -2007,12 +1969,12 @@ common levels."
     (should (equal '("high" . "high") chosen))))
 
 (ert-deftest harness-ui-non-interactive-key-and-menu-label ()
-  "C-c h i toggles non-interactive mode.  In the menu its entry says
+  "C-c h S i toggles non-interactive mode.  In the menu its entry says
 whether what it toggles from the buffer is non-interactive, a session
 or a board's new-task settings; from a buffer with neither it says
 nothing about it and asks for nothing."
-  (should (eq 'harness-toggle-non-interactive (lookup-key harness-ui-map (kbd "i"))))
-  (should (eq 'harness-toggle-non-interactive (lookup-key harness-global-mode-map (kbd "C-c h i"))))
+  (should (eq 'harness-toggle-non-interactive (lookup-key harness-ui-session-map (kbd "i"))))
+  (should (eq 'harness-toggle-non-interactive (lookup-key harness-global-mode-map (kbd "C-c h S i"))))
   (let ((harness-ui--sessions (make-hash-table :test 'equal))
         (harness-ui-sessions-changed-hook nil)
         (sent nil) (set nil))
@@ -2022,29 +1984,33 @@ nothing about it and asks for nothing."
               ((symbol-function 'read-string) (lambda (&rest _) (error "Prompted")))
               ((symbol-function 'harness-ui-call) (lambda (_method params &rest _) (push params sent))))
       (harness-ui-test-with-menu-buffer #'fundamental-mode
-        (let ((text (harness-ui-test-menu)))
+        (let ((text (harness-ui-test--menu-text #'harness-ui-session-menu)))
           (should (string-match-p " i Non-interactive\\( \\|$\\)" text))
           (should-not (string-match-p "Non-interactive:" text))))
       (pcase-dolist (`(,sid ,label ,value) '(("s-away" "on" :false) ("s-here" "off" t)))
         (harness-ui-test-with-menu-buffer #'fundamental-mode
           (setq harness-ui-session-id sid)
-          (should (string-match-p (concat " i Non-interactive: " label) (harness-ui-test-menu "i")))
+          (should (string-match-p (concat " i Non-interactive: " label)
+                                  (harness-ui-test--menu-text #'harness-ui-session-menu)))
+          (call-interactively #'harness-toggle-non-interactive)
           (should (equal (list :id sid :non-interactive value) (pop sent)))))
       ;; What a target function names, as the task board's new-task settings.
       (harness-ui-test-with-menu-buffer #'fundamental-mode
         (setq-local harness-ui-setting-target-function
                     (lambda () (list '(:non-interactive t) (lambda (key value) (push (list key value) set)))))
-        (should (string-match-p " i Non-interactive: on" (harness-ui-test-menu "i")))
+        (should (string-match-p " i Non-interactive: on"
+                                (harness-ui-test--menu-text #'harness-ui-session-menu)))
+        (call-interactively #'harness-toggle-non-interactive)
         (should (equal '((:non-interactive nil)) set))))
     (should-not sent)))
 
 (ert-deftest harness-ui-move-session-asks-the-harness ()
-  "C-c h W moves a session.  The harness gets the directory, absolute,
+  "C-c h S W moves a session.  The harness gets the directory, absolute,
 and the project the UI sees there; a prefix argument keeps the old
 directory.  A remote session's directory goes as typed, a path on its
 host, and no TRAMP connection is opened for it."
-  (should (eq 'harness-move-session (lookup-key harness-ui-map (kbd "W"))))
-  (should (eq 'harness-move-session (lookup-key harness-global-mode-map (kbd "C-c h W"))))
+  (should (eq 'harness-move-session (lookup-key harness-ui-session-map (kbd "W"))))
+  (should (eq 'harness-move-session (lookup-key harness-global-mode-map (kbd "C-c h S W"))))
   (should (eq 'harness-move-session (symbol-function 'harness-session-move)))
   (let* ((harness-ui--sessions (make-hash-table :test 'equal))
          (harness-ui-sessions-changed-hook nil)
@@ -2108,10 +2074,12 @@ the position asked for; without one the session is just shown."
       (should (equal '(("s-new" nil)) shown)))))
 
 (ert-deftest harness-ui-menu-offers-prompting-with-the-region ()
-  "The menu has > from any buffer: prompt a session with the region."
+  "The View group has > from any buffer: prompt a session with the region."
   (harness-ui-test-with-menu-buffer #'fundamental-mode
     (should (fboundp 'harness-prompt-region))
-    (should (string-match-p "> +Region prompt" (harness-ui-test-menu)))))
+    (should (string-match-p "> +Region prompt"
+                            (harness-ui-test--menu-text #'harness-ui-views-menu)))
+    (should-not transient--prefix)))
 
 (ert-deftest harness-ui-tool-outcome-tells-denied-from-failed ()
   "A refused call is `denied' whatever else its result says; one that
@@ -2341,7 +2309,7 @@ agenda or Embark for instance."
             (should (prefix-p (kbd "C-c x")))
             (should-not (prefix-p (kbd "C-c h")))
             (let ((harness-global-mode t))
-              (should (eq harness-ui--groups-menu-key
+              (should (eq harness-ui--menu-key
                         (harness-ui--prefix-menu-event (kbd "C-c x"))))
               (should-not (harness-ui--prefix-menu-event (kbd "C-c h"))))
             ;; A vector of events, which Customize stored before the option
@@ -2350,7 +2318,7 @@ agenda or Embark for instance."
             (should (prefix-p [f12]))
             (should-not (prefix-p (kbd "C-c x")))
             (let ((harness-global-mode t))
-              (should (eq harness-ui--groups-menu-key
+              (should (eq harness-ui--menu-key
                         (harness-ui--prefix-menu-event [f12])))
               (should-not (harness-ui--prefix-menu-event (kbd "C-c x")))))
         (setopt harness-ui-prefix-key before))
@@ -2565,7 +2533,7 @@ reconnection."
   "The menu shows Server connection as inapt in corporate mode."
   (cl-flet ((inapt-p ()
               (harness-ui-test-with-menu-buffer #'fundamental-mode
-                (call-interactively #'harness-menu)
+                (call-interactively #'harness-ui-options-menu)
                 (unwind-protect
                     (with-current-buffer transient--buffer-name
                       (goto-char (point-min))
@@ -2764,24 +2732,24 @@ for two open boards, of /p/ and /q/."
          ,@body))))
 
 (ert-deftest harness-ui-set-non-interactive-all-changes-everything ()
-  "C-c h I, beside C-c h i for one session as M is beside m, turns
+  "C-c h S I, beside C-c h S i for one session as M is beside m, turns
 non-interactive on or off, offering on first, for every session and
 current task of every project, for the open boards' next tasks and as
 the default for new sessions.  It says how many sessions and tasks
 changed, and what keeps the new default from new work: here a
 project's .dir-locals.el and a directory's."
-  (should (eq 'harness-set-non-interactive-all (lookup-key harness-ui-map (kbd "I"))))
-  (should (eq 'harness-set-non-interactive-all (lookup-key harness-global-mode-map (kbd "C-c h I"))))
-  (should (eq 'harness-toggle-non-interactive (lookup-key harness-global-mode-map (kbd "C-c h i"))))
-  ;; Beside i in the menu's session settings, as M is beside m.
-  (let* ((column (transient-get-suffix 'harness-menu '(0 1)))
-         (keys (mapcar (lambda (suffix) (plist-get (harness-ui-test--suffix-plist suffix) :key))
-                       (aref column (1- (length column))))))
-    (should (equal "Session settings" (plist-get (aref column (- (length column) 2)) :description)))
-    (should (equal '("i" "I") (seq-take (member "i" keys) 2)))
-    (should (equal '("m" "M") (seq-take (member "m" keys) 2)))
-    ;; The supervisor's all-command sits with them, behind I.
-    (should (equal '("I" "V") (seq-take (member "I" keys) 2))))
+  (should (eq 'harness-set-non-interactive-all (lookup-key harness-ui-session-map (kbd "I"))))
+  (should (eq 'harness-set-non-interactive-all (lookup-key harness-global-mode-map (kbd "C-c h S I"))))
+  (should (eq 'harness-toggle-non-interactive (lookup-key harness-global-mode-map (kbd "C-c h S i"))))
+  ;; Beside i in the session group's Permission column, as M is beside m
+  ;; in its Model column: the session's own settings, not the top level's.
+  (let* ((level (harness-ui--level harness-ui-session-map))
+         (column (lambda (key)
+                   (plist-get (cdr (assoc (kbd key) (harness-ui-level-entries level)))
+                              :column))))
+    (should (equal '("Permission" "Permission") (mapcar column '("i" "I"))))
+    (should (equal '("Model" "Thinking") (mapcar column '("M" "T")))))
+  (should-not transient--prefix)
   (harness-ui-test-with-all
       (list (cons "_harness/session/set-all" '("s1" "s2" "s3"))
             (cons "_harness/task/set-all" '("t1"))
@@ -2833,7 +2801,7 @@ project's .dir-locals.el and a directory's."
                    said))))
 
 (ert-deftest harness-ui-set-non-interactive-all-prefix-leaves-the-default-alone ()
-  "With a prefix argument C-c h I leaves the default for new sessions alone.
+  "With a prefix argument C-c h S I leaves the default for new sessions alone.
 The boards' next tasks still change.  Turned on, there is no new default
 to say anything about; turned off, what still turns new work on is said
 all the same."
@@ -2863,11 +2831,11 @@ all the same."
                    said))))
 
 (ert-deftest harness-ui-set-thinking-all-reaches-every-project ()
-  "C-c h H sets a thinking level on every session and current task of
+  "C-c h S H sets a thinking level on every session and current task of
 every project, the open boards' next tasks and new sessions, and says
 what keeps the new default from new work.  With a prefix argument the
 default and the boards stay as they were."
-  (should (eq 'harness-set-thinking-all (lookup-key harness-ui-map (kbd "H"))))
+  (should (eq 'harness-set-thinking-all (lookup-key harness-ui-session-map (kbd "H"))))
   (harness-ui-test-with-all
       (list (cons "_harness/session/set-all" '("s1" "s2"))
             (cons "_harness/task/set-all" '("t1" "t2" "t3"))
@@ -2905,7 +2873,7 @@ default and the boards stay as they were."
 
 (ert-deftest harness-ui-set-all-empty-answer-changes-nothing ()
   "An empty answer at the model or thinking prompt, which a required
-match still lets through, chooses nothing: C-c h M and C-c h H change
+match still lets through, chooses nothing: C-c h S M and C-c h S H change
 no session, task, board or default, where they once set the model to
 nil and the level to \"\" everywhere."
   (dolist (command '(harness-set-model-all harness-set-thinking-all))

@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; One buffer, "*harness pet*", opened with `harness-pet' (C-c h z, or
+;; One buffer, "*harness pet*", opened with `harness-pet' (C-c h V z, or
 ;; z in the harness menu), shows the companion pet of the pet module:
 ;;
 ;;   header line   [Pet] [Rename] [Mute] [Release] [Turn off], g and q;
@@ -2748,7 +2748,7 @@ Then which of its attributes are set by hand, when any are."
     (define-key map (kbd "R") #'harness-ui-pet-release)
     (define-key map (kbd "O") #'harness-ui-pet-toggle-enabled)
     (define-key map (kbd "g") #'harness-ui-pet-refresh)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-pet-mode'.")
 
@@ -2934,7 +2934,7 @@ Asks first, unless FORCE."
   (add-hook 'harness-ui-event-functions #'harness-ui-pet--on-event)
   (add-hook 'harness-ui-connected-hook #'harness-ui-pet--on-connected)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-pet--redraw)
-  (define-key harness-ui-map (kbd "z") #'harness-pet)
+  (harness-ui-bind "z" #'harness-pet "Companion pet" :group 'views :column "Views")
   (setq harness-ui-pet--live t)
   ;; Started again while connected, as a reload does: no connection
   ;; opens to ask for the pet.

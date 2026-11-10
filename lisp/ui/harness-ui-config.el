@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; `harness-settings' (C-c h S) shows every setting of the harness on
+;; `harness-settings' (C-c h O S) shows every setting of the harness on
 ;; one page, like a customize buffer, with a scope toggle at the top:
 ;;
 ;;   Global   the customize value, used everywhere unless a project
@@ -2198,7 +2198,7 @@ They have a global value only, so showing them shows the Global scope."
     (define-key map (kbd "SPC") #'scroll-up-command)
     (define-key map (kbd "S-SPC") #'scroll-down-command)
     (define-key map (kbd "DEL") #'scroll-down-command)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-config-mode'.")
 
@@ -2325,7 +2325,7 @@ socket is up."
   "Wire the settings page into the UI."
   (add-hook 'harness-ui-event-functions #'harness-ui-config--on-event)
   (add-hook 'harness-ui-redraw-hook #'harness-ui-config--redraw-all)
-  (define-key harness-ui-map (kbd "S") #'harness-settings))
+  (harness-ui-bind "S" #'harness-settings "Settings" :group 'options :column "Harness"))
 
 (harness-define-module 'ui-config
   :doc "Settings page: every harness setting, edited globally or for the project."

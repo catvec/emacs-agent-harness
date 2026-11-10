@@ -361,7 +361,7 @@ pipeline that is not running is refused before the microphone is on."
             (should (= (cl-count #'harness-voice--on-update harness-ui-update-functions) 1))
             (should (= (cl-count #'harness-voice--controls harness-compose-controls-functions) 1))
             (should (= (cl-count harness-voice--mode-line global-mode-string :test #'equal) 1))
-            (should (eq (lookup-key harness-ui-map (kbd "v")) #'harness-voice))
+            (should (eq (lookup-key harness-ui-views-map (kbd "v")) #'harness-voice))
             (should (eq (lookup-key harness-compose-map (kbd "C-c v")) #'harness-voice-dictate))
             (should (eq (lookup-key harness-compose-map (kbd "C-c V")) #'harness-voice-interrupt))
             (harness-ui-voice-test--record)
@@ -372,7 +372,7 @@ pipeline that is not running is refused before the microphone is on."
             (should-not harness-ui-update-functions) (should-not harness-ui-event-functions)
             (should-not harness-ui-redraw-hook) (should-not harness-ui-media-recording-blocked-p-functions)
             (should-not harness-compose-controls-functions) (should-not global-mode-string)
-            (should-not (lookup-key harness-ui-map (kbd "v")))
+            (should-not (lookup-key harness-ui-views-map (kbd "v")))
             (should-not (lookup-key harness-compose-map (kbd "C-c v"))))
         (harness-voice--shutdown)))))
 

@@ -1550,20 +1550,20 @@ does not show; the column stops growing at its limit."
 ;;;; The module
 
 (ert-deftest harness-ui-secrets-menu-entries-and-hook-come-and-go-with-the-module ()
-  "The commands are in the harness menu and the events are followed while it runs."
+  "The commands are in the Tools group and the events are followed while it runs."
   (harness-ui-secrets-test-with
-    (should (eq 'harness-redact-secret (harness-ui-secrets--suffix-command "x")))
-    (should (eq 'harness-secrets-list-sources (harness-ui-secrets--suffix-command "E")))
+    (should (eq 'harness-redact-secret (lookup-key harness-ui-tools-map (kbd "x"))))
+    (should (eq 'harness-secrets-list-sources (lookup-key harness-ui-tools-map (kbd "E"))))
     (should (memq 'harness-ui-secrets--on-event harness-ui-event-functions))
     ;; Starting again changes nothing.
     (harness-ui-secrets--init)
-    (should (eq 'harness-redact-secret (harness-ui-secrets--suffix-command "x")))
+    (should (eq 'harness-redact-secret (lookup-key harness-ui-tools-map (kbd "x"))))
     (harness-ui-secrets--shutdown)
-    (should-not (harness-ui-secrets--suffix-command "x"))
-    (should-not (harness-ui-secrets--suffix-command "E"))
+    (should-not (lookup-key harness-ui-tools-map (kbd "x")))
+    (should-not (lookup-key harness-ui-tools-map (kbd "E")))
     (should-not (memq 'harness-ui-secrets--on-event harness-ui-event-functions))
     (harness-ui-secrets--init)
-    (should (eq 'harness-redact-secret (harness-ui-secrets--suffix-command "x")))
+    (should (eq 'harness-redact-secret (lookup-key harness-ui-tools-map (kbd "x"))))
     (should (memq 'harness-ui-secrets--on-event harness-ui-event-functions))))
 
 (ert-deftest harness-ui-secrets-menu-groups-teach-the-keys-of-the-buffers ()
@@ -1589,21 +1589,21 @@ does not show; the column stops growing at its limit."
                   (should (eq (nth 2 item) (lookup-key map own))))))))))))
 
 (ert-deftest harness-ui-secrets-menu-key-of-another-command-is-left-alone ()
-  "A key the menu gives to another command is not taken over."
+  "A key the Tools group gives to another command is not taken over."
   (harness-ui-secrets-test-with
     (harness-ui-secrets--shutdown)
-    (transient-append-suffix 'harness-menu "L" '("x" "Something else" ignore))
+    (harness-ui-bind "x" #'ignore "Something else" :group 'tools :column "Secrets")
     (unwind-protect
         (progn
           (harness-ui-secrets--init)
-          (should (eq 'ignore (harness-ui-secrets--suffix-command "x")))
-          ;; The other command still gets its place.
-          (should (eq 'harness-secrets-list-sources (harness-ui-secrets--suffix-command "E")))
+          (should (eq 'ignore (lookup-key harness-ui-tools-map (kbd "x"))))
+          ;; The other command still gets its key.
+          (should (eq 'harness-secrets-list-sources (lookup-key harness-ui-tools-map (kbd "E"))))
           ;; And shutting down removes only what is ours.
           (harness-ui-secrets--shutdown)
-          (should (eq 'ignore (harness-ui-secrets--suffix-command "x")))
-          (should-not (harness-ui-secrets--suffix-command "E")))
-      (ignore-errors (transient-remove-suffix 'harness-menu "x"))
+          (should (eq 'ignore (lookup-key harness-ui-tools-map (kbd "x"))))
+          (should-not (lookup-key harness-ui-tools-map (kbd "E"))))
+      (harness-ui-unbind "x" harness-ui-tools-map)
       (harness-ui-secrets--init))))
 
 ;;;; Against the engine

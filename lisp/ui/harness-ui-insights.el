@@ -899,7 +899,7 @@ Only for a report of every project."
     (define-key map [mouse-1] #'harness-ui-insights-mouse-open)
     (define-key map (kbd "TAB") #'forward-button)
     (define-key map (kbd "<backtab>") #'backward-button)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-insights-mode'.")
 
@@ -1041,7 +1041,7 @@ nil covers every project.  Interactively, read it with completion."
   (add-hook 'harness-ui-redraw-hook #'harness-ui-insights--redraw)
   ;; A, not I: I is non-interactive mode for every session, beside i
   ;; for one.
-  (define-key harness-ui-map (kbd "A") #'harness-insights))
+  (harness-ui-bind "A" #'harness-insights "Insights" :group 'views :column "Views"))
 
 (harness-define-module 'ui-insights
 		       :doc "The Insights report: figures and a written summary of your work with the agents, for any provider."

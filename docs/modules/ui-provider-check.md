@@ -12,7 +12,7 @@ The provider and model check page: live checks of any model, from the harness.
 
 ## About
 
-`harness-provider-check` (C-c h !, or Model's neighbour in the
+`harness-provider-check` (C-c h S !, or Model's neighbour in the
 harness menu) runs the live checks of the model in front of you, or
 of any model the catalogue lists with a prefix argument.  It opens
 the report page, which fills in as the checks settle: one line per

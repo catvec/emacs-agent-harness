@@ -428,21 +428,18 @@ has not started, whose session has held its priority since submission."
          (should (equal '(("_harness/priority/set" (:sessionId "t-1" :priority "high"))) sent)))))))
 
 (ert-deftest harness-ui-priority-in-the-menu ()
-  "The menu has a Priority column: +, -, y and Y with the harness's labels.
-`p', beside them, is still the permission mode."
+  "The session group has a Priority column: +, -, y and Y with the
+harness's labels.  `p', at the top level, is still the permission mode."
   (harness-ui-priority-test-with
-    (let* ((column (transient-get-suffix 'harness-menu '(0 2)))
-           (suffixes (aref column (1- (length column))))
-           (plist (lambda (s) (if (keywordp (cadr s)) (cdr s) (car (last s)))))
-           (keys (mapcar (lambda (s) (plist-get (funcall plist s) :key)) suffixes))
-           (labels (mapcar (lambda (s) (plist-get (funcall plist s) :description)) suffixes)))
-      (should (equal "Priority" (plist-get (aref column (- (length column) 2)) :description)))
-      (should (equal '("+" "-" "y" "Y") keys))
-      (should (equal '("Priority raise" "Priority lower" "Priority…"
-                       "Priority for all sessions…")
-                     labels))
-      (should (eq #'harness-set-permission-mode
-                  (plist-get (funcall plist (transient-get-suffix 'harness-menu "p")) :command))))))
+    (let ((lines (harness-ui-test--menu-lines #'harness-ui-session-menu)))
+      (dolist (entry '(("+" . "Priority raise")
+                       ("-" . "Priority lower")
+                       ("y" . "Priority…")
+                       ("Y" . "Priority for all sessions…")))
+        (ert-info ((car entry))
+          (should (equal (cdr entry) (cdr (assoc (car entry) lines)))))))
+    (should (eq #'harness-set-permission-mode
+                (lookup-key harness-ui-map (kbd "p"))))))
 
 (ert-deftest harness-ui-priority-keys-and-hooks ()
   "The module binds +, -, y and Y, and adds its header function once.
@@ -450,21 +447,21 @@ It follows `session/ext-changed'; p stays the permission mode.  Shut
 down, all of it goes again."
   (harness-ui-priority-test-with
     (should (harness-module-ready-p 'ui-priority))
-    (should (eq #'harness-priority-raise (lookup-key harness-ui-map (kbd "+"))))
-    (should (eq #'harness-priority-lower (lookup-key harness-ui-map (kbd "-"))))
-    (should (eq #'harness-set-priority (lookup-key harness-ui-map (kbd "y"))))
-    (should (eq #'harness-set-priority-all (lookup-key harness-ui-map (kbd "Y"))))
+    (should (eq #'harness-priority-raise (lookup-key harness-ui-session-map (kbd "+"))))
+    (should (eq #'harness-priority-lower (lookup-key harness-ui-session-map (kbd "-"))))
+    (should (eq #'harness-set-priority (lookup-key harness-ui-session-map (kbd "y"))))
+    (should (eq #'harness-set-priority-all (lookup-key harness-ui-session-map (kbd "Y"))))
     (should (eq #'harness-set-permission-mode (lookup-key harness-ui-map (kbd "p"))))
     (should (memq #'harness-ui-priority--header harness-chat-header-functions))
     (should (memq #'harness-ui-priority--on-event harness-ui-event-functions))
     ;; Starting again, as a reload does, adds nothing.
     (harness-ui-priority--init)
-    (should (eq #'harness-set-priority (lookup-key harness-ui-map (kbd "y"))))
+    (should (eq #'harness-set-priority (lookup-key harness-ui-session-map (kbd "y"))))
     (should (= 1 (cl-count #'harness-ui-priority--header harness-chat-header-functions)))
     (should (= 1 (cl-count #'harness-ui-priority--on-event harness-ui-event-functions)))
     (harness-ui-priority--shutdown)
     (dolist (key '("+" "-" "y" "Y"))
-      (should-not (lookup-key harness-ui-map (kbd key))))
+      (should-not (lookup-key harness-ui-session-map (kbd key))))
     (should (eq #'harness-set-permission-mode (lookup-key harness-ui-map (kbd "p"))))
     (should-not (memq #'harness-ui-priority--header harness-chat-header-functions))
     (should-not (memq #'harness-ui-priority--on-event harness-ui-event-functions))))

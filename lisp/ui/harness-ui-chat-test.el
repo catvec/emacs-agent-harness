@@ -3966,7 +3966,7 @@ from (`harness-thread-ref-functions') instead."
           (save-window-excursion
             (delete-other-windows)
             (switch-to-buffer source)
-            (should (eq 'harness-thread-region (key-binding (kbd "C-c h <"))))
+            (should (eq 'harness-thread-region (key-binding (kbd "C-c h V <"))))
             (harness-ui-chat-test-select source "(defun parse" "(list x))")
             (call-interactively #'harness-thread-region)
             (let ((chat (harness-chat--buffer-for (cadr ids))))
@@ -4125,9 +4125,9 @@ in a thread to the region instead."
              (opened nil))
         (cl-letf (((symbol-function 'harness-ui-display-session) (lambda (&rest args) (push args opened)))
                   ((symbol-function 'harness-new-session) (lambda (&rest args) (push args opened))))
-          (should (equal quoted (harness-ui-chat-test-quote buf from to "C-c h >")))
+          (should (equal quoted (harness-ui-chat-test-quote buf from to "C-c h V >")))
           (with-current-buffer buf (harness-compose-set ""))
-          (should (equal quoted (harness-ui-chat-test-quote buf from to "C-u C-c h >")))
+          (should (equal quoted (harness-ui-chat-test-quote buf from to "C-u C-c h V >")))
           (with-current-buffer buf (harness-compose-set ""))
           (should (equal (cons (harness-test-quoted region n-run sid) t)
                          (harness-ui-chat-test-thread-quote buf from to)))
@@ -4285,12 +4285,13 @@ transcript has loaded as well."
         (should (equal "draft\n\nFrom x:\n\n> y\n\n" (harness-compose-text)))))))
 
 (ert-deftest harness-ui-chat-prompt-region-key ()
-  "C-c h > prompts with the region, next to C-c h o, which opens the newest session."
+  "C-c h V > prompts with the region, next to C-c h V o, which opens the
+newest session: the View group holds the region's commands."
   (harness-ui-chat-test-with
     (should (commandp 'harness-prompt-region))
-    (should (eq 'harness-prompt-region (lookup-key harness-ui-map (kbd ">"))))
-    (should (eq 'harness-prompt-region (key-binding (kbd "C-c h >"))))
-    (should (eq 'harness-open-latest-session (key-binding (kbd "C-c h o"))))))
+    (should (eq 'harness-prompt-region (lookup-key harness-ui-views-map (kbd ">"))))
+    (should (eq 'harness-prompt-region (key-binding (kbd "C-c h V >"))))
+    (should (eq 'harness-open-latest-session (key-binding (kbd "C-c h V o"))))))
 
 (ert-deftest harness-ui-chat-open-latest-session-is-the-projects-newest ()
   "The newest session of the project the buffer is in is the one that opens,

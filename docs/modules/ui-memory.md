@@ -15,7 +15,7 @@ The memory page and quick capture: lasting memories seen, added, edited, forgott
 The lasting memories (harness-memory.el) on a page of their own:
 what the agent and the user saved, in the two scopes, grouped by kind,
 with the buttons that add, edit, forget, search and consolidate them.
-`C-c h M` opens it; `C-c h m` captures one from anywhere.
+`C-c h T M` opens it; `C-c h m` captures one from anywhere.
 
 The page reads, top to bottom (the project is the buffer's, as the
 settings page's is):

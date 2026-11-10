@@ -628,24 +628,7 @@ it asks.  One that cannot be read keeps the text in the box."
 
 ;;;; The menu
 
-(defun harness-ui-cache-warm--suffix-command (key)
-  "Return the command the harness menu has at KEY, or nil."
-  (when-let* ((suffix (ignore-errors (transient-get-suffix 'harness-menu key))))
-    (plist-get (if (keywordp (cadr suffix)) (cdr suffix) (car (last suffix))) :command)))
 
-(defun harness-ui-cache-warm--menu-install ()
-  "Put `harness-cache-keep-warm' in the harness menu, after Fork session."
-  (condition-case err
-      (pcase (harness-ui-cache-warm--suffix-command "K")
-        ((pred null) (transient-append-suffix 'harness-menu "f" '("K" "Cache warming" harness-cache-keep-warm)))
-        ('harness-cache-keep-warm nil)
-        (other (harness-log 'warn "cache-warm: the menu key K is %s's: no entry for keeping a cache warm" other)))
-    (error (harness-log 'warn "cache-warm: no menu entry: %s" (error-message-string err)))))
-
-(defun harness-ui-cache-warm--menu-remove ()
-  "Take `harness-cache-keep-warm' out of the harness menu."
-  (when (eq (harness-ui-cache-warm--suffix-command "K") 'harness-cache-keep-warm)
-    (ignore-errors (transient-remove-suffix 'harness-menu "K"))))
 
 ;;;; Following the harness
 
@@ -686,8 +669,8 @@ already, the states are fetched now."
         (when (derived-mode-p 'harness-chat-mode)
           (harness-ui-cache-warm--setup)))))
   (setf (alist-get "warm" harness-chat-commands nil nil #'equal) #'harness-ui-cache-warm--chat-command)
-  (define-key harness-ui-map (kbd "K") #'harness-cache-keep-warm)
-  (harness-ui-cache-warm--menu-install)
+  (harness-ui-bind "K" #'harness-cache-keep-warm "Cache warming"
+                   :group 'session :column "Limits")
   (when (harness-ui-connected-p)
     (harness-ui-cache-warm-refresh)))
 
@@ -705,9 +688,8 @@ already, the states are fetched now."
         (remove-hook 'post-command-hook #'harness-ui-cache-warm--note-activity t))))
   (when (eq (cdr (assoc "warm" harness-chat-commands)) #'harness-ui-cache-warm--chat-command)
     (setq harness-chat-commands (assoc-delete-all "warm" harness-chat-commands)))
-  (when (eq (lookup-key harness-ui-map (kbd "K")) #'harness-cache-keep-warm)
-    (define-key harness-ui-map (kbd "K") nil t))
-  (harness-ui-cache-warm--menu-remove)
+  (when (eq (lookup-key harness-ui-session-map (kbd "K")) #'harness-cache-keep-warm)
+    (harness-ui-unbind "K" harness-ui-session-map))
   (clrhash harness-ui-cache-warm--states)
   (harness-ui-cache-warm--sync-timer)
   (harness-ui-cache-warm--redraw nil)

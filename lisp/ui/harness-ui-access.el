@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; `harness-access' (C-c h j) says what a session may reach, in one
+;; `harness-access' (C-c h S j) says what a session may reach, in one
 ;; place, and changes it.  Clicking the permission mode on a chat's
 ;; settings line (Ask, Accept Edits, Auto, YOLO) opens it too.  It is
 ;; five pages, a buffer each, that share a strip under the title --
@@ -28,7 +28,7 @@
 ;;   what can be done with it: give it up or keep it for reading only,
 ;;   revoke a grant, restore one given up; new ones are allowed, for
 ;;   writing or for reading only, and the session moves to another
-;;   working directory (`harness-directories', C-c h d, opens the page
+;;   working directory (`harness-directories', C-c h S d, opens the page
 ;;   here).  Details end it: a line each for the tools, the rules, the
 ;;   judgements and the secret protection, with what they hold, each a
 ;;   link to its page.
@@ -2064,7 +2064,7 @@ Past the last button the first is next, as TAB goes round a form."
     (define-key map (kbd "C") #'harness-ui-access-toggle-capability)
     (define-key map (kbd "D") #'harness-ui-access-redetect-sandbox)
     (define-key map (kbd "O") #'harness-ui-access-check-openshell)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-access-mode'.")
 
@@ -2181,8 +2181,10 @@ the buffer cannot know which connection that was."
   (add-hook 'harness-ui-connected-hook #'harness-ui-access--reconnected)
   (add-hook 'harness-ui-event-functions #'harness-ui-access--on-event)
   (add-hook 'harness-ui-update-functions #'harness-ui-access--on-update)
-  (define-key harness-ui-map (kbd "j") #'harness-access)
-  (define-key harness-ui-map (kbd "d") #'harness-directories))
+  (harness-ui-bind "j" #'harness-access "Jail & permissions"
+                   :group 'session :column "Permission")
+  (harness-ui-bind "d" #'harness-directories "Directory access"
+                   :group 'session :column "Permission"))
 
 (defun harness-ui-access--shutdown ()
   "Unwire the access views."

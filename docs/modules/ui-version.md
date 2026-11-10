@@ -12,7 +12,7 @@ Version page: whether the running harness is the latest, against its origins.
 
 ## About
 
-`harness-version` (C-c h U) answers "are we running the latest
+`harness-version` (C-c h O U) answers "are we running the latest
 changes?".  The key is U, not the v it had before voice: v is
 voice's while that module is enabled, and V is supervisor mode.  The
 page shows one row per place a version lives:

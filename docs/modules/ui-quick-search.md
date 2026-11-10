@@ -13,7 +13,7 @@ The quick search: find a session, a command or a task from anywhere, answered by
 
 ## About
 
-C-c h / -- or / in the harness menu -- opens the quick search from
+C-c h T / -- or / in the harness menu -- opens the quick search from
 any buffer: a popout at the bottom of the frame whose box takes a
 line in words, the way a command palette does ("how do I attach a
 file?", "where did I debug the merge queue?", "the task about the
@@ -61,7 +61,7 @@ plan's `:session-query`: the line's words that say something, not
 (`harness-search-sessions`).  An order to manage tasks ("stop the
 docs task") is only proposed here: [Do it] does it.
 
-On a task board, C-c h / is the board's own search
+On a task board, C-c h T / is the board's own search
 (`harness-tasks-search`), which filters the board.  The lines of
 what a search found (`harness-quick-search-session-line` and the
 others) and its answer in words (`harness-quick-search-answer-text`)

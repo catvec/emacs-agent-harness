@@ -363,7 +363,8 @@ when the view is fetched and drawn again, and a click on it does that."
 
 (ert-deftest harness-ui-access-move-and-keys ()
   "m moves the session, and the view follows; 1 to 4 show its pages and q
-leaves the Overview as any view is left; j and d open it from the harness keys."
+leaves the Overview as any view is left; C-c h S j and C-c h S d open it
+from the harness's keys."
   (harness-ui-access-test-with
     (let ((new (harness-test-temp-dir)))
       (harness-ui-access-test-open sid)
@@ -372,8 +373,10 @@ leaves the Overview as any view is left; j and d open it from the harness keys."
       (should (equal '(harness-ui-access-show-overview harness-ui-access-show-tools
                        harness-ui-access-show-rules harness-ui-access-show-judgements)
                      (mapcar (lambda (key) (key-binding (kbd key))) '("1" "2" "3" "4"))))
-      (should (eq #'harness-access (lookup-key harness-ui-map (kbd "j"))))
-      (should (eq #'harness-directories (lookup-key harness-ui-map (kbd "d"))))
+      (should (eq #'harness-access (lookup-key harness-ui-session-map (kbd "j"))))
+      (should (eq #'harness-directories (lookup-key harness-ui-session-map (kbd "d"))))
+      (should (eq #'harness-access (key-binding (kbd "C-c h S j"))))
+      (should (eq #'harness-directories (key-binding (kbd "C-c h S d"))))
       (harness-ui-access-move new)
       (harness-test-wait (lambda () (equal new (plist-get (harness-call 'session/get sid) :cwd))) 5 "the move")
       (harness-ui-access-test-wait-text (regexp-quote (abbreviate-file-name new))))))

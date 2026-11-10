@@ -148,7 +148,7 @@ run, not a wrapper whose last `echo` happened to return zero.
 
 ## Check a provider and a model against a real account
 
-`C-c h !` (`M-x harness-provider-check`) runs the **live checks from
+`C-c h S !` (`M-x harness-provider-check`) runs the **live checks from
 inside the harness**, on the model of the session in front of you: a
 chat's model, or the model of the task at point on a board.  With `C-u`
 it asks the model catalogue for any model instead, so a provider a

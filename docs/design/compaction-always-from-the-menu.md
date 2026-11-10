@@ -149,7 +149,7 @@ still compacts rather than carrying on past the window.
   and not others; `hold` never takes one.
 - `lisp/ui/harness-ui.el`: `harness-toggle-compaction-ask` (session)
   and `harness-set-compaction-ask-all` (every session), their labels
-  in the Session settings menu (`C-c h o`), and the state in the label.
+  in the Session settings menu (`C-c h S`), and the state in the label.
 - `lisp/ui/harness-ui-sessions.el`: `:compaction-ask` among the marked
   sessions' settings, so the toggle works from the list too.
 - `lisp/modules/harness-config.el`: `harness-compaction-ask` in the

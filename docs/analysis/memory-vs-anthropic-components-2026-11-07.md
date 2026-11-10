@@ -153,7 +153,7 @@ database and truncates the write-ahead log.
 | tools | `memory_save`, `memory_search`, `memory_get`, `memory_forget`, `memory_consolidate` | [lines 1276-1338](../../lisp/modules/harness-memory.el) |
 | methods | `memory/add`, `update`, `delete`, `get`, `list`, `search`, `prompt`, `consolidate`, `redact` | the module |
 | events | `memory/changed` (view, action), so the memory page follows a change made elsewhere | [line 1606](../../lisp/modules/harness-memory.el) |
-| page | `C-c h M`: both scopes, grouped by kind, add/edit/forget/search/consolidate | [lisp/ui/harness-ui-memory.el](../../lisp/ui/harness-ui-memory.el) |
+| page | `C-c h T M`: both scopes, grouped by kind, add/edit/forget/search/consolidate | [lisp/ui/harness-ui-memory.el](../../lisp/ui/harness-ui-memory.el) |
 | capture | `C-c h m`, `C-u` for the user scope | the same file |
 
 ## The article's model, in one page

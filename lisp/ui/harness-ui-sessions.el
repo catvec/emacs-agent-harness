@@ -60,7 +60,7 @@
 ;; several settings can be given to the same sessions.  The list binds no
 ;; key to these commands, its m, T, p and i being others, so its menu
 ;; group does not list them.  The menu's own Session settings column
-;; (`harness-menu') lists all but supervisor mode, and runs them here.
+;; (`harness-ui-menu') lists all but supervisor mode, and runs them here.
 ;;
 ;; T lists only the sessions that work on a task, with the sub-agents,
 ;; forks and BTW conversations under them
@@ -1008,7 +1008,7 @@ ID `panel' is the panel above the rows, when there is one
     (define-key map (kbd "i") #'harness-ui-sessions-toggle-inactive)
     (define-key map (kbd "g") #'harness-ui-sessions-reload)
     (define-key map (kbd "SPC") #'harness-ui-sessions-requests)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map))
 
 ;; At top level, not in the `defvar', so a reload binds them in a running
@@ -2357,7 +2357,7 @@ it."
     (with-current-buffer buf
       (when (derived-mode-p 'harness-ui-sessions-mode)
         (harness-ui-view-install #'harness-ui-sessions--catch-up))))
-  (define-key harness-ui-map (kbd "l") #'harness-sessions))
+  (harness-ui-bind "l" #'harness-sessions "Session list" :column "Sessions"))
 
 (harness-define-module 'ui-sessions
   :doc "Session list buffer."

@@ -186,14 +186,14 @@ Real model names and ids remain visible.  Nothing is selected or run."
 (defun harness-ui-model-complexity--init ()
   "Offer the ranked picker and bind the guide under the harness prefix."
   (add-hook 'harness-ui-model-picker-functions #'harness-ui-model-complexity--pick)
-  (unless (lookup-key harness-ui-map (kbd "="))
-    (define-key harness-ui-map (kbd "=") #'harness-model-complexity)))
+  (harness-ui-bind "=" #'harness-model-complexity "Model complexity"
+                   :group 'session :column "Model"))
 
 (defun harness-ui-model-complexity--shutdown ()
   "Remove the ranked picker and its guide binding."
   (remove-hook 'harness-ui-model-picker-functions #'harness-ui-model-complexity--pick)
-  (when (eq (lookup-key harness-ui-map (kbd "=")) #'harness-model-complexity)
-    (define-key harness-ui-map (kbd "=") nil t)))
+  (when (eq (lookup-key harness-ui-session-map (kbd "=")) #'harness-model-complexity)
+    (harness-ui-unbind "=" harness-ui-session-map)))
 
 (harness-define-module 'ui-model-complexity
 		       :doc "Model names sorted by plain-language estimated work complexity."

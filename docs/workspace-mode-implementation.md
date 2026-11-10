@@ -931,7 +931,7 @@ button, so a stray click in Emacs does not click the box.
 
 ### The workspace list and settings
 
-`M-x harness-workspace` opens the last workspace; `M-x harness-workspaces` (or `C-c h Y`, for the persistent workspace) shows the list:
+`M-x harness-workspace` opens the last workspace; `M-x harness-workspaces` (or `C-c h V Y`, for the persistent workspace) shows the list:
 name, root, graph, box state, threads, last used, and `New workspace`,
 `Open`, `Settings`, `Delete`.  A new workspace is a small form: name,
 root, graph (new or existing), model, permission mode, and whether to

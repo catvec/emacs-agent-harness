@@ -146,7 +146,7 @@ image is no copy of this machine's `/usr`.
 
 ### 5. Check it
 
-- The jail and permissions view (`C-c h j`) names the backend in its Sandbox
+- The jail and permissions view (`C-c h S j`) names the backend in its Sandbox
   row, with what it cannot do, and, when OpenShell was asked for and cannot be
   used, why.  `sandbox/status` says the same: `:backend`, `:requested`,
   `:problem`, `:limits`.

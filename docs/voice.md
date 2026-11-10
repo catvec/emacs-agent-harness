@@ -72,7 +72,7 @@ there are no automatic model downloads or cloud speech defaults.
 
 | Control | Effect |
 | --- | --- |
-| `C-c h v`, `M-x harness-voice` | Voice controls for the current compose box, or a bottom quick voice chat from another buffer |
+| `C-c h V v`, `M-x harness-voice` | Voice controls for the current compose box, or a bottom quick voice chat from another buffer |
 | `C-c v` in a compose buffer | Start dictation; a second press stops and transcribes |
 | **Hold to talk** | Mouse press starts recording; release stops and transcribes |
 | `C-c V`, **Interrupt** | Stop recording/transcription or reply audio and interrupt the attached voice turn |
@@ -88,7 +88,7 @@ bypass them.
 Emacs generally does not deliver keyboard key-release events. Keyboard
 dictation therefore uses an explicit start/stop toggle, not guessed release
 based on key-repeat timing. Use the mouse control for actual press-and-hold.
-The existing `C-c h r` recording command still creates an audio attachment;
+The existing `C-c h V r` recording command still creates an audio attachment;
 voice dictation is a different operation.
 
 The WAV voice status distinguishes **Listening**, **Transcribing**,
@@ -115,8 +115,8 @@ is meant; speech recognition is not a guarantee of correct routing.
 
 ### The output voice, and hearing it first
 
-`M-x harness-voice-output` (`S` on the voice list, or **Output voice** in the
-session menu) is the page that chooses the voice spoken replies use. It lists
+`M-x harness-voice-output` (`S` on the voice list, or `C-c h V V`) is the page
+that chooses the voice spoken replies use. It lists
 the voices the selected speech service itself reports -- never a list this
 project made up -- with the language and voice each name carries, and the
 parameters that service declares. A service of your own that reports no list,
@@ -369,7 +369,7 @@ player do, even when the harness server is elsewhere.
 
 | Control | Effect |
 | --- | --- |
-| `C-c h v`, `M-x harness-voice` | Start the live session in this compose box, or show its controls |
+| `C-c h V v`, `M-x harness-voice` | Start the live session in this compose box, or show its controls |
 | `C-c v` | Start a stopped session, or mute and unmute the running one |
 | `C-c V`, **Interrupt C-c V** | Stop playback at once; the agent turn keeps running |
 | **Cancel work** | Cancel the agent turn through `session/cancel`; audio keeps running |

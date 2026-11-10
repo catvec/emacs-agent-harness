@@ -378,7 +378,7 @@ dashboard, that budget is the default."
   (harness-ui-usage-test-with
     (let ((sid (harness-ui-usage-test-own-budget-session "fix the login" 5))
           (offered nil))
-      (should (eq 'harness-delete-budget (lookup-key harness-ui-map (kbd "B"))))
+      (should (eq 'harness-delete-budget (lookup-key harness-ui-tools-map (kbd "B"))))
       (harness-ui-usage-test-request "_harness/usage/set-budget"
                                      (list :budget (list :scope "period" :period "month" :amount 100 :label "monthly cap")))
       (harness-ui-usage-test-request "_harness/usage/set-budget"

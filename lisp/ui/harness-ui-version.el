@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; `harness-version' (C-c h U) answers "are we running the latest
+;; `harness-version' (C-c h O U) answers "are we running the latest
 ;; changes?".  The key is U, not the v it had before voice: v is
 ;; voice's while that module is enabled, and V is supervisor mode.  The
 ;; page shows one row per place a version lives:
@@ -995,7 +995,7 @@ works its text out again."
     (define-key map (kbd "g") #'harness-ui-version-refresh)
     (define-key map (kbd "r") #'harness-reload)
     (define-key map (kbd "u") #'harness-ui-version-update)
-    (define-key map (kbd "?") #'harness-menu)
+    (define-key map (kbd "?") #'harness-ui-menu)
     map)
   "Keymap of `harness-ui-version-mode'.")
 
@@ -1072,26 +1072,23 @@ else the last one it made, for the nag icon."
     (harness-ui-version--fetch)))
 
 (defconst harness-ui-version--key "U"
-  "Key of the version page in `harness-ui-map'.
-`v' belongs to voice while `ui-voice' is enabled, and `V' to
-supervisor mode.")
+  "Key of the version page in the Options group of the harness's keys.")
 
 (defun harness-ui-version--claim-key ()
-  "Bind the version page's key, and take back `v' where an older page bound it.
+  "Bind the version page's key, in the Options group.
 A key another command owns stays: a user's own binding outranks the
 module's."
-  (let ((current (lookup-key harness-ui-map (kbd harness-ui-version--key))))
+  (let ((current (lookup-key harness-ui-options-map (kbd harness-ui-version--key))))
     (when (memq current '(nil harness-version))
-      (define-key harness-ui-map (kbd harness-ui-version--key) #'harness-version)))
-  ;; Older versions put the page on v; voice owns v now.
-  (when (eq (lookup-key harness-ui-map (kbd "v")) #'harness-version)
-    (define-key harness-ui-map (kbd "v") nil t)))
+      (harness-ui-bind harness-ui-version--key #'harness-version
+                       (harness-ui-version-menu-label)
+                       :group 'options :column "Upkeep"))))
 
 (defun harness-ui-version--release-key ()
-  "Unbind the version page's key, and `v', where they still run it."
-  (dolist (key (list harness-ui-version--key "v"))
-    (when (eq (lookup-key harness-ui-map (kbd key)) #'harness-version)
-      (define-key harness-ui-map (kbd key) nil t))))
+  "Unbind the version page's key, where it still runs it."
+  (when (eq (lookup-key harness-ui-options-map (kbd harness-ui-version--key))
+            #'harness-version)
+    (harness-ui-unbind harness-ui-version--key harness-ui-options-map)))
 
 (defun harness-ui-version--init ()
   "Wire the page and the nag icon into the UI."

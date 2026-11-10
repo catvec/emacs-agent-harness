@@ -327,7 +327,7 @@ binds it nil and the real `harness-compaction--prefix-cache-p' decides.")
 
 (defun harness-ui-compact-test--menu-command ()
   "Return the command the harness menu binds C to, or nil."
-  (plist-get (cdr (transient-get-suffix 'harness-menu "C")) :command))
+  (lookup-key harness-ui-session-map (kbd "C")))
 
 (ert-deftest harness-ui-compact-menu-entry ()
   "The compact command is in the harness menu, under C, and stays there

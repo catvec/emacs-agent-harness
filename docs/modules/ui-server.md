@@ -15,7 +15,7 @@ The UI is a client of a harness: this Emacs's own, or a harness
 server on another machine (`harness-server-address`).  This file
 holds the two views of that connection.
 
-`harness-connect-server` (C-c h c) asks for the details of the
+`harness-connect-server` (C-c h O c) asks for the details of the
 server to connect to: its address, its shared secret, and whether to
 use it whenever Emacs starts.  It is a form: the fields are edited
 in the buffer, TAB moves between them, C-c C-c connects, and a
@@ -23,7 +23,7 @@ button goes back to this Emacs's own harness.  The connection it
 makes is `harness-connect-remote`, which is still the way to do it
 from Lisp, or without the form.
 
-`harness-server` (C-c h C) shows the harness the UI talks to: the
+`harness-server` (C-c h O C) shows the harness the UI talks to: the
 connection, its address, how long it has been up and its round trip,
 the harness's version and Emacs, the sessions it runs and the
 modules it loaded.  It works the same for a server elsewhere and for

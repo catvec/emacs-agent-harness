@@ -319,7 +319,7 @@ once the minimum interval since the last build began is over."
         (should (equal (file-name-nondirectory (directory-file-name dir)) (plist-get context :title)))
         (should (equal (buffer-local-value 'harness-ui-tasks--dir board) (plist-get context :project)))
         (should (equal "tasks" (harness-quick-search-bias context))))
-      ;; On a board, C-c h / is the board's own search.
+      ;; On a board, C-c h T / is the board's own search.
       (let (asked)
         (cl-letf (((symbol-function 'harness-tasks-search) (lambda (&optional query) (push query asked))))
           (with-current-buffer board (harness-quick-search "the flaky test")))
@@ -353,10 +353,10 @@ once the minimum interval since the last build began is over."
         (should (string-prefix-p "C-c h " (plist-get model :keys)))
         (should (eq t (plist-get model :here)))
         (should (plist-get model :doc)))
-      ;; The quick search itself, in the menu and under the prefix.
+      ;; The quick search itself, in the Tools group.
       (let ((search (harness-ui-quick-search-test--entry "harness-quick-search" plain)))
         (should (equal "Quick search" (plist-get search :label)))
-        (should (equal "C-c h /" (plist-get search :keys))))
+        (should (equal "C-c h T /" (plist-get search :keys))))
       ;; Any other harness command, running where a key binds it.
       (let ((here (harness-ui-quick-search-test--entry "harness-quick-search-test-run" origin))
             (there (harness-ui-quick-search-test--entry "harness-quick-search-test-run" plain)))
@@ -379,9 +379,10 @@ once the minimum interval since the last build began is over."
         (dolist (key '(:keys :where :label :doc))
           (let ((value (plist-get entry key)))
             (should (or (null value) (and (stringp value) (null (text-properties-at 0 value)))))))))
-    ;; C-c h / and the menu's / are the quick search.
-    (should (eq 'harness-quick-search (lookup-key harness-ui-map (kbd "/"))))
-    (should (eq 'harness-quick-search (harness-quick-search--menu-command)))))
+    ;; C-c h T / is the quick search, and the Tools menu shows it.
+    (should (eq 'harness-quick-search (lookup-key harness-ui-tools-map (kbd "/"))))
+    (should (equal "Quick search"
+                   (cdr (assoc "/" (harness-ui-test--menu-lines #'harness-ui-tools-menu)))))))
 
 ;;;; The scan of the commands, built ahead
 

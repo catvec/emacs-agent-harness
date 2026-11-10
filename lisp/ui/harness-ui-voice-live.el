@@ -635,7 +635,7 @@ never says `Listening' in a box the words do not go to."
           (items nil))
       (if (not harness-voice--controls)
           (setq items (list (list (harness-voice--button
-                                   "Voice" #'harness-voice "Voice controls · C-c h v"))))
+                                   "Voice" #'harness-voice "Voice controls · C-c h V v"))))
         (setq items
               (list
                (list (propertize (harness-voice-live--status)
