@@ -80,6 +80,38 @@
     (harness-voice-pipeline-set-capture pipeline 'muted)
     (should (equal "Level · no data" (harness-voice-pipeline-level-label pipeline now)))))
 
+(ert-deftest harness-ui-voice-pipeline-level-is-drawn-in-decibels ()
+  "A measured level is drawn on the decibel scale, with its numbers kept.
+A speaking mouth's mean absolute sample is a few percent, which a linear
+bar draws as a dead microphone.  The same measurement in dBFS fills the
+bar, and the raw numbers stay in the details: a scale, not a gain."
+  (let ((pipeline (harness-voice-pipeline-create 'live))
+        (now 100.0))
+    ;; 0.03 is a normal speaking mouth on the gate's own scale.
+    (harness-voice-pipeline-set-level pipeline 0.03 now nil 0.12 -30.5)
+    (should (equal "Level · -30 dBFS" (harness-voice-pipeline-level-label pipeline now)))
+    ;; Half the bar: -30 dBFS is halfway from the -60 floor to 0.
+    (should (equal "███▇····" (harness-voice-pipeline-meter pipeline 8 now)))
+    (should (equal "input 0.030 · peak 0.120 · -30.5 dBFS"
+                   (substring-no-properties
+                    (harness-voice-pipeline-level-detail pipeline))))
+    ;; A quiet room is a number, not a guess, and not a dead meter.
+    (harness-voice-pipeline-set-level pipeline 0.001 now nil 0.004 -60.0)
+    (should (equal "Level · -60 dBFS" (harness-voice-pipeline-level-label pipeline now)))
+    (should (equal "········" (harness-voice-pipeline-meter pipeline 8 now)))
+    ;; A path that sends only the linear level is drawn as it is.
+    (harness-voice-pipeline-set-level pipeline 0.56 now)
+    (should (equal "Level · 56%" (harness-voice-pipeline-level-label pipeline now)))
+    (should (equal "████▃···" (harness-voice-pipeline-meter pipeline 8 now)))
+    (should (equal "input 0.560"
+                   (substring-no-properties
+                    (harness-voice-pipeline-level-detail pipeline))))
+    ;; The details list the measurement first, so a low reading is readable.
+    (harness-voice-pipeline-set-level pipeline 0.03 now nil 0.12 -30.5)
+    (should (string-prefix-p "input 0.030"
+                             (substring-no-properties
+                              (car (harness-voice-pipeline-details pipeline)))))))
+
 (ert-deftest harness-ui-voice-pipeline-gate-and-counts ()
   "The gate and the kept and dropped counts have exact words."
   (let ((pipeline (harness-ui-voice-pipeline-test--pipeline)))
@@ -347,15 +379,23 @@
                             (harness-voice-pipeline-summary pipeline))))))
 
 (ert-deftest harness-ui-voice-pipeline-details-copy ()
-  "Every marker is a line of words; an empty pipe says so."
-  (let ((pipeline (harness-ui-voice-pipeline-test--pipeline)))
+  "Every marker is a line of words; an empty pipe says so.
+The capture path's own numbers lead, so a level that looks low on the
+meter can be read as the measurement it is."
+  (let ((pipeline (harness-voice-pipeline-create 'live)))
     (should (equal '("No segments yet") (harness-voice-pipeline-details pipeline)))
+    (harness-voice-pipeline-set-level pipeline 0.56
+                                      harness-ui-voice-pipeline-test--now)
+    (should (equal '("input 0.560")
+                   (mapcar #'substring-no-properties
+                           (harness-voice-pipeline-details pipeline))))
     (harness-voice-pipeline-segment pipeline "u-1" 'accepted '(:seconds 1.4))
     (harness-voice-pipeline-segment pipeline "u-1" 'transcribed '(:text "Add a docstring to parse."))
     (harness-voice-pipeline-segment pipeline "u-2" 'dropped '(:seconds 0.08 :reason too-short))
     (harness-voice-pipeline-turn pipeline "d-1" 'working '(:segment "u-1"))
     (harness-voice-pipeline-reply pipeline "n-1" 'handed '(:turn "d-1"))
-    (should (equal '("u-2 · dropped · 80ms · too short"
+    (should (equal '("input 0.560"
+                     "u-2 · dropped · 80ms · too short"
                      "u-1 · transcribed · 1.4s · \"Add a docstring to parse.\""
                      "d-1 · working · 1 utterance"
                      "n-1 · handed · d-1")
@@ -440,7 +480,7 @@
                   (failed . "failed")))
     (should (equal (cdr case) (harness-voice-pipeline--reply-label (car case)))))
   (dolist (case '((too-short . "too short") (no-words . "no words")
-                  (no-request . "no request")
+                  (retargeted . "retargeted")
                   (cancelled . "cancelled") (failed . "failed")))
     (should (equal (cdr case) (harness-voice-pipeline--drop-label (car case)))))
   (dolist (case '((queued . "queued") (working . "working") (replied . "replied")

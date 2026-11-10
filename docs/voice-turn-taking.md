@@ -108,21 +108,19 @@ sidecar.
 Voice keeps two records, not one.  The **voice conversation** is what was
 said and heard on the audio side: the transcript as the speech model
 returned it, and every line the voice actually spoke.  The **session
-message** is what crosses into the chat: a request distilled from the
-transcript, with a bounded piece of the voice conversation only when the
-request cannot stand alone.  [The voice conversation and the request it
-sends](design/voice-conversation.md) has the rules and the alternatives.
+message** is what crosses into the chat: the transcript, unchanged.  The
+session's own agent reads it in the conversation it is already in, so a
+pronoun needs no block around it and a hesitation needs no rule to strip
+it.  [The voice conversation and the request it
+sends](design/voice-conversation.md) has the reasoning and the rejected
+alternatives.
 
-Distillation removes hesitation sounds, comma-set discourse markers,
-stutters, an explicit self-correction and non-speech annotations.  It is
-local and synchronous: no model, process or timer, so the request is sent
-in the same event that carried the transcript.  Content words, names,
-paths, numbers and casing stay; the raw words stay in the voice
-conversation and the transcript.  A request that names what it is about
-travels alone.  One that points (`do that`, `yes`, `the second one`,
-`also check the tests`) carries the last few voice turns as plain text,
-at most four turns and about 700 characters.  A burst that distils to
-nothing sends no request and shows `Not sent · no request`.
+Nothing is added to the message and nothing is taken out of it: no
+distillation, no context envelope, no interpretation model.  Sending it
+is local and synchronous -- no process, no timer, no model -- so the
+prompt leaves in the same event that carried the transcript.  A burst the
+speech model made no words of sends nothing and shows `Not sent · no
+words`.
 
 When the transcript arrives, the sidecar sends one `delegation` carrying:
 
@@ -142,9 +140,9 @@ When the transcript arrives, the sidecar sends one `delegation` carrying:
 `pending` is the assistant output that was held, in order, with the id
 Emacs gave it or the sidecar's own stable id.  The client merges its own
 held pieces with the sidecar's by id and by text, so a piece the transport
-and the sidecar both held is reported once.  The session prompt then has,
-in order: the distilled request, the voice-conversation block when the
-request needed one, and the explicit held-output block:
+and the sidecar both held is reported once.  The session prompt is the
+transcript as heard, and then the explicit held-output block when the
+sidecar held output while the person spoke:
 
 ```text
 check the parser test too
@@ -158,16 +156,15 @@ still relevant; do not assume it was heard.
 </voice-turn-context>
 ```
 
-The request is the first thing in the message; a self-contained request
-has no block after it.  No file/line or related-session block is added to
-a delegation: the session voice mode is used in is the context.  The
-agent decides whether to answer the new speech, fold in the update, or
-defer it.  The held block is context, not a command to repeat the old
-reply.  The user's own caption and the local echo show the words as they
-were heard; the voice transcript adds `Sent · <distilled request>` when
-the session got something different from the caption, and the
-conversation's user message has the request and the context, because that
-is what the model must see.
+The transcript is the first thing in the message.  No file/line or
+related-session block is added to a delegation: the session voice mode is
+used in is the context.  The agent decides whether to answer the new
+speech, fold in the update, or defer it.  The held block is context, not a
+command to repeat the old reply.  The user's own caption and the local
+echo show the words as they were heard; the voice transcript shows the
+same text under `Sent · ...`, so the caption and what crossed cannot
+disagree.  The conversation's user message is that text and the held
+block, because that is what the model sees.
 
 ### Ordering and duplicates
 
@@ -271,7 +268,7 @@ that returns immediately.
 | GPT-Live local detection → player stop | 150 ms | 10 ms frame + 30 ms onset + pipe/reader and callback; the fixture checks the ordering, not a live key |
 | Speech end → STT request | 1050 ms | 850 ms hangover + 20 ms tick; the hangover is the deliberate tradeoff against cutting a natural pause |
 | Transcript → delegation | 100 ms | sidecar drain tick (20 ms) and one JSON line; no model work in this path |
-| Delegation → session prompt | 0 ms | distillation and bounded context are local; no model, timer or batching |
+| Delegation → session prompt | 0 ms | the transcript is sent as it arrived; no model, timer or batching |
 | Held output → prompt context | 0 ms after the transcript | held pieces are consumed synchronously with the delegation |
 | False-trigger release | 1100 ms sidecar / 1600 ms clients | 1.0 s sidecar grace, 1.5 s Emacs and Flutter grace, plus scheduling |
 | Detector CPU | 500 ms per 30 s audio (test assertion) | fixture run measured about 3 ms CPU per audio second on this machine |

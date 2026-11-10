@@ -207,7 +207,9 @@ class GptSidecar(Sidecar):
             return
         if len(chunk) % 2:
             chunk = chunk[:-1]
-        self.announce_level(self.level_meter.measure(chunk))
+        reading = self.level_meter.reading(chunk)
+        if reading is not None:
+            self.announce_level(**reading)
         self.gate(chunk)
         try:
             self.connection.send_json({

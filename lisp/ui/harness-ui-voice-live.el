@@ -14,15 +14,19 @@
 ;; Emacs to sidecar: start, context, mute, interrupt, stop, commentary,
 ;; thinking, delegate_result.
 ;;
-;; A delegation becomes a distilled request in the current chat, through
-;; the normal `session/prompt' path; the raw words stay in the voice
-;; conversation and the transcript, and a request that points at an
-;; earlier voice turn carries the last few turns with it.  Assistant text
-;; streams back as speakable commentary; the turn's full text is the
-;; delegate result.  Permissions and questions stay on screen: the
-;; sidecar may say that approval is needed, never approve anything.
-;; Interruption stops playback only; cancelling the agent turn is a
-;; separate command.
+;; A delegation goes to the route as it stands, through the normal
+;; `session/prompt' path for a session and `_harness/workspace/prompt'
+;; for a workspace thread: the transcript is the message, with no
+;; distillation, no context envelope and no interpretation step.  The
+;; route is captured with the burst's onset and carries a generation, so
+;; a transcript, a turn or a reply that outlives a switch stays with the
+;; thread it was spoken in.  The sidecar and the microphone are shared:
+;; selecting another session or workspace retargets the call instead of
+;; restarting it.  Assistant text streams back as speakable commentary;
+;; the turn's full text is the delegate result.  Permissions and
+;; questions stay on screen: the sidecar may say that approval is
+;; needed, never approve anything.  Interruption stops playback only;
+;; cancelling the agent turn is a separate command.
 
 ;;; Code:
 
@@ -49,6 +53,14 @@
 (defvar harness-voice--owner)
 (defvar harness-voice-live-command)
 (declare-function harness-voice-live-p "harness-ui-voice-providers")
+(declare-function harness-voice-pipeline-start "harness-ui-voice-providers")
+(declare-function harness-voice-pipeline-state "harness-ui-voice-providers")
+(declare-function harness-voice-pipeline-reason "harness-ui-voice-providers")
+(declare-function harness-voice-unmute-need "harness-ui-voice-providers")
+(declare-function harness-ui-workspace--selected-thread "harness-ui-workspace")
+(declare-function harness-ui-workspace--live-session "harness-ui-workspace")
+(declare-function harness-ui-workspace--current-thread "harness-ui-workspace")
+(defvar harness-ui-workspace--id)
 (declare-function harness-voice-provider-command "harness-ui-voice-providers")
 (declare-function harness-voice-provider-label "harness-ui-voice-providers")
 (declare-function harness-voice-dictate "harness-ui-voice")
@@ -63,11 +75,38 @@
   "Seconds to wait for a sidecar to close before killing it.")
 
 (defvar harness-voice-live--process nil "The sidecar process, or nil.")
-(defvar harness-voice-live--buffer nil "The compose buffer that owns the session.")
-(defvar harness-voice-live--session nil "The session id delegations go to.")
+(defvar harness-voice-live--buffer nil
+  "The compose buffer voice was started in, or nil.
+It is where the controls are drawn and where a failure is shown; it is
+not the target.  The target is the route below, which moves when the
+person selects another session or workspace.")
+(defvar harness-voice-live--session nil
+  "The session id delegations go to now, or nil.
+For a workspace target this is the thread's live episode, once it has
+one; the prompt itself goes through the workspace.")
+(defvar harness-voice-live--route-kind 'session
+  "What the route names: `session' or `workspace'.")
+(defvar harness-voice-live--route-workspace nil
+  "The workspace id the route names, or nil.")
+(defvar harness-voice-live--route-thread nil
+  "The workspace thread the route names, or nil.")
+(defvar harness-voice-live--route-name nil
+  "What the UI calls the route's target, or nil.")
+(defvar harness-voice-live--route-generation 0
+  "Raised every time the route moves.
+A transcript, a turn or a reply carries the generation it was captured
+under, so a late one is delivered to the target it was spoken to and
+never to a thread selected after it.")
+(defvar harness-voice-live--utterance-routes nil
+  "Utterance id -> the route the words were spoken under.
+The sidecar starts a burst with an id of its own, so the person can
+select another thread while the speech is still being transcribed; the
+route is captured at the burst's onset and its transcript goes there.")
 (defvar harness-voice-live--stderr nil "Buffer holding the sidecar's stderr.")
 (defvar harness-voice-live--tail "" "Unparsed stdout after the last newline.")
 (defvar harness-voice-live--timer nil "Startup or stop timer, or nil.")
+(defvar harness-voice-live--pipeline-timer nil
+  "Timer following the shared local pipeline while it initializes, or nil.")
 (defvar harness-voice-live--state nil
   "Session state.
 One of nil, `starting', `listening', `speaking', `interrupted',
@@ -91,10 +130,9 @@ the next turn is tried as usual.")
   "User transcript since the last delegation, for a delegation without text.")
 (defvar harness-voice-live--conversation (harness-voice-conversation-create)
   "The voice conversation of the current call.
-It keeps the raw words and the distilled request of every user
-utterance, and what the voice actually spoke.  It is cleared when the
-call ends, so a new call starts empty while the chat keeps its own
-history.")
+It keeps the words of every user utterance as they were heard and sent,
+and what the voice actually spoke.  It is cleared when the call ends, so
+a new call starts empty while the chat keeps its own history.")
 (defvar harness-voice-live--speech-active nil
   "Non-nil while the sidecar hears a person speaking right now.")
 (defvar harness-voice-live--held nil
@@ -163,12 +201,261 @@ stage line and the timer read; the state is what the sidecar reported.")
 A frame every fifth of a second is the oldest trick there is to make a
 wait look alive, and it costs one character.")
 
-;;;; Status and controls
+;;;; The route
 
 (defun harness-voice-live--active-p ()
   "Non-nil while a sidecar session runs."
   (and (processp harness-voice-live--process)
        (process-live-p harness-voice-live--process)))
+
+;; One live call has one target, and the target is a value, not a
+;; captured buffer: the person selects another session or workspace and
+;; the next utterance goes there, with the same sidecar, the same
+;; microphone and the same speech services.  Every delegation, turn and
+;; reply carries the generation it was captured under, so a transcript
+;; that arrives after the switch is delivered to the target it was
+;; spoken to -- or dropped with a reason -- and never to the thread that
+;; happens to be selected when it lands.
+
+(defun harness-voice-live--route ()
+  "Return the current route as a plist.
+`:kind' is `session' or `workspace'; `:buffer' is the compose buffer
+the controls are drawn in; `:session' the session a prompt goes to;
+`:workspace' and `:thread' the workspace target; `:name' what the UI
+calls it; `:generation' the route's generation."
+  (list :kind harness-voice-live--route-kind
+        :buffer harness-voice-live--buffer
+        :session harness-voice-live--session
+        :workspace harness-voice-live--route-workspace
+        :thread harness-voice-live--route-thread
+        :name harness-voice-live--route-name
+        :generation harness-voice-live--route-generation))
+
+(defun harness-voice-live--route-label (&optional route)
+  "Return what the UI calls ROUTE's target, or nil.
+A session is named as the session list names it; a workspace thread as
+its workspace and thread.  The label is what the controls show, so the
+indicator and the target cannot disagree."
+  (let* ((route (or route (harness-voice-live--route)))
+         (name (plist-get route :name)))
+    (or (and (stringp name) (not (string-empty-p name)) name)
+        (pcase (plist-get route :kind)
+          ('workspace (or (plist-get route :workspace) "Workspace"))
+          (_ (let ((session (plist-get route :session)))
+               (and (stringp session)
+                    (if (fboundp 'harness-ui-session-name)
+                        (harness-ui-session-name session)
+                      (substring session 0 (min 8 (length session)))))))))))
+
+(defcustom harness-voice-live-follow-selection t
+  "Whether a live call follows the compose box the person is looking at.
+Non-nil sends the next utterance to the session or workspace thread of
+the selected window's compose box, when that is a different target from
+the last one.  The sidecar, the microphone and the speech services keep
+running: only the words' destination moves, and what was in flight for
+the old target is dropped with the reason `retargeted'.  nil keeps the
+target where it was until `harness-voice-live-retarget' or the `Use
+here' control moves it."
+  :type 'boolean
+  :group 'harness-voice)
+
+(defun harness-voice-live--selected-route ()
+  "Return the route of the compose box the person is looking at, or nil.
+A selected window that shows no compose box is no target: looking at a
+source file does not move the call."
+  (let ((buffer (window-buffer (selected-window))))
+    (when (and (buffer-live-p buffer)
+               (with-current-buffer buffer (harness-compose-live-p)))
+      (harness-voice-live--route-of-buffer buffer))))
+
+(defun harness-voice-live--follow-selection ()
+  "Move the route to the selected compose box, when the option says so.
+Return non-nil when the target moved.  This runs when an utterance
+arrives, not on a redisplay hook: the words go where the person is
+looking at the moment they speak, and nothing is retargeted while they
+are merely reading."
+  (when harness-voice-live-follow-selection
+    (let ((route (harness-voice-live--selected-route)))
+      (when (and route
+                 (not (harness-voice-live--route-same-p
+                       route (harness-voice-live--route))))
+        (let ((moved (harness-voice-live--route-set route)))
+          (when moved
+            (harness-voice-live--transcript-route)
+            (harness-voice-live--refresh))
+          moved)))))
+
+(defun harness-voice-live--route-of-buffer (buffer)
+  "Return the route BUFFER's compose box would be, or nil.
+A chat names its session; a workspace names its selected thread and the
+episode that thread runs in.  A buffer that names neither is no target.
+The workspace's own buffer-locals are read, so the transport needs no
+call into that module to know where a workspace's words go."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (cond
+       ((bound-and-true-p harness-ui-workspace--id)
+        (let* ((workspace harness-ui-workspace--id)
+               (thread (or (and (boundp 'harness-ui-workspace--thread)
+                                harness-ui-workspace--thread)
+                           (and (fboundp 'harness-ui-workspace--selected-thread)
+                                (harness-ui-workspace--selected-thread))))
+               (session (and (fboundp 'harness-ui-workspace--live-session)
+                             (harness-ui-workspace--live-session))))
+          (list :kind 'workspace
+                :buffer buffer
+                :workspace workspace
+                :thread thread
+                :session session
+                :name (harness-voice-live--workspace-label workspace thread))))
+       ((and (bound-and-true-p harness-ui-session-id)
+             (stringp harness-ui-session-id)
+             (not (string-empty-p harness-ui-session-id)))
+        (list :kind 'session
+              :buffer buffer
+              :session harness-ui-session-id
+              :name (if (fboundp 'harness-ui-session-name)
+                        (harness-ui-session-name harness-ui-session-id)
+                      harness-ui-session-id)))))))
+
+(defun harness-voice-live--workspace-label (workspace thread)
+  "Return a one-line name for WORKSPACE's THREAD, or nil."
+  (let ((title (and (fboundp 'harness-ui-workspace--current-thread)
+                    (buffer-live-p harness-voice-live--buffer)
+                    (with-current-buffer harness-voice-live--buffer
+                      (when (and (bound-and-true-p harness-ui-workspace--id)
+                                 (equal harness-ui-workspace--id workspace))
+                        (plist-get (harness-ui-workspace--current-thread) :title))))))
+    (cond ((and title (not (string-empty-p title))) title)
+          (thread thread)
+          (workspace workspace))))
+
+(defun harness-voice-live--route-same-p (a b)
+  "Return non-nil when routes A and B name the same target."
+  (and (eq (plist-get a :kind) (plist-get b :kind))
+       (equal (plist-get a :session) (plist-get b :session))
+       (equal (plist-get a :workspace) (plist-get b :workspace))
+       (equal (plist-get a :thread) (plist-get b :thread))))
+
+(defun harness-voice-live--route-set (route)
+  "Make ROUTE the target, raising the generation when it moved.
+The sidecar, the microphone and the speech services are untouched: a
+switch retargets the words, it does not restart the call.  What was in
+flight for the old target is dropped with the reason `retargeted', so
+the transcript says where it went instead of leaking into the new
+thread."
+  (let ((moved (not (harness-voice-live--route-same-p
+                     route (harness-voice-live--route)))))
+    (setq harness-voice-live--route-kind (or (plist-get route :kind) 'session)
+          harness-voice-live--route-workspace (plist-get route :workspace)
+          harness-voice-live--route-thread (plist-get route :thread)
+          harness-voice-live--route-name (plist-get route :name)
+          harness-voice-live--session (plist-get route :session))
+    (when (plist-get route :buffer)
+      (setq harness-voice-live--buffer (plist-get route :buffer)))
+    (when moved
+      (cl-incf harness-voice-live--route-generation)
+      (harness-voice-live--route-drop-in-flight))
+    moved))
+
+(defun harness-voice-live--route-drop-in-flight ()
+  "Drop what was captured for the previous target, with its reason.
+A queued delegation is answered so its sidecar does not wait for a turn
+that will never come; a turn already running is left to finish, and its
+reply is not spoken into the new thread."
+  (let ((queued harness-voice-live--delegations))
+    (setq harness-voice-live--delegations nil)
+    (dolist (job queued)
+      (harness-voice-live--pipeline-turn
+       (plist-get job :id) 'cancelled "retargeted")
+      (harness-voice-live--send
+       (list :event "delegate_result" :id (plist-get job :id) :text ""
+             :error t :message "retargeted")))
+    (when harness-voice-live--delegation
+      (harness-voice-live--pipeline-turn
+       (plist-get harness-voice-live--delegation :id) 'cancelled "retargeted"))
+    (setq harness-voice-live--held nil
+          harness-voice-live--utterance nil
+          harness-voice-live--utterance-done nil)
+    (harness-voice-live--cancel-held-timer)))
+
+(defun harness-voice-live--pipeline-turn (id state detail)
+  "Record that turn ID ended in STATE with DETAIL, when it is known."
+  (when (and (stringp id) harness-voice-live--pipeline)
+    (harness-voice-pipeline-turn
+     harness-voice-live--pipeline id state
+     (list :detail detail :generation (harness-voice-live--pipeline-generation)))
+    (harness-voice-live--pipeline-touch t)))
+
+(defun harness-voice-live--utterance-route (utterance)
+  "Return the route UTTERANCE was spoken under, or the current one.
+The sidecar's utterance id names a burst from its onset, so the route
+recorded then is where its words belong, whatever is selected when the
+transcript arrives."
+  (or (and utterance
+           (cdr (assoc (format "%s" utterance) harness-voice-live--utterance-routes)))
+      (harness-voice-live--route)))
+
+(defun harness-voice-live--utterance-route-set (utterance route)
+  "Record that ROUTE is where UTTERANCE's words go.
+Only a new id is recorded: a burst keeps the target it started under."
+  (when utterance
+    (let ((key (format "%s" utterance)))
+      (unless (assoc key harness-voice-live--utterance-routes)
+        (setq harness-voice-live--utterance-routes
+              (cons (cons key route) harness-voice-live--utterance-routes))
+        (when (> (length harness-voice-live--utterance-routes) 32)
+          (setq harness-voice-live--utterance-routes
+                (seq-take harness-voice-live--utterance-routes 32)))))))
+
+(defun harness-voice-live--route-current-p (generation)
+  "Return non-nil when GENERATION is the route's generation now."
+  (or (null generation) (eql generation harness-voice-live--route-generation)))
+
+(defun harness-voice-live--watched-session-p (session)
+  "Return non-nil when SESSION is one this call follows.
+That is the route's session now, or the session the running turn was
+sent to: a turn that outlives a switch still finishes where it went."
+  (and (stringp session)
+       (or (equal session harness-voice-live--session)
+           (equal session (plist-get harness-voice-live--delegation :session)))))
+
+(defun harness-voice-live--turn-session-p (session)
+  "Return non-nil when SESSION is the session this call follows now.
+That is the running delegation's own session, so a turn that outlives a
+switch still finishes where it was sent; with no delegation, it is the
+route's session, so a reply to something typed there is still spoken.
+A turn of any other session is somebody else's work."
+  (let ((delegation harness-voice-live--delegation))
+    (if delegation
+        (or (null (plist-get delegation :session))
+            (equal session (plist-get delegation :session)))
+      (equal session harness-voice-live--session))))
+
+;;;###autoload
+(defun harness-voice-live-retarget (&optional buffer)
+  "Point the running live call at BUFFER's session or workspace thread.
+The sidecar, the microphone and the speech services keep running: only
+the words' destination moves.  A call that is not running does nothing.
+Return non-nil when the target moved."
+  (interactive)
+  (let* ((buffer (or buffer (current-buffer)))
+         (route (harness-voice-live--route-of-buffer buffer)))
+    (when (and route (harness-voice-live--active-p))
+      (let ((moved (harness-voice-live--route-set route)))
+        (when moved
+          (harness-voice-live--transcript-route)
+          (harness-voice-live--refresh))
+        moved))))
+
+(defun harness-voice-live--transcript-route ()
+  "Write the route into the transcript, so the record says where it went."
+  (when (buffer-live-p harness-voice-live--transcript)
+    (let ((label (harness-voice-live--route-label)))
+      (when label
+        (harness-voice-live--transcript-section 'route "Target")
+        (harness-voice-live--transcript-insert
+         (concat "  " label "\n") 'harness-dim-face)))))
 
 (defun harness-voice-live--microphone-on-p ()
   "Non-nil while the sidecar microphone is open."
@@ -182,13 +469,14 @@ A stage under a third of a second reports nothing: an elapsed time that
 flickers in and out is noise, and a wait that short needs no clock."
   (when (and harness-voice-live--stage-since
              (memq harness-voice-live--stage
-                   '(hearing transcribing thinking)))
+                   '(initializing hearing transcribing thinking)))
     (let ((seconds (- (float-time) harness-voice-live--stage-since)))
       (and (>= seconds 0.3) seconds))))
 
 (defun harness-voice-live--stage-name ()
   "Return the word for the current stage, or nil."
   (pcase harness-voice-live--stage
+    ('initializing "Initializing")
     ('listening "Listening")
     ('hearing "Hearing you")
     ('transcribing "Transcribing")
@@ -201,7 +489,7 @@ flickers in and out is noise, and a wait that short needs no clock."
 (defun harness-voice-live--busy-p ()
   "Non-nil while the current stage should animate.
 Speaking has its own mark: the reply is arriving, not waited for."
-  (memq harness-voice-live--stage '(hearing transcribing thinking)))
+  (memq harness-voice-live--stage '(initializing hearing transcribing thinking)))
 
 (defun harness-voice-live--stage-glyph ()
   "Return the indicator of the current stage: a spinner or a dot."
@@ -246,16 +534,26 @@ Speaking has its own mark: the reply is arriving, not waited for."
     (harness-voice-live--stage-redraw)
     (harness-voice-live--refresh)))
 
+(defvar harness-voice-live--status-names-target nil
+  "Non-nil makes the status name the target even in the target's box.
+The mode line is one indicator for the whole frame, so it always names
+where the words go; a compose box names the target only when it is not
+the target, where the name is the fact the person needs.")
+
 (defun harness-voice-live--status ()
-  "Return the exact live status copy."
+  "Return the exact live status copy.
+A running call names its target after the state, so the indicator and
+the destination cannot disagree: a box that is not the target says so
+by naming the one that is."
   (concat
    "Live"
    (cond
     ((eq harness-voice-live--state 'failed) " · Failed")
+    ((eq harness-voice-live--state 'initializing) " · Initializing")
     ((eq harness-voice-live--state 'starting) " · Starting")
     ((eq harness-voice-live--state 'ending) " · Ending")
     ((eq harness-voice-live--state 'interrupted) " · Interrupted")
-    ((memq harness-voice-live--stage '(hearing transcribing thinking))
+    ((memq harness-voice-live--stage '(initializing hearing transcribing thinking))
      (concat " · " (harness-voice-live--stage-name)
              (let ((elapsed (harness-voice-live--elapsed)))
                (when elapsed (format " · %.1fs" elapsed)))))
@@ -267,7 +565,13 @@ Speaking has its own mark: the reply is arriving, not waited for."
     ((or (eq harness-voice-live--state 'listening)
          (eq harness-voice-live--stage 'listening)) " · Listening")
     ((null harness-voice-live--state) " · Off")
-    (t ""))))
+    (t ""))
+   (when (and (harness-voice-live--active-p)
+              (not (memq harness-voice-live--state '(ending failed)))
+              (or harness-voice-live--status-names-target
+                  (not (harness-voice-live--here-p))))
+     (let ((label (harness-voice-live--route-label)))
+       (when label (concat " · " label))))))
 
 (defun harness-voice-live--refresh ()
   "Refresh the owner's controls and the mode line."
@@ -277,10 +581,42 @@ Speaking has its own mark: the reply is arriving, not waited for."
     (force-mode-line-update t)))
 
 (defun harness-voice-live--release-others ()
-  "End a live session owned by a different compose buffer."
+  "Point a running live call at this compose box, instead of ending it.
+The sidecar owns the microphone and the speech services; a person who
+selects another session wants the next words to go there, not a call
+that stops and starts again.  A call that is not running is left to
+`harness-voice-live-start'."
   (when (and (harness-voice-live--active-p)
              (not (eq harness-voice-live--buffer (current-buffer))))
-    (harness-voice-live--reset)))
+    (harness-voice-live-retarget (current-buffer))))
+
+(defun harness-voice-live--adopt-other-box ()
+  "Move the call to another compose box that can take it, or return nil.
+The box the call started in can be closed while the person is still
+talking; the call belongs to the microphone, not to that buffer.  A
+visible compose box of a session or workspace is a target; with none,
+the call has nowhere to go and ends."
+  (let ((candidates
+         (cl-remove-if-not
+          (lambda (buffer)
+            (and (buffer-live-p buffer)
+                 (not (eq buffer harness-voice-live--buffer))
+                 (with-current-buffer buffer
+                   (and (harness-compose-live-p)
+                        (harness-voice-live--route-of-buffer buffer)))))
+          (buffer-list))))
+    (when candidates
+      (let* ((buffer (car candidates))
+             (route (harness-voice-live--route-of-buffer buffer)))
+        (harness-voice-live--route-set route)
+        (harness-voice-live--transcript-route)
+        (harness-voice-live--refresh)
+        t))))
+
+(defun harness-voice-live--here-p ()
+  "Non-nil when this compose box is the live call's target."
+  (and (harness-voice-live--active-p)
+       (eq harness-voice-live--buffer (current-buffer))))
 
 (defun harness-voice-live--face ()
   "Return the face for the live status."
@@ -289,9 +625,13 @@ Speaking has its own mark: the reply is arriving, not waited for."
         (t 'harness-label-face)))
 
 (defun harness-voice-live--controls ()
-  "Return fitted live voice controls for a compose box, or nil."
+  "Return fitted live voice controls for a compose box, or nil.
+A box that is not the call's target still shows the call, with the
+target's name and a control that moves the words here: the indicator
+never says `Listening' in a box the words do not go to."
   (when (and harness-voice--enabled (harness-voice-live-p))
     (let ((active (harness-voice-live--active-p))
+          (here (harness-voice-live--here-p))
           (items nil))
       (if (not harness-voice--controls)
           (setq items (list (list (harness-voice--button
@@ -302,13 +642,18 @@ Speaking has its own mark: the reply is arriving, not waited for."
                                  'face (harness-voice-live--face)
                                  'help-echo (or harness-voice-live--error "Live voice status"))
                      100 nil)
-               (list (if active
-                         (harness-voice--button "End" #'harness-voice-live-stop
-                                                "Live session · end")
+               (list (cond
+                      ((and active here)
+                       (harness-voice--button "End" #'harness-voice-live-stop
+                                              "Live session · end"))
+                      (active
+                       (harness-voice--button "Use here" #'harness-voice-live-use-here
+                                              "Live voice · target"))
+                      (t
                        (harness-voice--button "Start" #'harness-voice-live--start-here
-                                              "Live voice · sidecar session"))
+                                              "Live voice · sidecar session")))
                      95 nil)
-               (and active
+               (and active here
                     (list (harness-voice--button "Interrupt C-c V" #'harness-voice-live-interrupt
                                                  "Playback · interruption") 90 nil))
                (and harness-voice-live--error
@@ -317,10 +662,10 @@ Speaking has its own mark: the reply is arriving, not waited for."
                (and active harness-voice-live--notice
                     (list (propertize harness-voice-live--notice 'face 'harness-caution-face
                                       'help-echo harness-voice-live--notice) 83 nil))
-               (and active harness-voice-live--working
+               (and active here harness-voice-live--working
                     (list (harness-voice--button "Cancel work" #'harness-voice-live-cancel
                                                  "Agent turn · cancellation") 80 nil))
-               (and active
+               (and active here
                     (list (harness-voice--button
                            (if harness-voice-live--muted "Unmute C-c v" "Mute C-c v")
                            #'harness-voice-live-mute "Microphone · live session") 70 nil))
@@ -333,7 +678,7 @@ Speaking has its own mark: the reply is arriving, not waited for."
                 ;; The pipeline is a line of its own under the controls:
                 ;; one settings line cannot fit both, and the strip must
                 ;; stay readable at a narrow width.
-                (when (and active (> room 20))
+                (when (and active here (> room 20))
                   (concat "\n" (harness-voice-pipeline-compact-line
                                 harness-voice-live--pipeline room))))))))
 
@@ -432,11 +777,16 @@ which is the meter's rate, not the transcript's."
           (set-marker harness-voice-live--pipeline-end (point))
           (force-mode-line-update t))))))
 
-(defun harness-voice-live--pipeline-level (level)
-  "Record the capture path's LEVEL, and stop claiming it when it goes stale."
+(defun harness-voice-live--pipeline-level (level &optional peak dbfs)
+  "Record the capture path's LEVEL, PEAK and DBFS, and let it go stale.
+LEVEL is the mean absolute sample the gate itself uses; PEAK and DBFS
+are the same chunk's loudest sample and its decibel reading, when the
+sidecar measured them.  Nothing here changes a sample or a threshold:
+the meter draws a scale, and the details keep the numbers."
   (when (numberp level)
     (harness-voice-pipeline-set-level harness-voice-live--pipeline level nil
-                                      (harness-voice-live--pipeline-generation))
+                                      (harness-voice-live--pipeline-generation)
+                                      peak dbfs)
     (harness-voice-live--pipeline-touch t)
     (when (timerp harness-voice-live--pipeline-stale-timer)
       (cancel-timer harness-voice-live--pipeline-stale-timer))
@@ -681,7 +1031,8 @@ local pipeline, the fixture or a custom sidecar."
     (cancel-timer harness-voice-live--pipeline-timer))
   (when (timerp harness-voice-live--pipeline-stale-timer)
     (cancel-timer harness-voice-live--pipeline-stale-timer))
-  (setq harness-voice-live--timer nil
+  (setq harness-voice-live--pipeline-timer nil
+        harness-voice-live--timer nil
         harness-voice-live--pipeline-timer nil
         harness-voice-live--pipeline-stale-timer nil
         harness-voice-live--stage-timer nil
@@ -776,59 +1127,6 @@ utterance sends transcribing first, which cancels it."
              (harness-voice-live--muted 'muted)
              ((harness-voice-live--holding-output-p) 'holding)
              (t 'listening))))))
-
-(defun harness-voice-live--pending-items (event)
-  "Return held output items from EVENT and the client's own held list.
-EVENT's `pending' is the sidecar's unspoken queue, already bounded.  The
-merge is by id and then by text, so a piece the transport also saw is
-reported once."
-  (let ((items (append
-                (mapcar (lambda (item)
-                          (list :id (plist-get item :id)
-                                :text (or (plist-get item :text) "")))
-                        (append (plist-get event :pending) nil))
-                harness-voice-live--held))
-        (seen-ids nil)
-        (seen-texts nil)
-        (result nil))
-    (dolist (item items)
-      (let ((id (plist-get item :id))
-            (text (plist-get item :text)))
-        (unless (or (and id (member id seen-ids))
-                    (and text (member text seen-texts)))
-          (when id (push id seen-ids))
-          (when text (push text seen-texts))
-          (push item result))))
-    (setq harness-voice-live--held nil)
-    ;; A full turn result contains the sentence pieces that were held while
-    ;; it streamed; keep the larger text, not both.
-    (setq result
-          (cl-remove-if
-           (lambda (item)
-             (let ((text (plist-get item :text)))
-               (and text
-                    (cl-some
-                     (lambda (other)
-                       (let ((more (plist-get other :text)))
-                         (and more
-                              (> (length more) (length text))
-                              (string-match-p (regexp-quote text) more))))
-                     result))))
-           result))
-    (nreverse result)))
-
-(defun harness-voice-live--pending-context (items)
-  "Return the explicit pending-update context for ITEMS, or nil."
-  (when items
-    (concat "<voice-turn-context>\n"
-            "assistant_output: held (not spoken)\n"
-            "held_output:\n"
-            (mapconcat (lambda (item)
-                         (concat "- " (plist-get item :text) "\n"))
-                       items "")
-            "decision: answer the new speech; fold the held output in only "
-            "if it is still relevant; do not assume it was heard.\n"
-            "</voice-turn-context>\n")))
 
 (defun harness-voice-live--delegate-key (event)
   "Return the exact-once key of delegation EVENT."
@@ -948,7 +1246,7 @@ The stage line at the top says what the session is doing now, and the
 pipeline under it says what reached the microphone, what the speech
 filter kept and dropped, what was transcribed, and what the speaker is
 doing.  The sections below say what you said, what crossed into the
-session (`Sent`, or `Not sent` for a burst of mumbles), what the coding
+session (`Sent`, or `Not sent` when no words came back), what the coding
 agent did and what the voice said back.  `d' shows every pipeline marker,
 `C-c v' dictates or mutes, `C-c V' interrupts and `q' closes the
 buffer."
@@ -1090,20 +1388,24 @@ not the whole path."
    (concat "  ▸ " title "\n")
    'harness-tool-title-face))
 
-(defun harness-voice-live--transcript-sent (text)
-  "Show what crossed into the session: TEXT, or that nothing did.
-TEXT is the distilled request without its context block.  The raw
-caption above it stays as it was heard, so the transcript shows the
-voice conversation and the session message as the two different
-records they are."
-  (if text
-      (progn
-        (harness-voice-live--transcript-section 'sent "Sent")
-        (harness-voice-live--transcript-insert
-         (concat "  " text "\n") 'harness-dim-face))
+(defun harness-voice-live--transcript-sent (text &optional caption)
+  "Show what crossed into the target: TEXT, or that nothing did.
+TEXT is what the target received.  When it is the words the caption above
+already shows, CAPTION, nothing is written: repeating the same sentence
+under a second heading is not a record of a crossing.  A text that differs
+is written under `Sent', so a rewrite -- from a provider of the future, or
+from this client -- is visible as one."
+  (cond
+   ((null text)
     (harness-voice-live--transcript-section 'not-sent "Not sent")
     (harness-voice-live--transcript-insert
-     "  no request\n" 'harness-dim-face)))
+     "  no words\n" 'harness-dim-face))
+   ((and caption (equal (string-trim caption) (string-trim text)))
+    nil)
+   (t
+    (harness-voice-live--transcript-section 'sent "Sent")
+    (harness-voice-live--transcript-insert
+     (concat "  " text "\n") 'harness-dim-face))))
 
 ;;;###autoload
 (defun harness-voice-live-transcript ()
@@ -1125,6 +1427,14 @@ server answers it with an empty body, which used to fail the whole call
 for a reply that was merely done being said."
   (and (stringp text) (string-match-p "[[:alnum:]]" text)))
 
+(defun harness-voice-live--turn-stale-p ()
+  "Non-nil when the running turn was sent to a route that moved.
+Its reply belongs to the thread it was asked in: it is neither spoken
+into the thread the person selected nor shown as if it answered it."
+  (let ((route (plist-get harness-voice-live--delegation :route)))
+    (and route
+         (not (harness-voice-live--route-current-p (plist-get route :generation))))))
+
 (defun harness-voice-live--speak (text &optional id)
   "Send speakable TEXT to the sidecar as commentary, or hold it.
 
@@ -1135,7 +1445,9 @@ commentary to speak later.  A piece with nothing to say in it is not
 sent at all."
   (let ((speech (harness-voice--speech-text text))
         (part 0))
-    (while (and (not (string-empty-p speech)) (harness-voice-live--active-p))
+    (while (and (not (string-empty-p speech))
+                (not (harness-voice-live--turn-stale-p))
+                (harness-voice-live--active-p))
       (let* ((piece (if (> (length speech) 1200)
                         (substring speech 0 1200)
                       speech))
@@ -1216,49 +1528,73 @@ sent at all."
 
 ;;;; Delegation
 
-(defun harness-voice-live--prompt (text &optional pending)
-  "Return the agent prompt for delegated TEXT and held PENDING items.
-The request is the first thing in the message.  There is no
-related-session lookup and no context block added to a transcript: the
-session a voice request is made in is the context, and a request that
-needs an earlier voice turn carries that turn itself."
-  (let ((block (harness-voice-live--pending-context pending)))
-    (concat text
-            (when block (concat "\n\n" block)))))
-
 (defun harness-voice-live--delegate-next ()
-  "Send the next delegation to the agent, unless one is running."
+  "Send the next delegation to the agent, unless one is running.
+The job carries the route it was spoken under.  A job whose route has
+moved is answered with `retargeted' instead of being sent: the words
+belong to the thread they were said in, and a thread selected after
+them is not it."
   (when (and (null harness-voice-live--delegation)
              harness-voice-live--delegations
-             (harness-voice-live--active-p)
-             (buffer-live-p harness-voice-live--buffer)
-             (equal (buffer-local-value 'harness-ui-session-id harness-voice-live--buffer)
-                    harness-voice-live--session))
+             (harness-voice-live--active-p))
     (let* ((job (pop harness-voice-live--delegations))
            (id (plist-get job :id))
-           (text (plist-get job :text)))
-      (setq harness-voice-live--delegation (list :id id)
-            harness-voice-live--turn-id id
-            harness-voice-live--working t
-            harness-voice-live--turn-active t
-            harness-voice-live--nodes (make-hash-table :test 'equal)
-            harness-voice-live--order nil)
-      (harness-voice-live--pipeline-turn-sent id)
-      (harness-voice-live--send (list :event "thinking" :text "Agent turn started"))
-      (harness-voice-live--stage-set 'thinking)
-      (harness-voice-live--refresh)
-      (condition-case err
-          (harness-ui-call-turn harness-voice-live--session "session/prompt"
-                                (list :sessionId harness-voice-live--session
-                                      :prompt (list (list :type "text"
-                                                          :text (harness-voice-live--prompt
-                                                                 text
-                                                                 (plist-get job :pending)))))
-                                #'ignore
-                                (lambda (error)
-                                  (harness-voice-live--delegate-error id error)))
-        (error
-         (harness-voice-live--delegate-error id err))))))
+           (text (plist-get job :text))
+           (route (plist-get job :route)))
+      (if (not (harness-voice-live--route-current-p (plist-get route :generation)))
+          (progn
+            (harness-voice-live--pipeline-turn id 'cancelled "retargeted")
+            (harness-voice-live--send
+             (list :event "delegate_result" :id id :text ""
+                   :error t :message "retargeted"))
+            (harness-voice-live--delegate-next))
+        (setq harness-voice-live--delegation
+              (list :id id :route route :session (plist-get route :session))
+              harness-voice-live--turn-id id
+              harness-voice-live--working t
+              harness-voice-live--turn-active t
+              harness-voice-live--nodes (make-hash-table :test 'equal)
+              harness-voice-live--order nil)
+        (harness-voice-live--pipeline-turn-sent id)
+        (harness-voice-live--send (list :event "thinking" :text "Agent turn started"))
+        (harness-voice-live--stage-set 'thinking)
+        (harness-voice-live--refresh)
+        (condition-case err
+            (harness-voice-live--dispatch route text
+                                          (lambda (error)
+                                            (harness-voice-live--delegate-error id error)))
+          (error
+           (harness-voice-live--delegate-error id err)))))))
+
+(defun harness-voice-live--dispatch (route text on-error)
+  "Send TEXT to ROUTE's target, calling ON-ERROR with a failure.
+A session gets the ordinary `session/prompt' path, so its tools,
+permissions and questions are the ones it always has.  A workspace
+thread gets `_harness/workspace/prompt' with the thread, which is how
+the workspace routes a message to that thread's live episode; the
+workspace's own agent does the work, and no second model is asked to
+interpret the words."
+  (pcase (plist-get route :kind)
+    ('workspace
+     (let ((workspace (plist-get route :workspace))
+           (thread (plist-get route :thread)))
+       (unless (and (stringp workspace) (not (string-empty-p workspace)))
+         (user-error "Live voice workspace unavailable"))
+       (harness-ui-call
+        "_harness/workspace/prompt"
+        (append (list :id workspace :text text)
+                (and thread (list :opts (list :thread thread))))
+        #'ignore
+        on-error)))
+    (_
+     (let ((session (plist-get route :session)))
+       (unless (and (stringp session) (not (string-empty-p session)))
+         (user-error "Live voice session unavailable"))
+       (harness-ui-call-turn session "session/prompt"
+                             (list :sessionId session
+                                   :prompt (list (list :type "text" :text text)))
+                             #'ignore
+                             on-error)))))
 
 (defun harness-voice-live--delegate-error (id error)
   "Report that delegation ID failed with ERROR."
@@ -1278,82 +1614,85 @@ needs an earlier voice turn carries that turn itself."
 (defun harness-voice-live--delegate (event)
   "Start a delegation from EVENT, or queue it behind the running turn.
 
-The utterance key is delivered once.  The transcript is distilled into
-a request; the raw words stay in the voice conversation and the
-transcript.  A request that points at an earlier voice turn carries the
-last few turns as plain context.  Any assistant output held while the
-person spoke travels with this prompt as explicit context; it is never
-spoken afterwards merely because the transcript arrived.  A burst that
-distils to nothing is recorded and answers its delegation without a
-session prompt."
+The utterance key is delivered once.  The transcript is the session
+message: it is what the speech model returned, sent to the route's
+target as it stands.  There is no distillation, no context envelope and
+no interpretation step, so nothing is added to what the person said and
+no model is asked about it before the target's own agent sees it.
+
+The route is captured here, with its generation, so the words reach the
+thread they were said in even when the person selects another one while
+the agent is working.  A burst the speech model made no words of is
+answered without a prompt."
+  (harness-voice-live--follow-selection)
   (let* ((id (or (plist-get event :id) (format "d-%s" (float-time))))
          (text (or (plist-get event :text) (plist-get event :prompt) ""))
-         (text (if (string-empty-p text) harness-voice-live--heard text)))
+         (text (string-trim (if (string-empty-p text) harness-voice-live--heard text)))
+         (route (harness-voice-live--utterance-route (plist-get event :utterance)))
+         (caption harness-voice-live--heard))
     (if (harness-voice-live--delegate-seen-p event)
         (harness-voice-live--refresh)
       (setq harness-voice-live--heard "")
       (harness-voice-live--cancel-held-timer)
-      (let* ((conversation harness-voice-live--conversation)
-             (distilled (if harness-voice-distill
-                            (harness-voice-distilled-text text)
-                          (let ((trimmed (string-trim (or text ""))))
-                            (unless (string-empty-p trimmed) trimmed)))))
-        (cond
-         ((null distilled)
-          (if (string-empty-p (string-trim (or text "")))
-              (harness-voice-live--send
-               (list :event "delegate_result" :id id :text ""
-                     :error t :message "Live voice delegation empty"))
-            ;; Nothing but mumbles: the voice conversation keeps the
-            ;; words, the session gets no request, and the sidecar is
-            ;; answered so it does not wait for one.
-            (harness-voice-conversation-hear conversation text nil nil)
-            (let ((segment (or harness-voice-live--utterance-done
-                               harness-voice-live--utterance
-                               (and (plist-get event :utterance)
-                                    (format "u-%s"
-                                            (plist-get event :utterance))))))
-              (when segment
-                (harness-voice-live--pipeline-segment
-                 (list :event "segment" :state "dropped" :id segment
-                       :reason "no request"))
-                (when (equal segment harness-voice-live--utterance-done)
-                  (setq harness-voice-live--utterance-done nil))))
-            (harness-voice-live--transcript-sent nil)
-            (harness-voice-live--send
-             (list :event "delegate_result" :id id :text ""))
-            (harness-voice-live--stage-set
-             (cond ((not (harness-voice-live--active-p)) nil)
-                   (harness-voice-live--muted 'muted)
-                   ((harness-voice-live--holding-output-p) 'holding)
-                   (t 'listening)))
-            (when (harness-voice-live--holding-output-p)
-              (harness-voice-live--schedule-held-release))
-            (harness-voice-live--refresh)))
-         (t
-          (let* ((request (harness-voice-conversation-request
-                           conversation distilled))
-                 (turn (harness-voice-conversation-hear
-                        conversation text distilled request))
-                 (raw (plist-get turn :raw))
-                 (pending (harness-voice-live--pending-items event)))
-            ;; Show the crossing only when the session did not get
-            ;; exactly what was heard: a changed request, or context.
-            (unless (and (equal distilled raw)
-                         (equal request distilled))
-              (harness-voice-live--transcript-sent distilled))
-            (setq harness-voice-live--delegations
-                  (nconc harness-voice-live--delegations
-                         (list (list :id id :text request :pending pending))))
-            (when harness-voice-live--delegation
-              (harness-voice-live--pipeline-turn-queued id))
-            (harness-voice-live--delegate-next))))))))
+      ;; The person spoke: a reply held for the previous turn is
+      ;; superseded, and is neither spoken now nor repeated into the
+      ;; message.  The session's agent already has the turn it wrote.
+      (setq harness-voice-live--held nil)
+      (cond
+       ((string-empty-p text)
+        ;; The speech model made no words of this burst: the record says
+        ;; so, the target gets no message, and the sidecar is answered so
+        ;; it does not wait for a turn that will never come.
+        (harness-voice-live--drop-burst event "no words")
+        (harness-voice-live--transcript-sent nil)
+        (harness-voice-live--send (list :event "delegate_result" :id id :text ""))
+        (harness-voice-live--settle-stage)
+        (harness-voice-live--refresh))
+       (t
+        ;; Show the crossing when it is not simply the caption again:
+        ;; the words that went to the target were the words on screen.
+        (harness-voice-live--transcript-sent text caption)
+        (harness-voice-conversation-hear
+         harness-voice-live--conversation text text)
+        (setq harness-voice-live--delegations
+              (nconc harness-voice-live--delegations
+                     (list (list :id id :text text :route route))))
+        (when harness-voice-live--delegation
+          (harness-voice-live--pipeline-turn-queued id))
+        (harness-voice-live--delegate-next))))))
+
+(defun harness-voice-live--drop-burst (event reason)
+  "Record EVENT's burst as dropped with REASON, and return to listening."
+  (let ((segment (or harness-voice-live--utterance-done
+                     harness-voice-live--utterance
+                     (and (plist-get event :utterance)
+                          (format "u-%s" (plist-get event :utterance))))))
+    (when segment
+      (harness-voice-live--pipeline-segment
+       (list :event "segment" :state "dropped" :id segment :reason reason))
+      (when (equal segment harness-voice-live--utterance-done)
+        (setq harness-voice-live--utterance-done nil)))))
+
+(defun harness-voice-live--settle-stage ()
+  "Return to the stage the session is really in, after a burst is done."
+  (harness-voice-live--stage-set
+   (cond ((not (harness-voice-live--active-p)) nil)
+         (harness-voice-live--muted 'muted)
+         ((harness-voice-live--holding-output-p) 'holding)
+         (t 'listening))))
 
 (defun harness-voice-live--finish-turn (outcome)
-  "Finish the agent turn that ended with OUTCOME."
-  (let ((cancelled (member outcome '("cancelled" "error" "failed")))
-        (delegation harness-voice-live--delegation)
-        (text nil))
+  "Finish the agent turn that ended with OUTCOME.
+A turn whose route moved while it ran is answered, but its reply is not
+spoken: the person is in another thread now, and a sentence about the
+old one would arrive as if it answered the new one."
+  (let* ((cancelled (member outcome '("cancelled" "error" "failed")))
+         (delegation harness-voice-live--delegation)
+         (route (plist-get delegation :route))
+         (stale (and route
+                     (not (harness-voice-live--route-current-p
+                           (plist-get route :generation)))))
+         (text nil))
     (if cancelled
         (progn
           (harness-voice-live--pipeline-turn-ended 'failed (or outcome "cancelled"))
@@ -1375,46 +1714,54 @@ session prompt."
             harness-voice-live--working nil
             harness-voice-live--turn-active nil
             harness-voice-live--delegation nil)
-      (harness-voice-live--pipeline-turn-ended (if cancelled 'failed 'done))
+      (harness-voice-live--pipeline-turn-ended
+       (if stale 'cancelled 'done) (and stale "retargeted"))
       (when delegation
-        (if (harness-voice-live--holding-output-p)
-            (progn
-              ;; Keep the full result as context only when no sentence of
-              ;; it was already held; otherwise the pieces are the truth.
-              (unless (cl-find (plist-get delegation :id) harness-voice-live--held
-                               :key (lambda (item) (plist-get item :turn))
-                               :test #'equal)
-                (harness-voice-live--hold
-                 (format "result:%s" (plist-get delegation :id)) text))
-              (harness-voice-live--send
-               (list :event "delegate_result"
-                     :id (plist-get delegation :id) :text text :held t)))
+        (cond
+         (stale
+          ;; The words went to the thread they were said in; the reply
+          ;; stays there, and the sidecar is told so it stops waiting.
+          (harness-voice-live--send
+           (list :event "delegate_result"
+                 :id (plist-get delegation :id) :text ""
+                 :error t :message "retargeted")))
+         ((harness-voice-live--holding-output-p)
+          ;; Keep the full result as context only when no sentence of
+          ;; it was already held; otherwise the pieces are the truth.
+          (unless (cl-find (plist-get delegation :id) harness-voice-live--held
+                           :key (lambda (item) (plist-get item :turn))
+                           :test #'equal)
+            (harness-voice-live--hold
+             (format "result:%s" (plist-get delegation :id)) text))
+          (harness-voice-live--send
+           (list :event "delegate_result"
+                 :id (plist-get delegation :id) :text text :held t)))
+         (t
           (harness-voice-live--send
            (list :event "delegate_result"
                  :id (plist-get delegation :id) :text text))
           (harness-voice-conversation-say
-           harness-voice-live--conversation text 'result)))
+           harness-voice-live--conversation text 'result))))
       (setq harness-voice-live--nodes nil
             harness-voice-live--order nil))
     ;; A turn that ends while another delegation waits stays in Working:
     ;; the next turn starts at once.
     (unless (or (eq harness-voice-live--state 'speaking)
                 harness-voice-live--delegations)
-      (harness-voice-live--stage-set
-       (cond ((not (harness-voice-live--active-p)) nil)
-             (harness-voice-live--muted 'muted)
-             ((harness-voice-live--holding-output-p) 'holding)
-             (t 'listening))))
+      (harness-voice-live--settle-stage))
     (harness-voice-live--refresh)
     (harness-voice-live--delegate-next)))
 
 ;;;; Agent updates and events
 
 (defun harness-voice-live--on-update (sid update)
-  "Follow live assistant text for session SID from UPDATE."
+  "Follow live assistant text for session SID from UPDATE.
+A session the call is about answers, whether it is the route's now or
+the one the running turn was sent to: a turn that outlives a switch
+still finishes where it was sent."
   (when (and (harness-voice-live-p)
              (harness-voice-live--active-p)
-             (equal sid harness-voice-live--session))
+             (harness-voice-live--watched-session-p sid))
     (pcase (plist-get update :sessionUpdate)
       ("_harness/session_deleted" (harness-voice-live-stop))
       ((or "agent_message_chunk" "_harness/node" "tool_call")
@@ -1440,19 +1787,45 @@ session prompt."
   "Follow agent EVENT with ARGS while a live session runs."
   (when (and (harness-voice-live-p)
              (harness-voice-live--active-p)
-             (equal (car args) harness-voice-live--session))
+             (harness-voice-live--watched-session-p (car args)))
     (pcase event
       ("agent/turn-started"
-       (unless harness-voice-live--turn-active
-         (setq harness-voice-live--nodes (make-hash-table :test 'equal)
-               harness-voice-live--order nil))
-       (setq harness-voice-live--turn-active t
-             harness-voice-live--working t)
-       (harness-voice-live--refresh))
+       ;; Only the session the running delegation went to is this call's
+       ;; turn: a turn started in a thread the person just selected is
+       ;; driven by that thread's own message, not by the microphone.
+       (when (harness-voice-live--turn-session-p (car args))
+         (unless harness-voice-live--turn-active
+           (setq harness-voice-live--nodes (make-hash-table :test 'equal)
+                 harness-voice-live--order nil))
+         (setq harness-voice-live--turn-active t
+               harness-voice-live--working t)
+         (harness-voice-live--refresh)))
       ("agent/turn-ended"
-       (harness-voice-live--finish-turn (cadr args)))
+       (when (harness-voice-live--turn-session-p (car args))
+         (harness-voice-live--finish-turn (cadr args))))
       ((or "_harness/session_deleted" "session/deleted")
-       (harness-voice-live-stop)))))
+       (harness-voice-live-stop))
+      ("workspace/episode-changed"
+       ;; The selected thread got an episode: that is what its next words
+       ;; go to, and what its reply will come from.
+       (harness-voice-live--route-resolve)))))
+
+(defun harness-voice-live--route-resolve ()
+  "Refresh the route's session from the workspace thread it names.
+A thread's live episode is made by the harness when the first message
+of a new episode goes out, so the route learns it from the workspace
+rather than guessing one.  A route that is not a workspace is left as
+it is."
+  (when (eq harness-voice-live--route-kind 'workspace)
+    (when (buffer-live-p harness-voice-live--buffer)
+      (with-current-buffer harness-voice-live--buffer
+        (when (and (bound-and-true-p harness-ui-workspace--id)
+                   (equal harness-ui-workspace--id
+                          harness-voice-live--route-workspace)
+                   (fboundp 'harness-ui-workspace--live-session))
+          (let ((session (harness-ui-workspace--live-session)))
+            (unless (equal session harness-voice-live--session)
+              (setq harness-voice-live--session session))))))))
 
 ;;;; Sidecar events
 
@@ -1460,7 +1833,9 @@ session prompt."
   "Handle one parsed sidecar EVENT."
   (pcase (plist-get event :event)
     ("level"
-     (harness-voice-live--pipeline-level (plist-get event :input)))
+     (harness-voice-live--pipeline-level (plist-get event :input)
+                                         (plist-get event :peak)
+                                         (plist-get event :dbfs)))
     ("segment"
      (harness-voice-live--pipeline-segment event))
     ("ready"
@@ -1477,6 +1852,9 @@ session prompt."
        (harness-voice-live--refresh)))
     ("speech"
      (let ((active (plist-get event :active)))
+       (when (plist-get event :utterance)
+         (harness-voice-live--utterance-route-set
+          (plist-get event :utterance) (harness-voice-live--route)))
        (harness-voice-live--pipeline-speech active)
        (when (and active (plist-get event :utterance))
          (harness-voice-live--pipeline-segment
@@ -1504,6 +1882,8 @@ session prompt."
     ("hearing"
      (setq harness-voice-live--state 'listening)
      (when (plist-get event :utterance)
+       (harness-voice-live--utterance-route-set
+        (plist-get event :utterance) (harness-voice-live--route))
        (let ((id (format "u-%s" (plist-get event :utterance))))
          (unless (equal id harness-voice-live--utterance)
            (setq harness-voice-live--utterance nil
@@ -1625,40 +2005,144 @@ cannot be interrupted from the UI that is gone."
 
 ;;;###autoload
 (defun harness-voice-live-start ()
-  "Start the live sidecar session for this compose box."
+  "Start the live sidecar session for this compose box.
+A call that already runs is retargeted here instead of refused: the
+sidecar, the microphone and the speech services are shared, and only
+the words' destination moves.
+
+The local pipeline is the harness server's, and it is started when it
+is not running: the controls read `Initializing' while it comes up, and
+the sidecar starts once it answers.  A pipeline that fails says why at
+once, with a Retry control, rather than waiting out its own deadline."
   (interactive)
   (unless (harness-voice-live-p)
     (user-error "Live voice provider unavailable"))
-  (unless harness-ui-session-id
-    (user-error "Live voice session unavailable"))
-  (when (harness-voice-live--active-p)
-    (user-error "Live voice active"))
   (unless (harness-compose-live-p)
     (user-error "Live voice compose unavailable"))
-  (unless harness-voice-mode (harness-voice-mode 1))
+  (let ((route (harness-voice-live--route-of-buffer (current-buffer))))
+    (unless route
+      (user-error "Live voice session unavailable"))
+    (if (harness-voice-live--active-p)
+        (harness-voice-live-retarget (current-buffer))
+      (unless harness-voice-mode (harness-voice-mode 1))
+      (harness-voice--adopt)
+      (harness-voice-live--pipeline-bump 'connecting)
+      (setq harness-voice-live--error nil
+            harness-voice-live--notice nil
+            harness-voice-live--muted nil
+            harness-voice-live--closing nil
+            harness-voice-live--tail ""
+            harness-voice-live--speaker nil
+            harness-voice-live--seen (make-hash-table :test 'equal)
+            harness-voice-live--held-seq 0
+            harness-voice-live--route-generation 0
+            harness-voice-live--utterance-routes nil)
+      (harness-voice-live--route-set route)
+      (harness-voice-live--clear-gate)
+      (harness-voice-live--clear-turn)
+      (when (buffer-live-p harness-voice-live--transcript)
+        (with-current-buffer harness-voice-live--transcript
+          (let ((inhibit-read-only t)) (erase-buffer))
+          (setq-local harness-voice-live--pipeline-end nil))
+        (harness-voice-live--pipeline-draw))
+      (harness-voice-live--transcript-route)
+      (harness-voice-live--begin))))
+
+(defun harness-voice-live--begin ()
+  "Start the sidecar, once the speech services it needs are up.
+A provider that needs no local pipeline starts at once.  The local
+pipeline is the harness server's and is shared by every client, so a
+start attaches to one that runs or is already starting, and starts one
+that is stopped."
+  (let ((reason (harness-voice-live--pipeline-need)))
+    (cond
+     ((null reason)
+      (harness-voice-live--spawn))
+     ((eq reason 'starting)
+      (setq harness-voice-live--state 'initializing)
+      (harness-voice-live--stage-set 'initializing)
+      (harness-voice-live--refresh)
+      (harness-voice-live--watch-pipeline))
+     (t
+      (harness-voice-live--pipeline-start)))))
+
+(defun harness-voice-live--pipeline-need ()
+  "Return what the local pipeline still needs, or nil when it is ready.
+Only the local provider uses the harness server's pipeline: a sidecar
+of your own, the fixture or GPT-Live needs nothing of it.  `starting'
+means a start is in flight, which this call waits for; a string is the
+reason it cannot be used, which is shown as it is."
+  (when (and (eq harness-voice-provider 'unmute)
+             (fboundp 'harness-voice-unmute-need))
+    (let ((reason (harness-voice-unmute-need)))
+      (cond
+       ((null reason) nil)
+       ((harness-voice-live--pipeline-starting-p) 'starting)
+       (t (or reason "Local voice pipeline · stopped"))))))
+
+(defun harness-voice-live--pipeline-starting-p ()
+  "Non-nil when the harness reports its local pipeline starting."
+  (and (fboundp 'harness-voice-pipeline-state)
+       (eq 'starting (harness-voice-pipeline-state))))
+
+(defun harness-voice-live--pipeline-start ()
+  "Start the shared local pipeline and wait for it, visibly.
+The controls read `Initializing' while it comes up.  A start that fails
+fails this call at once with the harness's own reason, so a broken
+pipeline is a sentence in the controls, not a two-minute wait."
+  (setq harness-voice-live--state 'initializing)
+  (harness-voice-live--stage-set 'initializing)
+  (harness-voice-live--refresh)
+  (harness-voice-live--watch-pipeline)
+  (condition-case err
+      (harness-voice-pipeline-start)
+    (error
+     (harness-voice-live--fail
+      (format "Local voice pipeline · %s" (error-message-string err))))))
+
+(defun harness-voice-live--watch-pipeline ()
+  "Follow the shared pipeline until it runs, or says why it cannot.
+The harness reports its state as it moves (`speech/changed'), and this
+reads the cached state on a short timer as well, so a client that
+missed an event still starts."
+  (harness-voice-live--cancel-pipeline-timer)
+  (setq harness-voice-live--pipeline-timer
+        (run-at-time 0.2 0.2 #'harness-voice-live--pipeline-tick)))
+
+(defun harness-voice-live--cancel-pipeline-timer ()
+  "Stop following the shared pipeline."
+  (when (timerp harness-voice-live--pipeline-timer)
+    (cancel-timer harness-voice-live--pipeline-timer))
+  (setq harness-voice-live--pipeline-timer nil))
+
+(defun harness-voice-live--pipeline-tick ()
+  "Start the sidecar when the pipeline runs, or fail with its reason."
+  (cond
+   ((not (eq harness-voice-live--state 'initializing))
+    (harness-voice-live--cancel-pipeline-timer))
+   ((harness-voice-live--active-p)
+    (harness-voice-live--cancel-pipeline-timer))
+   ((null (harness-voice-live--pipeline-need))
+    (harness-voice-live--cancel-pipeline-timer)
+    (harness-voice-live--spawn))
+   ((let ((state (and (fboundp 'harness-voice-pipeline-state)
+                      (harness-voice-pipeline-state))))
+      (eq state 'failed))
+    (harness-voice-live--cancel-pipeline-timer)
+    (harness-voice-live--fail
+     (or (and (fboundp 'harness-voice-pipeline-reason)
+              (harness-voice-pipeline-reason))
+         "Local voice pipeline · failed")))))
+
+(defun harness-voice-live--spawn ()
+  "Start the sidecar process for the current route."
   (let ((command (harness-voice-live--command))
         (stderr (generate-new-buffer " *harness-voice-live-errors*")))
-    (harness-voice--adopt)
-    (harness-voice-live--pipeline-bump 'connecting)
-    (setq harness-voice-live--buffer (current-buffer)
-          harness-voice-live--session harness-ui-session-id
-          harness-voice-live--stderr stderr
+    (setq harness-voice-live--stderr stderr
           harness-voice-live--state 'starting
           harness-voice-live--error nil
-          harness-voice-live--notice nil
-          harness-voice-live--muted nil
           harness-voice-live--closing nil
-          harness-voice-live--tail ""
-          harness-voice-live--speaker nil
-          harness-voice-live--seen (make-hash-table :test 'equal)
-          harness-voice-live--held-seq 0)
-    (harness-voice-live--clear-gate)
-    (harness-voice-live--clear-turn)
-    (when (buffer-live-p harness-voice-live--transcript)
-      (with-current-buffer harness-voice-live--transcript
-        (let ((inhibit-read-only t)) (erase-buffer))
-        (setq-local harness-voice-live--pipeline-end nil))
-      (harness-voice-live--pipeline-draw))
+          harness-voice-live--tail "")
     (condition-case err
         (let ((process
                (make-process
@@ -1706,6 +2190,15 @@ cannot be interrupted from the UI that is gone."
       (when (and (buffer-live-p buffer)
                  (buffer-local-value 'harness-voice-mode buffer))
         (with-current-buffer buffer (harness-voice-mode -1))))))
+
+;;;###autoload
+(defun harness-voice-live-use-here ()
+  "Point the running live call at this compose box's session or thread."
+  (interactive)
+  (unless (harness-voice-live--active-p)
+    (user-error "Live voice inactive"))
+  (unless (harness-voice-live-retarget (current-buffer))
+    (user-error "Live voice target unchanged")))
 
 ;;;###autoload
 (defun harness-voice-live-toggle ()
@@ -1756,6 +2249,7 @@ cannot be interrupted from the UI that is gone."
 
 (defun harness-voice-live--reset ()
   "Stop the sidecar and discard its transcripts, on reload or redaction."
+  (harness-voice-live--cancel-pipeline-timer)
   (when (harness-voice-live--active-p)
     (harness-voice-live--dispose))
   (let ((buffer harness-voice-live--buffer))
@@ -1769,6 +2263,12 @@ cannot be interrupted from the UI that is gone."
         harness-voice-live--closing nil
         harness-voice-live--buffer nil
         harness-voice-live--session nil
+        harness-voice-live--route-kind 'session
+        harness-voice-live--route-workspace nil
+        harness-voice-live--route-thread nil
+        harness-voice-live--route-name nil
+        harness-voice-live--route-generation 0
+        harness-voice-live--utterance-routes nil
         harness-voice-live--speaker nil
         harness-voice-live--section nil
         harness-voice-live--stage nil

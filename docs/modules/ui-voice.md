@@ -27,10 +27,9 @@ microphone, speaker and speech model, while Emacs keeps the captions,
 the agent turn and every permission decision.  The bundled live
 providers are ChatGPT Live (GPT-Live over the API), a local
 whisper.cpp or Parakeet and Kokoro pipeline, and a scripted fixture;
-a sidecar delegation becomes a distilled request in the chat (a
-bounded piece of the voice conversation travels with it when the
-request needs one), and assistant text streams back as commentary.
-Audio never crosses the control pipe.
+a sidecar delegation becomes a message in the chat, sent as the
+speech model returned it, and assistant text streams back as
+commentary.  Audio never crosses the control pipe.
 
 The local pipeline's speech-to-text model is a choice of its own
 (`harness-voice-stt-model`), listed on the voice setup page: the

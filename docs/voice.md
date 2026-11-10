@@ -117,23 +117,20 @@ is meant; speech recognition is not a guarantee of correct routing.
 
 A live call keeps two records. The **voice conversation** is the audio side:
 the transcript as the speech model returned it, every line the voice spoke, and
-the request that crossed into the chat. The **session message** is what the
-chat receives: a request distilled from the transcript. `Uh`, `um`, a stutter,
-a comma-set `like` and an explicit `no wait, ...` correction are removed; every
-content word, name, path and number stays. The voice transcript shows the
-caption as it was heard and `Sent · ...` when the session got a different
-text; a burst of nothing but mumbles shows `Not sent · no request`.
+the words that crossed into the chat. The **session message** is what the chat
+receives: the transcript, sent as it came back from speech to text.
 
-Distillation is local and synchronous: no model call, process or timer, so it
-adds no wait between the transcript and the prompt. A request that cannot
-stand alone (`do that`, `yes`, `the second one`, `also ...`) carries the last
-few voice turns as plain text; a self-contained request travels alone, without
-a wrapper. `harness-voice-distill` nil sends the transcript as heard and
-`harness-voice-conversation-carry-context` nil never adds the earlier turns.
-[The design](design/voice-conversation.md) has the rules, bounds and rejected
-alternatives. The Flutter client applies the same rules
-(`harness_client/lib/src/voice/voice_conversation.dart`), so a request
-composed on a phone has the same shape.
+Nothing is added to it and nothing is taken out. There is no distillation, no
+context envelope and no interpretation model: the session's own agent has the
+conversation it is in, and it is the only reader that can tell which earlier
+turn a pronoun points at. The voice transcript shows the caption as it was
+heard and `Sent · ...` for what crossed; a burst the speech model made no words
+of shows `Not sent · no words`. [The design](design/voice-conversation.md) has
+the reasoning and the rejected alternatives, and
+[the routing design](design/live-voice-routing.md) has the destination side.
+The Flutter client sends the transcript the same way
+(`harness_client/lib/src/voice/voice_conversation.dart`), so a request composed
+on a phone has the same shape.
 
 ## Live voice with a sidecar
 
@@ -340,10 +337,17 @@ player do, even when the harness server is elsewhere.
 | **Setup** | The voice providers and settings |
 
 The live status names what the session is doing now: **Live · Off**, **Live ·
-Starting**, **Live · Listening**, **Live · Hearing you**, **Live ·
-Transcribing**, **Live · Working**, **Live · Holding reply**, **Live ·
-Speaking**, **Live · Interrupted**, **Live · Muted**, **Live · Ending** or
-**Live · Failed**. A reply the speech service could not say, or one
+Starting**, **Live · Initializing**, **Live · Listening**, **Live · Hearing
+you**, **Live · Transcribing**, **Live · Working**, **Live · Holding reply**,
+**Live · Speaking**, **Live · Interrupted**, **Live · Muted**, **Live ·
+Ending** or **Live · Failed**. A running call appends the target it sends words
+to (**Live · Listening · Fix routing**), and a compose box that is not the
+target says so by naming it, with a **Use here** control that moves the words
+there. Only the target box offers Interrupt, Cancel work, Mute and the compact
+pipeline line, because those act on the call rather than on the box. [The
+routing design](design/live-voice-routing.md) has the picture and the reasoning.
+A reply
+the speech service could not say, or one
 utterance it could not transcribe, does not end the session: the status stays
 what it was, and the controls and the transcript name the loss in a line of
 their own (**Live voice · Local speech · no audio**), so the call, the
@@ -368,9 +372,9 @@ a section with its own label and time:
 ▷ Speaking   Voice · Local pipeline                (header line, always in view)
 Pipeline
 Input                     Filter            Words          Turn         Speaker
-████▃··· Level · 56%      ● 1 accepted      ≡ in turn      ✓ done       ▷ speaking
+████▃··· Level · -18 dBFS ● 1 accepted      ≡ in turn      ✓ done       ▷ speaking
 Mic · live                × 1 dropped                      1 utterance
-Mic · live · Level · 56% · 1 accepted · 1 dropped · Turn · done · Speaker · speaking
+Mic · live · Level · -18 dBFS · 1 accepted · 1 dropped · Turn · done · Speaker · speaking
 [Pipeline details]
 ──────────────────────────────────────────────────────────
 

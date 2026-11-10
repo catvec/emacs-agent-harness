@@ -21,17 +21,21 @@ Pipeline
 Input              Filter                 Words                    Turn                 Speaker
 ▂▄▆█ level         × dropped · too short  ⋯ transcribing · 2.0s    ✓ answered · 3.0s    🔊 speaking
 Mic · live         ● accepted · 1.4s      ≡ transcribed · 1.0s
-Level · 56%        ◌ heard
-Mic · live · Level · 56% · Speech · heard · 4 accepted · 1 dropped · Turn · done · Voice · speaking
+Level · -18 dBFS   ◌ heard
+Mic · live · Level · -18 dBFS · Speech · heard · 4 accepted · 1 dropped · Turn · done · Voice · speaking
 ```
 
 - **Input** — the microphone's level *before* the speech filter, drawn as bars
-  and a percentage, beside the capture state (`Mic · live`, `Mic · muted`, …).
-  No level is not silence: without telemetry the meter says `Level · no data`
-  and the bars stay unlit.
+  and a level in dBFS on a −60…0 dB scale, beside the capture state (`Mic ·
+  live`, `Mic · muted`, …).  The scale is a display choice, not a change to
+  the audio: `harness-voice-pipeline-level-floor` names the bottom of it.  The
+  sidecar sends the mean absolute sample as `input` and the peak and the dBFS
+  value beside it, so the raw measurement stays in the pipeline details.  No
+  level is not silence: without telemetry the meter says `Level · no data` and
+  the bars stay unlit.
 - **Filter** — the speech gate (`heard` while it hears speech) and the bursts
-  it did **not** keep, with the reason (`too short`, `no words`, `no
-  request`, `failed`).
+  it did **not** keep, with the reason (`too short`, `no words`,
+  `retargeted`, `failed`).
   A burst that survives enters here and moves right.
 - **Words** — speech to text: `transcribing`, `transcribed`, with a partial
   transcript replacing the text of the same marker.
@@ -159,11 +163,11 @@ exactly (`test/voice_pipeline_widget_test.dart`, `test/voice_pipeline_test.dart`
 | heading | `Pipeline` |
 | stage headers (tooltips) | `Input` (*Microphone level before the speech filter*), `Filter` (*Speech kept for transcription*), `Words` (*Speech to text*), `Turn` (*Agent work*), `Speaker` (*Playback*) |
 | capture | `Mic · live`, `Mic · muted`, `Mic · paused`, `Mic · off`, `Mic · connecting`, `Mic · failed`, `Mic · disconnected`, `Mic · ended` |
-| level | `Level · 56%`, `Level · no data` |
+| level | `Level · -18 dBFS` on a −60…0 dB scale, `Level · no data` |
 | gate | `heard` (*Speech gate · speech heard*), and `Speech · heard` in the summary |
 | counts | `1 accepted`, `4 accepted`, `1 dropped` |
 | marker stages | `accepted`, `transcribing`, `transcribed`, `in turn`, `answered`, `dropped`, `failed` |
-| drop reasons | `too short`, `no words`, `no request`, `cancelled`, `failed` |
+| drop reasons | `too short`, `no words`, `retargeted`, `cancelled`, `failed` |
 | why a burst stopped, in the details | `muted`, `paused`, `interrupted`, `ended`, `restart`, `context` (a reply folded into the next prompt) |
 | turn | `Turn · working`, `Turn · replied`, `Turn · done`, `Turn · failed` |
 | speaker | `Voice · silent`, `Voice · ready`, `Voice · held`, `Voice · handed`, `Voice · speaking`, `Voice · interrupted`, `Voice · failed` |
@@ -195,10 +199,10 @@ rather than from a provider's captions.  It appears in two places:
 ```text
 Pipeline
 Input                     Filter            Words          Turn         Speaker
-████▃··· Level · 56%      ● 1 accepted      ≡ in turn      ✓ done       ▷ speaking
+████▃··· Level · -18 dBFS ● 1 accepted      ≡ in turn      ✓ done       ▷ speaking
 Mic · live                × 1 dropped                      1 utterance
                                                            1 reply
-Mic · live · Level · 56% · 1 accepted · 1 dropped · Turn · done · Speaker · speaking
+Mic · live · Level · -18 dBFS · 1 accepted · 1 dropped · Turn · done · Speaker · speaking
 [Pipeline details]
 ```
 
@@ -206,11 +210,11 @@ Every stage carries the event it comes from:
 
 | Stage | Event | Emitted at | Carries |
 | --- | --- | --- | --- |
-| level | `level` | the sidecar's capture loop, on the PCM it just read, before the detector (`LevelMeter`, at most ten a second) | `input`, 0..1 |
+| level | `level` | the sidecar's capture loop, on the PCM it just read, before the detector (`LevelMeter`, at most ten a second) | `input` (mean absolute sample, 0..1), `peak` and `dbfs` |
 | capture | the session's own state | start, `ready`, mute, `error`, an unexpected exit, stop | connecting, live, muted, failed, disconnected, ended |
 | gate | `speech` | the detector's onset and hangover | `active`, `utterance` |
 | accepted | `segment` `state=accepted` | `Vad._finish` (the local sidecar) or the GPT sidecar's gate, the moment the burst is kept | `id` (`u-N`), `seconds` |
-| dropped | `segment` `state=dropped` | the detector's `cancel` (`too short`), an empty transcription (`no words`), or a transcript the client distilled to no request (`no request`) | `id`, `seconds`, `reason` |
+| dropped | `segment` `state=dropped` | the detector's `cancel` (`too short`), an empty transcription (`no words`), or a transcript whose route moved before it arrived (`retargeted`) | `id`, `seconds`, `reason` |
 | failed | `segment` `state=failed` | a failed transcription | `id` |
 | transcribing | `transcribing`, `user_delta` | the transcription worker, or a provider's caption | `utterance`, text |
 | transcribed | `user_delta` `final` | the transcript is whole | text |

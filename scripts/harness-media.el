@@ -3491,8 +3491,10 @@ No microphone or speech service is used for the documentation picture."
 The events are the sidecar protocol's own with fixture values: no
 microphone measured them, and the sidecar process is not started.  The
 handlers, the model and the drawing are the ones a real session uses.
-The utterance has its own mumbles so the picture shows the raw caption
-and the distilled request that crossed into the session."
+The level carries the decibel reading the sidecar sends beside the raw
+one, so the meter draws the scale a live call draws.  The utterance keeps
+the mumbles the speech model returned: what crossed into the session is
+those words, unchanged."
   (harness-voice-conversation-clear harness-voice-live--conversation)
   (setq harness-voice-live--seen (make-hash-table :test 'equal)
         harness-voice-live--utterance nil
@@ -3500,13 +3502,13 @@ and the distilled request that crossed into the session."
         harness-voice-live--speaker nil
         harness-voice-live--section nil)
   (harness-voice-live--pipeline-bump 'live)
-  (dolist (event '((:event "level" :input 0.19)
-                   (:event "level" :input 0.56)
+  (dolist (event '((:event "level" :input 0.19 :peak 0.42 :dbfs -14.4)
+                   (:event "level" :input 0.56 :peak 0.88 :dbfs -5.0)
                    (:event "speech" :active t :utterance 1 :reason "onset")
                    (:event "segment" :state "accepted" :id "u-1" :seconds 1.4)
                    (:event "transcribing" :utterance 1)
                    (:event "speech" :active nil :utterance 1 :reason "hangover")
-                   (:event "level" :input 0.11)
+                   (:event "level" :input 0.11 :peak 0.30 :dbfs -19.2)
                    (:event "segment" :state "dropped" :id "u-2" :seconds 0.08
                            :reason "too short")
                    (:event "user_delta" :final t :utterance 1
@@ -3536,7 +3538,7 @@ turn is done and the reply is playing, as the scripted events say."
         harness-voice-live--stage-since nil
         harness-voice-live--state 'speaking)
   (setq harness-voice-live--pipeline-controls-at nil)
-  (harness-voice-live--pipeline-level 0.56)
+  (harness-voice-live--pipeline-level 0.56 0.88 -5.0)
   (harness-voice-live--pipeline-draw))
 
 (defun harness-media--voice-pipeline-frame ()
@@ -3544,6 +3546,75 @@ turn is done and the reply is playing, as the scripted events say."
   (harness-media--fit (harness-media--text-lines (selected-window)))
   (set-window-start nil (with-current-buffer (window-buffer) (point-min)))
   (harness-media--settle 0.5))
+
+(defun harness-media-shot-voice-routing ()
+  "Two chats under one live call: the target, and a box that is not it.
+The person started live voice in the first chat and then selected the
+second.  The call follows the selection at the next utterance, so the
+picture is taken with the route still on the first chat: that box shows
+the plain status and every control that acts on the call, and the second
+shows the target's name beside `Live · Listening' with a `[Use here]'
+control.  The bug this documents was an indicator that read `Listening' in
+a box the microphone did not go to; the copy here cannot say that.  No
+microphone or speech service is started: the sidecar is a `cat' that stays
+open and is killed after the picture."
+  (let* ((a (harness-media--new-session :name "Fix the rate limiter"
+                                        :model "claude:claude-sonnet-5"))
+         (b (harness-media--new-session :name "Document the API guide"
+                                        :model "claude:claude-sonnet-5")))
+    ;; A turn of each, so both chats have something to draw and the
+    ;; compose box sits under a transcript rather than alone.
+    (harness-media--prompt a "Explain how TokenBucket.take refills the bucket.")
+    (harness-media--prompt b "Where does the API guide describe the merge queue?")
+    (unwind-protect
+        (let* ((harness-voice--enabled t)
+               (harness-voice--controls t)
+               (harness-voice-provider 'fixture)
+               (harness-voice-live--session a)
+               (harness-voice-live--route-name "Fix the rate limiter")
+               (harness-voice-live--route-kind 'session)
+               (harness-voice-live--route-workspace nil)
+               (harness-voice-live--route-thread nil)
+               (harness-voice-live--state 'listening)
+               (harness-voice-live--stage 'listening)
+               (harness-voice-live--muted nil)
+               (harness-voice-live--working nil)
+               (harness-voice-live--error nil)
+               (harness-voice-live--notice nil)
+               (harness-voice-live--transcript nil)
+               (harness-voice-live--pipeline (harness-voice-pipeline-create 'live))
+               ;; A process that stays open, so the call reads as running
+               ;; for every box that draws its controls.
+               (harness-voice-live--process
+                (make-process :name "harness-media-voice" :command '("cat")
+                              :connection-type 'pipe :noquery t))
+               (target (harness-media--notes-open a 'full "the target chat"))
+               (other (harness-media--notes-open b 'right "the other chat")))
+          (harness-media--fit (max (harness-media--text-lines (get-buffer-window target))
+                                   (harness-media--text-lines (get-buffer-window other)))
+                              24 40)
+          (with-current-buffer target
+            (setq harness-voice-live--buffer target)
+            (harness-voice-pipeline-set-capture harness-voice-live--pipeline 'live)
+            (harness-voice-pipeline-set-level harness-voice-live--pipeline
+                                              0.56 nil nil 0.88 -5.0)
+            (setq-local harness-compose-controls-functions (list #'harness-voice--controls))
+            (harness-voice--refresh))
+          (with-current-buffer other
+            (setq-local harness-compose-controls-functions (list #'harness-voice--controls))
+            (harness-voice--refresh))
+          (harness-media--to-bottom target)
+          (harness-media--to-bottom other)
+          (harness-media--wait (lambda () (harness-media--shows other "[Use here]"))
+                               15 "the other chat to offer [Use here]")
+          (harness-media--wait (lambda () (harness-media--shows target "[End]"))
+                               15 "the target chat to offer its controls")
+          (harness-media--settle 0.5)
+          (harness-media--capture "voice-routing"))
+      (when (process-live-p harness-voice-live--process)
+        (delete-process harness-voice-live--process))
+      (harness-call 'session/delete a)
+      (harness-call 'session/delete b))))
 
 (defun harness-media-shot-voice-pipeline ()
   "The voice pipeline in Emacs: the strip in the voice transcript.
@@ -5068,6 +5139,7 @@ names."
     ("voice-pipeline" . harness-media-shot-voice-pipeline)
     ("voice-pipeline-details" . harness-media-shot-voice-pipeline-details)
     ("voice-pipeline-compose" . harness-media-shot-voice-pipeline-compose)
+    ("voice-routing" . harness-media-shot-voice-routing)
     ;; After every picture of usage: its session's usage would count there.
     ("chat-cowboy" . harness-media-shot-chat-cowboy)
     ;; Last: an "Always deny" and an "always" cold-cache answer, both

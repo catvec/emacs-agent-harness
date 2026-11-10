@@ -57,24 +57,43 @@ void main() {
       expect(snapshot.details.single, contains('too short'));
     });
 
-    test('a transcribed burst that leaves no request is dropped late', () {
+    test('a transcribed burst of no words is dropped late', () {
       final tracker = VoicePipelineTracker(clock: _now);
       tracker.begin();
       tracker.input(VoiceInputState.live);
       tracker.accept('u-1');
-      tracker.transcript('u-1', 'Um, uh.', finalized: true);
+      tracker.transcript('u-1', '', finalized: true);
       tracker.drop(
         'u-1',
-        drop: VoiceSegmentDrop.noRequest,
-        detail: 'no request',
+        drop: VoiceSegmentDrop.noWords,
+        detail: 'no words',
       );
 
       final segment = tracker.snapshot.segments.single;
       expect(segment.stage, VoicePipelineStage.dropped);
-      expect(segment.drop, VoiceSegmentDrop.noRequest);
-      expect(segment.dropLabel, 'no request');
+      expect(segment.drop, VoiceSegmentDrop.noWords);
+      expect(segment.dropLabel, 'no words');
       expect(segment.column, VoicePipelineColumn.transcript);
-      expect(tracker.snapshot.details.single, contains('no request'));
+      expect(tracker.snapshot.details.single, contains('no words'));
+    });
+
+    test('a burst whose route moved says so, and stops there', () {
+      final tracker = VoicePipelineTracker(clock: _now);
+      tracker.begin();
+      tracker.input(VoiceInputState.live);
+      tracker.accept('u-1');
+      tracker.transcript('u-1', 'Add a docstring.', finalized: true);
+      tracker.drop(
+        'u-1',
+        drop: VoiceSegmentDrop.retargeted,
+        detail: 'retargeted',
+      );
+
+      final segment = tracker.snapshot.segments.single;
+      expect(segment.stage, VoicePipelineStage.dropped);
+      expect(segment.drop, VoiceSegmentDrop.retargeted);
+      expect(segment.dropLabel, 'retargeted');
+      expect(tracker.snapshot.details.single, contains('retargeted'));
     });
 
     test('a segment waits at each stage and never skips one', () {

@@ -455,7 +455,8 @@ class VoiceController extends ChangeNotifier {
           conversation.say(text, source: 'provider');
         }
       case VoicePromptEvent(:final prompt):
-        if (prompt.isEmpty) break;
+        // Even a prompt with no words goes through: the segment it names
+        // is then dropped with a reason instead of waiting forever.
         unawaited(_sendPrompt(prompt));
       case VoiceFailureEvent(:final problem):
         _setProblem(problem);
@@ -517,41 +518,31 @@ class VoiceController extends ChangeNotifier {
       if (!_sentPrompts.add(id)) return;
     }
     final raw = prompt.text?.trim() ?? '';
-    final distilled = raw.isEmpty ? null : conversation.distilledText(raw);
-    if (raw.isNotEmpty && distilled == null) {
-      // Nothing but mumbles: the voice conversation keeps the words, the
-      // session gets no request, and the segment says why it stopped.
-      conversation.hear(raw: raw);
+    if (raw.isEmpty && prompt.audio == null) {
+      // The speech model made no words of this burst: the voice
+      // conversation keeps nothing new, the session gets no request, and
+      // the segment says why it stopped.
       final segment = prompt.segmentId ?? prompt.id;
       if (segment != null && segment.isNotEmpty) {
         pipeline.drop(
           segment,
-          drop: VoiceSegmentDrop.noRequest,
-          detail: 'no request',
+          drop: VoiceSegmentDrop.noWords,
+          detail: 'no words',
         );
       }
       _scheduleHeldRelease();
       if (!_disposed) notifyListeners();
       return;
     }
-    final request = distilled == null
-        ? prompt.text
-        : conversation.request(distilled);
+    // The message is the transcript.  No distillation and no context
+    // envelope: the session's own agent has the conversation, and the
+    // words reach it in the event that carried them.  A burst that
+    // carries audio instead of words travels as it is.
     _heldTimer?.cancel();
     _heldTimer = null;
-    final held = <String>[
-      ...?prompt.pending,
-      for (final piece in _heldReplies) piece.text,
-    ];
-    for (final piece in _heldReplies) {
-      pipeline.replyDropped(piece.id, detail: 'context');
-    }
     _heldReplies.clear();
-    final context = _pendingContext(held);
-    final text = _withContext(request, context);
-    if (distilled != null) {
-      conversation.hear(raw: raw, distilled: distilled, sent: text);
-    }
+    final text = raw.isEmpty ? null : raw;
+    if (text != null) conversation.hear(raw: raw, sent: text);
     final display = prompt.spokenText;
     final turnId = 't-${++_turnSequence}';
     _openTurns.add(turnId);
@@ -580,42 +571,6 @@ class VoiceController extends ChangeNotifier {
       );
       if (!_disposed) notifyListeners();
     }
-  }
-
-  String? _withContext(String? text, String context) {
-    final body = text?.trim() ?? '';
-    if (context.isEmpty) {
-      return body.isEmpty ? text : body;
-    }
-    return body.isEmpty ? context : '$body\n\n$context';
-  }
-
-  String _pendingContext(List<String> held) {
-    if (held.isEmpty) return '';
-    final seen = <String>{};
-    final unique = <String>[];
-    for (final text in held) {
-      final trimmed = text.trim();
-      if (trimmed.isEmpty || !seen.add(trimmed)) continue;
-      unique.add(trimmed);
-    }
-    if (unique.isEmpty) return '';
-    // A full turn result contains the sentence pieces that were held while
-    // it streamed; keep the larger text, not both.
-    final kept = unique
-        .where(
-          (text) => !unique.any(
-            (other) => other.length > text.length && other.contains(text),
-          ),
-        )
-        .toList();
-    return '<voice-turn-context>\n'
-        'assistant_output: held (not spoken)\n'
-        'held_output:\n'
-        '${kept.map((text) => '- $text').join('\n')}\n'
-        'decision: answer the new speech; fold the held output in only if '
-        'it is still relevant; do not assume it was heard.\n'
-        '</voice-turn-context>';
   }
 
   void _scheduleHeldRelease() {

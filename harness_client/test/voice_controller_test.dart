@@ -266,12 +266,13 @@ void main() {
     await settle();
     expect(rig.session.sent, hasLength(1));
     final prompt = rig.session.sent.single;
-    expect(prompt.text, contains('open the merge queue'));
-    expect(prompt.text, contains('<voice-turn-context>'));
-    expect(prompt.text, contains('All tests pass.'));
-    expect(prompt.text, contains('The sidecar held this.'));
-    expect(occurrences('All tests pass.', prompt.text!), 1);
-    expect(occurrences('The sidecar held this.', prompt.text!), 1);
+    // The held reply is not spoken and not repeated into the message: the
+    // session's agent has the turn it wrote, and the voice sends only what
+    // the person said.
+    expect(prompt.text, 'open the merge queue');
+    expect(prompt.text, isNot(contains('<voice-turn-context>')));
+    expect(prompt.text, isNot(contains('All tests pass.')));
+    expect(prompt.text, isNot(contains('The sidecar held this.')));
     expect(rig.backend.spoken, isEmpty);
 
     // The same provider event is not a second prompt.
@@ -323,7 +324,7 @@ void main() {
         const VoicePromptEvent(VoicePrompt(text: 'what changed', id: 'u-1')),
       );
       await settle();
-      expect(rig.session.sent.single.text, contains('Stale update.'));
+      expect(rig.session.sent.single.text, 'what changed');
       rig.backend.emit(const VoicePhaseEvent(VoicePhase.listening));
       await Future<void>.delayed(const Duration(milliseconds: 60));
       expect(rig.backend.spoken, isEmpty);
@@ -395,7 +396,7 @@ void main() {
     expect(rig.media.stops, 1);
   });
 
-  test('pending context keeps the full result over its pieces', () async {
+  test('a held reply is neither spoken nor repeated into the message', () async {
     final rig = Rig();
     await rig.controller.start();
     await settle();
@@ -412,8 +413,9 @@ void main() {
     );
     await settle();
     final prompt = rig.session.sent.single;
-    expect(occurrences('The parser is ready.', prompt.text!), 1);
-    expect(occurrences('Tests pass.', prompt.text!), 1);
+    expect(prompt.text, 'what changed');
+    expect(occurrences('The parser is ready.', prompt.text!), 0);
+    expect(rig.backend.spoken, isEmpty);
     await rig.controller.stop();
   });
 
@@ -438,7 +440,7 @@ void main() {
     await rig.controller.stop();
   });
 
-  test('a mumbly prompt is distilled before the session sees it', () async {
+  test('the transcript reaches the session as it was said', () async {
     final rig = Rig();
     await rig.controller.start();
     await settle();
@@ -448,16 +450,17 @@ void main() {
     );
     await settle();
     final prompt = rig.session.sent.single;
-    expect(prompt.text, 'add a docstring to the parser.');
+    // No distillation, no context block, no meta-instruction.
+    expect(prompt.text, raw);
     expect(prompt.displayText, raw);
     final turn = rig.controller.conversation.turns.single;
     expect(turn.raw, raw);
-    expect(turn.text, 'add a docstring to the parser.');
-    expect(turn.sent, 'add a docstring to the parser.');
+    expect(turn.text, raw);
+    expect(turn.sent, raw);
     await rig.controller.stop();
   });
 
-  test('a burst of mumbles sends no request and says why', () async {
+  test('an empty transcript sends no request and says why', () async {
     final rig = Rig();
     await rig.controller.start();
     await settle();
@@ -470,22 +473,20 @@ void main() {
     await settle();
     rig.backend.emit(
       const VoicePromptEvent(
-        VoicePrompt(text: 'Um, uh, hmm.', id: 'd-1', segmentId: 'u-1'),
+        VoicePrompt(text: '   ', id: 'd-1', segmentId: 'u-1'),
       ),
     );
     await settle();
     expect(rig.session.sent, isEmpty);
     final segment = rig.controller.pipelineState.segments.single;
     expect(segment.stage, VoicePipelineStage.dropped);
-    expect(segment.drop, VoiceSegmentDrop.noRequest);
-    expect(segment.dropLabel, 'no request');
-    final turn = rig.controller.conversation.turns.single;
-    expect(turn.raw, 'Um, uh, hmm.');
-    expect(turn.text, isNull);
+    expect(segment.drop, VoiceSegmentDrop.noWords);
+    expect(segment.dropLabel, 'no words');
+    expect(rig.controller.conversation.turns, isEmpty);
     await rig.controller.stop();
   });
 
-  test('a dependent prompt carries the voice conversation', () async {
+  test('a dependent prompt carries nothing of earlier turns', () async {
     final rig = Rig();
     await rig.controller.start();
     await settle();
@@ -504,9 +505,11 @@ void main() {
     );
     await settle();
     final prompt = rig.session.sent.single;
-    expect(prompt.text, startsWith('Do that instead.\n\n'));
-    expect(prompt.text, contains('Voice conversation before this request:'));
-    expect(prompt.text, contains('Voice: The timer wakes it every 200 ms.'));
+    // The session's agent has the conversation; the voice sends only the
+    // words the person said, and adds no envelope around them.
+    expect(prompt.text, 'Do that instead.');
+    expect(prompt.text, isNot(contains('Voice conversation before')));
+    expect(prompt.text, isNot(contains('The timer wakes it')));
     expect(prompt.displayText, 'Do that instead.');
 
     rig.backend.emit(

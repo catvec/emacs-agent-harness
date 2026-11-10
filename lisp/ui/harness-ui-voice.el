@@ -18,10 +18,9 @@
 ;; the agent turn and every permission decision.  The bundled live
 ;; providers are ChatGPT Live (GPT-Live over the API), a local
 ;; whisper.cpp or Parakeet and Kokoro pipeline, and a scripted fixture;
-;; a sidecar delegation becomes a distilled request in the chat (a
-;; bounded piece of the voice conversation travels with it when the
-;; request needs one), and assistant text streams back as commentary.
-;; Audio never crosses the control pipe.
+;; a sidecar delegation becomes a message in the chat, sent as the
+;; speech model returned it, and assistant text streams back as
+;; commentary.  Audio never crosses the control pipe.
 ;;
 ;; The local pipeline's speech-to-text model is a choice of its own
 ;; (`harness-voice-stt-model'), listed on the voice setup page: the
@@ -48,6 +47,9 @@
 
 (declare-function transient-append-suffix "transient")
 (declare-function transient-remove-suffix "transient")
+(declare-function harness-voice-live--adopt-other-box "harness-ui-voice-live")
+(defvar harness-voice-live--buffer)
+(defvar harness-voice-live--status-names-target)
 
 (require 'harness-ui-voice-providers)
 
@@ -195,19 +197,29 @@ down, so the control shows the state the user is creating."
        (list items) (max 1 (- (/ (harness-compose--room) (frame-char-width)) 3))))))
 
 (defun harness-voice--indicator ()
-  "Return a global, clickable status while voice owns a buffer."
-  (when (buffer-live-p harness-voice--owner)
-    (with-current-buffer harness-voice--owner
+  "Return a global, clickable status while voice owns a buffer.
+A live call is shown from the box it is targeted at, so the indicator
+names the session the words go to even after the box it started in is
+gone."
+  (let ((owner (if (and (harness-voice-live-p)
+                        (harness-voice-live--active-p)
+                        (buffer-live-p harness-voice-live--buffer))
+                   harness-voice-live--buffer
+                 harness-voice--owner)))
+    (when (buffer-live-p owner)
+      (with-current-buffer owner
       (when (or harness-voice-mode harness-voice--job
                 (and (harness-voice-live-p)
                      (harness-voice-live--active-p)))
-        (propertize (concat "  " (harness-voice--status) "  ")
+        (propertize (concat "  " (let ((harness-voice-live--status-names-target t))
+                                  (harness-voice--status))
+                            "  ")
                     'face (if (harness-voice-live-p)
                               (harness-voice-live--face)
                             (if (eq harness-voice--state 'listening)
                                 'harness-caution-face 'harness-label-face))
                     'help-echo "Voice controls"
-                    'local-map (harness-ui-mouse-keymap #'harness-voice-show))))))
+                    'local-map (harness-ui-mouse-keymap #'harness-voice-show)))))))
 
 (defconst harness-voice--mode-line '(:eval (harness-voice--indicator)))
 
@@ -308,25 +320,39 @@ down, so the control shows the state the user is creating."
           (harness-voice--make-job :buffer (current-buffer) :session harness-ui-session-id :dir dir))))
 
 (defun harness-voice--adopt ()
-  "Give this compose host exclusive ownership of voice."
+  "Give this compose host ownership of voice.
+A live call is retargeted, not restarted: the sidecar owns the
+microphone and the speech services, and the previous box keeps its
+controls so the call is still visible from there.  The WAV capability
+has one recorder, so it is released from the previous box as before."
   (harness-voice-live--release-others)
   (unless (eq harness-voice--owner (current-buffer))
     (when (buffer-live-p harness-voice--owner)
       (with-current-buffer harness-voice--owner
-        (when harness-voice-mode (harness-voice-mode -1))
+        (unless (harness-voice-live-p)
+          (when harness-voice-mode (harness-voice-mode -1)))
         (setq harness-voice--queue nil harness-voice--turn-active nil)
-        (harness-voice--set-state 'ready)))
-    (harness-voice--abort)
+        (unless (harness-voice-live-p)
+          (harness-voice--set-state 'ready))))
+    (unless (harness-voice-live-p)
+      (harness-voice--abort))
     (setq harness-voice--owner (current-buffer)))
   (setq harness-voice--controls t)
   (add-hook 'kill-buffer-hook #'harness-voice--on-kill nil t))
 
 (defun harness-voice--on-kill ()
-  "Release voice when its owner dies."
+  "Release voice when its owner dies.
+A live call whose target was this box moves to another compose box that
+can take it, and only ends when there is none: the sidecar owns the
+microphone, and closing one chat is not a reason to stop the call."
   (when (eq harness-voice--owner (current-buffer))
-    (harness-voice-live--reset)
-    (harness-voice--abort)
-    (setq harness-voice--owner nil)))
+    (if (and (harness-voice-live-p)
+             (harness-voice-live--active-p)
+             (harness-voice-live--adopt-other-box))
+        (setq harness-voice--owner harness-voice-live--buffer)
+      (harness-voice-live--reset)
+      (harness-voice--abort)
+      (setq harness-voice--owner nil))))
 
 ;;;; Dictation
 

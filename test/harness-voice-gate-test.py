@@ -45,9 +45,10 @@ def process_alive(pid):
 
 import voice_fixtures as fixtures  # noqa: E402
 from harness_voice_sidecar import (  # noqa: E402
-    AUDIO_BACKENDS, LOCAL_RATE, FakeEvents, NullAudio, Player, Recorder,
-    SpeechDetector, Vad, audio_backend, audio_backend_names, audio_backends,
-    audio_missing_reason, pcm_energy, pcm_from_wav, self_test_audio, wav_from_pcm,
+    AUDIO_BACKENDS, LEVEL_FLOOR_DBFS, LOCAL_RATE, FakeEvents, NullAudio,
+    Player, Recorder, SpeechDetector, Vad, audio_backend, audio_backend_names,
+    audio_backends, audio_missing_reason, level_dbfs, pcm_energy, pcm_from_wav,
+    pcm_peak, self_test_audio, wav_from_pcm,
 )
 
 SCRIPT = os.path.join(ROOT, "scripts", "harness-voice-live-unmute")
@@ -207,6 +208,45 @@ class TelemetryTest(unittest.TestCase):
             self.assertNotIn("segment", rig.names())
         finally:
             rig.stop()
+
+    def test_level_carries_the_measurement_the_meter_draws(self):
+        """The chunk's peak and dBFS travel with its mean level.
+
+        A speaking mouth's mean absolute sample is a few percent, which a
+        linear bar draws as a dead microphone; the decibel reading is
+        what the meter draws, and the raw numbers stay beside it.  No
+        sample is changed by the scale.
+        """
+        rig = SidecarRig()
+        try:
+            pcm = fixtures.voiced(0.02)
+            rig.sidecar.recorder = ChunkRecorder([pcm])
+            rig.sidecar.tick()
+            level = rig.find("level")[0]
+            self.assertEqual(sorted(level), ["dbfs", "event", "input", "peak"])
+            self.assertAlmostEqual(level["input"], round(pcm_energy(pcm), 3),
+                                   places=3)
+            self.assertAlmostEqual(level["peak"], round(pcm_peak(pcm), 3),
+                                   places=3)
+            self.assertAlmostEqual(level["dbfs"], round(level_dbfs(pcm_energy(pcm)), 1),
+                                   places=1)
+            # The scale, not a gain: the peak is never below the mean, and
+            # a normal speaking level is well up the decibel bar.
+            self.assertGreaterEqual(level["peak"], level["input"])
+            self.assertGreater(level["dbfs"], -60.0)
+            self.assertLessEqual(level["dbfs"], 0.0)
+        finally:
+            rig.stop()
+
+    def test_level_dbfs_is_floored_and_bounded(self):
+        """Silence is the floor, full scale is zero, and nothing exceeds it."""
+        self.assertEqual(level_dbfs(0.0), level_dbfs(-1.0))
+        self.assertEqual(level_dbfs(0.0), LEVEL_FLOOR_DBFS)
+        self.assertAlmostEqual(level_dbfs(1.0), 0.0, places=6)
+        # 0.03, a normal speaking mouth, is halfway up a -60..0 bar.
+        self.assertAlmostEqual(level_dbfs(0.03), -30.46, places=2)
+        # A quiet room is a number, not a guess.
+        self.assertAlmostEqual(level_dbfs(0.001), -60.0, places=6)
 
     def test_levels_are_bounded_and_stop_while_muted(self):
         rig = SidecarRig()

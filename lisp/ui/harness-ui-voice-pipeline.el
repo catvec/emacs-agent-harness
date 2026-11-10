@@ -74,6 +74,17 @@ for the tests."
   :type 'natnum
   :group 'harness-voice-pipeline)
 
+(defcustom harness-voice-pipeline-level-floor -60.0
+  "The quietest level the meter draws, in dBFS.
+The capture path reports the microphone's mean absolute sample, which
+is a few percent for a speaking mouth: drawn on a 0..100% bar that
+reads as a dead microphone.  The meter therefore draws the same
+measurement in decibels, from this floor to 0 dBFS, and the raw numbers
+stay in the details.  This is a scale, not a gain: no sample is
+changed, and the speech filter's own threshold is untouched."
+  :type 'number
+  :group 'harness-voice-pipeline)
+
 ;;;; Stages and their words
 
 (defconst harness-voice-pipeline--stage-rank
@@ -98,7 +109,7 @@ or a turn already answered.")
 
 (defconst harness-voice-pipeline--drop-labels
   '((too-short . "too short") (no-words . "no words")
-    (no-request . "no request")
+    (retargeted . "retargeted")
     (cancelled . "cancelled") (failed . "failed"))
   "The words for why a burst did not reach a model.")
 
@@ -188,6 +199,8 @@ or a turn already answered.")
   (capture 'off)
   (problem nil)
   (level 0.0)
+  (peak nil)
+  (dbfs nil)
   (level-seen nil)
   (level-at nil)
   (gate nil)
@@ -221,6 +234,8 @@ the new session's own state."
   (setf (harness-voice-pipeline-capture p) (or capture 'connecting)
         (harness-voice-pipeline-problem p) nil
         (harness-voice-pipeline-level p) 0.0
+        (harness-voice-pipeline-peak p) nil
+        (harness-voice-pipeline-dbfs p) nil
         (harness-voice-pipeline-level-seen p) nil
         (harness-voice-pipeline-level-at p) nil
         (harness-voice-pipeline-gate p) nil
@@ -247,16 +262,21 @@ anything it could report, and the strip must not keep showing speech."
       (when changed (harness-voice-pipeline--changed p))))
   p)
 
-(defun harness-voice-pipeline-set-level (p level &optional at generation)
+(defun harness-voice-pipeline-set-level (p level &optional at generation peak dbfs)
   "Record that the capture path measured LEVEL, 0..1, at AT.
 LEVEL is the microphone's own measurement before the speech filter.
-Out-of-range and non-numeric values are dropped rather than drawn: a
-meter is a measurement, not a decoration."
+PEAK is the loudest sample of the same chunk and DBFS its decibel
+reading, when the capture path sent them; a path that sends only LEVEL
+leaves the meter on the linear scale.  Out-of-range and non-numeric
+values are dropped rather than drawn: a meter is a measurement, not a
+decoration."
   (when (and (harness-voice-pipeline--current p generation)
              (numberp level)
              (>= level 0.0)
              (<= level 1.0))
     (setf (harness-voice-pipeline-level p) (float level)
+          (harness-voice-pipeline-peak p) (and (numberp peak) (float peak))
+          (harness-voice-pipeline-dbfs p) (and (numberp dbfs) (float dbfs))
           (harness-voice-pipeline-level-seen p) t
           (harness-voice-pipeline-level-at p) (or at (float-time)))
     (harness-voice-pipeline--changed p))
@@ -266,6 +286,8 @@ meter is a measurement, not a decoration."
   "Forget the level in P: the microphone closed, or the session ended."
   (when (harness-voice-pipeline--current p generation)
     (setf (harness-voice-pipeline-level p) 0.0
+          (harness-voice-pipeline-peak p) nil
+          (harness-voice-pipeline-dbfs p) nil
           (harness-voice-pipeline-level-seen p) nil
           (harness-voice-pipeline-level-at p) nil)
     (harness-voice-pipeline--changed p))
@@ -501,14 +523,44 @@ never left: a late playback event cannot resurrect a reply."
   (concat "Mic · " (harness-voice-pipeline--capture-label
                     (harness-voice-pipeline-capture p))))
 
+(defun harness-voice-pipeline--level-fraction (p)
+  "Return P's level as the 0..1 the meter draws, or nil without one.
+A decibel reading is drawn on the scale `harness-voice-pipeline-level-floor'
+sets, so a speaking mouth fills the bar instead of sitting in its first
+tenth; a path that sent only the linear level is drawn as it is."
+  (let ((dbfs (harness-voice-pipeline-dbfs p)))
+    (cond
+     ((numberp dbfs)
+      (let ((floor harness-voice-pipeline-level-floor))
+        (max 0.0 (min 1.0 (/ (- dbfs floor) (- 0.0 floor))))))
+     ((harness-voice-pipeline-level-seen p)
+      (harness-voice-pipeline-level p)))))
+
 (defun harness-voice-pipeline-level-label (p &optional now)
   "Return P's level label: the measurement, or `Level · no data'.
 A closed microphone and a stale measurement both say they have no data,
-never 0%: an absent level must not read as a quiet room."
+never 0%: an absent level must not read as a quiet room.  A decibel
+reading is named in dBFS, the scale the meter draws; a path that sent
+only the linear level is named as a percentage of full scale."
   (if (or (not (eq (harness-voice-pipeline-capture p) 'live))
           (harness-voice-pipeline-level-stale-p p now))
       "Level · no data"
-    (format "Level · %d%%" (round (* 100.0 (harness-voice-pipeline-level p))))))
+    (let ((dbfs (harness-voice-pipeline-dbfs p)))
+      (if (numberp dbfs)
+          (format "Level · %d dBFS" (round dbfs))
+        (format "Level · %d%%" (round (* 100.0 (harness-voice-pipeline-level p))))))))
+
+(defun harness-voice-pipeline-level-detail (p)
+  "Return P's raw measurement as one line of words, or nil without one.
+The meter draws a scale; this is what the capture path actually
+measured, so a level that looks low can be read as the number it is."
+  (when (harness-voice-pipeline-level-seen p)
+    (harness-voice-pipeline--line
+     (list (format "input %.3f" (harness-voice-pipeline-level p))
+           (and (numberp (harness-voice-pipeline-peak p))
+                (format "peak %.3f" (harness-voice-pipeline-peak p)))
+           (and (numberp (harness-voice-pipeline-dbfs p))
+                (format "%.1f dBFS" (harness-voice-pipeline-dbfs p)))))))
 
 (defun harness-voice-pipeline-meter (p &optional cells now)
   "Return P's VU bars, CELLS wide, as block characters.
@@ -516,10 +568,12 @@ An absent level leaves the bars unlit: a meter is drawn only from a
 measurement the capture path sent."
   (let* ((cells (or cells 8))
          (time (or now (float-time)))
+         (fraction (harness-voice-pipeline--level-fraction p))
          (lit (if (or (not (eq (harness-voice-pipeline-capture p) 'live))
-                      (harness-voice-pipeline-level-stale-p p time))
+                      (harness-voice-pipeline-level-stale-p p time)
+                      (null fraction))
                   0.0
-                (* cells (harness-voice-pipeline-level p)))))
+                (* cells fraction))))
     (cl-loop for index below cells
              concat (let ((fill (- lit index)))
                       (cond
@@ -636,8 +690,12 @@ fact of the pipe is carried by colour or motion alone."
               (format "\"%s\"" (harness-voice-pipeline--excerpt (plist-get reply :text)))))))
 
 (defun harness-voice-pipeline-details (p)
-  "Return every marker of P as a line of words, newest first."
-  (let ((lines (append (mapcar #'harness-voice-pipeline-segment-line
+  "Return every marker of P as a line of words, newest first.
+The capture path's own numbers come first: the meter draws a scale, and
+this is what was measured."
+  (let ((lines (append (when-let* ((level (harness-voice-pipeline-level-detail p)))
+                         (list level))
+                       (mapcar #'harness-voice-pipeline-segment-line
                                (harness-voice-pipeline-segments p))
                        (mapcar #'harness-voice-pipeline-turn-line
                                (harness-voice-pipeline-turns p))

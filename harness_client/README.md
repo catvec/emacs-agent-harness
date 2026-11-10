@@ -1270,14 +1270,14 @@ needed*, *Open* shows the conversation, and the answer is given there.
 
 A live call keeps two records: the voice conversation (what was heard, and
 what the voice spoke) and the session messages it produces. A transcript is
-distilled before it is sent -- hesitation sounds, comma-set `like`, stutters
-and an explicit `no wait, ...` correction go; every content word, name and
-path stays. A request that points at something said earlier (`do that`,
-`yes`, `the second one`, `also ...`) carries the last few voice turns as
-plain text; a self-contained request travels alone. Distillation is local
-and synchronous, so it adds no wait. A burst that leaves nothing is recorded,
-marked `no request` in the pipe and not sent. The rules are in
-[docs/design/voice-conversation.md](../docs/design/voice-conversation.md).
+sent as it came back from speech to text: nothing is distilled out of it and
+nothing is added to it, because the session's own agent has the conversation
+it is in. Sending it is local and synchronous, so it adds no wait. A burst the
+speech model made no words of is recorded, marked `no words` in the pipe and
+not sent; a transcript whose destination moved before it arrived is marked
+`retargeted`. The rules are in
+[docs/design/voice-conversation.md](../docs/design/voice-conversation.md) and
+[docs/design/live-voice-routing.md](../docs/design/live-voice-routing.md).
 
 Which provider is used, and how, is a setting of the device, kept in
 `VoiceSettings` (SharedPreferences, `voiceSettings`) and edited in *Voice
@@ -1702,7 +1702,7 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   settings, and the endpoint a blank one falls back to; the speech endpoint's
   multipart, model, token, timeout, and an answer that is no transcript; both
   dialects of a live provider, and delegation to the session; the voice
-  conversation's distillation and bounded context; what voice puts
+  conversation and the transcript it sends; what voice puts
   on the wire -- a spoken message as a text block, a clip as an `audio` block,
   a spoken message while a turn runs -- and what it hears back, once; the
   screen's status, captions, notices and controls, and the settings sheet, with

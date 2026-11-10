@@ -35,6 +35,7 @@ import base64
 import collections
 import io
 import json
+import math
 import os
 import queue
 import select
@@ -246,6 +247,41 @@ def pcm_energy(pcm):
     for (sample,) in struct.iter_unpack("<h", pcm[:count * 2]):
         total += sample if sample >= 0 else -sample
     return total / (count * 32768.0)
+
+
+def pcm_peak(pcm):
+    """Return the loudest absolute sample of PCM16 bytes, in [0, 1]."""
+    if not pcm:
+        return 0.0
+    count = len(pcm) // 2
+    if not count:
+        return 0.0
+    peak = 0
+    for (sample,) in struct.iter_unpack("<h", pcm[:count * 2]):
+        value = sample if sample >= 0 else -sample
+        if value > peak:
+            peak = value
+    return peak / 32768.0
+
+
+#: The quietest level a meter shows, in dBFS.  A linear reading of a
+#: speaking mouth is a few percent -- mean absolute sample, not RMS --
+#: which reads as a dead microphone on a 0..100% bar.  Decibels put the
+#: whole speaking range in the top half of the bar, and the floor is
+#: named so a silent room is a number, not a guess.
+LEVEL_FLOOR_DBFS = -60.0
+
+
+def level_dbfs(level):
+    """Return LEVEL, a 0..1 amplitude, in dBFS, floored at LEVEL_FLOOR_DBFS.
+
+    This is a change of scale, not of gain: the samples are untouched,
+    and the same measurement is reported as ``input`` beside it.
+    """
+    level = max(0.0, float(level or 0.0))
+    if level <= 0.0:
+        return LEVEL_FLOOR_DBFS
+    return max(LEVEL_FLOOR_DBFS, 20.0 * math.log10(level))
 
 
 class Backend:
@@ -853,6 +889,14 @@ class LevelMeter:
     captured chunk would flood the control pipe, and a timer would report
     a level nobody measured in between: the capture loop offers each
     chunk and this keeps the ones that are due.
+
+    Three numbers come out of one chunk, and they answer different
+    questions: ``input`` is the mean absolute sample (the gate's own
+    scale), ``peak`` the loudest sample in it, and ``dbfs`` the same
+    ``input`` on a decibel scale.  A speaking mouth reads a few percent
+    on the first, which looks like a dead microphone on a linear bar;
+    the decibel reading is what a meter draws, and the raw numbers stay
+    beside it so nothing is hidden by the scale.
     """
 
     def __init__(self, interval=0.1):
@@ -866,6 +910,20 @@ class LevelMeter:
             return None
         self._last = now
         return pcm_energy(pcm)
+
+    def reading(self, pcm, now=None):
+        """Return the whole measurement of PCM, or None when it is not due.
+
+        The reading is a dict of ``level``, ``peak`` and ``dbfs``, named
+        for `announce_level`'s own arguments; a caller that only wants
+        the gate's scale uses ``measure``.
+        """
+        level = self.measure(pcm, now)
+        if level is None:
+            return None
+        return {"level": level,
+                "peak": pcm_peak(pcm),
+                "dbfs": level_dbfs(level)}
 
 
 #; ------------------------------------------------------------------
@@ -1521,10 +1579,23 @@ class Sidecar:
         else:
             log("ignored %s" % kind)
 
-    def announce_level(self, level):
-        """Report the microphone's level before the speech filter."""
-        if level is not None:
-            self.events.send("level", input=round(float(level), 3))
+    def announce_level(self, level, peak=None, dbfs=None):
+        """Report the microphone's level before the speech filter.
+
+        LEVEL is the mean absolute sample, the gate's own scale.  PEAK
+        and DBFS are the same chunk's loudest sample and its decibel
+        reading; a caller that measured only LEVEL sends only that, and
+        the client draws what it was given.  A measurement that is not
+        due yet (None) reports nothing at all.
+        """
+        if level is None:
+            return
+        fields = {"input": round(float(level), 3)}
+        if peak is not None:
+            fields["peak"] = round(float(peak), 3)
+        if dbfs is not None:
+            fields["dbfs"] = round(float(dbfs), 1)
+        self.events.send("level", **fields)
 
     def notice(self, message):
         """Report a problem the session survives, in one line.

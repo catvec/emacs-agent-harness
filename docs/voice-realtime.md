@@ -303,7 +303,7 @@ model, and the test sidecars do exactly that.
 | sidecar → Emacs | `transcribing` | `utterance` | A completed utterance is being transcribed |
 | sidecar → Emacs | `user_delta` / `assistant_delta` | `text`, `final` | Caption fragments; `final` ends the caption line |
 | sidecar → Emacs | `backchannel` | `text` | Brief listening sound |
-| sidecar → Emacs | `delegation` | `id`, `text`, `utterance`, `pending`, `speech_active` | Backend request: the transcript as heard, and assistant output held while the person spoke; the client distils the request |
+| sidecar → Emacs | `delegation` | `id`, `text`, `utterance`, `pending`, `speech_active` | Backend request: the transcript as heard, and assistant output held while the person spoke; the client sends the transcript unchanged |
 | sidecar → Emacs | `interrupted` | — | Playback stopped |
 | sidecar → Emacs | `notice` | `message` | One reply or utterance could not be done; the session goes on |
 | sidecar → Emacs | `error` | `message` | The sidecar cannot carry on: the client ends the session |
@@ -340,15 +340,15 @@ an empty body.
 
 The implemented loop:
 
-1. `delegation` becomes a distilled request in the current chat through
-   `session/prompt`.  The prompt is the request, and, when the request points
-   at something said earlier, a bounded plain-text piece of the voice
-   conversation.  No file/line or related-session block is added, and no
-   other session is looked up for a delegation: the session voice mode is
-   used in is the context.  The raw transcript stays in the voice
-   conversation and the transcript.  A second delegation waits for the
-   running turn.  The rules are in
-   [the voice conversation design](design/voice-conversation.md).
+1. `delegation` becomes a message in the chat through `session/prompt`.
+   The message is the transcript as the speech model returned it: nothing is
+   stripped from it and nothing is added to it.  No file/line or
+   related-session block is added, and no other session is looked up for a
+   delegation: the session voice mode is used in is the context, and the
+   session's own agent reads the words in the conversation it is already in.
+   A second delegation waits for the running turn.  The reasoning is in
+   [the voice conversation design](design/voice-conversation.md), and where
+   the words go is in [the routing design](design/live-voice-routing.md).
 2. Assistant chunks stream back as `commentary`, sentence by sentence, with
    fenced code and markup filtered out. The turn's full text is sent as
    `delegate_result`; an announcement-only provider still produces one result.
@@ -359,8 +359,8 @@ The implemented loop:
    work** is a separate control that sends `session/cancel`. The two are never
    conflated.
 5. The live transcript is its own read-only buffer (`*harness voice*`) with
-   `You`, `Sent` (`Not sent` for a burst of mumbles), `Coding agent` and
-   `Voice` sections. Headings carry their time, tool calls read
+   `You`, `Sent` (`Not sent` for a burst the speech model made no words of),
+   `Coding agent` and `Voice` sections. Headings carry their time, tool calls read
    `▸ Read · file.py`, backchannels are italic and the header line
    keeps the animated stage and the provider in view while the transcript
    scrolls. The editable compose draft is untouched. Redaction and UI reload
@@ -376,10 +376,10 @@ drawn by `harness-ui-voice-pipeline.el`:
 ```text
 Pipeline
 Input                     Filter            Words          Turn         Speaker
-████▃··· Level · 56%      ● 1 accepted      ≡ in turn      ✓ done       ▷ speaking
+████▃··· Level · -18 dBFS ● 1 accepted      ≡ in turn      ✓ done       ▷ speaking
 Mic · live                × 1 dropped                      1 utterance
                                                            1 reply
-Mic · live · Level · 56% · 1 accepted · 1 dropped · Turn · done · Speaker · speaking
+Mic · live · Level · -18 dBFS · 1 accepted · 1 dropped · Turn · done · Speaker · speaking
 [Pipeline details]
 ```
 

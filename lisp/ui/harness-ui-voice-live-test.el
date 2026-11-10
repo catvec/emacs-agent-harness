@@ -19,8 +19,32 @@
 
 (defvar harness-ui-voice-live-test--calls nil
   "Session prompts recorded by the test sidecar.")
+(defvar harness-ui-voice-live-test--sends nil
+  "Other requests sent, as (METHOD PARAMS) pairs, oldest first.")
 (defvar harness-ui-voice-live-test--notifications nil)
 (defvar harness-ui-voice-live-test--inbox nil)
+
+(defun harness-ui-voice-live-test--box (session &optional thread workspace)
+  "Make a compose box of SESSION, on THREAD of WORKSPACE when given.
+It is a real compose host in a buffer of its own, which is what a second
+chat or a workspace looks like to the live transport."
+  (let ((buffer (generate-new-buffer (format " *live voice %s*" session))))
+    (with-current-buffer buffer
+      (setq-local harness-ui-session-id session)
+      (setq-local default-directory default-directory)
+      (use-local-map harness-compose-map)
+      (harness-compose-setup :project (lambda () default-directory)
+                             :redraw #'ignore)
+      (when workspace
+        (setq-local harness-ui-workspace--id workspace)
+        (setq-local harness-ui-workspace--thread thread))
+      ;; A compose box exists only once it was drawn: its markers are
+      ;; what `harness-compose-live-p' reads.
+      (let ((inhibit-read-only t))
+        (insert (propertize "Transcript\n" 'read-only t))
+        (harness-compose-insert))
+      (harness-compose-capture))
+    buffer))
 
 (defun harness-ui-voice-live-test--draw ()
   "Redraw the compose host, preserving its draft and insertion offset."
@@ -96,12 +120,14 @@
            (harness-voice-live--seen (make-hash-table :test 'equal))
            (harness-voice-live--held-seq 0)
            (harness-voice-live-pending-release-delay 0.15)
-           (harness-voice-distill t)
-           (harness-voice-conversation-carry-context t)
            (harness-voice-conversation-turns 40)
-           (harness-voice-conversation-context-turns 4)
-           (harness-voice-conversation-context-chars 700)
-           (harness-voice-conversation-turn-chars 240)
+           (harness-voice-live-follow-selection nil)
+           (harness-voice-live--route-kind 'session)
+           (harness-voice-live--route-workspace nil)
+           (harness-voice-live--route-thread nil)
+           (harness-voice-live--route-name nil)
+           (harness-voice-live--route-generation 0)
+           (harness-voice-live--pipeline-timer nil)
            (harness-voice-live--speaker nil) (harness-voice-live--section nil)
            (harness-voice-live--stage nil) (harness-voice-live--stage-since nil)
            (harness-voice-live--stage-timer nil) (harness-voice-live--stage-frame 0)
@@ -113,6 +139,7 @@
            (harness-voice-live--caption-seq 0) (harness-voice-live--reply-seq 0)
            (harness-compose-controls-functions nil)
            (harness-ui-voice-live-test--calls nil)
+           (harness-ui-voice-live-test--sends nil)
            (harness-ui-voice-live-test--notifications nil)
            (harness-ui-voice-live-test--inbox (expand-file-name "inbox.jsonl" harness-state-directory))
            (default-directory dir) (buf (generate-new-buffer " *live voice test*")))
@@ -133,6 +160,12 @@
                           (lambda (id method params _callback _on-error)
                             (push (list id method params)
                                   harness-ui-voice-live-test--calls)
+                            nil))
+                         ((symbol-function 'harness-ui-call)
+                          (lambda (method params _callback &optional _on-error)
+                            (setq harness-ui-voice-live-test--sends
+                                  (nconc harness-ui-voice-live-test--sends
+                                         (list (list method params))))
                             nil)))
                  ,@body)))
          (harness-voice-live--dispose)
@@ -284,12 +317,15 @@ of several frames changes nothing."
                                " · [Transcript] · [Setup]")
                        (substring-no-properties (harness-voice-live--controls)))))
       (cl-letf (((symbol-function 'harness-voice-live--active-p) (lambda () t)))
+        (setq harness-voice-live--buffer (current-buffer)
+              harness-voice-live--route-name "Routing test")
         (pcase-dolist (`(,state ,working ,muted ,copy)
                        '((listening nil nil "Live · Listening")
                          (speaking nil nil "Live · Speaking")
                          (listening t nil "Live · Working")
                          (listening nil t "Live · Muted")
                          (interrupted nil nil "Live · Interrupted")
+                         (initializing nil nil "Live · Initializing")
                          (starting nil nil "Live · Starting")
                          (ending nil nil "Live · Ending")))
           (setq harness-voice-live--state state
@@ -369,15 +405,549 @@ which used to leave the line reading Off after a rejected Start."
       (should (string-search "Live · Off"
                              (buffer-substring-no-properties (point-min) (point-max))))
       (harness-voice-live--start-here)
+      ;; The pipeline is stopped, so the call initializes it and says so
+      ;; while it comes up, instead of failing before it tries.
+      (should (eq harness-voice-live--state 'initializing))
+      (should (equal "Live · Initializing" (harness-voice-live--status)))
+      (should (string-search "Live · Initializing"
+                             (buffer-substring-no-properties (point-min) (point-max))))
+      (should-not harness-voice-live--process)
+      ;; A pipeline that reports a failure fails the call at once, with
+      ;; the harness's own reason, and offers Retry.
+      (cl-letf (((symbol-function 'harness-voice-pipeline-state)
+                 (lambda () 'failed))
+                ((symbol-function 'harness-voice-pipeline-reason)
+                 (lambda () "Local voice pipeline · failed · No answer in 120 s")))
+        (harness-voice-live--pipeline-tick))
       (should (eq harness-voice-live--state 'failed))
-      (should (equal "Local voice pipeline · stopped"
+      (should (equal "Local voice pipeline · failed · No answer in 120 s"
                      harness-voice-live--error))
       (should (equal (concat " Live · Failed · [Start] · Local voice pipeline"
-                             " · stopped · [Transcript] · [Setup]")
+                             " · failed · No answer in 120 s · [Transcript] · [Setup]")
                      (substring-no-properties (harness-voice-live--controls))))
-      (should (string-search "Live · Failed"
-                             (buffer-substring-no-properties (point-min) (point-max))))
       (should-not harness-voice-live--process))))
+
+;;;; Routing
+
+;; One live call, one authoritative target.  The person selects another
+;; session or workspace and the next words go there, with the same
+;; sidecar, the same microphone and the same speech services; and a
+;; transcript or a reply captured for the old target never lands in the
+;; new one.  These are the regressions for the reported failure: an
+;; indicator that said B while the words went to A.
+
+(defun harness-ui-voice-live-test--routing-copy ()
+  "Return the compose box's live status and controls as one text."
+  (substring-no-properties (harness-voice-live--controls)))
+
+(ert-deftest harness-ui-voice-live-retargets-without-restarting ()
+  "Selecting another box retargets the call; the sidecar keeps running."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    (let* ((process harness-voice-live--process)
+           (other (harness-ui-voice-live-test--box "session-b")))
+      (unwind-protect
+          (progn
+            (should (harness-voice-live-retarget other))
+            ;; The same process, still listening, still the same generation
+            ;; of sidecar: nothing restarted.
+            (should (eq process harness-voice-live--process))
+            (should (harness-voice-live--active-p))
+            (should (eq 'listening harness-voice-live--state))
+            (should (equal "session-b" harness-voice-live--session))
+            (should (eq other harness-voice-live--buffer))
+            ;; The words go to B now.
+            (harness-voice-live--handle
+             (list :event "delegation" :id "d-b" :text "Check the tests."))
+            (should (equal "session-b" (car (car harness-ui-voice-live-test--calls))))
+            (should (equal "Check the tests."
+                           (harness-ui-voice-live-test--latest-prompt)))
+            ;; Selecting the same box again moves nothing.
+            (let ((generation harness-voice-live--route-generation))
+              (should-not (harness-voice-live-retarget other))
+              (should (= generation harness-voice-live--route-generation))))
+        (when (buffer-live-p other) (kill-buffer other))))))
+
+(ert-deftest harness-ui-voice-live-switch-during-capture-keeps-the-target ()
+  "An utterance captured before a switch goes to the target it was said in.
+The transcript arrives after the person selected B; A is where the
+words were spoken, so A is where they go, and the sidecar is answered."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    (let ((other (harness-ui-voice-live-test--box "session-b")))
+      (unwind-protect
+          (progn
+            ;; A burst is open in A when the person switches.
+            (harness-voice-live--handle
+             (list :event "hearing" :utterance 1))
+            (should (harness-voice-live-retarget other))
+            ;; Its transcript and delegation belong to A.
+            (harness-voice-live--handle
+             (list :event "user_delta" :text "Add a docstring." :final t
+                   :utterance 1))
+            (harness-voice-live--handle
+             (list :event "delegation" :id "d-a" :utterance 1
+                   :text "Add a docstring."))
+            ;; Nothing went to B, and the sidecar was told why.
+            (should-not (cl-find "session-b" harness-ui-voice-live-test--calls
+                                 :key #'car :test #'equal))
+            (let ((result (harness-ui-voice-live-test--wait-event
+                           harness-ui-voice-live-test--inbox "delegate_result")))
+              (should (equal "d-a" (plist-get result :id)))
+              (should (equal "retargeted" (plist-get result :message))))
+            ;; The next words go to B.
+            (harness-voice-live--handle
+             (list :event "delegation" :id "d-b" :utterance 2
+                   :text "Now check the tests."))
+            (should (equal "session-b" (car (car harness-ui-voice-live-test--calls))))
+            (should (equal "Now check the tests."
+                           (harness-ui-voice-live-test--latest-prompt))))
+        (when (buffer-live-p other) (kill-buffer other))))))
+
+(ert-deftest harness-ui-voice-live-switch-during-a-turn-keeps-its-reply ()
+  "A turn that outlives a switch is answered where it was sent.
+Its reply is not spoken into the thread the person selected, and the
+sidecar is told the turn ended without one."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    (harness-voice-live--handle (list :event "delegation" :id "d-a"
+                                      :text "Do the work." :utterance 1))
+    (harness-voice--on-event "agent/turn-started" '("live-session"))
+    (should harness-voice-live--working)
+    (let ((other (harness-ui-voice-live-test--box "session-b")))
+      (unwind-protect
+          (progn
+            (should (harness-voice-live-retarget other))
+            (harness-ui-voice-live-test--chunk "The parser is ready. " "n-1")
+            (harness-voice--on-event "agent/turn-ended" '("live-session" "end-turn"))
+            (let ((result (harness-ui-voice-live-test--wait-event
+                           harness-ui-voice-live-test--inbox "delegate_result")))
+              (should (equal "d-a" (plist-get result :id)))
+              (should (equal "retargeted" (plist-get result :message)))
+              ;; Nothing was spoken: the old thread's reply is not B's.
+              (should-not (string-search "The parser is ready."
+                                         (harness-ui-voice-live-test--file-text
+                                          harness-ui-voice-live-test--inbox))))
+            (should-not harness-voice-live--working)
+            (should (eq 'listening harness-voice-live--stage)))
+        (when (buffer-live-p other) (kill-buffer other))))))
+
+(ert-deftest harness-ui-voice-live-switch-takes-the-utterance-that-follows ()
+  "The utterance after a switch is not held back by the queued one.
+A burst already queued for A is answered as retargeted, and the next
+delegation goes to B without waiting for a turn that will not start."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    ;; A turn runs for A, with one utterance queued behind it.
+    (harness-voice-live--handle (list :event "delegation" :id "d-a1"
+                                      :text "First." :utterance 1))
+    (harness-voice-live--handle (list :event "delegation" :id "d-a2"
+                                      :text "Second." :utterance 2))
+    (should (= 1 (length harness-ui-voice-live-test--calls)))
+    (let ((other (harness-ui-voice-live-test--box "session-b")))
+      (unwind-protect
+          (progn
+            (should (harness-voice-live-retarget other))
+            ;; The queued one is dropped, and its sidecar answered.
+            (should-not harness-voice-live--delegations)
+            (should (equal "d-a2" (plist-get
+                                   (harness-ui-voice-live-test--wait-event
+                                    harness-ui-voice-live-test--inbox
+                                    "delegate_result")
+                                   :id)))
+            (harness-voice--on-event "agent/turn-ended" '("live-session" "end-turn"))
+            (harness-voice-live--handle (list :event "delegation" :id "d-b"
+                                              :text "Third." :utterance 3))
+            (should (equal "session-b" (car (car harness-ui-voice-live-test--calls))))
+            (should (equal "Third." (harness-ui-voice-live-test--latest-prompt))))
+        (when (buffer-live-p other) (kill-buffer other))))))
+
+(ert-deftest harness-ui-voice-live-repeated-switches-keep-one-target ()
+  "Switching back and forth many times leaves one target and one call.
+The generation moves once per real move, nothing leaks between the
+sessions, and the sidecar is never restarted."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    (let ((process harness-voice-live--process)
+          (a (current-buffer))
+          (b (harness-ui-voice-live-test--box "session-b")))
+      (unwind-protect
+          (progn
+            (dotimes (_ 4)
+              (should (harness-voice-live-retarget b))
+              ;; The same box again is not a move.
+              (should-not (harness-voice-live-retarget b))
+              (should (harness-voice-live-retarget a))
+              (should-not (harness-voice-live-retarget a)))
+            (should (harness-voice-live-retarget b))
+            (should (eq process harness-voice-live--process))
+            (should (eq 1 (cl-count-if #'identity
+                                       (list (harness-voice-live--active-p)))))
+            (should (equal "session-b" harness-voice-live--session))
+            (harness-voice-live--handle (list :event "delegation" :id "d-last"
+                                              :text "One target."))
+            (should (equal "session-b" (car (car harness-ui-voice-live-test--calls))))
+            (should (= 1 (length harness-ui-voice-live-test--calls))))
+        (when (buffer-live-p b) (kill-buffer b))))))
+
+(ert-deftest harness-ui-voice-live-non-target-box-names-the-target ()
+  "A box that is not the target says where the words go, and offers Use here.
+The reported bug was an indicator that read Listening in a session the
+microphone did not go to."
+  (harness-ui-voice-live-test-with
+    (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) 500))
+              ((symbol-function 'harness-compose--room)
+               (lambda () (* 500 (frame-char-width))))
+              ((symbol-function 'harness-voice-live--active-p) (lambda () t)))
+      (setq harness-voice-live--buffer (current-buffer)
+            harness-voice-live--session "session-a"
+            harness-voice-live--route-name "Session A"
+            harness-voice-live--state 'listening
+            harness-voice-live--stage 'listening)
+      ;; The target's own box: no name, every control.
+      (should (equal "Live · Listening" (harness-voice-live--status)))
+      (should (equal (concat " Live · Listening · [End] · [Interrupt C-c V]"
+                             " · [Mute C-c v] · [Transcript] · [Setup]")
+                     (nth 0 (harness-ui-voice-live-test--control-lines))))
+      (should (eq (current-buffer) harness-voice-live--buffer))
+      ;; Another box: it names the target and offers to move there.
+      (let ((target harness-voice-live--buffer)
+            (other (harness-ui-voice-live-test--box "session-b")))
+        (unwind-protect
+            (with-current-buffer other
+              (should-not (harness-voice-live--here-p))
+              (should (equal "Live · Listening · Session A"
+                             (harness-voice-live--status)))
+              (should (equal (concat " Live · Listening · Session A"
+                                     " · [Use here] · [Transcript] · [Setup]")
+                             (nth 0 (harness-ui-voice-live-test--control-lines))))
+              (should (= 1 (length (harness-ui-voice-live-test--control-lines))))
+              (let ((at (string-search "[Use here]"
+                                       (harness-voice-live--controls))))
+                (should at)
+                (should (equal "Live voice · target"
+                               (get-text-property
+                                at 'help-echo (harness-voice-live--controls))))))
+          (when (buffer-live-p other) (kill-buffer other)))
+        (should (eq target harness-voice-live--buffer))))))
+
+(ert-deftest harness-ui-voice-live-follow-selection-moves-the-route ()
+  "With following on, the selected box is the target at the next utterance.
+Looking at a buffer with no compose box moves nothing."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet")
+          harness-voice-live-follow-selection t)
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    (let ((a (current-buffer))
+          (b (harness-ui-voice-live-test--box "session-b"))
+          (readme (generate-new-buffer " *routing readme*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer readme (fundamental-mode))
+            ;; A source buffer is not a target.
+            (set-window-buffer (selected-window) readme)
+            (should-not (harness-voice-live--follow-selection))
+            (should (equal "live-session" harness-voice-live--session))
+            ;; A compose box of another session is.
+            (set-window-buffer (selected-window) b)
+            (should (harness-voice-live--follow-selection))
+            (should (equal "session-b" harness-voice-live--session))
+            ;; And the utterance goes there.
+            (harness-voice-live--handle (list :event "delegation" :id "d-follow"
+                                              :text "Follow me."))
+            (should (equal "session-b" (car (car harness-ui-voice-live-test--calls))))
+            ;; Following back to the first box works the same way.
+            (set-window-buffer (selected-window) a)
+            (harness-voice-live--follow-selection)
+            (should (equal "live-session" harness-voice-live--session)))
+        (when (buffer-live-p b) (kill-buffer b))
+        (when (buffer-live-p readme) (kill-buffer readme))))))
+
+(ert-deftest harness-ui-voice-live-workspace-target-uses-the-thread ()
+  "A workspace target sends through the workspace, to its selected thread.
+The workspace's own agent does the work; the voice adds no second model."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (let ((box (harness-ui-voice-live-test--box "episode-1" "thread-7" "workspace-3")))
+      (unwind-protect
+          (with-current-buffer box
+            (harness-voice-live-start)
+            (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                               5 "sidecar ready")
+            (should (eq 'workspace harness-voice-live--route-kind))
+            (should (equal "workspace-3" harness-voice-live--route-workspace))
+            (should (equal "thread-7" harness-voice-live--route-thread))
+            (harness-voice-live--handle
+             (list :event "delegation" :id "d-w" :text "Add a README."))
+            ;; It went through the workspace, to that thread, and not
+            ;; through a session prompt.
+            (should-not harness-ui-voice-live-test--calls)
+            (let* ((send (car harness-ui-voice-live-test--sends))
+                   (params (cadr send)))
+              (should (equal "_harness/workspace/prompt" (car send)))
+              (should (equal "workspace-3" (plist-get params :id)))
+              (should (equal "Add a README." (plist-get params :text)))
+              (should (equal "thread-7" (plist-get (plist-get params :opts) :thread)))))
+        (when (buffer-live-p box) (kill-buffer box))))))
+
+(ert-deftest harness-ui-voice-live-many-utterances-one-screen ()
+  "Several utterances in one call each reach the target once, in order.
+Every burst gets its own prompt, its own turn, and its own reply, and
+none of them is delivered twice."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    (dotimes (index 3)
+      (let ((n (1+ index)))
+        (harness-voice-live--handle
+         (list :event "delegation" :id (format "d-%d" n) :utterance n
+               :text (format "Request %d." n)))
+        (harness-voice--on-event "agent/turn-started" '("live-session"))
+        (harness-voice-live--finish-turn "end-turn")))
+    (should (= 3 (length harness-ui-voice-live-test--calls)))
+    (should (equal '("Request 1." "Request 2." "Request 3.")
+                   (mapcar (lambda (call)
+                             (plist-get (car (plist-get (nth 2 call) :prompt)) :text))
+                           (reverse harness-ui-voice-live-test--calls))))
+    ;; The same utterance twice is one prompt.
+    (harness-voice-live--handle
+     (list :event "delegation" :id "d-3" :utterance 3 :text "Request 3."))
+    (should (= 3 (length harness-ui-voice-live-test--calls)))))
+
+;;;; End to end through the real sidecar
+
+;; The scripted sidecar is a real process speaking the real protocol.
+;; These tests drive a whole call through it, including the switch that
+;; the reported failure was about, so the transport and the process are
+;; checked together and not only each on its own.  Synthetic audio: no
+;; microphone and no speech model is anywhere in this.
+
+(ert-deftest harness-ui-voice-live-e2e-retargets-between-two-utterances ()
+  "A whole call: the first utterance goes to A, the switch, then B.
+The sidecar is a real process; its second burst comes after the first
+turn's result, which is where a person would have switched threads."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "routing"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () harness-ui-voice-live-test--calls)
+                       5 "the first delegation")
+    (should (equal "live-session" (car (car harness-ui-voice-live-test--calls))))
+    (should (equal "Add a docstring." (harness-ui-voice-live-test--latest-prompt)))
+    ;; The measured level the sidecar sent reached the meter.
+    (should (numberp (harness-voice-pipeline-dbfs harness-voice-live--pipeline)))
+    (should (equal "Level · -30 dBFS"
+                   (harness-voice-pipeline-level-label
+                    harness-voice-live--pipeline)))
+    (let ((other (harness-ui-voice-live-test--box "session-b")))
+      (unwind-protect
+          (progn
+            ;; The first turn ends, and the person selects B.
+            (harness-voice--on-event "agent/turn-started" '("live-session"))
+            (harness-voice--on-event "agent/turn-ended" '("live-session" "end-turn"))
+            (should (harness-voice-live-retarget other))
+            (should (equal "session-b" harness-voice-live--session))
+            ;; The second burst goes to B, once, as it was said.
+            (harness-test-wait
+             (lambda ()
+               (cl-find "session-b" harness-ui-voice-live-test--calls
+                        :key #'car :test #'equal))
+             5 "the second delegation")
+            (let ((call (car harness-ui-voice-live-test--calls)))
+              (should (equal "session-b" (car call)))
+              (should (equal "Now check the tests."
+                             (plist-get (car (plist-get (nth 2 call) :prompt))
+                                        :text))))
+            (should (equal '("session-b" "live-session")
+                           (mapcar #'car harness-ui-voice-live-test--calls))))
+        (when (buffer-live-p other) (kill-buffer other))))))
+
+(ert-deftest harness-ui-voice-live-e2e-keeps-the-target-through-a-turn ()
+  "The switch happens while the first turn runs; its reply is not spoken.
+The sidecar is told the turn ended without a reply to speak."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "routing"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () harness-ui-voice-live-test--calls)
+                       5 "the first delegation")
+    (harness-voice--on-event "agent/turn-started" '("live-session"))
+    (let ((other (harness-ui-voice-live-test--box "session-b")))
+      (unwind-protect
+          (progn
+            (harness-voice-live-retarget other)
+            (harness-ui-voice-live-test--chunk "The docstring is in place. " "n-1")
+            (harness-voice--on-event "agent/turn-ended" '("live-session" "end-turn"))
+            (let ((result (harness-ui-voice-live-test--wait-event
+                           harness-ui-voice-live-test--inbox "delegate_result")))
+              (should (equal "d-1" (plist-get result :id)))
+              (should (equal "retargeted" (plist-get result :message))))
+            (should-not (string-search "The docstring is in place."
+                                       (harness-ui-voice-live-test--file-text
+                                        harness-ui-voice-live-test--inbox))))
+        (when (buffer-live-p other) (kill-buffer other))))))
+
+;;;; The shared pipeline
+
+;; The local pipeline is the harness server's and every client shares
+;; it.  A call attaches to one that runs or is already starting, starts
+;; one that is stopped, says `Initializing' while it comes up, and turns
+;; a failed start into one sentence with a Retry control instead of a
+;; wait that ends in a timeout.
+
+(ert-deftest harness-ui-voice-live-pipeline-ready-starts-the-sidecar ()
+  "A running pipeline is used as it is: no start, no wait."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-provider 'unmute
+          harness-voice-live-command (harness-ui-voice-live-test--command "quiet"))
+    (let ((started nil))
+      (cl-letf (((symbol-function 'harness-voice-pipeline-state) (lambda () 'running))
+                ((symbol-function 'harness-voice-unmute-need) (lambda () nil))
+                ((symbol-function 'harness-voice-pipeline-start)
+                 (lambda (&optional _callback) (setq started t)))
+                ((symbol-function 'harness-voice-unmute-command)
+                 (lambda () harness-voice-live-command)))
+        (harness-voice-live-start)
+        (should-not started)
+        (should (eq harness-voice-live--state 'starting))
+        (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                           5 "sidecar ready")))))
+
+(ert-deftest harness-ui-voice-live-pipeline-initializing-is-visible ()
+  "A stopped pipeline is started, and the controls say Initializing.
+The sidecar waits for it; the stage line animates so the wait is alive."
+  (harness-ui-voice-live-test-with
+    (setq harness-voice-provider 'unmute)
+    (let ((started 0))
+      (cl-letf (((symbol-function 'harness-voice-pipeline-state) (lambda () 'stopped))
+                ((symbol-function 'harness-voice-unmute-need)
+                 (lambda () "Local voice pipeline · stopped"))
+                ((symbol-function 'harness-voice-pipeline-start)
+                 (lambda (&optional _callback) (cl-incf started)))
+                ((symbol-function 'harness-voice-unmute-command)
+                 (lambda () '("python3" "-c" "pass"))))
+        (harness-voice-live-start)
+        (should (= 1 started))
+        (should (eq harness-voice-live--state 'initializing))
+        (should (eq harness-voice-live--stage 'initializing))
+        (should (equal "Live · Initializing" (harness-voice-live--status)))
+        (should (string-prefix-p "⠋ Initializing" (harness-voice-live--stage-text)))
+        (should (timerp harness-voice-live--pipeline-timer))
+        (should-not harness-voice-live--process)
+        ;; When it reports running, the sidecar starts by itself.
+        (cl-letf (((symbol-function 'harness-voice-pipeline-state) (lambda () 'running))
+                  ((symbol-function 'harness-voice-unmute-need) (lambda () nil))
+                  ((symbol-function 'harness-voice-live--command)
+                   (lambda () '("python3" "-c" "import sys; sys.stdin.read()"))))
+          (harness-voice-live--pipeline-tick)
+          (should-not (timerp harness-voice-live--pipeline-timer))
+          (should (harness-voice-live--active-p))
+          (should (eq harness-voice-live--state 'starting)))))))
+
+(ert-deftest harness-ui-voice-live-pipeline-failure-is-one-sentence ()
+  "A failed start fails the call at once, with Retry, not after a wait.
+The reported two-minute stop/start was the pipeline's own start
+deadline; a failure the harness already knows should not be waited out."
+  (harness-ui-voice-live-test-with
+    (setq harness-voice-provider 'unmute)
+    (cl-letf (((symbol-function 'harness-voice-pipeline-state) (lambda () 'starting))
+              ((symbol-function 'harness-voice-unmute-need)
+               (lambda () "Local voice pipeline · starting"))
+              ((symbol-function 'harness-voice-pipeline-start)
+               (lambda (&optional _callback) nil))
+              ((symbol-function 'window-body-width) (lambda (&rest _) 500))
+              ((symbol-function 'harness-compose--room)
+               (lambda () (* 500 (frame-char-width))))
+              ((symbol-function 'harness-voice-unmute-command)
+               (lambda () '("python3" "-c" "pass"))))
+      (harness-voice-live-start)
+      (should (eq harness-voice-live--state 'initializing))
+      ;; A start that failed while waiting is read now, with its reason.
+      (cl-letf (((symbol-function 'harness-voice-pipeline-state) (lambda () 'failed))
+                ((symbol-function 'harness-voice-pipeline-reason)
+                 (lambda () "Local voice pipeline · failed · No answer in 120 s")))
+        (harness-voice-live--pipeline-tick))
+      (should (eq harness-voice-live--state 'failed))
+      (should (equal "Local voice pipeline · failed · No answer in 120 s"
+                     harness-voice-live--error))
+      (should-not (timerp harness-voice-live--pipeline-timer))
+      (should-not harness-voice-live--process)
+      (should (string-search "[Start]"
+                             (harness-voice-live--controls))))))
+
+(ert-deftest harness-ui-voice-live-pipeline-starting-is-joined ()
+  "A start already in flight is waited for, not started a second time.
+Two starts of one stack leave two speech services on one port."
+  (harness-ui-voice-live-test-with
+    (setq harness-voice-provider 'unmute)
+    (let ((started 0))
+      (cl-letf (((symbol-function 'harness-voice-pipeline-state) (lambda () 'starting))
+                ((symbol-function 'harness-voice-unmute-need)
+                 (lambda () "Local voice pipeline · starting"))
+                ((symbol-function 'harness-voice-pipeline-start)
+                 (lambda (&optional _callback) (cl-incf started)))
+                ((symbol-function 'harness-voice-unmute-command)
+                 (lambda () '("python3" "-c" "pass"))))
+        (harness-voice-live-start)
+        (should (= 0 started))
+        (should (eq harness-voice-live--state 'initializing))
+        (should (timerp harness-voice-live--pipeline-timer))))))
+
+(ert-deftest harness-ui-voice-live-stopping-keeps-the-shared-pipeline ()
+  "Ending voice never stops the pipeline every client shares."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
+    (let ((stopped 0))
+      (cl-letf (((symbol-function 'harness-voice-pipeline-stop)
+                 (lambda () (cl-incf stopped))))
+        (harness-voice-live-stop)
+        (harness-test-wait (lambda () (null harness-voice-live--state))
+                           5 "the call to end")
+        (should (= 0 stopped))
+        (should-not harness-voice-live--process)))))
 
 ;;;; Delegation
 
@@ -431,8 +1001,10 @@ which used to leave the line reading Off after a rejected Start."
            (prompt (plist-get (car (plist-get params :prompt)) :text)))
       (should (string-search "Second." prompt)))))
 
-(ert-deftest harness-ui-voice-live-distils-a-delegation ()
-  "A mumbly transcript reaches the session as its request, without its noise."
+(ert-deftest harness-ui-voice-live-sends-the-transcript-unchanged ()
+  "The transcript reaches the session as the speech model returned it.
+No distillation, no context block, no meta-instruction: the target's
+own agent reads the words, and nothing is asked about them first."
   (harness-ui-voice-live-test-with
     (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
     (setq harness-voice-live-command
@@ -446,42 +1018,27 @@ which used to leave the line reading Off after a rejected Start."
       (harness-voice-live--handle
        (list :event "delegation" :id "d-mumble" :utterance 1 :text raw))
       (let ((prompt (harness-ui-voice-live-test--latest-prompt)))
-        (should (string-search "add a docstring to the parser." prompt))
-        (should-not (string-search "Uh," prompt))
-        (should-not (string-search "um," prompt)))
+        (should (equal raw prompt))
+        (should-not (string-search "<voice-turn-context>" prompt))
+        (should-not (string-search "Voice conversation" prompt))
+        (should-not (string-search "Voice request context" prompt)))
       (let ((turns (harness-voice-conversation-turns
                     harness-voice-live--conversation)))
         (should (= 1 (length turns)))
         (should (equal raw (plist-get (car turns) :raw)))
-        (should (equal "add a docstring to the parser."
-                       (plist-get (car turns) :text)))
-        (should (equal "add a docstring to the parser."
-                       (plist-get (car turns) :sent))))
+        (should (equal raw (plist-get (car turns) :text)))
+        (should (equal raw (plist-get (car turns) :sent))))
       (let ((transcript (harness-ui-voice-live-test--transcript)))
+        ;; The words are on screen once: what crossed is what was shown,
+        ;; so a second `Sent' heading would only repeat the sentence.
         (should (string-search raw transcript))
-        (should (string-search "Sent · " transcript))
-        (should (string-search "add a docstring to the parser." transcript))))))
+        (should-not (string-search "Sent · " transcript))
+        (should-not (string-search "Not sent · " transcript))))))
 
-(ert-deftest harness-ui-voice-live-distillation-can-be-turned-off ()
-  "The option sends the transcript as heard, while the record keeps both."
-  (harness-ui-voice-live-test-with
-    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
-    (setq harness-voice-live-command
-          (harness-ui-voice-live-test--command "quiet")
-          harness-voice-distill nil)
-    (harness-voice-live-start)
-    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
-                       5 "sidecar ready")
-    (harness-voice-live--handle
-     (list :event "delegation" :id "d-raw" :utterance 1
-           :text "Uh, add a docstring, um, to the parser."))
-    (should (string-search "Uh, add a docstring, um, to the parser."
-                           (harness-ui-voice-live-test--latest-prompt)))
-    (let ((transcript (harness-ui-voice-live-test--transcript)))
-      (should-not (string-search "Sent ·" transcript)))))
-
-(ert-deftest harness-ui-voice-live-noise-only-delegation-sends-nothing ()
-  "A burst of mumbles is recorded, not forwarded, and its sidecar answered."
+(ert-deftest harness-ui-voice-live-a-dependent-request-carries-nothing ()
+  "A request that points at an earlier turn is sent as it was said.
+The session's agent has the conversation; the voice does not repeat it
+and does not add an envelope around the words."
   (harness-ui-voice-live-test-with
     (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
     (setq harness-voice-live-command
@@ -489,42 +1046,6 @@ which used to leave the line reading Off after a rejected Start."
     (harness-voice-live-start)
     (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
                        5 "sidecar ready")
-    (harness-voice-live--handle
-     (list :event "delegation" :id "d-noise" :utterance 1
-           :text "Um, uh, hmm."))
-    (should-not harness-ui-voice-live-test--calls)
-    (let ((result (harness-ui-voice-live-test--wait-event
-                   harness-ui-voice-live-test--inbox "delegate_result")))
-      (should (equal "d-noise" (plist-get result :id)))
-      (should (equal "" (plist-get result :text)))
-      (should-not (plist-get result :error)))
-    (let ((turns (harness-voice-conversation-turns
-                  harness-voice-live--conversation)))
-      (should (= 1 (length turns)))
-      (should (equal "Um, uh, hmm." (plist-get (car turns) :raw)))
-      (should-not (plist-get (car turns) :text)))
-    (let ((segment (harness-voice-pipeline--segment
-                    harness-voice-live--pipeline "u-1")))
-      (should (eq 'dropped (plist-get segment :stage)))
-      (should (eq 'no-request (plist-get segment :reason)))
-      (should (equal "no request"
-                     (harness-voice-pipeline--drop-label
-                      (plist-get segment :reason)))))
-    (let ((transcript (harness-ui-voice-live-test--transcript)))
-      (should (string-search "Not sent · " transcript))
-      (should (string-search "no request" transcript)))))
-
-(ert-deftest harness-ui-voice-live-carries-voice-context-when-needed ()
-  "A dependent request carries the voice's own earlier words; a plain one does not."
-  (harness-ui-voice-live-test-with
-    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
-    (setq harness-voice-live-command
-          (harness-ui-voice-live-test--command "quiet"))
-    (harness-voice-live-start)
-    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
-                       5 "sidecar ready")
-    ;; The provider's own speech, outside an agent turn: the session
-    ;; never saw these words.
     (harness-voice-live--handle
      (list :event "assistant_delta" :final t
            :text "The timer wakes it every 200 ms."))
@@ -532,17 +1053,39 @@ which used to leave the line reading Off after a rejected Start."
      (list :event "delegation" :id "d-ctx" :utterance 1
            :text "Do that instead."))
     (let ((prompt (harness-ui-voice-live-test--latest-prompt)))
-      (should (string-search "Do that instead." prompt))
-      (should (string-search "Voice conversation before this request:" prompt))
-      (should (string-search "Voice: The timer wakes it every 200 ms." prompt)))
-    (harness-voice-live--finish-turn "end-turn")
+      (should (equal "Do that instead." prompt))
+      (should-not (string-search "Voice conversation before this request:" prompt))
+      (should-not (string-search "The timer wakes it every 200 ms." prompt)))))
+
+(ert-deftest harness-ui-voice-live-empty-transcript-sends-nothing ()
+  "A burst the speech model made no words of is recorded, not forwarded.
+The sidecar is answered so it does not wait for a turn that will never
+come, and the burst says why it stopped."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                       5 "sidecar ready")
     (harness-voice-live--handle
-     (list :event "delegation" :id "d-plain" :utterance 2
-           :text "Add a docstring to parse."))
-    (let ((prompt (harness-ui-voice-live-test--latest-prompt)))
-      (should (string-search "Add a docstring to parse." prompt))
-      (should-not (string-search "Voice conversation before this request:"
-                                 prompt)))))
+     (list :event "delegation" :id "d-noise" :utterance 1 :text "   "))
+    (should-not harness-ui-voice-live-test--calls)
+    (let ((result (harness-ui-voice-live-test--wait-event
+                   harness-ui-voice-live-test--inbox "delegate_result")))
+      (should (equal "d-noise" (plist-get result :id)))
+      (should (equal "" (plist-get result :text)))
+      (should-not (plist-get result :error)))
+    (let ((segment (harness-voice-pipeline--segment
+                    harness-voice-live--pipeline "u-1")))
+      (should (eq 'dropped (plist-get segment :stage)))
+      (should (eq 'no-words (plist-get segment :reason)))
+      (should (equal "no words"
+                     (harness-voice-pipeline--drop-label
+                      (plist-get segment :reason)))))
+    (let ((transcript (harness-ui-voice-live-test--transcript)))
+      (should (string-search "Not sent · " transcript))
+      (should (string-search "no words" transcript)))))
 
 (ert-deftest harness-ui-voice-live-conversation-ends-with-the-call ()
   "Ending the call forgets the voice conversation; the chat keeps its history."
@@ -892,13 +1435,14 @@ a speech server answers with no audio at all."
            :text "Wait, also check the tests."
            :pending (list (list :id "sidecar-1" :text "The sidecar held this."))))
     (should (= 2 (length harness-ui-voice-live-test--calls)))
+    ;; The held reply is not spoken and not repeated into the message:
+    ;; the session's agent has the turn it wrote, and the voice sends
+    ;; only what the person said.
     (let ((prompt (harness-ui-voice-live-test--latest-prompt)))
-      (should (string-search "Wait, also check the tests." prompt))
-      (should (string-search "<voice-turn-context>" prompt))
-      (should (string-search "The parser is ready." prompt))
-      (should (string-search "The sidecar held this." prompt))
-      (should (= 1 (harness-ui-voice-live-test--occurrences "The parser is ready." prompt)))
-      (should (= 1 (harness-ui-voice-live-test--occurrences "The sidecar held this." prompt))))
+      (should (equal "Wait, also check the tests." prompt))
+      (should-not (string-search "<voice-turn-context>" prompt))
+      (should-not (string-search "The parser is ready." prompt))
+      (should-not (string-search "The sidecar held this." prompt)))
     ;; The same utterance arriving twice is not a second prompt.
     (harness-voice-live--handle
      (list :event "delegation" :id "d-2" :utterance 2
@@ -1173,21 +1717,6 @@ a speech server answers with no audio at all."
     (harness-voice-toggle)
     (harness-test-wait (lambda () (null harness-voice-live--state)) 5 "toggle off")
     (should-not (harness-voice-live--active-p))))
-
-(ert-deftest harness-ui-voice-live-pending-keeps-the-full-result ()
-  "A held sentence and the full result that contains it are one context line."
-  (let ((harness-voice-live--held
-         (list (list :id "piece" :text "The parser is ready.")
-               (list :id "result:d" :text "The parser is ready. Tests pass.")))
-        (harness-voice-live--held-timer nil))
-    (let* ((items (harness-voice-live--pending-items (list :pending nil)))
-           (context (harness-voice-live--pending-context items)))
-      (should (= 1 (length items)))
-      (should (equal "The parser is ready. Tests pass."
-                     (plist-get (car items) :text)))
-      (should (= 1 (cl-count-if (lambda (line) (string-prefix-p "- " line))
-                                (split-string context "\n"))))
-      (should (string-search "Tests pass." context)))))
 
 (provide 'harness-ui-voice-live-test)
 ;;; harness-ui-voice-live-test.el ends here
