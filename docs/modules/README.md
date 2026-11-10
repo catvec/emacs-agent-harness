@@ -73,7 +73,8 @@ and supervisor load only when they are named.
  ;;deepseek           ; DeepSeek provider (OpenAI-compatible) with peak and off-peak pricing.
  ;;demo               ; Scripted provider for demos and tests.
  ;;gremlin            ; A provider that is slow, malformed, hungry or dishonest on purpose.
- ;;openai             ; OpenAI-compatible chat completions provider (OpenAI, OpenRouter, local…
+ ;;openai             ; OpenAI-compatible chat completions provider (OpenAI, local servers,…
+ ;;openrouter         ; OpenRouter provider: request fields, price-aware endpoint pinning,…
  ;;responses          ; OpenAI Responses API paid for by a ChatGPT plan (Sign in with ChatGPT).
  :tools
  ;;compact            ; The compact tool: an agent compacts its own conversation, on a running…
@@ -156,7 +157,8 @@ and supervisor load only when they are named.
 | [provider-deepseek](provider-deepseek.md) |  | [provider](provider.md), [provider-openai](provider-openai.md) | DeepSeek provider (OpenAI-compatible) with peak and off-peak pricing. |
 | [provider-demo](provider-demo.md) |  | [provider](provider.md) | Scripted provider for demos and tests. |
 | [provider-gremlin](provider-gremlin.md) |  | [provider](provider.md), [gremlin](gremlin.md) | A provider that is slow, malformed, hungry or dishonest on purpose. |
-| [provider-openai](provider-openai.md) |  | [provider](provider.md) | OpenAI-compatible chat completions provider (OpenAI, OpenRouter, local servers). |
+| [provider-openai](provider-openai.md) |  | [provider](provider.md) | OpenAI-compatible chat completions provider (OpenAI, local servers, custom endpoints). |
+| [provider-openrouter](provider-openrouter.md) |  | [provider](provider.md), [provider-openai](provider-openai.md), [retry](retry.md) | OpenRouter provider: request fields, price-aware endpoint pinning, error detail. |
 | [provider-responses](provider-responses.md) |  | [provider](provider.md), [chatgpt-plan](chatgpt-plan.md) | OpenAI Responses API paid for by a ChatGPT plan (Sign in with ChatGPT). |
 | [readonly](readonly.md) | by default | [session](session.md), [tools](tools.md) | Read-only sessions: the sessions a module's policy names (a supervisor, a task's write-up or plan) get only reading tools and read-only, offline bash, enforced by the harness. |
 | [recap](recap.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md), [tasks](tasks.md) | Write the recaps task cards and running chats show, with a short model call. |
@@ -290,8 +292,8 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/stream` | [agent](agent.md) | [agent](agent.md) | [acp](acp.md), [resilience](resilience.md), [usage](usage.md) |  |
 | `agent/tool-call` | [agent](agent.md) | [agent](agent.md) | [resilience](resilience.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools](tools.md) |  |
 | `agent/tool-result` | [agent](agent.md) | [agent](agent.md) | [perms](perms.md), [recap](recap.md), [resilience](resilience.md), [tools](tools.md) |  |
-| `agent/turn-ended` | [agent](agent.md) | [agent](agent.md) | [compaction](compaction.md), [cowboy](cowboy.md), [handoff](handoff.md), [merge](merge.md), [perms](perms.md), [pet](pet.md), [recap](recap.md), [redact](redact.md), [resilience](resilience.md), [retry](retry.md), [session](session.md), [supervisor](supervisor.md), [tasks](tasks.md), [thread-reply](thread-reply.md), [todo-sync](todo-sync.md), [tools](tools.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-usage](ui-usage.md), [ui-workspace](ui-workspace.md), [usage](usage.md), [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md) | yes |
-| `agent/turn-started` | [agent](agent.md) | [agent](agent.md) | [merge](merge.md), [naming](naming.md), [perms](perms.md), [recap](recap.md), [resilience](resilience.md), [retry](retry.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-pet](ui-pet.md), [ui-workspace](ui-workspace.md), [usage](usage.md), [workspace](workspace.md) | yes |
+| `agent/turn-ended` | [agent](agent.md) | [agent](agent.md) | [compaction](compaction.md), [cowboy](cowboy.md), [handoff](handoff.md), [merge](merge.md), [perms](perms.md), [pet](pet.md), [provider-openrouter](provider-openrouter.md), [recap](recap.md), [redact](redact.md), [resilience](resilience.md), [retry](retry.md), [session](session.md), [supervisor](supervisor.md), [tasks](tasks.md), [thread-reply](thread-reply.md), [todo-sync](todo-sync.md), [tools](tools.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-usage](ui-usage.md), [ui-workspace](ui-workspace.md), [usage](usage.md), [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md) | yes |
+| `agent/turn-started` | [agent](agent.md) | [agent](agent.md) | [merge](merge.md), [naming](naming.md), [perms](perms.md), [provider-openrouter](provider-openrouter.md), [recap](recap.md), [resilience](resilience.md), [retry](retry.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-pet](ui-pet.md), [ui-workspace](ui-workspace.md), [usage](usage.md), [workspace](workspace.md) | yes |
 | `cache/compacted` | [cache-compact](cache-compact.md) | [cache-compact](cache-compact.md) |  |  |
 | `cache/poor-hit` | [cache](cache.md) | [cache](cache.md) |  |  |
 | `cache/pre-expire` | [cache](cache.md) | [cache](cache.md) | [cache-compact](cache-compact.md), [cache-warm](cache-warm.md) |  |
@@ -309,6 +311,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `decision/changed` | [decisions](decisions.md) | [decisions](decisions.md) | [ui-decisions](ui-decisions.md) | yes |
 | `event-watch/changed` | [tools-events](tools-events.md) | [tools-events](tools-events.md) | [ui-watches](ui-watches.md) | yes |
 | `fallback/changed` | [fallback](fallback.md) | [fallback](fallback.md) | [tasks](tasks.md), [ui-usage](ui-usage.md) | yes |
+| `fallback/refused` | [fallback](fallback.md) | [fallback](fallback.md) |  |  |
 | `fallback/switched` | [fallback](fallback.md) | [fallback](fallback.md) | [ui-usage](ui-usage.md) | yes |
 | `handoff/done` | [handoff](handoff.md) | [handoff](handoff.md) |  |  |
 | `harness/reloaded` | `harness.el` | `harness.el` | [session](session.md), [ui-cache-warm](ui-cache-warm.md), [ui-decisions](ui-decisions.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md), [ui-voice](ui-voice.md), [version](version.md), [worktree](worktree.md) | yes |
@@ -323,6 +326,9 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `naming/done` | [naming](naming.md) | [naming](naming.md) |  |  |
 | `naming/failed` | [naming](naming.md) | [naming](naming.md) |  |  |
 | `notification/sent` | [notifications](notifications.md) | [notifications](notifications.md) |  |  |
+| `openrouter/response-mismatch` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
+| `openrouter/route-paused` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
+| `openrouter/route-selected` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
 | `patch-review/changed` | [patch-review](patch-review.md) | [patch-review](patch-review.md) | [ui-patch-review](ui-patch-review.md) | yes |
 | `patch-review/last-close` | [patch-review](patch-review.md) | [patch-review](patch-review.md) | [ui-patch-review](ui-patch-review.md) | yes |
 | `permission/decided` | [tools](tools.md) | [tools](tools.md) | [access](access.md), [agent](agent.md), [insights](insights.md), [perms](perms.md) |  |
@@ -423,7 +429,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/message` | [agent](agent.md) | [cache](cache.md) (90), [patch-review](patch-review.md) (40), [tasks](tasks.md) (50), [thread-reply](thread-reply.md) (35) |
 | `agent/outstanding` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tools-agent](tools-agent.md) (50), [tools-events](tools-events.md) (50), [tools-sessions](tools-sessions.md) (50) |
 | `agent/step` | [agent](agent.md) | [compaction](compaction.md) (12, 35), [handoff](handoff.md) (10), [merge](merge.md) (30), [usage](usage.md) (30) |
-| `agent/step-error` | [agent](agent.md) | [fallback](fallback.md) (50), [retry](retry.md) (60) |
+| `agent/step-error` | [agent](agent.md) | [fallback](fallback.md) (50), [provider-openrouter](provider-openrouter.md) (45), [retry](retry.md) (60) |
 | `agent/stop` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tasks](tasks.md) (50), [thread-reply](thread-reply.md) (60) |
 | `agent/stop-outstanding` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tools-agent](tools-agent.md) (50) |
 | `agent/system-prompt` | [agent](agent.md) | [linking](linking.md) (45), [memory](memory.md) (55), [skills](skills.md) (60), [supervisor](supervisor.md) (900), [tasks](tasks.md) (60), [tools-agent](tools-agent.md) (40), [tools-computers](tools-computers.md) (60), [workspace](workspace.md) (50) |
@@ -479,6 +485,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-corporate-mode-change-hook` | `harness-core.el` | [acp](acp.md), [acp-remote](acp-remote.md), [ui](ui.md) |
 | `harness-describe-modules-functions` | `harness-core.el` | [ui](ui.md), `harness.el` |
 | `harness-error-report--previous-signal-hook` | `harness-errors.el` |  |
+| `harness-fallback-guard-functions` | [fallback](fallback.md), [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |
 | `harness-gremlin-cleanup-hook` | [gremlin](gremlin.md) |  |
 | `harness-log-hook` | `harness-core.el` | `harness-server.el` |
 | `harness-module-init-hook` | `harness-core.el` |  |

@@ -84,6 +84,22 @@ shows and edits this list beside the plans' quota."
   :type '(repeat (string :tag "Provider or model id" :names (provider model)))
   :group 'harness)
 
+(defvar harness-fallback-guard-functions nil
+  "Functions that may refuse to move a session off its model.
+Each is called as (SESSION TARGET WHY) with the session plist, the model
+it would move to and why (`out', `back' or `up'), and returns nil when
+the move may happen, or a string saying why it may not.  A string blocks
+the move: the session stays where it is, the reason is left as a hint and
+`fallback/refused' says so.  This is for a provider whose model is
+pinned on purpose -- the OpenRouter module pins one endpoint per session,
+and a move to another model would leave the vetted set -- so that such a
+pin is not treated as a preference the fallback may revise.  The
+functions are asked before a turn, after a failed step, and by the
+fallback's own switch, so no path moves a guarded session.  A module adds
+its own with `add-hook'; nil is the default, and nothing is guarded.
+It is a hook rather than an option because a module registers into it
+whenever it loads, and no user setting may quietly drop a guard.")
+
 (defconst harness-fallback--retry-after 3600
   "Seconds a provider counts as out when it did not say when it comes back.
 Money spent has no reset time, and a usage limit sometimes comes
@@ -590,7 +606,21 @@ failing, and when to look again."
             (if (plist-get mark :guess) ""
               (format " until %s" (harness-fallback--clock (plist-get mark :until)))))))
 
-(defun harness-fallback--switch (session target why &optional mark)
+(defun harness-fallback-refusal (session target why)
+  "Return why SESSION may not move to TARGET for WHY, or nil.
+Asks each of `harness-fallback-guard-functions'; the first that answers
+a string blocks the move.  A guard that fails blocks too, with its
+error: a guard that cannot say yes has not said the move is allowed."
+  (let ((refusal nil))
+    (dolist (fn harness-fallback-guard-functions)
+      (when (and (null refusal) (functionp fn))
+        (setq refusal
+              (condition-case err
+                  (funcall fn session target why)
+                (error (format "the guard %S failed: %s" fn (harness-error-message err)))))))
+    refusal))
+
+(cl-defun harness-fallback--switch (session target why &optional mark)
   "Move SESSION to model TARGET; WHY says why, and MARK is what ran out.
 WHY is `out' (MARK put the model being left out), `back' (its own model
 works again) or `up' (a more preferred entry of the list works again
@@ -602,31 +632,39 @@ own model is remembered while it runs on another."
          (from (plist-get session :model))
          (record (gethash sid harness-fallback--moved))
          (original (or (plist-get record :original) from)))
-    (unless (equal from target)
-      (if (equal target original)
-          (remhash sid harness-fallback--moved)
-        (unless record (puthash sid (list :original from :since (float-time)) harness-fallback--moved)))
-      (let ((harness-fallback--switching t))
-        (harness-call 'session/update sid :model target :silent t))
-      (harness-call 'session/hint sid
-                    (pcase why
-                      ('out
-                       (format "%s, so this session carries on with %s."
-                               (if mark (harness-fallback--out-text mark)
-                                 (format "%s is out" (harness-fallback--model-label from)))
-                               (harness-fallback--model-label target)))
-                      ('up
-                       (format "%s works again, so this session goes back up to %s."
-                               (harness-fallback--provider-label (harness-fallback--provider-of target))
-                               (harness-fallback--model-label target)))
-                      (_
-                       (format "%s works again, so this session goes back to %s."
-                               (harness-fallback--provider-label (harness-fallback--provider-of target))
-                               (harness-fallback--model-label target)))))
-      (harness-log 'info "fallback: %s %s → %s (%s)" sid from target why)
-      (harness-emit 'fallback/switched sid from target why)
-      (when (and mark (eq why 'out)) (harness-fallback--notify-switch session mark target))
-      (harness-fallback--changed))))
+    (when-let* ((refusal (and (not (equal from target))
+                              (harness-fallback-refusal session target why))))
+      (harness-log 'info "fallback: %s stays on %s: %s" sid from refusal)
+      (harness-call 'session/hint sid (format "Not switching to %s: %s" target refusal))
+      (harness-emit 'fallback/refused sid from target refusal)
+      (cl-return-from harness-fallback--switch nil))
+    (when (equal from target)
+      (cl-return-from harness-fallback--switch nil))
+    (if (equal target original)
+        (remhash sid harness-fallback--moved)
+      (unless record (puthash sid (list :original from :since (float-time)) harness-fallback--moved)))
+    (let ((harness-fallback--switching t))
+      (harness-call 'session/update sid :model target :silent t))
+    (harness-call 'session/hint sid
+                  (pcase why
+                    ('out
+                     (format "%s, so this session carries on with %s."
+                             (if mark (harness-fallback--out-text mark)
+                               (format "%s is out" (harness-fallback--model-label from)))
+                             (harness-fallback--model-label target)))
+                    ('up
+                     (format "%s works again, so this session goes back up to %s."
+                             (harness-fallback--provider-label (harness-fallback--provider-of target))
+                             (harness-fallback--model-label target)))
+                    (_
+                     (format "%s works again, so this session goes back to %s."
+                             (harness-fallback--provider-label (harness-fallback--provider-of target))
+                             (harness-fallback--model-label target)))))
+    (harness-log 'info "fallback: %s %s → %s (%s)" sid from target why)
+    (harness-emit 'fallback/switched sid from target why)
+    (when (and mark (eq why 'out)) (harness-fallback--notify-switch session mark target))
+    (harness-fallback--changed)
+    t))
 
 (defun harness-fallback--notify (key title body urgency session)
   "Send the notification TITLE BODY at URGENCY about SESSION, once per KEY."
@@ -678,26 +716,49 @@ VALUE and NEXT are the filter's.  A session whose own model works stays
 on it.  A model that is out gives way to the first of
 `harness-fallback-models' that is not; a session moved earlier moves
 back up to a higher entry that works again while its own model is
-still out, and goes back to its own model once that works again."
+still out, and goes back to its own model once that works again.
+
+A move a `harness-fallback-guard-functions' guard refuses is not made:
+the turn does not start, and stops with the guard's reason, because
+running on a model that is out only to fail again would hide what the
+person has to decide."
   (when (plist-get value :proceed)
     (condition-case err
         (let* ((mark (harness-fallback-mark-of (plist-get session :model)))
-               (choice (harness-fallback-choose session)))
+               (choice (harness-fallback-choose session))
+               (why (cond (mark 'out)
+                          ((plist-get choice :back) 'back)
+                          (t 'up))))
           (when (and choice (not (equal (plist-get choice :model) (plist-get session :model))))
-            (harness-fallback--switch session (plist-get choice :model)
-                                      (cond (mark 'out)
-                                            ((plist-get choice :back) 'back)
-                                            (t 'up))
-                                      mark)))
+            (if-let* ((refusal (harness-fallback-refusal
+                                session (plist-get choice :model) why)))
+                (progn
+                  (harness-fallback--hint-refusal session (plist-get choice :model) refusal)
+                  (harness-emit 'fallback/refused
+                                (plist-get session :id) (plist-get session :model)
+                                (plist-get choice :model) refusal)
+                  (setq value (list :proceed nil :reason refusal)))
+              (harness-fallback--switch session (plist-get choice :model) why mark))))
       (error (harness-log 'warn "fallback: before the turn of %s: %S" (plist-get session :id) err))))
   (funcall next value)
   nil)
+
+(defun harness-fallback--hint-refusal (session target refusal)
+  "Leave REFUSAL as a hint on SESSION, saying TARGET was not taken."
+  (when (harness-method-exists-p 'session/hint)
+    (ignore-errors
+      (harness-call 'session/hint (plist-get session :id)
+                    (format "Not switching to %s: %s" target refusal)))))
 
 (defun harness-fallback--step-error (value next session failure)
   "`agent/step-error' handler: when FAILURE ran out of quota or money, move on.
 VALUE and NEXT are the filter's, SESSION the session as it failed.  The
 provider or model is marked out; when another model can carry on,
-SESSION moves there (a switch with why `out') and the step is retried."
+SESSION moves there (a switch with why `out') and the step is retried.
+When a guard (`harness-fallback-guard-functions') refuses that move, the
+step is not retried and the turn stops with the guard's reason: a
+session whose provider is pinned on purpose does not carry on elsewhere
+just because the quota ran out."
   (let ((decision value))
     (unless (plist-get value :retry)
       (condition-case err
@@ -705,11 +766,23 @@ SESSION moves there (a switch with why `out') and the step is retried."
             (let* ((model (or (plist-get failure :model) (plist-get session :model)))
                    (mark (harness-fallback--record-failure model kind failure))
                    (choice (harness-fallback-choose session)))
-              (if (and choice (not (equal (plist-get choice :model) (plist-get session :model))))
-                  (progn
-                    (harness-fallback--switch session (plist-get choice :model) 'out mark)
-                    (setq decision (list :retry t :reason (harness-fallback--out-text mark))))
-                (harness-fallback--nothing-left session mark))))
+              (cond
+               ((and choice (not (equal (plist-get choice :model) (plist-get session :model))))
+                (if-let* ((refusal (harness-fallback-refusal
+                                    session (plist-get choice :model) 'out)))
+                    (progn
+                      (harness-fallback--hint-refusal
+                       session (plist-get choice :model) refusal)
+                      (harness-emit 'fallback/refused (plist-get session :id)
+                                    (plist-get session :model)
+                                    (plist-get choice :model) refusal)
+                      (setq decision (list :retry nil :stop t
+                                           :reason (format "Not switching to %s: %s"
+                                                           (plist-get choice :model) refusal))))
+                  (when (harness-fallback--switch session (plist-get choice :model) 'out mark)
+                    (setq decision (list :retry t
+                                         :reason (harness-fallback--out-text mark))))))
+               (t (harness-fallback--nothing-left session mark)))))
         (error (harness-log 'warn "fallback: after the failure of %s: %S" (plist-get session :id) err))))
     (funcall next decision))
   nil)
@@ -875,6 +948,8 @@ A reload reads nothing: the marks in memory are newer than the store."
 (harness-declare-event 'fallback/changed "() after what ran out, or the sessions moved off their model, changed.")
 (harness-declare-event 'fallback/switched
                        "(SESSION-ID FROM TO WHY) after the fallback moved a session to model TO; WHY is `out', `up' or `back'.")
+(harness-declare-event 'fallback/refused
+                       "(SESSION-ID FROM TO REASON) when a guard kept a session on FROM instead of moving it to TO.")
 
 (harness-define-module 'fallback
   :doc "Carry on with another provider when one runs out of quota or money."

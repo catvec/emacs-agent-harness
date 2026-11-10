@@ -2,30 +2,38 @@
 
 # provider-openai
 
-OpenAI-compatible chat completions provider (OpenAI, OpenRouter, local servers).
+OpenAI-compatible chat completions provider (OpenAI, local servers, custom endpoints).
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-provider-openai.el](../../lisp/modules/harness-provider-openai.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [provider](provider.md)
-- **Required by:** [provider-deepseek](provider-deepseek.md)
+- **Required by:** [provider-deepseek](provider-deepseek.md), [provider-openrouter](provider-openrouter.md)
 
 ## About
 
 A native-loop provider for every server that speaks the OpenAI chat
-completions API: OpenAI itself, OpenRouter, and local servers such
-as llama.cpp, vLLM or Ollama.  The agent runs the tool loop; this
-module only turns a request into a streamed sequence of events.
+completions API: OpenAI itself, a local server such as llama.cpp, vLLM
+or Ollama, and a custom compatible endpoint.  The agent runs the tool
+loop; this module only turns a request into a streamed sequence of
+events.
 
 Each entry of `harness-openai-endpoints` becomes its own provider,
-so model ids look like "openrouter:openai/gpt-4.1-nano" or
-"openai:gpt-4.1".  Keys come from the endpoint plist, an environment
-variable, or auth-source, and are never logged.
+so model ids look like "openai:gpt-4.1" or "local:llama-3".
+
+A provider whose wire is OpenAI's but whose fields, routing or
+errors are its own gets a module that uses this transport rather
+than a branch in it: OpenRouter does
+(harness-provider-openrouter.el), through the `:dialect` hooks
+`harness-openai--dialect` describes.  Keys come from the endpoint
+plist, an environment variable, or auth-source, and are never
+logged.
 
 The models are what the server lists at /models, asked again once
 the listing is older than `harness-openai--models-ttl` or a refresh
-asks.  OpenRouter's schema (pricing, context length, modalities,
-supported parameters) is mapped onto the harness model plist so the
+asks.  A schema that carries prices (prompt, completion, cache-read),
+context length, modalities and supported parameters -- OpenRouter's,
+for instance -- is mapped onto the harness model plist so the
 catalogue carries live prices, and so are the windows other servers
 give under their own names (vLLM, Groq, Mistral, LM Studio,
 LiteLLM).  Plain OpenAI only gives ids: a model without a window
@@ -40,10 +48,11 @@ endpoint with no key, no static models and no headers lists
 nothing, and a refresh clears the models it listed before.  Other
 endpoints, such as a local server, stay usable without a key.
 
-The reasoning effort is model-specific too.  OpenRouter's model list
-names the efforts a model takes in its `reasoning` object
+The reasoning effort is model-specific too.  A model list may name
+the efforts a model takes in its `reasoning` object
 (`supported_efforts`, with `mandatory` saying that `none` is not
-one), and they become the model's `:thinking-levels`; the body fits
+one) -- OpenRouter's does -- and they become the model's
+`:thinking-levels`; the body fits
 the harness level asked for to them, so `max` and `xhigh` go out
 where the model takes them and a model that refuses `none` is asked
 for its weakest effort instead.  A server that names no efforts keeps

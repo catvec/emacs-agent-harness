@@ -17,8 +17,9 @@ module needs something more, add it here first.
                 fallback, retry, naming, judge, compaction, handoff, worktree, merge, tasks,
                 tasks-notify, supervisor, skills, perms, decisions, sandbox,
                 notifications, secrets, redact, plugins, chatgpt-plan
- Completion     provider, provider-openai, provider-deepseek, provider-claude,
-                provider-bedrock, provider-copilot, provider-responses
+ Completion     provider, provider-openai, provider-openrouter,
+                provider-deepseek, provider-claude, provider-bedrock,
+                provider-copilot, provider-responses
  Tool calls     mcp (the MCP host: tool servers the harness starts in the
                 session's sandbox, and the Emacs a client lends), tools,
                 tools-fs, tools-shell, tools-ssh, tools-emacs,
@@ -2904,6 +2905,15 @@ on every later turn.  The agent gives this provider pictures only for a
 model that lists image input; a DeepSeek model lists it only when its
 catalogue entry says `:vision`.
 
+A provider whose wire is OpenAI's but whose request fields, routing
+or errors are its own gets a module of its own over this transport,
+through a `:dialect` plist the endpoint carries: headers, extra body
+fields, the stream chunk reader, the error-detail reader, the response
+audit, and the state an answer reports, as functions the transport
+calls.  The transport knows no provider's field names; an endpoint
+without a dialect is sent exactly the body it was always sent.
+OpenRouter is the first such module (`provider-openrouter`, below).
+
 An endpoint that spends a ChatGPT plan reports it through
 `provider/quota`: an answer carrying `x-codex-primary-*` or
 `x-codex-secondary-*` headers (a window's used percentage, its length
@@ -2954,6 +2964,29 @@ holidays) at double the off-peak rate, so the catalogue carries
 `:pricing-fn' picks between them; cached input, cache-miss input and
 output are priced separately.  A `provider/pricing-warning` event and a
 session hint say once per peak window that a call costs more.
+
+The OpenRouter provider (`provider-openrouter`, `openrouter:` models)
+is the OpenAI-compatible transport with OpenRouter's dialect and its
+own module.  Its request fields are its own: the `provider` routing
+object, `service_tier`, `session_id`, `usage.include`, the `reasoning`
+object and `max_tokens`.  Behind an opt-in policy
+(`harness-openrouter-routing`, nil by default) a new session is pinned
+to one exact endpoint of one exact model, chosen by price: only the
+policy's vetted endpoints are candidates, one dearer than the model
+owner's own published price in any priced component is dropped, and the
+cheapest of the rest is chosen.  The pin lives in the session's `ext`
+and every request carries `only`/`order` with `allow_fallbacks: false`,
+the standard tier and the session id as OpenRouter's sticky hint.  A
+pinned session is revalidated before dispatch and pauses rather than
+switching; a switch is by hand (`harness-openrouter-switch`) and starts
+a cache-cold conversation.  A candidate whose listing cannot be read
+blocks the decision instead of falling through to the next provider.
+The answer is audited for the model, provider, tier and region it names,
+and a typed error code an identical retry cannot pass stops the step
+instead of retrying it.  A pinned session is also guarded from
+`harness-fallback`, so running out of quota or money stops the turn
+rather than moving to an unvetted model.  Prices are compared as exact
+decimals, never floats.  See docs/openrouter-pinning.md.
 
 The Copilot provider (`copilot:` models) drives `copilot --headless
 --stdio`, the GitHub Copilot CLI's server mode that GitHub's Copilot

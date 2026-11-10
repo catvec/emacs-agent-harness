@@ -69,7 +69,12 @@ providers already said.
 ### Events
 
 - `fallback/changed` — () after what ran out, or the sessions moved off their model, changed.
+- `fallback/refused` — (SESSION-ID FROM TO REASON) when a guard kept a session on FROM instead of moving it to TO.
 - `fallback/switched` — (SESSION-ID FROM TO WHY) after the fallback moved a session to model TO; WHY is `out`, `up` or `back`.
+
+### Hooks
+
+- `harness-fallback-guard-functions` — Functions that may refuse to move a session off its model.
 
 ### Options
 
@@ -103,6 +108,7 @@ providers already said.
 ### Events it emits
 
 - `fallback/changed`
+- `fallback/refused`
 - `fallback/switched`
 
 ### Filter chains it joins

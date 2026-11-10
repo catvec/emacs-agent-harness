@@ -64,9 +64,9 @@ RESPONSE is (:status N :chunks (STRING…)) for streamed replies or
              payloads ""))
 
 (defvar harness-openai-test-endpoint
-  '(:id testrouter :label "Test router" :base-url "https://openrouter.example/api/v1/"
+  '(:id testrouter :label "Test router" :base-url "https://router.example/api/v1/"
     :api-key "sk-test-not-a-real-key")
-  "An OpenRouter-flavoured endpoint with a literal key.")
+  "An OpenAI-compatible endpoint with a literal key.")
 
 (defvar harness-openai-test-openai-endpoint
   '(:id testopenai :label "Test OpenAI" :base-url "https://api.openai.example/v1"
@@ -108,10 +108,12 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
 ;;;; Registration and configuration
 
 (ert-deftest harness-provider-openai-registers-default-endpoints ()
-  (should (harness-provider-get 'openrouter))
   (should (harness-provider-get 'openai))
-  (should (equal "OpenRouter" (harness-provider-label (harness-provider-get 'openrouter))))
-  (should (eq 'dynamic (plist-get (harness-provider-capabilities (harness-provider-get 'openrouter)) :pricing)))
+  ;; OpenRouter is another module's provider (harness-provider-openrouter),
+  ;; so it is not in this module's defaults and this module's listing
+  ;; claims no prices for anything: the catalogue's prices come only from
+  ;; a dialect that asks for them.
+  (should-not (harness-openai-endpoint 'openrouter))
   (should-not (plist-get (harness-provider-capabilities (harness-provider-get 'openai)) :pricing))
   (should (memq 'provider (harness-module-requires (harness-module-get 'provider-openai)))))
 
@@ -134,7 +136,7 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
           ;; Setting the custom back through :set drops the provider again.
           (funcall (get 'harness-openai-endpoints 'custom-set) 'harness-openai-endpoints saved)
           (should-not (harness-provider-get 'local))
-          (should (harness-provider-get 'openrouter)))
+          (should (harness-provider-get 'openai)))
       (setq harness-openai-endpoints saved)
       (harness-openai--register-all))))
 
@@ -188,16 +190,22 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
       (let* ((req (car harness-openai-test--requests))
              (body (plist-get req :json))
              (msgs (plist-get body :messages)))
-        (should (equal "https://openrouter.example/api/v1/chat/completions" (plist-get req :url)))
+        (should (equal "https://router.example/api/v1/chat/completions" (plist-get req :url)))
         (should (equal "POST" (plist-get req :method)))
         (should (equal "Bearer sk-test-not-a-real-key" (cdr (assoc "Authorization" (plist-get req :headers)))))
         (should (equal "vendor/model-1" (plist-get body :model)))
         (should (eq t (plist-get body :stream)))
         (should (equal '(:include_usage t) (plist-get body :stream_options)))
-        (should (equal '(:include t) (plist-get body :usage)))
-        (should (equal '(:effort "medium") (plist-get body :reasoning)))
-        (should (= 321 (plist-get body :max_tokens)))
-        (should-not (plist-get body :reasoning_effort))
+        ;; A plain OpenAI-compatible endpoint: no provider field of its own,
+        ;; and the plain OpenAI spelling of the effort and the output limit.
+        (should-not (plist-get body :usage))
+        (should-not (plist-get body :provider))
+        (should-not (plist-get body :service_tier))
+        (should-not (plist-get body :session_id))
+        (should (equal "medium" (plist-get body :reasoning_effort)))
+        (should-not (plist-get body :reasoning))
+        (should (= 321 (plist-get body :max_completion_tokens)))
+        (should-not (plist-get body :max_tokens))
         ;; tools
         (should (equal '((:type "function"
                           :function (:name "echo" :description "Echo it."
@@ -531,15 +539,13 @@ not take `none' is asked for its weakest effort instead of failing."
          `(:model "testrouter:vendor/smart" :thinking ,(car case)
            :messages ((:role user :content ((:type "text" :text "hi"))))))
         (should (equal (cdr case)
-                       (harness-plist-get-in (harness-openai-test--last-request-json)
-                                             '(:reasoning :effort)))))
+                       (plist-get (harness-openai-test--last-request-json) :reasoning_effort))))
       (harness-openai-test--complete
        harness-openai-test-endpoint
        '(:model "testrouter:vendor/smart" :no-thinking t
          :messages ((:role user :content ((:type "text" :text "hi"))))))
       (should (equal "low"
-                     (harness-plist-get-in (harness-openai-test--last-request-json)
-                                           '(:reasoning :effort)))))))
+                     (plist-get (harness-openai-test--last-request-json) :reasoning_effort))))))
 
 (ert-deftest harness-provider-openai-deepseek-replays-reasoning-content ()
   ;; DeepSeek's thinking mode rejects a tool-using history whose assistant
@@ -1058,9 +1064,13 @@ sessions would leave it otherwise."
     (cl-letf (((symbol-function 'harness-openai--api-key) (lambda (_) nil))
               ((symbol-function 'harness-openai--fetch-models)
                (lambda (_) (ert-fail "No public listing without account configuration"))))
-      (dolist (endpoint '((:id openrouter :base-url "https://openrouter.ai/api/v1")
-                          (:id openai :base-url "https://api.openai.com/v1")
-                          (:id deepseek :base-url "https://api.deepseek.com")))
+      (dolist (endpoint '((:id openai :base-url "https://api.openai.com/v1")
+                          (:id deepseek :base-url "https://api.deepseek.com")
+                          ;; A dialect may name its own hosted service as
+                          ;; needing an account; this is that hook, not
+                          ;; knowledge of any provider in this module.
+                          (:id hosted :base-url "https://hosted.example/v1"
+                           :dialect (:key-needed t))))
         (puthash (plist-get endpoint :id) '(0 (:name "stale")) harness-openai--models-cache)
         (should-not (harness-test-await (harness-openai--models endpoint)))
         (should-not (gethash (plist-get endpoint :id) harness-openai--models-cache))
@@ -1076,17 +1086,17 @@ sessions would leave it otherwise."
                (lambda (_) (cl-incf calls) (harness-resolved '((:name "listed"))))))
       (dolist (endpoint '((:id local :base-url "http://localhost:11434/v1")
                           (:id custom :base-url "https://keyless.example/v1")
-                          (:id headers :base-url "https://openrouter.ai/api/v1"
+                          (:id headers :base-url "https://api.openai.com/v1"
                            :headers (("Authorization" . "Bearer custom")))))
         (should (equal '((:name "listed")) (harness-test-await (harness-openai--models endpoint t)))))
       (should (equal '((:name "static"))
                      (harness-test-await
-                      (harness-openai--models '(:id static :base-url "https://openrouter.ai/api/v1"
+                      (harness-openai--models '(:id static :base-url "https://api.openai.com/v1"
                                                 :models ("static"))))))
       (setq key "configured")
       (should (equal '((:name "listed"))
                      (harness-test-await
-                      (harness-openai--models '(:id account :base-url "https://openrouter.ai/api/v1")))))
+                      (harness-openai--models '(:id account :base-url "https://api.openai.com/v1")))))
       (should (= 4 calls)))))
 
 (ert-deftest harness-provider-openai-models-removed-key-clears-provider-cache ()
@@ -1104,15 +1114,19 @@ sessions would leave it otherwise."
     (cl-letf (((symbol-function 'harness-openai--api-key) (lambda (_) key))
               ((symbol-function 'harness-openai--fetch-models)
                (lambda (_) (harness-resolved '((:name "listed" :context-window 1000))))))
-      (harness-openai-register-endpoint '(:id openrouter :base-url "https://openrouter.ai/api/v1"))
-      (should (equal '("openrouter:listed")
+      (harness-openai-register-endpoint '(:id reloaded :base-url "https://api.openai.com/v1"))
+      (should (equal '("reloaded:listed")
                      (mapcar (lambda (m) (plist-get m :id))
                              (harness-test-await (harness-call 'provider/models t)))))
       (setq key nil)
       (should-not (harness-test-await (harness-call 'provider/models t)))
       (should-not (harness-test-await (harness-call 'provider/models))))))
 
-(ert-deftest harness-provider-openai-models-openrouter-mapping ()
+(ert-deftest harness-provider-openai-models-map-the-fields-servers-send ()
+  "A catalogue entry's fields are read when a server sends them.
+Prices, modalities and effort lists are OpenRouter's names too, but this
+mapping only reads what an entry carries: an entry without them -- plain
+OpenAI's -- gains nothing, and no request is changed by it."
   (harness-openai-test-with-fake
       `(("/models"
          . (:body ,(harness-json-encode
@@ -1131,7 +1145,7 @@ sessions would leave it otherwise."
     (let* ((models (harness-test-await (harness-openai--models harness-openai-test-endpoint)))
            (smart (car models)) (plain (cadr models))
            (pricing (plist-get smart :pricing)))
-      (should (equal "https://openrouter.example/api/v1/models" (plist-get (car harness-openai-test--requests) :url)))
+      (should (equal "https://router.example/api/v1/models" (plist-get (car harness-openai-test--requests) :url)))
       (should (equal "Bearer sk-test-not-a-real-key"
                      (cdr (assoc "Authorization" (plist-get (car harness-openai-test--requests) :headers)))))
       (should (= 2 (length models)))
@@ -1165,8 +1179,8 @@ sessions would leave it otherwise."
                                 :id))))
     (harness-openai-clear-models-cache)))
 
-(ert-deftest harness-provider-openai-models-read-openrouter-reasoning-efforts ()
-  "OpenRouter names each model's reasoning efforts; they become its levels.
+(ert-deftest harness-provider-openai-models-read-a-reasoning-effort-list ()
+  "A model that names its reasoning efforts gets those levels.
 `mandatory' is honoured by leaving out `none', which such a model
 refuses; a null list means every value is taken, and a `reasoning'
 object without the list exposes no effort choice at all."
@@ -1277,6 +1291,9 @@ A model no field sizes has none: the catalogue estimates it."
 ;;;; Integration
 
 (defconst harness-openai-test-integration-model "openrouter:openai/gpt-4.1-nano")
+;; The integration tests below talk to OpenRouter for real; they are the
+;; one place this suite names it, and they load its module for the
+;; provider it registers.
 
 (defun harness-openai-test--run-live (request)
   "Send REQUEST through the bus and return its events oldest first."
@@ -1294,6 +1311,7 @@ A model no field sizes has none: the catalogue estimates it."
   :tags '(integration)
   (harness-test-skip-unless-integration)
   (skip-unless (getenv "OPENROUTER_API_KEY"))
+  (require 'harness-provider-openrouter)
   (let* ((events (harness-openai-test--run-live
                   (list :model harness-openai-test-integration-model
                         :system "You answer with a single word."
@@ -1314,6 +1332,7 @@ A model no field sizes has none: the catalogue estimates it."
   :tags '(integration)
   (harness-test-skip-unless-integration)
   (skip-unless (getenv "OPENROUTER_API_KEY"))
+  (require 'harness-provider-openrouter)
   (let* ((tools '((:name "echo" :description "Echo VALUE back through the tool runtime."
                    :schema (:type "object" :properties (:value (:type "string" :description "Text to echo"))
                             :required ("value")))))

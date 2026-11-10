@@ -8,6 +8,7 @@ Try a step again after a transient network or rate-limit failure.
 - **Source:** [lisp/modules/harness-retry.el](../../lisp/modules/harness-retry.el)
 - **Loaded:** by default
 - **Requires:** [session](session.md), [agent](agent.md)
+- **Required by:** [provider-openrouter](provider-openrouter.md)
 
 ## About
 
