@@ -128,12 +128,19 @@ Future<void> main() async {
           // The column it is over names what leaving it there would do.
           expect(find.text('Start now'), findsOneWidget);
         case _Scene.phoneDrag:
-          // The stages of a phone's one list, every priority in them.
+          // The stages of a phone's one list, every priority in them, in the
+          // order a person attends to them: Review comes first, above Active,
+          // and the card is carried to it.  (The columns that hold nothing
+          // are targets too while a card is carried; the picture holds one
+          // card over the first section, and `task_drag_test.dart` takes the
+          // empty ones.)
           expect(find.text('Merging'), findsNothing);
           carried = await carry('task-1', find.text('Review'));
-          // A column that holds nothing is a target too, while one is
-          // carried.
-          expect(find.text('Merging'), findsOneWidget);
+          expect(find.text('Put in review'), findsOneWidget);
+          expect(
+            tester.getTopLeft(find.text('Review')).dy,
+            lessThan(tester.getTopLeft(find.text('Active')).dy),
+          );
       }
 
       if (shots != null) {

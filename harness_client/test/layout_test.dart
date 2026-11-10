@@ -228,7 +228,9 @@ void main() {
       // them, and its stages are sections of one scroll.
       expect(find.byType(HarnessTabStrip<String>), findsNothing);
       // What waits on the person is the lane above the stages, its heading
-      // and card on the same edge as the stages'.
+      // and card on the same edge as the stages'.  The first stage under it
+      // is Review: what is ready for the person comes before the work at
+      // work (see `taskPhoneSections`).
       final lane = find.byKey(const ValueKey('task-lane-needs-input'));
       final laneHeading = tester.getTopLeft(
         find.descendant(of: lane, matching: find.text('Needs input')),
@@ -236,9 +238,9 @@ void main() {
       final asking = tester.getTopLeft(
         find.byKey(const ValueKey('task-card-task-4')),
       );
-      final stage = tester.getTopLeft(find.text('Backlog'));
+      final stage = tester.getTopLeft(find.text('Review'));
       final card = tester.getTopLeft(
-        find.byKey(const ValueKey('task-card-task-5')),
+        find.byKey(const ValueKey('task-card-task-2')),
       );
       expect(laneHeading.dy, lessThan(asking.dy));
       expect(asking.dy, lessThan(stage.dy));

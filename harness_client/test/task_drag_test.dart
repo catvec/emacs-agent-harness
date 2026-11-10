@@ -59,10 +59,12 @@ Future<void> _openWide(WidgetTester tester, _Rig rig) async {
   await _settle(tester, 6);
 }
 
-/// The board on a phone: one scroll, the columns as stage sections, every
-/// priority in them.
-Future<void> _openPhone(WidgetTester tester, _Rig rig) async {
-  tester.view.physicalSize = const Size(1170, 2532);
+/// The board on a phone: one scroll, the columns as stage sections in the
+/// order a person attends to them, every priority in them.  A taller screen
+/// draws every section of a board at once, which a section below the fold is
+/// no part of until it is scrolled to.
+Future<void> _openPhone(WidgetTester tester, _Rig rig, {Size? size}) async {
+  tester.view.physicalSize = size ?? const Size(1170, 2532);
   tester.view.devicePixelRatio = 3.0;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
@@ -323,11 +325,12 @@ void main() {
       expect(rig.harness.tasks['task-4']!['column'], 'pending');
     });
 
-    testWidgets('shows every column as a target while a card is carried', (
-      tester,
-    ) async {
+    testWidgets('shows every column as a target while a card is carried, in '
+        'the order a person attends to them', (tester) async {
       final rig = await _rig();
-      await _openPhone(tester, rig);
+      // Tall enough to draw every section at once, so that the order the
+      // board renders is the order it reads down.
+      await _openPhone(tester, rig, size: const Size(1170, 6000));
       // The board is one scroll of stage sections, every priority in them.
       // A section that holds nothing is not there until a card is carried.
       expect(find.text('Merging'), findsNothing);
@@ -336,8 +339,32 @@ void main() {
         'task-1',
         find.text('Review'),
         beforeDrop: () async {
-          // A column that holds nothing is there to be dropped on.
-          expect(find.text('Merging'), findsOneWidget);
+          // A column that holds nothing is there to be dropped on, and the
+          // sections keep the phone's order while one is carried.
+          final tops = <String, double>{
+            for (final heading in [
+              'Review',
+              'Active',
+              'Pending',
+              'Backlog',
+              'Merging',
+              'Done',
+            ])
+              heading: tester.getTopLeft(find.text(heading)).dy,
+          };
+          for (final pair in [
+            ('Review', 'Active'),
+            ('Active', 'Pending'),
+            ('Pending', 'Backlog'),
+            ('Backlog', 'Merging'),
+            ('Merging', 'Done'),
+          ]) {
+            expect(
+              tops[pair.$1]!,
+              lessThan(tops[pair.$2]!),
+              reason: '${pair.$1} is above ${pair.$2}',
+            );
+          }
         },
       );
       expect(
@@ -345,6 +372,32 @@ void main() {
         'task-1',
       );
       expect(rig.harness.tasks['task-1']!['column'], 'review');
+    });
+
+    testWidgets('drops a card on a section that holds nothing', (tester) async {
+      final rig = await _rig();
+      await _openPhone(tester, rig, size: const Size(1170, 6000));
+      // Merging holds no task: its section is drawn while a card is carried,
+      // and takes the card like any other.
+      expect(find.byKey(const ValueKey('task-section-merging')), findsNothing);
+      await _carry(
+        tester,
+        'task-2',
+        find.text('Merging'),
+        beforeDrop: () async {
+          // The section it is over says what the drop does, in place of its
+          // count.
+          expect(
+            find.descendant(
+              of: find.byKey(const ValueKey('task-section-merging')),
+              matching: find.text('Verify and merge'),
+            ),
+            findsOneWidget,
+          );
+        },
+      );
+      expect(rig.harness.calls('_harness/task/verify').last['id'], 'task-2');
+      expect(rig.harness.tasks['task-2']!['column'], 'done');
     });
   });
 }

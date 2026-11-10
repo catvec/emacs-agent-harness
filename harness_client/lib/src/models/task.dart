@@ -5,12 +5,14 @@ import 'tool_display.dart';
 
 /// The workflow columns of the task board, in the order a task travels.
 ///
-/// Backlog, Pending, Active, Review, Merging, Done, Cancelled.  The board
-/// draws them left to right; a phone draws one lane and its stages as
-/// sections in this order.  The harness decides which column a task is in;
-/// the board only says where to draw it.  A task that waits on the person
-/// is no column of its own here: it is the `needs-input` lane, drawn
-/// over its stage (see [HarnessTask.stageName]).
+/// Backlog, Pending, Active, Review, Merging, Done, Cancelled.  A wide
+/// board draws them left to right, and they are the states its cells take a
+/// card for.  A phone draws sections in [taskPhoneSections]'s order
+/// instead, by what needs the person first: the same stages, in another
+/// order, so this order is not the phone's.  The harness decides which
+/// column a task is in; the board only says where to draw it.  A task that
+/// waits on the person is no column of its own here: it is the
+/// `needs-input` lane, drawn over its stage (see [HarnessTask.stageName]).
 const taskColumns = [
   'backlog',
   'pending',
@@ -28,6 +30,36 @@ const taskColumns = [
 /// is a row across the workflow columns, so a person can see one priority
 /// at work in every stage, or everything that waits on them at once.
 const taskLanes = ['needs-input', 'high', 'medium', 'low'];
+
+/// The sections of a phone's board, top to bottom: what the person attends to
+/// first.
+///
+/// A phone has no room for the grid of [taskColumns] by [taskLanes], so it
+/// draws one scroll of sections.  They are ordered by what a person does
+/// with them, not by the order a task travels: the work blocked on them,
+/// then the work ready for them, then the work at work, then the work that
+/// waits for a slot, then the work that is over.  `needs-input` is the lane
+/// of what waits on the person ([taskLanes] first), not a stage: it is drawn
+/// above the stages, and its tasks are not drawn in the stages again (see
+/// [HarnessTask.stageName]).
+///
+/// The stages keep their workflow neighbours as far as the person's order
+/// allows: Pending and Backlog are the waiting work, so both come after
+/// Active and before what is over; Merging is a task in the merge queue,
+/// after the stages that are being worked on and before the finished one;
+/// Done is the finished work, and Cancelled follows it.  This is the phone's
+/// order only: a wide board is a grid, and [taskColumns] is still the order
+/// of its columns and of the drops a card can make.
+const taskPhoneSections = [
+  'needs-input',
+  'review',
+  'active',
+  'pending',
+  'backlog',
+  'merging',
+  'done',
+  'cancelled',
+];
 
 /// A task on the harness's task board.
 class HarnessTask {

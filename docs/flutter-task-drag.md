@@ -70,7 +70,12 @@ Cards are `LongPressDraggable<HarnessTask>`; a column is a
 screen a card is carried along the lane it is drawn in, so the cells it can
 be dropped on are that lane's, and the drop reads the column it is over, not
 the lane; a phone draws no lane rows, so every stage section takes any card,
-and the lane of what waits on the person above them takes none. A long
+and the lane of what waits on the person above them takes none. On a phone
+the sections come in the order a person attends to the work rather than the
+order a task travels ([flutter-task-columns.md](flutter-task-columns.md)),
+which changes where a drop target is, not what a drop does: a section is the
+same stage's target wherever it sits, and a section that holds nothing is
+drawn as one while a card is carried. A long
 press is the gesture on every platform: an immediate drag would take the
 mouse drag that scrolls the board out from under the list, and a tap still
 has to open the conversation. A carried card is drawn smaller than nothing

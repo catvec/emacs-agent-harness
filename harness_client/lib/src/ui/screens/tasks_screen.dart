@@ -123,7 +123,11 @@ class _TasksScreenState extends State<TasksScreen> {
                   child: _TaskBoard(
                     app: widget.app,
                     controller: controller,
+                    // A wide board's columns are the workflow; a phone's
+                    // sections are the same stages in the order a person
+                    // attends to them (see `taskPhoneSections`).
                     stages: taskColumns,
+                    sections: taskPhoneSections,
                     lanes: taskLanes,
                     onOpen: _openTask,
                     onMove: _moveTask,
@@ -706,13 +710,15 @@ class _AllQueuesSheetState extends State<_AllQueuesSheet> {
 /// The board's columns and lanes.  A card is carried with a long press and
 /// dropped on another column to move its task there: the column says what
 /// the drop does, and one with no action for the task refuses it.  A wide
-/// screen draws the lanes as rows (see [_TaskGrid]); a phone has room for one
-/// lane only, what waits on the person, above the columns (see [_TaskStages]).
+/// screen draws the lanes as rows (see [_TaskGrid]); a phone draws one
+/// scroll of sections ordered by what needs the person first, the work
+/// blocked on them leading (see [_TaskStages]).
 class _TaskBoard extends StatefulWidget {
   const _TaskBoard({
     required this.app,
     required this.controller,
     required this.stages,
+    required this.sections,
     required this.lanes,
     required this.onOpen,
     required this.onMove,
@@ -723,6 +729,10 @@ class _TaskBoard extends StatefulWidget {
 
   /// The workflow stages, left to right.
   final List<String> stages;
+
+  /// The phone's sections, top to bottom: the Needs input lane, then the
+  /// stages in the order a person attends to them.
+  final List<String> sections;
 
   /// The swimlanes, top to bottom.
   final List<String> lanes;
@@ -759,7 +769,7 @@ class _TaskBoardState extends State<_TaskBoard> {
     return _TaskStages(
       app: widget.app,
       controller: widget.controller,
-      stages: widget.stages,
+      sections: widget.sections,
       onOpen: widget.onOpen,
       onMove: widget.onMove,
       dragging: _dragging,
@@ -1070,18 +1080,24 @@ class _LaneCell extends StatelessWidget {
   }
 }
 
-/// The board on a phone: the workflow stages as sections in the order a task
-/// travels, every priority in each, so the whole board reads down one list.
-/// What waits on the person is no part of a stage here: it is the lane above
-/// them, one section of its own, since a phone draws no lane rows for the
-/// priorities.  A stage section holds the tasks of that stage that do not wait
-/// on the person.  While a card is carried every column is a section, that one
+/// The board on a phone: one scroll of sections ordered by what a person
+/// attends to first.  What waits on the person leads, in a section of its
+/// own, then the stages in `taskPhoneSections`'s order -- Review, Active,
+/// Pending, Backlog, Merging, Done, Cancelled -- every priority in each.  So
+/// the board reads down one list: the work blocked on the person, the work
+/// ready for them, the work at work, the work waiting for a slot, then the
+/// work that is over.
+///
+/// The Needs input section is no stage: its tasks are every task that waits
+/// on the person, whatever stage they stopped in, and a stage section holds
+/// only the tasks of that stage that do not wait on the person, so no card is
+/// drawn twice.  While a card is carried every stage is a section, that one
 /// holding nothing included, and each section takes the card.
 class _TaskStages extends StatelessWidget {
   const _TaskStages({
     required this.app,
     required this.controller,
-    required this.stages,
+    required this.sections,
     required this.onOpen,
     required this.onMove,
     required this.dragging,
@@ -1091,7 +1107,10 @@ class _TaskStages extends StatelessWidget {
 
   final AppController app;
   final TaskController controller;
-  final List<String> stages;
+
+  /// The sections top to bottom: `needs-input` leads, then the stages in the
+  /// order a person attends to them.
+  final List<String> sections;
   final ValueChanged<HarnessTask> onOpen;
   final void Function(HarnessTask task, TaskAction action) onMove;
 
@@ -1103,7 +1122,7 @@ class _TaskStages extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final attention = controller.forAttention();
-    final sections = <Widget>[
+    final built = <Widget>[
       // What waits on the person is the lane above the stages, not a part of
       // one: it is the first thing the board says when there is anything.
       if (attention.isNotEmpty)
@@ -1115,17 +1134,20 @@ class _TaskStages extends StatelessWidget {
           onDragEnded: onDragEnded,
         ),
     ];
-    for (final stage in stages) {
+    for (final stage in sections) {
+      // The lane is the section above, not a stage of its own.
+      if (stage == taskLanes.first) continue;
       final tasks = controller.forStage(stage);
       // A column that holds nothing is a target too, which the board does not
       // show on a phone until a card is carried.
       if (dragging != null || tasks.isNotEmpty) {
-        sections.add(
+        built.add(
           Padding(
             padding: const EdgeInsets.symmetric(
               horizontal: HarnessSpace.gutter,
             ),
             child: _StageSection(
+              key: ValueKey('task-section-$stage'),
               stage: stage,
               tasks: tasks,
               app: app,
@@ -1139,8 +1161,8 @@ class _TaskStages extends StatelessWidget {
       }
     }
     // A board that shows nothing says so, rather than leaving a blank scroll.
-    if (sections.isEmpty) {
-      sections.add(
+    if (built.isEmpty) {
+      built.add(
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 40),
           child: Center(
@@ -1157,7 +1179,7 @@ class _TaskStages extends StatelessWidget {
       child: ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.fromLTRB(0, HarnessSpace.md, 0, 20),
-        children: sections,
+        children: built,
       ),
     );
   }
@@ -1302,6 +1324,7 @@ class _SectionHeading extends StatelessWidget {
 /// is dropped on that column.
 class _StageSection extends StatelessWidget {
   const _StageSection({
+    super.key,
     required this.stage,
     required this.tasks,
     required this.app,
