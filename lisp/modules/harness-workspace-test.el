@@ -207,6 +207,29 @@ reads what the episode waits on without opening it."
                        (plist-get (car (plist-get (harness-call 'workspace/get id) :threads))
                                   :episode-status)))))))
 
+(ert-deftest harness-workspace-skills-are-inherited-by-its-episodes ()
+  "A workspace's skill selection is intent its episodes inherit.
+It is kept as references, never as a grant: each episode resolves them
+afresh, and `workspace/update' changes them for the episodes after."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace
+                       '(:skills ("harness/review" "?cmp-box/deploy"))))
+           (id (plist-get workspace :id)))
+      (should (equal '("harness/review" "?cmp-box/deploy")
+                     (plist-get (harness-call 'workspace/get id) :skills)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (let* ((thread (car (plist-get (harness-call 'workspace/get id) :threads)))
+             (session (plist-get thread :live)))
+        (harness-workspace-test-wait-idle session)
+        (should (equal '("harness/review" "?cmp-box/deploy")
+                       (plist-get (plist-get (harness-call 'session/get session) :ext)
+                                  :skill-selection-inherited)))
+        (harness-call 'workspace/update id :skills '("harness/commit"))
+        (should (equal '("harness/commit")
+                       (plist-get (harness-call 'workspace/get id) :skills)))))))
+
 (ert-deftest harness-workspace-view-names-the-model-and-activity ()
   "A thread carries the model and activity of its live episode.
 A parked thread carries the defaults its next episode would start with,

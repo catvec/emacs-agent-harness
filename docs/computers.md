@@ -189,6 +189,7 @@ implementation answers what it can do.
 | `audio` | list audio devices, record a little |
 | `sandbox` | a desktop separate from the computer's own |
 | `exec` | run the computer's extra tools |
+| `skills` | read the skills the computer advertises, and no file of it |
 
 The capabilities are `harness-computers-capability-names`; a module may
 add one with `harness-computers-define-capability`, with a doc for people
@@ -261,20 +262,30 @@ page in Firefox, and the endpoint's screen, pointer and keyboard acting
 on it (`scripts/computer-use-demo.sh`).
 
 The MCP server answers `info`, `screenshot`, `windows`, `window`,
-`pointer`, `keyboard`, `clipboard` and `audio`; `initialize` advertises
-the client's computer in `clientCapabilities._harness.computer` (its id,
-name, host, OS, architecture, display, VNC URL, window scope, capabilities
-and servers), which the harness records as where the client runs, not as a
+`pointer`, `keyboard`, `clipboard`, `audio` and `skills`; `initialize`
+advertises the client's computer in
+`clientCapabilities._harness.computer` (its id, name, host, OS,
+architecture, display, VNC URL, window scope, capabilities and servers),
+which the harness records as where the client runs, not as a
 registration.  The id is stable per machine (`cmp-HOST-RANDOM`, kept in
 `harness-computer-endpoint-id-file`), and the same client registering
 again keeps it.
 
 Resources come from `harness-computer-endpoint-resource-roots` (git
 repositories at most `harness-computer-endpoint-resource-depth` levels
-down) and `harness-computer-endpoint-resources` (anything else a client
-names).  Limits: `harness-computer-endpoint-max-image-bytes`,
-`-max-text`, `-max-audio-seconds`; a program's stderr and exit status are
-the error a call reads.
+down), `harness-computer-endpoint-resources` (anything else a client
+names) and `harness-computer-endpoint-skill-roots` (the skills on that
+machine, one `skill` resource each; nil is the documented conventions,
+`-skill-plugins` and `-skill-project` the plugins' and the project's).
+A skill resource carries `:id`, `:name` and `:properties`
+(`:description`, `:source`, `:origin`, `:version`, `:version-key`,
+`:fingerprint`, `:files`), and the `skills` tool lists them, scans
+again, or returns the content of one by its stable id and the
+fingerprint the harness selected; see
+[skills](design/skills-as-computer-resources.md).  Limits:
+`harness-computer-endpoint-max-image-bytes`, `-max-text`,
+`-max-audio-seconds`; a program's stderr and exit status are the error a
+call reads.
 
 ## Permissions
 

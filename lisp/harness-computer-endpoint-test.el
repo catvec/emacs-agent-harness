@@ -50,6 +50,10 @@
             (harness-computer-endpoint-secret-file (harness-computer-endpoint-test-secret-file dir))
             (harness-computer-endpoint-resource-roots nil)
             (harness-computer-endpoint-resources nil)
+            ;; The skills tests name their own roots; every other test
+            ;; reads none of the developer's own skills.
+            (harness-computer-endpoint-skill-roots (list (file-name-as-directory dir)))
+            (harness-computer-endpoint-skill-plugins nil)
             (harness-computer-endpoint-vnc-url nil)
             (harness-computer-endpoint-name nil)
             (harness-computer-endpoint--attached nil)
@@ -104,18 +108,18 @@ answer is the response or the error the client gives."
   (harness-computer-endpoint-test-with
     (harness-computer-endpoint-test-when
         'wayland '("grim" "swaymsg" "ydotool" "pw-record")
-      (should (equal '("view" "windows" "pointer" "keyboard" "clipboard" "audio")
+      (should (equal '("view" "windows" "pointer" "keyboard" "clipboard" "audio" "skills")
                      (harness-computer-endpoint-capabilities)))))
   (harness-computer-endpoint-test-with
     (harness-computer-endpoint-test-when
         'x11 '("scrot" "wmctrl" "xdotool")
-      (should (equal '("view" "windows" "pointer" "keyboard" "clipboard")
+      (should (equal '("view" "windows" "pointer" "keyboard" "clipboard" "skills")
                      (harness-computer-endpoint-capabilities)))))
   (harness-computer-endpoint-test-with
     (harness-computer-endpoint-test-when
         'x11 '()
       ;; This Emacs can still lend its own frame as a picture.
-      (should (equal '("view" "clipboard")
+      (should (equal '("view" "clipboard" "skills")
                      (harness-computer-endpoint-capabilities))))))
 
 (ert-deftest harness-computer-endpoint-lends-another-display ()
@@ -129,7 +133,7 @@ The programs act on that display, not on the one this Emacs draws in."
       (let ((harness-computer-endpoint-display ":99")
             (harness-computer-endpoint-vnc-url "http://127.0.0.1:6080/vnc_lite.html")
             (harness-computer-endpoint-vnc-socket "ws://127.0.0.1:6080/websockify"))
-        (should (equal '("view" "windows" "pointer" "keyboard" "sandbox")
+        (should (equal '("view" "windows" "pointer" "keyboard" "sandbox" "skills")
                        (harness-computer-endpoint-capabilities)))
         (should-not (harness-computer-endpoint-window-scoped-p))
         (let ((environment (harness-computer-endpoint--process-environment)))
@@ -412,6 +416,187 @@ the secret that lets it speak for the computer."
                 (should (equal "app" (plist-get (car resources) :name)))
                 (should (equal (directory-file-name repo) (plist-get (car resources) :path)))
                 (should (equal "topic" (plist-get (car resources) :branch))))))
+        (ignore-errors (delete-directory root t))))))
+
+;;;; The skills this computer offers
+
+(defun harness-computer-endpoint-test--skill (root name content)
+  "Create skill NAME under ROOT with CONTENT in its SKILL.md; return its dir."
+  (let ((dir (file-name-as-directory (expand-file-name name root))))
+    (make-directory dir t)
+    (with-temp-file (expand-file-name "SKILL.md" dir) (insert content))
+    dir))
+
+(ert-deftest harness-computer-endpoint-advertises-its-skills-as-resources ()
+  "A registration names the skills this computer has, one `skill'
+resource each, with the stable id, the provenance and the version it
+will answer a read by.  The scanner is the harness's own; no skills
+repository is consulted."
+  (harness-computer-endpoint-test-with
+    (let* ((root (harness-test-temp-dir))
+           (harness-computer-endpoint-skill-roots (list (list :dir root :source 'global :origin "claude")))
+           (harness-computer-endpoint-resource-roots nil)
+           (dir (harness-computer-endpoint-test--skill
+                 root "commit"
+                 "---\nname: commit\ndescription: Write a commit message.\nversion: \"2.1\"\n---\nBody.\n")))
+      (unwind-protect
+          (progn
+            (with-temp-file (expand-file-name "checklist.md" dir) (insert "- [ ] tests\n"))
+            (let* ((resources (harness-computer-endpoint--resources))
+                   (skill (cl-find "skill" resources :key (lambda (r) (plist-get r :kind))
+                                   :test #'equal))
+                   (properties (plist-get skill :properties)))
+              (should (= 1 (length resources)))
+              (should (string-prefix-p "sk-" (plist-get skill :id)))
+              (should (equal "commit" (plist-get skill :name)))
+              ;; Metadata is what is advertised; the content is not.
+              (should (equal "Write a commit message." (plist-get properties :description)))
+              (should (equal "2.1" (plist-get properties :version)))
+              (should (equal "claude" (plist-get properties :origin)))
+              (should (eq 'global (plist-get properties :source)))
+              (should (string-prefix-p "fp-" (plist-get properties :fingerprint)))
+              (should (equal '("checklist.md") (plist-get properties :files)))
+              (should-not (plist-member properties :content))
+              ;; What crosses the wire names the skill's place in its own
+              ;; convention, and its content is not in it.
+              (should (equal "commit" (plist-get properties :relative)))
+              (should-not (string-search "Body." (format "%S" resources))))
+            ;; The capability says this computer can answer for them.
+            (should (member "skills" (harness-computer-endpoint-capabilities))))
+        (ignore-errors (delete-directory root t))))))
+
+(ert-deftest harness-computer-endpoint-refuses-a-skill-file-outside-the-skill ()
+  "A supporting file is served only from inside the skill, once links are
+resolved, and a skill that leads out of the project or plugin that
+provides it serves nothing: a read is no way around the file tools."
+  (harness-computer-endpoint-test-with
+    (let* ((root (harness-test-temp-dir))
+           (outside (harness-test-temp-dir))
+           (harness-computer-endpoint-skill-roots (list (list :dir root :source 'global :origin "claude")))
+           (dir (harness-computer-endpoint-test--skill root "review" "Review.\n"))
+           (secret (expand-file-name "secret.txt" outside)))
+      (unwind-protect
+          (progn
+            (with-temp-file secret (insert "s3cret\n"))
+            (make-symbolic-link secret (expand-file-name "leak.txt" dir))
+            (with-temp-file (expand-file-name "notes.md" dir) (insert "notes\n"))
+            (let ((skill (harness-computer-endpoint--skill
+                          (plist-get (harness-computer-endpoint--skill-resource
+                                      (harness-skills-scan-read
+                                       dir (list :dir root :source 'global :origin "claude")))
+                                     :id))))
+              (should skill)
+              ;; The file that is there is served.
+              (should (equal "notes\n"
+                             (plist-get (harness-computer-endpoint-skills-read
+                                         (plist-get skill :id) "notes.md")
+                                        :content)))
+              ;; A link out of the skill is not, and the secret never crosses.
+              (let ((err (condition-case err
+                             (harness-computer-endpoint-skills-read
+                              (plist-get skill :id) "leak.txt")
+                           (harness-error (error-message-string err)))))
+                (should (stringp err))
+                (should-not (string-search "s3cret" err)))
+              ;; Neither is a path out of the skill by name.
+              (should (condition-case nil
+                          (progn (harness-computer-endpoint-skills-read
+                                  (plist-get skill :id) "../secret.txt")
+                                 nil)
+                        (harness-error t))))
+            ;; A root the client gave it is not a project or a plugin, so
+            ;; its own directory is what a read may serve; a skill the
+            ;; project or plugin links out of is refused by the entry's
+            ;; :within, which the scan records.
+            (let* ((scanned (harness-skills-scan-read
+                             dir (list :dir root :source 'project :origin "claude"
+                                       :within (harness-test-temp-dir)))))
+              (should-not (plist-get scanned :contained))))
+        (ignore-errors (delete-directory root t))
+        (ignore-errors (delete-directory outside t))))))
+
+(ert-deftest harness-computer-endpoint-serves-its-skills-over-mcp ()
+  "The `skills' tool lists metadata, reads one by its stable id, returns
+a supporting file, and refuses a fingerprint that changed."
+  (harness-computer-endpoint-test-with
+    (let* ((root (harness-test-temp-dir))
+           (harness-computer-endpoint-skill-roots
+            (list (list :dir root :source 'global :origin "claude")))
+           (dir (harness-computer-endpoint-test--skill
+                 root "commit" "---\ndescription: Write a commit.\n---\nBody.\n")))
+      (unwind-protect
+          (progn
+            (with-temp-file (expand-file-name "checklist.md" dir)
+              (insert "- [ ] tests\n"))
+            (let* ((listed (harness-computer-endpoint-test-respond
+                            "_harness/computer/mcp"
+                            (list :message (harness-computer-endpoint-test-mcp
+                                            "tools/call"
+                                            (list :name "skills"
+                                                  :arguments (list :action "list"))))))
+                   (structured (plist-get (plist-get (cdr listed) :result) :structuredContent))
+                   (skill (car (plist-get structured :skills)))
+                   (reply (lambda (arguments)
+                            (harness-computer-endpoint-test-respond
+                             "_harness/computer/mcp"
+                             (list :message (harness-computer-endpoint-test-mcp
+                                             "tools/call"
+                                             (list :name "skills" :arguments arguments))))))
+                   (answer-of (lambda (response)
+                                (plist-get (plist-get (cdr response) :result)
+                                           :structuredContent))))
+              (should (car listed))
+              (should (= 1 (plist-get structured :count)))
+              (should (equal "commit" (plist-get skill :name)))
+              ;; A listing is metadata: the content is not in it.
+              (should-not (plist-member skill :content))
+              ;; Reading one, at the fingerprint the listing gave.
+              (let* ((read (funcall reply (list :action "read"
+                                                :id (plist-get skill :id)
+                                                :fingerprint (plist-get skill :fingerprint))))
+                     (answer (funcall answer-of read)))
+                (should (equal "Body.\n" (plist-get answer :content)))
+                (should (equal (plist-get skill :fingerprint) (plist-get answer :fingerprint))))
+              ;; A supporting file, by name.
+              (let* ((file (funcall reply (list :action "read"
+                                                :id (plist-get skill :id)
+                                                :file "checklist.md")))
+                     (answer (funcall answer-of file)))
+                (should (equal "- [ ] tests\n" (plist-get answer :content)))
+                (should (equal "checklist.md" (plist-get answer :file))))
+              ;; A fingerprint that changed is refused, not substituted.
+              (let ((refused (funcall reply (list :action "read"
+                                                  :id (plist-get skill :id)
+                                                  :fingerprint "fp-0000000000000000"))))
+                (should (plist-get (plist-get (cdr refused) :result) :isError))
+                (should (string-search "changed since it was selected"
+                                       (harness-mcp-result-text
+                                        (plist-get (cdr refused) :result)))))))
+        (ignore-errors (delete-directory root t))))))
+
+(ert-deftest harness-computer-endpoint-refresh-rescans-its-skills ()
+  "A refresh scan sees what was added and what was removed, and an
+unreadable skill is a diagnostic rather than an answer that hides it."
+  (harness-computer-endpoint-test-with
+    (let* ((root (harness-test-temp-dir))
+           (harness-computer-endpoint-skill-roots (list (list :dir root :source 'global :origin "claude"))))
+      (unwind-protect
+          (progn
+            (harness-computer-endpoint-test--skill root "one" "One.\n")
+            (should (= 1 (length (harness-computer-endpoint-skills))))
+            (harness-computer-endpoint-test--skill root "two" "Two.\n")
+            ;; The cache is mtime-based per root, so a refresh is explicit.
+            (let ((listed (harness-computer-endpoint-skills-list nil t)))
+              (should (= 2 (plist-get listed :count)))
+              (should (equal '("one" "two") (mapcar (lambda (s) (plist-get s :name))
+                                                    (plist-get listed :skills)))))
+            ;; A skill that cannot be read is a diagnostic, and the rest
+            ;; still list.
+            (let ((broken (expand-file-name "broken" root)))
+              (make-directory (expand-file-name "SKILL.md" broken) t)
+              (let ((listed (harness-computer-endpoint-skills-list nil t)))
+                (should (= 2 (plist-get listed :count)))
+                (should (equal "unreadable" (plist-get (car (plist-get listed :diagnostics)) :code))))))
         (ignore-errors (delete-directory root t))))))
 
 (provide 'harness-computer-endpoint-test)

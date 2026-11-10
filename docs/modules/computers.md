@@ -141,8 +141,9 @@ act on that computer.
 `computer/register-remote`, `computer/attach`, `computer/update`,
 `computer/unregister`, `computer/grant`, `computer/revoke`,
 `computer/set-preference`, `computer/take-control` and
-`computer/release-control`.  `computers/check`, `computers/call` and
-`computers/tools` are the harness's own, not callable over ACP.
+`computer/release-control`.  `computers/check`, `computers/call`,
+`computers/tools` and `computers/update-resources` are the harness's
+own, not callable over ACP.
 `computers/changed` (ID WHAT) says one changed.
 
 ## Provides
@@ -168,6 +169,7 @@ act on that computer.
 - `computers/call` (computer tool input &optional server) — Call TOOL of COMPUTER's SERVER with INPUT; return the MCP result.
 - `computers/check` (session-id &rest subject) — Return whether SESSION-ID may use the computer SUBJECT names for a call.
 - `computers/tools` (computer &optional server) — Return the tools COMPUTER's SERVER lists.  The harness's own.
+- `computers/update-resources` (id kind resources) — Replace the resources of KIND that computer ID offers with RESOURCES.
 
 ### Events
 

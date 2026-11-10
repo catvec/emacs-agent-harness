@@ -284,6 +284,7 @@ every file (see `harness--compiled-fresh-p').")
                                   "lisp/harness-prompts.el"
                                   "lisp/harness-redaction.el"
                                   "lisp/harness-claude-plugin.el"
+                                  "lisp/harness-skills-scan.el"
                                   "lisp/harness-mcp-protocol.el"
                                   "lisp/harness-emacs-endpoint.el"
                                   "lisp/harness-computer-endpoint.el"
@@ -316,6 +317,9 @@ harness-instance (the identity and secret of this harness process,
 from which the credentials of its MCP transports are derived),
 harness-claude-plugin (the Claude Code plugin through which the Claude
 provider serves tools, and the loopback listener its relay connects to),
+harness-skills-scan (the one scanner of a computer's skill directories,
+which the skills module and the computer endpoint share, so a skill is
+found the same way on either side and there is no second registry),
 harness-notifications-desktop, harness-revision (which notes, on each
 side, the commit the harness was loaded from) and harness-emacs-endpoint
 \(what an Emacs lends the harness: its answers to the emacs_* tools).

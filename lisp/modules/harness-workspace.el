@@ -484,9 +484,16 @@ the divider the user sees.  Return the session id."
                        :non-interactive (if (plist-member workspace :non-interactive)
                                             (plist-get workspace :non-interactive)
                                           harness-workspace-non-interactive)
-                       :ext (list :workspace wid
-                                  :thread (plist-get thread :id)
-                                  :episode number))
+                       :ext (append
+                             (list :workspace wid
+                                   :thread (plist-get thread :id)
+                                   :episode number)
+                             ;; The workspace's skill selection is intent
+                             ;; the episode resolves afresh: what it may
+                             ;; read is still its own grant of a computer.
+                             (when (plist-get workspace :skills)
+                               (list :skill-selection-inherited
+                                     (append (plist-get workspace :skills) nil)))))
                  (when-let* ((model (or (plist-get workspace :model)
                                         harness-workspace-model)))
                    (list :model model))
@@ -1274,9 +1281,14 @@ from the store by the time this runs."
 
 (harness-defmethod workspace/create (&rest plist)
   "Create a workspace.  PLIST may set :name, :root, :graph, :project,
-:model, :thinking, :permission-mode, :non-interactive and :instructions.
-:graph is the Logseq graph its knowledge lives in; the default is the
-configured graph (`harness-logseq-directory')."
+:model, :thinking, :permission-mode, :non-interactive, :skills and
+:instructions.  :graph is the Logseq graph its knowledge lives in; the
+default is the configured graph (`harness-logseq-directory').  :skills
+is the skill selection its episodes inherit (see the skills module's
+`skills/selection'): durable references such as `OWNER/NAME',
+`@VERSION' or `#FINGERPRINT', optional with a leading `?', never a copy
+of a grant.  It is resolved afresh for each episode against what the
+computers the episode may use offer then."
   (harness-workspace--load)
   (let* ((root (file-name-as-directory
                 (expand-file-name (or (plist-get plist :root)
@@ -1302,6 +1314,7 @@ configured graph (`harness-logseq-directory')."
                           :non-interactive (if (plist-member plist :non-interactive)
                                                (plist-get plist :non-interactive)
                                              harness-workspace-non-interactive)
+                          :skills (append (plist-get plist :skills) nil)
                           :threads nil
                           :last-thread nil
                           :created (harness-workspace--now)
@@ -1330,7 +1343,7 @@ or instructions."
   (let* ((workspace (harness-workspace--get id))
          (root (plist-get plist :root)))
     (dolist (key '(:name :project :model :thinking :permission-mode
-                   :non-interactive :instructions))
+                   :non-interactive :instructions :skills))
       (when (plist-member plist key)
         (setf (plist-get workspace key) (plist-get plist key))))
     (when root

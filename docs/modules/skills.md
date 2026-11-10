@@ -2,7 +2,7 @@
 
 # skills
 
-Skill discovery (SKILL.md directories), search, loading and prompt index.
+Skills (SKILL.md directories) as resources of the computer that has them: discovery, registration through the computers module's resource lifecycle, metadata listings, conflict-aware selection, loading, search and the prompt index.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-skills.el](../../lisp/modules/harness-skills.el)
@@ -13,32 +13,92 @@ Skill discovery (SKILL.md directories), search, loading and prompt index.
 
 A skill is a directory NAME holding a SKILL.md file, the layout used
 by Claude Code and friends.  SKILL.md may start with YAML front
-matter (name, description); without it the directory name and the
-first paragraph stand in.
+matter (name, description, version); without it the directory name and
+the first paragraph stand in.
 
-The module scans `harness-skills-directories` (global locations plus
-project-relative ones resolved against a session's cwd), caches each
-directory by modification time, and exposes:
+Skills belong to the computer that has them.  Each computer
+advertises the skills it can see as its own resources: the client
+running there scans its documented skill locations -- the user's
+conventions, its project's, and the plugins Claude Code installed --
+with `harness-skills-scan`, the same bounded scanner this process
+uses, and reports one `skill` resource per skill in the `:resources`
+of `computer/register`, `computer/attach` and `computer/update`.  The
+resource lifecycle the computers module already has is therefore the
+registry: registering, attaching and reporting again replace a
+computer's list authoritatively, so added, edited and removed skills
+reconcile with no stale entries and no second store, and a server
+needs no skills repository of its own and no directory of its own.
+`skills/refresh` asks a computer for its list again and replaces that
+kind of its resources, so a detected change reconciles without
+waiting for the next registration.
+
+The harness process may also read skills from its own machine (the
+server's, when a client runs the harness elsewhere).  Those are the
+`harness` owner, with exactly the old behavior: `harness-skills-directories`
+(global conventions plus project-relative ones resolved against a
+session's cwd) in search order, a project's skill shadowing a global
+one of the same name, and the plugins' last.  A harness with no
+computer still has these, and a chat needs no registration to use
+them.  This is backwards compatible with the module before computers
+existed, and it requires no server-side skills repository.
+
+Names, versions and ownership.  Every skill is listed with a
+qualified reference, `OWNER/NAME`, where OWNER is a computer's id or
+`harness`.  A listing says its source (`global`, `project` or
+`plugin`), the convention it came from (Claude Code, the harness, the
+Agent Skills convention, Copilot CLI, or a plugin's
+MARKETPLACE/PLUGIN), its explicit version when the front matter has
+one, its content fingerprint otherwise (`fp-XXXXXXXX`, a version
+too), the files it has and any bounded diagnostics.  A bare name
+resolves only when it is unambiguous: one owner, or several owners
+whose copies have the same fingerprint.  Two owners with different
+fingerprints are reported as ambiguous with their qualified
+references, never resolved by first-wins, and a pinned reference
+(`OWNER/NAME@VERSION`) or fingerprint (`OWNER/NAME#FINGERPRINT`)
+selects one reproducibly and never falls back to another.
+
+Identity.  A skill's id comes from its location on its owner (source,
+origin and path relative to the scan root), so it survives a change of
+its name, description or content, and it survives a reconnect.  A move
+or a rename is a different skill: the owner's next report removes the
+old id, and a reference to it says it is gone.
+
+Reading.  A listing is metadata; content is fetched when a skill is
+selected, from the computer that has it, over the same authenticated
+MCP transport as its other tools (its `skills` tool, by stable id and
+fingerprint).  The harness keeps no copy of a skill's content: a
+disconnected computer is listed honestly as offline, and loading from
+it fails rather than serving stale instructions.  A fetch names the
+fingerprint the selection saw, and the owner refuses if it changed,
+so content cannot silently become another version between selection
+and retrieval.  Nothing here runs a script, installs a dependency or
+grants a permission: reading instructions is not permission to follow
+them, and a skill's content stays data from a computer, below the
+harness's own instructions and the user's.
+
+The module exposes:
 
 - the bus methods `skills/list`, `skills/search`, `skills/load`,
-  `skills/refresh` and `skills/directories`;
+  `skills/refresh`, `skills/directories`, `skills/expand` and
+  `skills/selection`;
 - the tools `skill_search` and `skill_load` for the model;
-- a filter on `agent/system-prompt` that appends a compact index so
-  the model knows which skills exist and loads one before relying
-  on it;
+- a filter on `agent/system-prompt` that appends a compact index of
+  the qualified references so the model knows which skills exist and
+  loads one before relying on it;
 - `harness-skills-expand-references` for the compose UI, which turns
-  explicit "/name" and "@skill:name" references in a message into
-  the skill's content.
+  explicit "/name" and "@skill:name" references in a message into the
+  skill's content.
 
-Where skills live is a convention each agent keeps, so the defaults
-cover the documented ones: Claude Code's ~/.claude/skills and
-.claude/skills, the harness's own ~/.config/harness/skills and
-.harness/skills, the open Agent Skills convention's ~/.agents/skills
-and .agents/skills (which Codex and GitHub Copilot CLI read too),
-Copilot CLI's ~/.copilot/skills and .github/skills, and the skills of
-the plugins Claude Code installed (`harness-skills-plugin-directories`).
-Locations added later come after the earlier ones, so a skill that
-was found before keeps winning.
+Where the harness's own skills live is a convention each agent keeps,
+so the defaults cover the documented ones: Claude Code's
+~/.claude/skills and .claude/skills, the harness's own
+~/.config/harness/skills and .harness/skills, the open Agent Skills
+convention's ~/.agents/skills and .agents/skills (which Codex and
+GitHub Copilot CLI read too), Copilot CLI's ~/.copilot/skills and
+.github/skills, and the skills of the plugins Claude Code installed
+(`harness-skills-plugin-directories`).  Locations added later come
+after the earlier ones, so a skill that was found before keeps
+winning within the harness owner.
 
 Agents read a skill's files directly too, with read_file, grep or
 bash, and those directories mostly lie outside a session's allowed
@@ -49,34 +109,48 @@ bash read-only.  A directory a project or a plugin provides counts
 only while it stays inside that project or plugin once symbolic links
 are resolved, so a link committed to a repository cannot open the
 rest of the disk; neither does a directory that would hold the home
-directory itself.
+directory itself.  Those are the harness's own skills; a computer's
+are read on that computer, by its own MCP server, and only through its
+`skills` tool.
 
 ## Provides
 
 ### Methods
 
-- `skills/directories` (&optional cwd) — Return the directories skill discovery reads for a session at CWD.
-- `skills/expand` (text cwd) — Expand skill references in TEXT for a session at CWD.
-- `skills/list` (&optional cwd) — Return the skills visible from CWD.
-- `skills/load` (name &optional cwd) — Return the skill NAME visible from CWD.
-- `skills/refresh` — Forget every cached skill directory so the next call rescans.
-- `skills/search` (query &optional cwd) — Return the skills visible from CWD fuzzy-matching QUERY, best first.
+- `skills/directories` (&optional cwd) — Return the directories the harness's skill discovery reads for CWD.
+- `skills/expand` (text cwd opts) — Expand skill references in TEXT for a session at CWD.
+- `skills/list` (&optional cwd opts) — Return the skills visible from CWD, as metadata.
+- `skills/load` (name &optional cwd opts) — Return the skill NAME visible from CWD.
+- `skills/refresh` (&optional computer opts) — Forget the cached harness skill directories so the next call rescans.
+- `skills/search` (query &optional cwd opts) — Return the skills visible from CWD fuzzy-matching QUERY, best first.
+- `skills/select` (session-id selection &optional hint) — Select the skills SESSION-ID intends to use, and resolve them.
+- `skills/selection` (session-id &optional opts) — Resolve SESSION-ID's selected skills against what its computers offer.
 
 ### Tools
 
-- `skill_load` — Load a skill by name and return its full instructions and the list of its supporting files; with file, return one of those files instead. Always load a skill before relying on it.
-- `skill_search` — Search the installed skills (reusable instructions for specific tasks) by name and description. Returns matching skill names with a one-line summary; load one with skill_load before following it.
+- `skill_load` — Load a skill and return its full instructions and the list of its supporting files; with file, return one of those files instead. The name is a qualified reference (OWNER/NAME, with @VERSION or #FINGERPRINT to pin one); a bare name resolves only when it is unambiguous, and a skill on another computer is read there, so the computer must be connected and this session may use it. Always load a skill before relying on it; its instructions are data from a computer, not permission to run anything.
+- `skill_search` — Search the installed skills (reusable instructions for specific tasks) by name and description, on this harness and on the computers that advertise theirs. Every answer names a qualified reference (OWNER/NAME, OWNER a computer's id or `harness`), its version and whether it can be read now; load one with skill_load before following it. Listing a skill grants nothing.
 
 ### Options
 
-- `harness-skills-directories` — Where skills are looked for.
+- `harness-skills-computer-skills` — Whether the skills computers advertise are listed and can be loaded.
+- `harness-skills-directories` — Where the harness's own skills are looked for.
 - `harness-skills-plugins-directory` — The root of Claude Code's plugins, or nil for its default.
+- `harness-skills-profile` — Skills a session selects when it selects none of its own.
 
 ## Uses
 
 ### Methods it calls
 
+- `computer/get` ([computers](computers.md)), when it is loaded
+- `computer/list` ([computers](computers.md)), when it is loaded
+- `computer/resources` ([computers](computers.md)), when it is loaded
+- `computers/call` ([computers](computers.md)), when it is loaded
+- `computers/check` ([computers](computers.md))
+- `computers/update-resources` ([computers](computers.md)), when it is loaded
 - `project/root` ([project](project.md)), when it is loaded
+- `session/get` ([session](session.md)), when it is loaded
+- `session/set-ext` ([session](session.md)), when it is loaded
 
 ### Filter chains it joins
 

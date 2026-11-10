@@ -10241,6 +10241,9 @@ into the response where it landed, read-only as the transcript is."
         (harness-ui-chat-test-type buf "a /rev")
         (should-not (harness-compose-completion-at-point))
         (should (harness-compose-skill-reference-p "please /review this"))
+        ;; A reference may name the owner, as skills/list writes it.
+        (should (harness-compose-skill-reference-p "see @skill:harness/review here"))
+        (should (harness-compose-skill-reference-p "see @skill:cmp-box/review"))
         (should-not (harness-compose-skill-reference-p "a/review"))))))
 
 (defun harness-ui-chat-test-matches (input table)

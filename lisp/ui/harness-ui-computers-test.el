@@ -138,7 +138,12 @@ LABEL is matched as it is written: [view] is not [View]."
                                      :control "user"))
                    :access (harness-ui-computers-test-session-answer)
                    :resources (list (list :kind "git-repo" :name "app" :computer "cmp-box"
-                                          :computer-name "box" :path "/srv/app"))
+                                          :computer-name "box" :path "/srv/app")
+                                    ;; A skill a computer advertises is a
+                                    ;; resource of its own kind, with the
+                                    ;; same columns and no new words.
+                                    (list :kind "skill" :name "commit" :computer "cmp-box"
+                                          :computer-name "box" :path "~/.claude/skills/commit"))
                    :session "sid-1")))
         ;; The hero and the sections.
         (should (string-match-p "Computers  capabilities · resources · access" text))
@@ -170,7 +175,9 @@ LABEL is matched as it is written: [view] is not [View]."
         (should (string-match-p "\\[Grant\\]" text))
         (should (string-match-p "\\[Preference\\]" text))
         ;; Resources.
-        (should (string-match-p "git-repo  app               box         /srv/app" text))))))
+        (should (string-match-p "git-repo  app               box         /srv/app" text))
+        (should (string-match-p
+                 "skill     commit            box         ~/.claude/skills/commit" text))))))
 
 (ert-deftest harness-ui-computers-nothing-overflows-a-narrow-window ()
   "Every line fits the width of a narrow window, elided where it must be."

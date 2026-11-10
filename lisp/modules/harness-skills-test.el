@@ -139,7 +139,7 @@ BODY receives the global directory, the project directory and the cwd."
         (should (member "skill_search" (mapcar (lambda (s) (plist-get s :name)) (harness-call 'tools/list))))
         (let ((r (harness-test-await (harness-call 'tools/execute nil '(:id "c1" :name "skill_search" :input (:query "commit"))))))
           (should-not (plist-get r :is-error))
-          (should (string-match-p "^- commit — Write a conventional" (plist-get r :content)))
+          (should (string-match-p "^- harness/commit — Write a conventional" (plist-get r :content)))
           (should (string-match-p "\\[global\\]" (plist-get r :content))))
         (let ((r (harness-test-await (harness-call 'tools/execute nil '(:id "c2" :name "skill_search" :input (:query ""))))))
           (should (string-match-p "4 skills" (plist-get r :content))))
@@ -153,15 +153,18 @@ BODY receives the global directory, the project directory and the cwd."
           (should (string-match-p "- templates/checklist.md" (plist-get r :content))))
         (let ((r (harness-test-await (harness-call 'tools/execute nil '(:id "c5" :name "skill_load" :input (:name "revew"))))))
           (should (plist-get r :is-error))
-          (should (string-match-p "Did you mean: code-review" (plist-get r :content))))
+          ;; A suggestion is a qualified reference too: it is what loads.
+          (should (string-match-p "Did you mean: harness/code-review" (plist-get r :content))))
         (should (equal "Load skill: x" (harness-tool-title "skill_load" '(:name "x"))))))))
 
 (ert-deftest harness-skills-system-prompt-filter ()
   (harness-skills-test-with-skills
     (let ((prompt (harness-run-filter 'agent/system-prompt "Base prompt." (list :cwd cwd))))
       (should (string-prefix-p "Base prompt.\n\n## Available skills" prompt))
-      (should (string-match-p "^- code-review — Review a diff" prompt))
-      (should (string-match-p "^- commit — Write a conventional" prompt))
+      ;; A listing names a qualified reference, never a bare name: the
+      ;; owner is part of what the model must load.
+      (should (string-match-p "^- harness/code-review — Review a diff" prompt))
+      (should (string-match-p "^- harness/commit — Write a conventional" prompt))
       (should (string-match-p "skill_load" prompt))
       (should-not (string-match-p "more; use skill_search" prompt)))
     ;; The limit truncates the index and says so.
@@ -180,13 +183,18 @@ BODY receives the global directory, the project directory and the cwd."
            (out (car result))
            (attached (cdr result)))
       (should (equal '("commit" "code-review") (mapcar (lambda (s) (plist-get s :name)) attached)))
-      ;; The reference line is kept and followed by a fenced block.
-      (should (string-prefix-p "/commit please, and keep it short\n```markdown skill:commit\n# Commit\n\nRun `git diff --cached` first.\n```\nAlso see @skill:code-review here.\n" out))
+      ;; The reference line is kept and followed by a fenced block that
+      ;; names the qualified reference; the harness's own owner is `harness'.
+      (should (string-prefix-p "/commit please, and keep it short\n```markdown skill:harness/commit\n# Commit\n\nRun `git diff --cached` first.\n```\nAlso see @skill:code-review here.\n" out))
       ;; The review body contains a fence, so a longer one wraps it.
-      (should (string-match-p "\n````markdown skill:code-review\nLook at the diff\\.\n\n```sh\ngit diff\n```\n````\n" out))
+      (should (string-match-p "\n````markdown skill:harness/code-review\nLook at the diff\\.\n\n```sh\ngit diff\n```\n````\n" out))
       ;; Paths and unknown names are untouched; repeats are not re-attached.
       (should (string-match-p "^/usr/bin is a path\n/nope is unknown\n@skill:commit again\\'" out))
-      (should (= 1 (cl-count "markdown skill:commit" (split-string out "\n") :test #'string-match-p)))
+      (should (= 1 (cl-count "markdown skill:harness/commit" (split-string out "\n") :test #'string-match-p)))
+      ;; What was attached carries its provenance: the owner and version.
+      (should (equal "harness/commit" (plist-get (car attached) :reference)))
+      (should (equal "harness" (plist-get (car attached) :owner)))
+      (should (string-prefix-p "fp-" (plist-get (car attached) :version-key)))
       ;; No references: text is returned unchanged.
       (should (equal (cons "plain text" nil) (harness-skills-expand-references "plain text" cwd))))))
 
@@ -250,9 +258,13 @@ replaced (.orphaned_at), each belonging to its marketplace."
     (set-file-times old (time-subtract (current-time) 3600))
     (set-file-times new (current-time))
     (let ((market (file-name-as-directory (expand-file-name "cache/market" root))))
-      (should (equal (list (list :dir (expand-file-name "skills" new) :source 'plugin :within market)
-                           (list :dir (expand-file-name "skills" old) :source 'plugin :within market)
+      ;; Each names the plugin it belongs to: the provenance a listing shows.
+      (should (equal (list (list :dir (expand-file-name "skills" new) :source 'plugin
+                                 :origin "market/tools" :within market)
+                           (list :dir (expand-file-name "skills" old) :source 'plugin
+                                 :origin "market/tools" :within market)
                            (list :dir (expand-file-name "skills" other) :source 'plugin
+                                 :origin "other/notes"
                                  :within (file-name-as-directory (expand-file-name "cache/other" root))))
                      (harness-skills-plugin-directories nil))))
     (let ((harness-skills-directories (list #'harness-skills-plugin-directories)))
@@ -386,7 +398,11 @@ nothing outside the skill or outside what may be read."
         (with-temp-file (expand-file-name "blob.bin" review) (set-buffer-multibyte nil) (insert "\0\1\2"))
         (let ((r (funcall load :name "code-review" :file "templates/checklist.md")))
           (should-not (plist-get r :is-error))
-          (should (equal (format "# Skill: code-review, file templates/checklist.md\nPath: %stemplates/checklist.md\n\n- [ ] tests\n"
+          ;; The source identity, the version and the fingerprint go along
+          ;; with the text, end to end.
+          (should (equal (format "# Skill: code-review, file templates/checklist.md\nReference: harness/code-review\nFingerprint: %s\nPath: %stemplates/checklist.md\n\n- [ ] tests\n"
+                                 (plist-get (harness-call 'skills/load "harness/code-review" cwd)
+                                            :fingerprint)
                                  review)
                          (plist-get r :content))))
         ;; The loaded skill says so.

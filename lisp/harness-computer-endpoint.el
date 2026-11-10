@@ -24,15 +24,19 @@
 ;;   tools/call keyboard {action text key window}   -> (:done TEXT)
 ;;   tools/call clipboard {action text}             -> (:text TEXT) | (:done TEXT)
 ;;   tools/call audio {action seconds}              -> (:sources ...) | (:data BASE64 :mime "audio/wav")
+;;   tools/call skills {action id file fingerprint cwd}
+;;                                                  -> (:skills (...) :count N :diagnostics (...))
+;;                                                     | (:skill ... :content TEXT :fingerprint FP)
 ;;   tools/call info {}                             -> (:computer ... :capabilities (...))
 ;;
 ;; An implementation declares the capabilities it really has
 ;; (`harness-computer-endpoint-capabilities'): `view' when it can capture
 ;; the screen or a window, `windows' when it lists the desktop's windows,
 ;; `pointer' and `keyboard' when it can drive them, `clipboard' when it
-;; reads and writes the selection, `audio' when it can record.  A tool
-;; whose capability the computer lacks is refused by the harness before
-;; it ever reaches this file.  `:window-scoped' says that `view' can name
+;; reads and writes the selection, `audio' when it can record, and
+;; `skills' when it can list the skills on the machine and return one's
+;; content.  A tool whose capability the computer lacks is refused by the
+;; harness before it ever reaches this file.  `:window-scoped' says that `view' can name
 ;; one window and no other, which this implementation can for the Emacs
 ;; frames it draws itself (`x-export-frames'), and for a Wayland
 ;; compositor's windows when `swaymsg' and `grim' are there.
@@ -52,6 +56,23 @@
 ;; the MCP session; `_harness/computer/attach' presents the secret again
 ;; after a reconnect.  Nothing of the harness's state is kept here, and
 ;; the harness server has no computer of its own.
+;;
+;; The skills on this machine are a resource of it, as its git
+;; repositories are.  A registration, an attachment and a refresh carry
+;; them in the same `:resources' list -- `(:kind "skill" :id STABLE-ID
+;; :name NAME :path ABBREV :properties (:source :origin :version
+;; :fingerprint :description :files :diagnostics ...))` -- so the harness
+;; learns them through the resource lifecycle it already has, with no
+;; second registry and no server-side repository.  The metadata is
+;; scanned here, by `harness-skills-scan' (the same scanner the harness
+;; process uses for skills of its own), bounded and confined to the
+;; documented skill directories; the content is read only when the
+;; harness asks for one skill by its stable id, through the `skills' tool
+;; above, and the fingerprint it sends is checked first, so a skill that
+;; changed since it was selected is refused rather than served as
+;; another version.  A session still needs the computer-use capability
+;; `skills' and its usual grants to read one: advertising a skill grants
+;; nothing, and reading instructions is not permission to run them.
 
 ;;; Code:
 
@@ -59,6 +80,7 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-skills-scan)
 (require 'harness-mcp-protocol)
 
 (defvar harness-acp-error-method)
@@ -101,6 +123,41 @@ A repository under one of them, at most
 `git-repo' resource.  It is a place this computer has, with the path it
 has; the harness needs no path of its own."
   :type '(repeat directory)
+  :group 'harness-computer-endpoint)
+
+(defcustom harness-computer-endpoint-skill-roots nil
+  "Where this computer looks for skills to offer, or nil for the conventions.
+nil means the documented skill locations
+\(`harness-skills-scan-entries'): Claude Code's ~/.claude/skills, the
+harness's own ~/.config/harness/skills, the Agent Skills convention's
+~/.agents/skills (read by Codex and Copilot CLI too) and Copilot CLI's
+~/.copilot/skills, then, when the harness names a project, its
+.claude/skills, .harness/skills, .agents/skills and .github/skills, and
+the plugins of Claude Code when
+`harness-computer-endpoint-skill-plugins' is non-nil.
+
+A list overrides that: each entry is a directory, a function of the cwd
+returning directories or `(:dir :source :origin :within)' plists, or such
+a plist.  A scan reads only these, follows no symbolic link out of a
+project's or a plugin's own directory, and reads no file above
+`harness-skills-scan-max-file-bytes'.  It never reads a credential."
+  :type '(repeat (choice directory function plist))
+  :group 'harness-computer-endpoint)
+
+(defcustom harness-computer-endpoint-skill-plugins t
+  "Whether this computer offers the skills of the plugins Claude Code installed.
+They are read where Claude Code keeps them (see
+`harness-skills-scan-plugin-entries'), each tagged with its marketplace
+and plugin, and none of a version it orphaned."
+  :type 'boolean
+  :group 'harness-computer-endpoint)
+
+(defcustom harness-computer-endpoint-skill-project t
+  "Whether this computer offers the skills of the project it is asked about.
+A client is asked for no particular project when it registers, and for
+the project of a call when the harness asks again; the project's own
+conventions then come after the user's, as the skills module lists them."
+  :type 'boolean
   :group 'harness-computer-endpoint)
 
 (defcustom harness-computer-endpoint-resource-depth 3
@@ -170,6 +227,22 @@ is named by `harness-computer-endpoint-vnc-url' and
 
 (defconst harness-computer-endpoint--servers '("computer")
   "The tool servers this client runs for its computer.")
+
+(defconst harness-computer-endpoint-skill-capability harness-skills-scan-capability
+  "The computer-use capability a client that serves its skills advertises.
+It says the computer can answer a `skills' tool: list its skills, scan
+again, and return the content of one by its stable id.  A harness may
+grant it to a session as it grants any other capability, and listing
+needs no grant.  It does not make a skill runnable and it executes
+nothing: reading instructions is not permission to follow them.")
+
+(defvar harness-computer-endpoint--skills-cache (make-hash-table :test 'equal)
+  "Skill-entries key -> (STAMP . SKILLS) for this client's last scan.
+The stamp is the entry list, so a refresh that finds none of the roots
+moved is served from memory.")
+
+(defvar harness-computer-endpoint--skills-scan-count 0
+  "How many times this client scanned for skills, for tests and logs.")
 
 (defvar harness-computer-endpoint--token (make-hash-table :test 'equal)
   "Computer id -> the MCP token the harness gave this client at registration.")
@@ -293,8 +366,10 @@ one this Emacs draws in; without an override it is this process's own."
 `view' when it can capture the screen or a window, `windows' when it
 lists the desktop's windows, `pointer' and `keyboard' when it can drive
 them, `clipboard' for Emacs's selection, `audio' when it can record,
-and `sandbox' when `harness-computer-endpoint-display' lends a desktop
-other than the client's own.  What the machine lacks is not offered."
+`sandbox' when `harness-computer-endpoint-display' lends a desktop other
+than the client's own, and `skills' when it can list and return the
+skills on this computer (see `harness-computer-endpoint-skill-capability').
+What the machine lacks is not offered."
   (let* ((override (harness-computer-endpoint--display-override))
          (wayland (eq (harness-computer-endpoint--session-type) 'wayland))
          (grim (and wayland (harness-computer-endpoint--program "grim")))
@@ -315,6 +390,9 @@ other than the client's own.  What the machine lacks is not offered."
     (when clipboard (push "clipboard" caps))
     (when record (push "audio" caps))
     (when override (push "sandbox" caps))
+    ;; This computer reads its own skill directories, so it always offers
+    ;; them; the scan itself is bounded and execs nothing.
+    (push harness-computer-endpoint-skill-capability caps)
     (nreverse caps)))
 
 (defun harness-computer-endpoint-window-scoped-p ()
@@ -810,6 +888,7 @@ no program of the client itself can, and the compositor's IPC can."
     ("keyboard" (harness-computer-endpoint--keyboard params))
     ("clipboard" (harness-computer-endpoint--clipboard params))
     ("audio" (harness-computer-endpoint--audio params))
+    ("skills" (harness-computer-endpoint--skill-call params))
     (_ (signal 'harness-error (list (format "This computer answers no tool %s" name))))))
 
 (defun harness-computer-endpoint--schema (properties &optional required)
@@ -825,7 +904,15 @@ no program of the client itself can, and the compositor's IPC can."
     ("pointer" "Pointer" "Move the pointer, click, scroll or drag, on this computer's desktop." nil)
     ("keyboard" "Keyboard" "Type text or press a key on this computer." nil)
     ("clipboard" "Clipboard" "Read or write this computer's clipboard." nil)
-    ("audio" "Audio" "List this computer's audio devices, or record a few seconds from its microphone." nil))
+    ("audio" "Audio" "List this computer's audio devices, or record a few seconds from its microphone." nil)
+    ("skills" "Skills"
+     "List, refresh or read the skills on this computer: metadata only for a listing, and the content of one skill when read asks for it by its stable id."
+     ((:action (:type "string" :enum ["list" "refresh" "read"]
+                :description "list the skills, scan the roots again, or read one"))
+      (:id (:type "string" :description "The skill's stable id, as a listing gives it, for read."))
+      (:file (:type "string" :description "Optional: one of the skill's supporting files, relative to its directory."))
+      (:fingerprint (:type "string" :description "Optional: the fingerprint the skill was selected at; a different one now is refused."))
+      (:cwd (:type "string" :description "The project whose own skills to include.")))))
   "The computer-use tools this client serves: (NAME TITLE DESCRIPTION SCHEMA).")
 
 (defun harness-computer-endpoint--mcp-tool (entry)
@@ -838,13 +925,15 @@ no program of the client itself can, and the compositor's IPC can."
      :schema (or schema (harness-computer-endpoint--schema
                          '(:computer (:type "string" :description "The computer this call is for; the harness resolves it."))
                          nil))
-     :annotations (list :readOnlyHint (if (member name '("info" "screenshot" "windows" "window"))
+     :annotations (list :readOnlyHint (if (member name '("info" "screenshot" "windows" "window" "skills"))
                                           t :false))
      :handler (lambda (arguments _context)
                 (condition-case err
-                    (let ((value (harness-computer-endpoint--tool-call name arguments)))
+                    (let* ((value (harness-computer-endpoint--tool-call name arguments))
+                           (text (or (and (equal name "skills") (plist-get value :text))
+                                     (format "%S" value))))
                       (harness-mcp-call-result
-                       (harness-truncate-end (format "%S" value) 2000)
+                       (harness-truncate-end text 2000)
                        :structured value))
                   (error
                    (harness-mcp-call-result
@@ -855,7 +944,7 @@ no program of the client itself can, and the compositor's IPC can."
    :name "computer"
    :title "Computer"
    :version "1"
-   :instructions "The computer this client runs on: its screen, its windows, its pointer and keyboard, its clipboard and its audio."
+   :instructions "The computer this client runs on: its screen, its windows, its pointer and keyboard, its clipboard, its audio and its skills."
    :tools (mapcar #'harness-computer-endpoint--mcp-tool harness-computer-endpoint--tools))
   "The MCP server this client runs for the computer it is on.")
 
@@ -901,7 +990,8 @@ message this client refuses or cannot answer gets a JSON-RPC error."
 (defun harness-computer-endpoint--resources ()
   "Return the resources this computer offers, as plists.
 They are the git repositories under the resource roots, at most
-`harness-computer-endpoint-resource-depth' levels down, and those of
+`harness-computer-endpoint-resource-depth' levels down, the skills this
+computer has (see `harness-computer-endpoint-skills') and those of
 `harness-computer-endpoint-resources'."
   (let ((seen nil) (out nil))
     (dolist (root harness-computer-endpoint-resource-roots)
@@ -926,7 +1016,237 @@ They are the git repositories under the resource roots, at most
                                (not (member (file-name-nondirectory child)
                                             '("node_modules" "target" "build" "dist" ".git"))))
                       (push (cons (file-name-as-directory child) (1+ depth)) stack))))))))))
-    (append (nreverse out) harness-computer-endpoint-resources)))
+    (append (nreverse out)
+            (harness-computer-endpoint-skill-resources)
+            harness-computer-endpoint-resources)))
+
+;;;; The skills this computer has
+
+(defun harness-computer-endpoint--skill-entries (&optional cwd)
+  "Return the skill scan entries this computer offers for CWD.
+They are `harness-computer-endpoint-skill-roots' when it has a list, and
+the documented conventions otherwise (see `harness-skills-scan-entries'):
+the user's, the plugins Claude Code installed when
+`harness-computer-endpoint-skill-plugins' is non-nil, and, when CWD names
+a project and `harness-computer-endpoint-skill-project' is non-nil, the
+project's own."
+  (let ((given harness-computer-endpoint-skill-roots))
+    (if (or (null given) (not (consp given)))
+        (harness-skills-scan-entries (and cwd harness-computer-endpoint-skill-project cwd)
+                                     harness-computer-endpoint-skill-plugins)
+      (let (out)
+        (dolist (entry given)
+          (cond
+           ((and (consp entry) (stringp (plist-get entry :dir)))
+            (push entry out))
+           ((functionp entry)
+            (dolist (d (ignore-errors (funcall entry cwd)))
+              (cond ((and (consp d) (stringp (plist-get d :dir))) (push d out))
+                    ((stringp d) (push (list :dir d :source 'project :origin "custom") out)))))
+           ((stringp entry)
+            (push (list :dir entry :source 'global :origin "custom") out))))
+        (nreverse out)))))
+
+(defun harness-computer-endpoint-skills (&optional cwd)
+  "Return the skills this computer has, scanned now or from the cache.
+Each is what `harness-skills-scan-read' returns: metadata and content.
+The scan is bounded (see `harness-skills-scan-max-skills' and the bounds
+beside it) and never reads outside the roots it was given; a skill whose
+SKILL.md is malformed is returned with its diagnostics, and one that
+cannot be read at all is returned as an error entry, so one bad skill
+never breaks a registration."
+  (let* ((entries (harness-computer-endpoint--skill-entries cwd))
+         (key (mapconcat (lambda (e)
+                           (format "%s|%s|%s|%s"
+                                   (plist-get e :dir) (plist-get e :source)
+                                   (plist-get e :origin) (or (plist-get e :within) "")))
+                         entries "\n"))
+         (cached (gethash key harness-computer-endpoint--skills-cache))
+         (stamp (harness-computer-endpoint--skills-stamp entries)))
+    (if (and cached (equal (car cached) stamp))
+        (cdr cached)
+      (cl-incf harness-computer-endpoint--skills-scan-count)
+      (let ((skills (harness-skills-scan entries)))
+        (puthash key (cons stamp skills) harness-computer-endpoint--skills-cache)
+        skills))))
+
+(defun harness-computer-endpoint--skills-stamp (entries)
+  "Return a freshness stamp for ENTRIES: each root's and skill's mtimes."
+  (mapcar (lambda (entry)
+            (let ((dir (plist-get entry :dir)))
+              (cons dir
+                    (cons (harness-skills-scan--mtime dir)
+                          (mapcar (lambda (sub)
+                                    (cons (file-name-nondirectory (directory-file-name sub))
+                                          (harness-skills-scan--mtime
+                                           (expand-file-name harness-skills-scan-file-name sub))))
+                                  (ignore-errors (directory-files dir t "\\`[^.]" t)))))))
+          entries))
+
+(defun harness-computer-endpoint-forget-skills ()
+  "Forget every cached skill scan, so the next one reads the roots again."
+  (clrhash harness-computer-endpoint--skills-cache)
+  t)
+
+(defun harness-computer-endpoint--skill-resource (skill)
+  "Return SKILL as the resource this computer advertises for it.
+It is a `skill' resource whose id is the skill's stable id and whose
+`:properties' carry what names it: source, origin, version, fingerprint,
+description, scope, files and diagnostics.  `:path' is the skill's
+directory abbreviated, so a person reading the list knows roughly where
+it is without the store holding a path of this machine's disk that no
+other machine can use."
+  (let ((id (plist-get skill :id))
+        (properties (harness-skills-scan-properties skill)))
+    (when id
+      (list :kind "skill"
+            :id id
+            :name (or (plist-get skill :name) (plist-get skill :relative) id)
+            :path (harness-computer-endpoint--abbreviate (plist-get skill :dir))
+            :properties properties))))
+
+(defun harness-computer-endpoint--abbreviate (path)
+  "Return PATH with the home directory abbreviated, or nil."
+  (and (stringp path)
+       (not (harness-file-remote-p path))
+       (condition-case nil (abbreviate-file-name path) (error path))))
+
+(defun harness-computer-endpoint-skill-resources (&optional cwd)
+  "Return the `skill' resources this computer advertises for CWD.
+An error entry of a scan, a skill whose SKILL.md could not be read at
+all, is left out: it is no resource, and the harness reads it in the
+diagnostics of the scan it asked for."
+  (delq nil (mapcar #'harness-computer-endpoint--skill-resource
+                    (harness-computer-endpoint-skills cwd))))
+
+(defun harness-computer-endpoint--skill (id &optional cwd)
+  "Return the skill with stable ID this computer scans for CWD, or nil."
+  (cl-find id (harness-computer-endpoint-skills cwd)
+           :key (lambda (s) (plist-get s :id)) :test #'equal))
+
+(defun harness-computer-endpoint--skill-file (skill file)
+  "Return the text of FILE, one of SKILL's supporting files, with its path.
+FILE must stay inside the skill's directory once symbolic links are
+resolved, and a skill directory that leads out of the project or plugin
+it belongs to serves no file at all: a retrieval reads nothing the
+computer would not let a person read.  Signal `harness-error' when FILE
+is not a readable text file there."
+  (let* ((dir (harness-skills-scan--directory (plist-get skill :dir)))
+         (path (expand-file-name file dir))
+         (contained (harness-skills-scan-contained-p dir (plist-get skill :within))))
+    (cond
+     ((or (harness-string-blank-p file)
+          (not (harness-skills-scan-inside-p dir path)))
+      (signal 'harness-error
+              (list (format "%s is not inside the directory of the skill %s"
+                            file (plist-get skill :name)))))
+     ((not contained)
+      (signal 'harness-error
+              (list (format "The files of the skill %s are not served: its directory leads out of the project or plugin that provides it"
+                            (plist-get skill :name)))))
+     ((not (file-regular-p path))
+      (signal 'harness-error
+              (list (format "The skill %s has no file %s" (plist-get skill :name) file))))
+     (t
+      (pcase-let ((`(,text . ,size) (harness-skills-scan--text
+                                      path harness-skills-scan-max-file-read-bytes)))
+        (cond
+         ((null text)
+          (signal 'harness-error
+                  (list (format "%s of the skill %s is larger than %s"
+                                file (plist-get skill :name)
+                                (harness-format-bytes harness-skills-scan-max-file-read-bytes)))))
+         ((string-search "\0" text)
+          (signal 'harness-error
+                  (list (format "%s of the skill %s is a binary file" file (plist-get skill :name)))))
+         (t (list :path path :text text :size size))))))))
+
+(defun harness-computer-endpoint-skills-list (&optional cwd refresh)
+  "Return what this computer says about its skills for CWD.
+REFRESH non-nil scans the roots again first.  The answer is
+`(:skills (...summaries...) :count N :diagnostics (...) :scanned N)':
+metadata only, no content."
+  (when refresh (harness-computer-endpoint-forget-skills))
+  (let* ((skills (harness-computer-endpoint-skills cwd))
+         (ok (cl-remove-if (lambda (s) (null (plist-get s :id))) skills))
+         (diagnostics (delq nil (mapcar (lambda (s)
+                                          (cond ((plist-get s :error)
+                                                 (list :id (plist-get s :dir)
+                                                       :code "unreadable"
+                                                       :text (plist-get s :error)))
+                                                ((plist-get s :diagnostics)
+                                                 (list :id (plist-get s :id)
+                                                       :code "metadata"
+                                                       :text (mapconcat (lambda (d) (plist-get d :text))
+                                                                        (plist-get s :diagnostics) "; ")))))
+                                        skills))))
+    (list :skills (mapcar #'harness-skills-scan-summary ok)
+          :count (length ok)
+          :diagnostics diagnostics
+          :scanned harness-computer-endpoint--skills-scan-count)))
+
+(defun harness-computer-endpoint-skills-read (id &optional file cwd fingerprint)
+  "Return one skill of this computer, the skill ID names, for CWD.
+With FILE, return that supporting file instead of the instructions.
+FINGERPRINT, when given, is the fingerprint the caller selected: when
+the skill is not that version any more, this refuses rather than return
+another version under the same name.  Return
+`(:skill SUMMARY :content TEXT :file REL :path PATH :size BYTES
+:fingerprint FP)'."
+  (let ((skill (harness-computer-endpoint--skill id cwd)))
+    (unless skill
+      (signal 'harness-error
+              (list (format "This computer has no skill %s; ask for its skills again" id))))
+    (when (and fingerprint
+               (not (string-equal fingerprint (plist-get skill :fingerprint))))
+      (signal 'harness-error
+              (list (format "The skill %s changed since it was selected: it was %s, it is %s now"
+                            (plist-get skill :name)
+                            (substring fingerprint 0 (min 15 (length fingerprint)))
+                            (substring (plist-get skill :fingerprint) 0 15)))))
+    (if (and (stringp file) (not (harness-string-blank-p file)))
+        (let ((found (harness-computer-endpoint--skill-file skill (string-trim file))))
+          (list :skill (harness-skills-scan-summary skill)
+                :content (plist-get found :text)
+                :file (string-trim file)
+                :path (harness-computer-endpoint--abbreviate (plist-get found :path))
+                :size (plist-get found :size)
+                :fingerprint (plist-get skill :fingerprint)))
+      (list :skill (harness-skills-scan-summary skill)
+            :content (plist-get skill :content)
+            :file nil
+            :path (harness-computer-endpoint--abbreviate (plist-get skill :dir))
+            :size (plist-get skill :bytes)
+            :fingerprint (plist-get skill :fingerprint)))))
+
+(defun harness-computer-endpoint--skill-call (params)
+  "Answer a `skills' tool call of PARAMS: list, refresh or read.
+The answer is structured, and its text is a bounded summary for a model
+that reads only text."
+  (let* ((action (downcase (or (harness-computer-endpoint--name (plist-get params :action)) "list")))
+         (cwd (harness-computer-endpoint--name (plist-get params :cwd)))
+         (id (harness-computer-endpoint--name (plist-get params :id)))
+         (file (harness-computer-endpoint--name (plist-get params :file)))
+         (fingerprint (harness-computer-endpoint--name (plist-get params :fingerprint))))
+    (pcase action
+      ("list" (harness-computer-endpoint-skills-list cwd nil))
+      ("refresh" (harness-computer-endpoint-skills-list cwd t))
+      ("read"
+       (unless id
+         (signal 'harness-error (list "skills read needs the skill's id, as a listing gives it")))
+       (let ((found (harness-computer-endpoint-skills-read id file cwd fingerprint)))
+         (list :skill (plist-get found :skill) :file (plist-get found :file)
+               :path (plist-get found :path) :size (plist-get found :size)
+               :fingerprint (plist-get found :fingerprint)
+               :content (plist-get found :content)
+               :text (format "# Skill: %s%s\n%s"
+                             (plist-get (plist-get found :skill) :name)
+                             (if (plist-get found :file)
+                                 (format ", file %s" (plist-get found :file)) "")
+                             (harness-truncate-end (or (plist-get found :content) "")
+                                                   100000)))))
+      (_ (signal 'harness-error
+                 (list (format "No skills action %s; use list, refresh or read" action)))))))
 
 (defun harness-computer-endpoint--branch (dir)
   "Return the branch checked out in DIR, or nil."

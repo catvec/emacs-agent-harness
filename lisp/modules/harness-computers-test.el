@@ -524,6 +524,48 @@ Projects are the git repositories among them, across computers."
       (should (equal '("app") (mapcar (lambda (r) (plist-get r :name)) projects)))
       (should (plist-get (car projects) :project)))))
 
+(ert-deftest harness-computers-update-resources-replaces-one-kind ()
+  "The harness replaces one kind of a computer's resources authoritatively.
+What it reports reconciles: a resource of that kind the list leaves out
+is gone, the other kinds are untouched, and it is not a client's call."
+  (harness-computers-test-with
+    (let* ((id (harness-computers-test-id "box"))
+           (skills (lambda ()
+                     (harness-call 'computer/resources id "skill")))
+           (repos (lambda ()
+                    (harness-call 'computer/resources id "git-repo"))))
+      (harness-computers-test-remote-record
+       "box" :resources (list (list :kind "git-repo" :name "app" :path "/home/me/app")
+                              (list :kind "skill" :name "commit" :id "sk-one"
+                                    :properties (list :name "commit" :fingerprint "fp-one"))
+                              (list :kind "skill" :name "review" :id "sk-two"
+                                    :properties (list :name "review" :fingerprint "fp-two"))))
+      (should (equal '("commit" "review") (mapcar (lambda (r) (plist-get r :name))
+                                                  (funcall skills))))
+      ;; The report replaces the kind: a skill it leaves out is gone, and
+      ;; the properties of the one it keeps are the answer's.
+      (let ((record (harness-call
+                     'computers/update-resources id "skill"
+                     (list (list :kind "skill" :name "commit" :id "sk-one"
+                                 :properties (list :name "commit"
+                                                   :fingerprint "fp-changed"))))))
+        (should (equal '("commit") (mapcar (lambda (r) (plist-get r :name))
+                                           (funcall skills))))
+        (should (equal "fp-changed"
+                       (plist-get (plist-get (car (funcall skills)) :properties)
+                                  :fingerprint)))
+        ;; The answer is the computer as `computer/get' reads it.
+        (should (equal id (plist-get record :id))))
+      ;; The other kinds stay as they were.
+      (should (equal '("app") (mapcar (lambda (r) (plist-get r :name))
+                                      (funcall repos))))
+      ;; A kind the computer no longer has at all empties.
+      (harness-call 'computers/update-resources id "skill" nil)
+      (should-not (funcall skills))
+      (should (funcall repos))
+      ;; The harness's own method: no client speaks it over ACP.
+      (should-not (harness-acp--extension-allowed-p "computers/update-resources")))))
+
 (ert-deftest harness-computers-the-registry-survives-a-save-and-load ()
   "The records that outlive the process come back, without a client or a
 transport, and a computer no client runs on reads disconnected."

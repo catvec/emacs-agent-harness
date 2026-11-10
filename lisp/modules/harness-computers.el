@@ -132,8 +132,9 @@
 ;; `computer/register-remote', `computer/attach', `computer/update',
 ;; `computer/unregister', `computer/grant', `computer/revoke',
 ;; `computer/set-preference', `computer/take-control' and
-;; `computer/release-control'.  `computers/check', `computers/call' and
-;; `computers/tools' are the harness's own, not callable over ACP.
+;; `computer/release-control'.  `computers/check', `computers/call',
+;; `computers/tools' and `computers/update-resources' are the harness's
+;; own, not callable over ACP.
 ;; `computers/changed' (ID WHAT) says one changed.
 
 ;;; Code:
@@ -198,14 +199,15 @@ they name: this is a default, not a pin."
 
 (defconst harness-computers-capability-names
   '("view" "windows" "pointer" "keyboard" "clipboard" "audio" "camera" "files"
-    "sandbox" "exec")
+    "sandbox" "exec" "skills")
   "The capabilities of the computer-use interface.
 `view' sees the screen or one window, `windows' lists the windows of the
 desktop, `pointer' moves the pointer, clicks and scrolls, `keyboard'
 types text and presses keys, `clipboard' reads and writes the clipboard,
 `audio' uses the microphone and the speakers, `sandbox' is a desktop
-separate from the computer's own, and `exec' runs programs there.  An
-implementation declares the ones it has, and may define more with
+separate from the computer's own, `exec' runs programs there, and
+`skills' reads the skills the computer advertises, by their stable id.
+An implementation declares the ones it has, and may define more with
 `harness-computers-define-capability'.")
 
 (defconst harness-computers--capability-docs
@@ -218,7 +220,8 @@ implementation declares the ones it has, and may define more with
     ("camera" . "Take a picture with the computer's camera.")
     ("files" . "Read and write the files the computer offers, and no others.")
     ("sandbox" . "A desktop separate from the computer's own.")
-    ("exec" . "Run programs on the computer."))
+    ("exec" . "Run programs on the computer.")
+    ("skills" . "Read the skills the computer advertises, and no file of it."))
   "What each capability lets a call do, for prompts and pages.")
 
 (defvar harness-computers--capabilities nil
@@ -1442,6 +1445,35 @@ another server registers again."
       (setq record (plist-put record :window-scoped
                               (and (harness-json-true-p (plist-get params :window-scoped))
                                    t))))
+    (setq record (plist-put record :last-seen (harness-computers--now)))
+    (puthash (plist-get record :id) record harness-computers--computers)
+    (harness-computers--save)
+    (harness-emit 'computers/changed (plist-get record :id) 'updated)
+    (harness-computers--describe record)))
+
+(harness-defmethod computers/update-resources (id kind resources)
+  "Replace the resources of KIND that computer ID offers with RESOURCES.
+RESOURCES are plists as `computer/update' takes them, normally the ones
+its MCP server answered for KIND; a resource of KIND the list leaves out
+is removed, so a change the computer reports reconciles with nothing
+left behind.  The harness's own method: a client reports through
+`computer/update', and a module that asks a computer something it only
+knows when asked -- its skills, say -- calls this with the answer.
+Return the computer as `computer/get' describes it."
+  (unless (harness-computers-get id)
+    (signal 'harness-error (list (format "No computer is named %s" id))))
+  (let* ((record (harness-computers-get id))
+         (kind (or (harness-computers--name kind) "directory"))
+         (others (cl-remove-if (lambda (r)
+                                 (string-equal (downcase (or (plist-get r :kind) ""))
+                                               (downcase kind)))
+                               (plist-get record :resources)))
+         (replaced (delq nil (mapcar (lambda (r)
+                                       (harness-computers--normalise-resource
+                                        (plist-put (copy-sequence r) :kind kind)
+                                        (plist-get record :id)))
+                                     (if (listp resources) resources nil)))))
+    (setq record (plist-put record :resources (append (append others nil) replaced)))
     (setq record (plist-put record :last-seen (harness-computers--now)))
     (puthash (plist-get record :id) record harness-computers--computers)
     (harness-computers--save)

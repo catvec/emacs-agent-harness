@@ -1571,8 +1571,10 @@ The overlays are made again only when the lines or their prefix move."
   (error nil))
 
 (defun harness-compose-skill-reference-p (text)
-  "Non-nil when TEXT references a skill by /name or @skill:name."
-  (or (string-match-p "\\(?:\\`\\|[ \t\n]\\)@skill:[A-Za-z0-9_.-]+" text)
+  "Non-nil when TEXT references a skill by /name or @skill:REFERENCE.
+A reference is OWNER/NAME, OWNER a computer's id or `harness', as
+`skills/expand' reads it."
+  (or (string-match-p "\\(?:\\`\\|[ \t\n]\\)@skill:[A-Za-z0-9_.-]+\\(?:/[A-Za-z0-9_.-]+\\)?" text)
       (let ((case-fold-search nil) (found nil))
         (dolist (name harness-compose--skills found)
           (when (string-match-p (concat "\\(?:\\`\\|[ \t\n]\\)/" (regexp-quote name) "\\_>") text)

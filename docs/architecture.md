@@ -6977,29 +6977,79 @@ loads on its own.
 
 ### skills
 
-- Scans `harness-skills-directories` for `NAME/SKILL.md` with front
-  matter.  The defaults are the documented locations: Claude Code's
-  `~/.claude/skills` and `.claude/skills`, the harness's
-  `~/.config/harness/skills` and `.harness/skills`, the open Agent
-  Skills convention's `~/.agents/skills` and `.agents/skills` (which
-  Codex and GitHub Copilot CLI read too), Copilot CLI's
-  `~/.copilot/skills` and `.github/skills`
-  (`harness-skills-project-subdirectories`, under the cwd and its
-  project root), and the skills of Claude Code's plugins
-  (`harness-skills-plugin-directories`: `cache/MARKETPLACE/PLUGIN/VERSION/skills`
-  under `harness-skills-plugins-directory`, else
+- A skill is `NAME/SKILL.md` with front matter.  It belongs to the
+  computer that has it: each computer's client scans its own
+  documented locations with `harness-skills-scan`, the one scanner
+  both sides of the process split use, and advertises one `:kind
+  "skill"` resource per skill in the `:resources` of
+  `computer/register`, `computer/attach` and `computer/update`.  The
+  computers module's resource lifecycle is therefore the registry:
+  a report replaces a computer's list authoritatively, so additions,
+  edits and removals reconcile, a disconnected computer keeps its
+  metadata, and no server-side skills repository and no second store
+  exist.  `computers/update-resources ID "skill" RESOURCES` replaces
+  one kind after `skills/refresh` asked a computer to scan again.
+- An entry is `(:id :name :description :source :origin :version
+  :version-source :version-key :fingerprint :files :relative :path
+  :owner :owner-name :reference :pin :state :diagnostics)`.  `:source`
+  is `global`, `project` or `plugin`; `:origin` names the convention
+  (`claude`, `harness`, `agents`, `copilot`, a plugin's
+  `MARKETPLACE/PLUGIN`); `:owner` is a computer's id or `harness`;
+  `:reference` is `OWNER/NAME` and `:pin` `OWNER/NAME@VERSION`.
+- Identity is `sk-` and the SHA-1 of (root, source, origin, relative
+  path): a rename of the skill, an edit, a new description or a
+  reconnect keeps it, and a move of the directory is a new skill whose
+  predecessor the next report removes.  A fingerprint is `fp-` and the
+  SHA-256 of the SKILL.md bytes, the supporting files' sorted relative
+  names and their sizes: no clock, so two computers compare copies.
+  Without a declared `version` the fingerprint is the version
+  (`fp-XXXXXXXX`, `:version-key`).
+- The documented locations are the user's Claude Code (`~/.claude/skills`),
+  the harness's own (`~/.config/harness/skills`), the open Agent Skills
+  convention's (`~/.agents/skills`, which Codex and Copilot CLI read
+  too) and Copilot CLI's (`~/.copilot/skills`); the project's
+  `.claude/skills`, `.harness/skills`, `.agents/skills` and
+  `.github/skills` under the cwd and its project root; and the skills of
+  Claude Code's plugins (`cache/MARKETPLACE/PLUGIN/VERSION/skills` under
+  `harness-skills-scan-plugins-directory`, else
   `$CLAUDE_CODE_PLUGIN_CACHE_DIR`, else `~/.claude/plugins`; newest
   version first, none Claude Code orphaned with `.orphaned_at`).
   Codex's deprecated `~/.codex/skills` and its admin `/etc/codex/skills`
-  are left out.  Project skills come first, then global ones, then
-  plugins' (`harness-skills--source-rank`); the first skill of a name
-  wins.  A function in the list may return `(:dir :source :within)`
-  plists instead of directories.
-- `skills/list &optional CWD`, `skills/search QUERY &optional CWD`,
-  `skills/load NAME &optional CWD` → `(:name :description :content :path :source :files)`,
-  `skills/refresh`, `skills/expand TEXT CWD` → `(:text EXPANDED :skills (…))`
-  (explicit `/name` or `@skill:name` references get the skill content
-  attached; the compose UI calls this over ACP).
+  are left out.  The endpoint's `harness-computer-endpoint-skill-roots`
+  names its own roots instead; `-skill-plugins` and `-skill-project`
+  add the plugins' and the project's.
+- `skills/list &optional CWD OPTS`, `skills/search QUERY &optional CWD
+  OPTS`, `skills/load REFERENCE &optional CWD OPTS`, `skills/refresh
+  [&optional COMPUTER OPTS]`, `skills/expand TEXT CWD OPTS` →
+  `(:text EXPANDED :skills (…))`, `skills/selection SESSION-ID`,
+  `skills/select SESSION-ID SELECTION` and `skills/directories &
+  optional CWD`.  A reference is `NAME`, `OWNER/NAME`, or either with
+  `@VERSION` or `#FINGERPRINT`; a leading `?` marks it optional in a
+  selection.
+- A bare name resolves when one owner has it, or when every copy has
+  the same fingerprint; copies with different fingerprints are
+  `ambiguous` and every qualified reference is named, never first-wins.
+  A pin that matches nothing is `version-mismatch` (with the versions
+  that exist) or `missing`, and no other version is substituted.  A
+  copy on a computer that is disconnected, does not offer the `skills`
+  capability, or is not granted to the session reads `offline`,
+  `unavailable` or `not-granted`.
+- Reading is a computer call: the harness fetches a skill's content
+  from its owner's MCP `skills` tool (`action` `read`, by stable `id`
+  and the `fingerprint` the selection saw) over the authenticated
+  connection of the client bound to that computer; the owner refuses a
+  fingerprint that changed.  The harness keeps no copy of a skill's
+  content, so an offline computer's skills cannot be read and are never
+  served stale.  The capability is `skills` (`Read the skills the
+  computer advertises, and no file of it.`); listing needs no grant,
+  reading is gated at stage 7 like every computer call, and reading a
+  skill runs and grants nothing.
+- The harness's own machine's skills are the `harness` owner, with the
+  old behavior: `harness-skills-directories` in search order (global
+  entries, project-relative functions, `harness-skills-plugin-directories`),
+  a project's skill shadowing a global one of the same name, and the
+  plugins' last.  They need no computer and no registration, and a bare
+  name still loads them.
 - `skills/directories &optional CWD` → `(:dir :source :contained)` for
   every directory discovery reads, each followed by the skill
   directories in it that lead elsewhere through a symbolic link (a
@@ -7011,11 +7061,17 @@ loads on its own.
   the home directory does.  So a link committed to a repository, or
   shipped in a plugin, opens nothing.  The perms module lets every read
   read the contained ones, and the bash tool's sandbox shows them.
-- Tools `skill_search`, `skill_load` (`name`, and `file` for one of the
-  skill's supporting files, which must stay inside the skill's
-  directory and a contained directory once links are resolved, and be
-  text; a failure lists the files there are).  Adds a short skills index
-  to the system prompt via `agent/system-prompt`.
+- Tools `skill_search` and `skill_load` (`name`, `computer`, `source`,
+  `version`, `fingerprint`, and `file` for one of the skill's
+  supporting files, which must stay inside the skill's directory and a
+  contained directory once links are resolved, and be text; a failure
+  lists the files there are).  Adds a short index of the qualified
+  references, and what cannot be read now, to the system prompt via
+  `agent/system-prompt`.  A workspace's `:skills` is inherited by each
+  episode as `:skill-selection-inherited`, a session's
+  `:skill-selection` overrides it, and `harness-skills-profile` is the
+  harness-wide default; a selection resolves afresh and copies no
+  grant.
 
 ### worktree
 
