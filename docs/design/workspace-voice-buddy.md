@@ -17,6 +17,12 @@ the person at the top that a call is running, and the compact card is for
 when the app is *not* the window they are working in.  This note is the
 design after that change.
 
+The card's detail was cut down after the voice pipeline grew its own
+picture: the card is now a circle and the two words that say what it means,
+with everything else behind `Details`.  [voice-buddy-compact.md](voice-buddy-compact.md)
+is that refinement, and it also records what Android and iOS actually allow
+for a phone-sized floating presence.
+
 Related contracts:
 
 - [Workspace mode](../workspace-mode.md) and its
@@ -364,10 +370,12 @@ full call view keep their hover tooltips.
 | Provider | `Clip` / `Live` (the existing voice provider labels) |
 | Card status | the same status labels as the bar |
 | Card microphone | the same microphone labels as the bar |
+| Card circle | the buddy's circle, unchanged in the bar and on the card: [voice-buddy-compact.md](voice-buddy-compact.md) has its ring table, its words and the non-colour cues |
 | Level meter tooltip | `Microphone · level` (only when the backend reports levels and the microphone is live) |
 | Concurrent activity | `Speaking`, `Reply held`, `Working` when one of those is not already the status and the state is real |
-| Card primary controls | `Start`, `End` |
-| Card secondary controls | `Mute` / `Unmute`, `Pause` / `Resume`, `Interrupt`, `Voice settings` |
+| Card glance controls | `Mute` / `Unmute`, `End`, `Details` (tooltip `Call · details`) |
+| Card detail controls | `Start`, `Pause` / `Resume`, `Interrupt`, `Voice settings`, and `Less` (tooltip `Call · glance`) to close them again |
+| Provider | `Clip` / `Live` |
 | Problem control | `Retry`; tooltip `Call · retry` |
 | Card off control | `Buddy · off` (tooltip and accessibility label `Workspace buddy off`) |
 | Workspace open | `Workspace · open` |

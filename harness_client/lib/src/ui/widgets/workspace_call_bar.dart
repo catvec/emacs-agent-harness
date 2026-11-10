@@ -6,6 +6,7 @@ import '../../state/app_controller.dart';
 import '../../state/workspace_buddy_controller.dart';
 import '../../voice/voice_buddy.dart';
 import '../theme/harness_theme.dart';
+import 'voice_buddy_dot.dart';
 import 'workspace_buddy.dart'
     show workspaceBuddyPhaseColor, workspaceBuddyPhaseIcon;
 
@@ -227,7 +228,18 @@ class WorkspaceCallBarView extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(horizontal: 12),
                   child: Row(
                     children: [
-                      const _CallMark(),
+                      // The buddy's circle: identity inside a ring that says
+                      // the last reported state.  The status and microphone
+                      // words beside it stay, so the state is never colour
+                      // alone and never only in a 28 px circle.
+                      VoiceBuddyDot(
+                        key: const Key('call-bar-dot'),
+                        status: model.status,
+                        workspaceName: model.workspaceName,
+                        level: model.level,
+                        size: 28,
+                        pulseAllowed: !reduceMotion,
+                      ),
                       const SizedBox(width: 10),
                       Expanded(
                         child: isWide
@@ -477,32 +489,6 @@ class WorkspaceCallBarView extends StatelessWidget {
         const SizedBox(width: 10),
         microphone,
       ],
-    );
-  }
-}
-
-/// The call mark: a small, quiet icon that says the bar is a live call, not
-/// a notification or a note.
-class _CallMark extends StatelessWidget {
-  const _CallMark();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return ExcludeSemantics(
-      child: Container(
-        width: 28,
-        height: 28,
-        decoration: BoxDecoration(
-          color: theme.colorScheme.primary.withValues(alpha: 0.10),
-          shape: BoxShape.circle,
-        ),
-        child: Icon(
-          Icons.call_rounded,
-          size: 16,
-          color: theme.colorScheme.primary,
-        ),
-      ),
     );
   }
 }

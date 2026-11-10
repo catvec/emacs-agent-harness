@@ -496,6 +496,10 @@ void main() {
     await tester.tap(find.byKey(const Key('buddy-workspace')));
     await tester.pump();
     expect(openedWorkspace, 1);
+    // The settings control is one step away, behind the card's own
+    // `Details`, so the window stays short and the own-window drag survives.
+    await tester.tap(find.byKey(const Key('buddy-details')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('buddy-settings')));
     await tester.pump();
     expect(openedSettings, 1);

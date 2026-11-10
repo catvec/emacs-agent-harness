@@ -87,6 +87,17 @@ BuddyViewModel buddyModel({
   );
 }
 
+/// Open the card's `Details` disclosure: everything the glance no longer
+/// stands there repeating.
+///
+/// The disclosure belongs to the card's own state, which survives a rebuild
+/// of the same widget in a test, so this leaves it open only once.
+Future<void> _openDetails(WidgetTester tester) async {
+  if (find.text('Details').evaluate().isEmpty) return;
+  await tester.tap(find.byKey(const Key('buddy-details')));
+  await tester.pumpAndSettle();
+}
+
 Future<void> _pump(
   WidgetTester tester,
   BuddyViewModel model, {
@@ -157,26 +168,38 @@ void main() {
     expect(find.text('Connected'), findsOneWidget);
     expect(find.text('Off'), findsOneWidget);
     expect(find.text('Mic off'), findsOneWidget);
-    expect(find.text('Clip'), findsOneWidget);
-    expect(find.text('Start'), findsOneWidget);
+    // The glance: the circle, its two words and the two controls that
+    // stop recording.
+    expect(find.byKey(const Key('buddy-dot')), findsOneWidget);
     expect(find.text('End'), findsOneWidget);
     expect(find.text('Mute'), findsOneWidget);
-    expect(find.text('Pause'), findsOneWidget);
-    expect(find.text('Interrupt'), findsOneWidget);
-    expect(find.text('Voice settings'), findsOneWidget);
-    expect(find.text('Retry'), findsNothing);
-    expect(find.text('Workspace buddy off'), findsNothing);
-    expect(find.byTooltip('Call · start'), findsOneWidget);
+    expect(find.text('Details'), findsOneWidget);
     expect(find.byTooltip('Call · end'), findsOneWidget);
     expect(find.byTooltip('Microphone · off'), findsOneWidget);
-    expect(find.byTooltip('Conversation · live'), findsOneWidget);
-    expect(find.byTooltip('Playback · interruption'), findsOneWidget);
-    expect(find.byTooltip('Voice settings'), findsOneWidget);
     expect(find.byTooltip('Buddy · off'), findsOneWidget);
     expect(find.byTooltip('Workspace · open'), findsOneWidget);
     expect(find.byTooltip('Connection · $_address'), findsOneWidget);
-    expect(find.byTooltip('Voice provider · Clip'), findsOneWidget);
+    expect(find.text('Retry'), findsNothing);
+    expect(find.text('Workspace buddy off'), findsNothing);
+    // Everything else is one step away, not on the card.
+    expect(find.text('Start'), findsNothing);
+    expect(find.text('Clip'), findsNothing);
+    expect(find.text('Pause'), findsNothing);
+    expect(find.text('Interrupt'), findsNothing);
+    expect(find.text('Voice settings'), findsNothing);
     expect(find.byTooltip('Microphone · level'), findsNothing);
+    await _openDetails(tester);
+    expect(find.text('Start'), findsOneWidget);
+    expect(find.text('Clip'), findsOneWidget);
+    expect(find.text('Pause'), findsOneWidget);
+    expect(find.text('Interrupt'), findsOneWidget);
+    expect(find.text('Voice settings'), findsOneWidget);
+    expect(find.byTooltip('Call · start'), findsOneWidget);
+    expect(find.byTooltip('Conversation · live'), findsOneWidget);
+    expect(find.byTooltip('Playback · interruption'), findsOneWidget);
+    expect(find.byTooltip('Voice settings'), findsOneWidget);
+    expect(find.byTooltip('Voice provider · Clip'), findsOneWidget);
+    expect(find.text('Less'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -225,6 +248,8 @@ void main() {
       buddyModel(phase: BuddyPhase.listening, levelReported: true),
     );
     expect(find.text('Mic live'), findsOneWidget);
+    expect(find.byKey(const Key('buddy-level')), findsNothing);
+    await _openDetails(tester);
     expect(find.byKey(const Key('buddy-level')), findsOneWidget);
     expect(find.byTooltip('Microphone · level'), findsOneWidget);
     // Without a reported level there is no meter even while listening.
@@ -250,9 +275,10 @@ void main() {
     await _pump(tester, buddyModel(phase: BuddyPhase.paused, paused: true));
     expect(find.text('Paused'), findsOneWidget);
     expect(find.text('Mic paused'), findsOneWidget);
+    expect(find.byTooltip('Microphone · paused'), findsOneWidget);
+    await _openDetails(tester);
     expect(find.text('Resume'), findsOneWidget);
     expect(find.byTooltip('Conversation · paused'), findsOneWidget);
-    expect(find.byTooltip('Microphone · paused'), findsOneWidget);
 
     await _pump(tester, buddyModel(phase: BuddyPhase.starting, starting: true));
     expect(find.text('Starting'), findsOneWidget);
@@ -281,8 +307,9 @@ void main() {
       ),
     );
     expect(find.text('Hearing you'), findsOneWidget);
-    expect(find.text('Speaking'), findsWidgets);
     expect(find.text('Mic live'), findsOneWidget);
+    await _openDetails(tester);
+    expect(find.text('Speaking'), findsOneWidget);
     expect(find.byKey(const Key('buddy-activity')), findsOneWidget);
     await _pump(
       tester,
@@ -293,13 +320,15 @@ void main() {
       ),
     );
     expect(find.text('Hearing you'), findsOneWidget);
-    expect(find.text('Reply held'), findsOneWidget);
     expect(find.text('Mic live'), findsOneWidget);
+    await _openDetails(tester);
+    expect(find.text('Reply held'), findsOneWidget);
     await _pump(
       tester,
       buddyModel(phase: BuddyPhase.hearing, output: BuddyOutput.working),
     );
     expect(find.text('Hearing you'), findsOneWidget);
+    await _openDetails(tester);
     expect(find.text('Working'), findsOneWidget);
   });
 
@@ -387,9 +416,11 @@ void main() {
       onOpenWorkspace: () => workspaces++,
       onOpenSettings: () => settings++,
     );
-    await tester.tap(find.byKey(const Key('buddy-start')));
+    // End and Mute are on the glance; the rest are one step away.
     await tester.tap(find.byKey(const Key('buddy-end')));
     await tester.tap(find.byKey(const Key('buddy-mute')));
+    await _openDetails(tester);
+    await tester.tap(find.byKey(const Key('buddy-start')));
     await tester.tap(find.byKey(const Key('buddy-pause')));
     await tester.tap(find.byKey(const Key('buddy-interrupt')));
     await tester.tap(find.byKey(const Key('buddy-settings')));
@@ -417,6 +448,7 @@ void main() {
         note: 'No live episode',
       ),
     );
+    await _openDetails(tester);
     final start = tester.widget<FilledButton>(
       find.ancestor(
         of: find.text('Start'),
@@ -443,6 +475,7 @@ void main() {
     final mic = tester.getSemantics(find.byKey(const Key('buddy-mic-node')));
     expect(mic.label, 'Mic live');
     expect(mic.hasFlag(SemanticsFlag.isLiveRegion), isTrue);
+    await _openDetails(tester);
     final start = tester.getSemantics(find.bySemanticsLabel('Start'));
     expect(
       start,
@@ -495,10 +528,24 @@ void main() {
       buddyModel(phase: BuddyPhase.off, canStart: true),
       onStart: () => starts++,
     );
-    // The card takes no focus when it appears; Tab reaches its controls.
-    await tester.sendKeyEvent(LogicalKeyboardKey.tab); // the off control
-    await tester.sendKeyEvent(LogicalKeyboardKey.tab); // the workspace
-    await tester.sendKeyEvent(LogicalKeyboardKey.tab); // Start
+    // The card takes no focus when it appears, but a keyboard alone reaches
+    // `Details` and then Start: nothing on the card needs a mouse.
+    for (var i = 0; i < 12 && find.text('Less').evaluate().isEmpty; i++) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      final details = find.byKey(const Key('buddy-details'));
+      if (Focus.of(tester.element(details)).hasFocus) {
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+      }
+    }
+    expect(find.text('Less'), findsOneWidget, reason: 'Details opened by key');
+    for (var i = 0; i < 12; i++) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      final start = find.byKey(const Key('buddy-start'));
+      if (Focus.of(tester.element(start)).hasFocus) break;
+    }
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pump();
     expect(starts, 1, reason: 'a keyboard user can start without a mouse');

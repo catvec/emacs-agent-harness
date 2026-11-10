@@ -10,6 +10,7 @@ import '../adaptive/layout_widgets.dart';
 import '../navigation.dart';
 import '../screens/voice_screen.dart';
 import '../theme/harness_theme.dart';
+import 'voice_buddy_dot.dart';
 
 /// Open the full call view of [buddy]'s call: the same call the in-call bar
 /// shows, in the screen that owns the large controls.  Leaving the view does
@@ -209,7 +210,13 @@ class WorkspaceBuddy extends StatelessWidget {
 
 /// The presentational card.  It takes an immutable [BuddyViewModel] so the
 /// exact copy and the layout of every state are testable without a harness.
-class WorkspaceBuddyView extends StatelessWidget {
+///
+/// It is the *glance*: the circle, the two words that say what the circle
+/// means, and the two controls a person away from the app must reach.  The
+/// rest — `Pause`, `Interrupt`, `Voice settings`, Start — is behind
+/// `Details`, which opens inside the same card, so the away window keeps
+/// every capability without the card standing open at full height.
+class WorkspaceBuddyView extends StatefulWidget {
   const WorkspaceBuddyView({
     super.key,
     required this.model,
@@ -237,6 +244,7 @@ class WorkspaceBuddyView extends StatelessWidget {
   final VoidCallback onOff;
   final VoidCallback onOpenWorkspace;
   final VoidCallback onOpenSettings;
+
   final ValueChanged<Offset>? onDragUpdate;
   final VoidCallback? onDragStart;
   final double? maxHeight;
@@ -250,6 +258,29 @@ class WorkspaceBuddyView extends StatelessWidget {
   }
 
   @override
+  State<WorkspaceBuddyView> createState() => _WorkspaceBuddyViewState();
+}
+
+class _WorkspaceBuddyViewState extends State<WorkspaceBuddyView> {
+  /// Whether the card shows what it does not stand there repeating.  It is
+  /// the card's own state, so opening it never opens a second call.
+  bool _details = false;
+
+  BuddyViewModel get model => widget.model;
+  VoidCallback get onStart => widget.onStart;
+  VoidCallback get onEnd => widget.onEnd;
+  VoidCallback get onMute => widget.onMute;
+  VoidCallback get onPause => widget.onPause;
+  VoidCallback get onInterrupt => widget.onInterrupt;
+  VoidCallback get onRetry => widget.onRetry;
+  VoidCallback get onOff => widget.onOff;
+  VoidCallback get onOpenWorkspace => widget.onOpenWorkspace;
+  VoidCallback get onOpenSettings => widget.onOpenSettings;
+  ValueChanged<Offset>? get onDragUpdate => widget.onDragUpdate;
+  VoidCallback? get onDragStart => widget.onDragStart;
+  double? get maxHeight => widget.maxHeight;
+
+  @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final reduceMotion =
@@ -257,7 +288,7 @@ class WorkspaceBuddyView extends StatelessWidget {
     final motion = reduceMotion
         ? Duration.zero
         : const Duration(milliseconds: 160);
-    final width = widthFor(context);
+    final width = WorkspaceBuddyView.widthFor(context);
     final content = Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -269,15 +300,39 @@ class WorkspaceBuddyView extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _identity(context),
-              const SizedBox(height: 8),
-              _status(context, motion),
-              const SizedBox(height: 5),
-              _microphone(context),
+              // The circle and the two words that say what it means.  The
+              // pipeline strip in the call view is the detailed picture now;
+              // this card is the glance, so it does not restate the strip.
+              Row(
+                children: [
+                  VoiceBuddyDot(
+                    key: const Key('buddy-dot'),
+                    status: model.status,
+                    workspaceName: model.workspaceName,
+                    level: model.level,
+                    size: 44,
+                    pulseAllowed: !reduceMotion,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _identity(context),
+                        const SizedBox(height: 4),
+                        _statusAndMicrophone(context, motion),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
               const SizedBox(height: 10),
               _callControls(context),
-              const SizedBox(height: 4),
-              _secondaryControls(context),
+              if (_details) ...[
+                const SizedBox(height: 4),
+                _secondaryControls(context),
+              ],
               if (model.problem != null) ...[
                 const SizedBox(height: 8),
                 _problem(context),
@@ -396,15 +451,19 @@ class WorkspaceBuddyView extends StatelessWidget {
     );
   }
 
-  Widget _status(BuildContext context, Duration motion) {
+  /// The status word and the microphone word, side by side: the two facts
+  /// the circle's colour stands for, said in words so colour is never the
+  /// only cue.  The provider and the level moved to the call view and the
+  /// circle's tooltip; the pipeline strip there carries the detail.
+  Widget _statusAndMicrophone(BuildContext context, Duration motion) {
     final theme = Theme.of(context);
     final phase = model.status.phase;
+    final mic = model.status.mic;
+    final live = mic == BuddyMic.live;
     final color = _phaseColor(context, phase);
     return Row(
       children: [
-        Icon(_phaseIcon(phase), size: 15, color: color),
-        const SizedBox(width: 6),
-        Expanded(
+        Flexible(
           child: Semantics(
             key: const Key('buddy-status-node'),
             container: true,
@@ -424,51 +483,7 @@ class WorkspaceBuddyView extends StatelessWidget {
             ),
           ),
         ),
-        const SizedBox(width: 6),
-        Tooltip(
-          message: 'Voice provider · ${model.providerLabel}',
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                model.providerLabel == 'Live'
-                    ? Icons.bolt_rounded
-                    : Icons.graphic_eq_rounded,
-                size: 12,
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-              const SizedBox(width: 3),
-              Text(
-                model.providerLabel,
-                key: const Key('buddy-provider'),
-                style: HarnessText.caption(context),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _microphone(BuildContext context) {
-    final theme = Theme.of(context);
-    final mic = model.status.mic;
-    final live = mic == BuddyMic.live;
-    return Row(
-      children: [
-        Icon(
-          switch (mic) {
-            BuddyMic.live => Icons.mic_rounded,
-            BuddyMic.muted => Icons.mic_off_rounded,
-            BuddyMic.paused => Icons.pause_circle_outline_rounded,
-            BuddyMic.starting => Icons.mic_none_rounded,
-            BuddyMic.closing => Icons.mic_none_rounded,
-            BuddyMic.off => Icons.mic_none_rounded,
-          },
-          size: 14,
-          color: live ? HarnessColors.moss : theme.colorScheme.onSurfaceVariant,
-        ),
-        const SizedBox(width: 5),
+        const SizedBox(width: 8),
         Flexible(
           child: Semantics(
             key: const Key('buddy-mic-node'),
@@ -476,45 +491,61 @@ class WorkspaceBuddyView extends StatelessWidget {
             liveRegion: true,
             label: mic.label,
             excludeSemantics: true,
-            child: Text(
-              mic.label,
-              key: const Key('buddy-mic'),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: HarnessText.caption(context),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  switch (mic) {
+                    BuddyMic.live => Icons.mic_rounded,
+                    BuddyMic.muted => Icons.mic_off_rounded,
+                    BuddyMic.paused => Icons.pause_circle_outline_rounded,
+                    BuddyMic.starting => Icons.mic_none_rounded,
+                    BuddyMic.closing => Icons.mic_none_rounded,
+                    BuddyMic.off => Icons.mic_none_rounded,
+                  },
+                  size: 13,
+                  color: live
+                      ? HarnessColors.moss
+                      : theme.colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 4),
+                Flexible(
+                  child: Text(
+                    mic.label,
+                    key: const Key('buddy-mic'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: HarnessText.caption(context),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
-        if (model.showsLevel) ...[
-          const SizedBox(width: 8),
-          Tooltip(
-            message: 'Microphone · level',
-            child: ExcludeSemantics(
-              child: _LevelMeter(
-                key: const Key('buddy-level'),
-                level: model.level,
-              ),
-            ),
-          ),
-        ],
-        const SizedBox(width: 8),
-        if (model.extraOutput != BuddyOutput.idle)
-          Flexible(child: _ActivityChip(output: model.extraOutput)),
       ],
     );
   }
 
+  /// The two controls a person away from the app must reach: the microphone
+  /// and End, each with its own name and target.  `Details` opens the rest
+  /// inside this same card, so nothing the away window could do before needs
+  /// the main window to come forward.
   Widget _callControls(BuildContext context) {
+    final mic = model.status.mic;
     return Row(
       children: [
         Expanded(
           child: _LabelControl(
-            key: const Key('buddy-start'),
-            label: 'Start',
-            tooltip: 'Call · start',
-            icon: Icons.play_arrow_rounded,
-            onPressed: model.canStart ? onStart : null,
-            filled: true,
+            key: const Key('buddy-mute'),
+            label: model.muted ? 'Unmute' : 'Mute',
+            // The microphone's own state, not the phase: a failed or
+            // starting call has no live microphone to toggle.
+            tooltip: 'Microphone · ${mic.name}',
+            icon: mic == BuddyMic.live
+                ? Icons.mic_rounded
+                : Icons.mic_off_rounded,
+            toggled: model.muted,
+            onPressed: model.canMute ? onMute : null,
           ),
         ),
         const SizedBox(width: 8),
@@ -528,51 +559,113 @@ class WorkspaceBuddyView extends StatelessWidget {
             destructive: true,
           ),
         ),
+        const SizedBox(width: 4),
+        Tooltip(
+          message: _details ? 'Call · glance' : 'Call · details',
+          child: TextButton(
+            key: const Key('buddy-details'),
+            onPressed: () => setState(() => _details = !_details),
+            style: TextButton.styleFrom(
+              minimumSize: const Size(0, 36),
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: Text(_details ? 'Less' : 'Details'),
+          ),
+        ),
       ],
     );
   }
 
+  /// What the card does not stand there repeating: the provider, the level in
+  /// numbers, Start, `Pause`, `Interrupt` and `Voice settings`.  The same
+  /// controller's controls; opening this row never opens a second call.
   Widget _secondaryControls(BuildContext context) {
-    final mic = model.status.mic;
-    return Wrap(
-      spacing: 1,
-      runSpacing: 1,
+    final theme = Theme.of(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _SmallControl(
-          key: const Key('buddy-mute'),
-          label: model.muted ? 'Unmute' : 'Mute',
-          // The microphone's own state, not the phase: a failed or starting
-          // call has no live microphone to toggle.
-          tooltip: 'Microphone · ${mic.name}',
-          icon: mic == BuddyMic.live
-              ? Icons.mic_rounded
-              : Icons.mic_off_rounded,
-          toggled: model.muted,
-          onPressed: model.canMute ? onMute : null,
+        Row(
+          children: [
+            // Start is always named, and disabled when there is nothing to
+            // start: a control that comes and goes is harder to find than a
+            // dimmed one that says what it is.
+            Expanded(
+              child: _LabelControl(
+                key: const Key('buddy-start'),
+                label: 'Start',
+                tooltip: 'Call · start',
+                icon: Icons.play_arrow_rounded,
+                onPressed: model.canStart ? onStart : null,
+                filled: true,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Tooltip(
+                message: 'Voice provider · ${model.providerLabel}',
+                child: Text(
+                  model.providerLabel,
+                  key: const Key('buddy-provider'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: HarnessText.caption(context).copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ),
+            if (model.showsLevel) ...[
+              const SizedBox(width: 6),
+              Tooltip(
+                message: 'Microphone · level',
+                child: ExcludeSemantics(
+                  child: _LevelMeter(
+                    key: const Key('buddy-level'),
+                    level: model.level,
+                  ),
+                ),
+              ),
+            ],
+            if (model.extraOutput != BuddyOutput.idle) ...[
+              const SizedBox(width: 6),
+              Flexible(child: _ActivityChip(output: model.extraOutput)),
+            ],
+          ],
         ),
-        _SmallControl(
-          key: const Key('buddy-pause'),
-          label: model.paused ? 'Resume' : 'Pause',
-          tooltip: model.paused
-              ? 'Conversation · paused'
-              : 'Conversation · live',
-          icon: model.paused ? Icons.play_arrow_rounded : Icons.pause_rounded,
-          toggled: model.paused,
-          onPressed: model.canPause ? onPause : null,
-        ),
-        _SmallControl(
-          key: const Key('buddy-interrupt'),
-          label: 'Interrupt',
-          tooltip: 'Playback · interruption',
-          icon: Icons.stop_rounded,
-          onPressed: model.canInterrupt ? onInterrupt : null,
-        ),
-        _SmallControl(
-          key: const Key('buddy-settings'),
-          label: 'Voice settings',
-          tooltip: 'Voice settings',
-          icon: Icons.settings_outlined,
-          onPressed: onOpenSettings,
+        const SizedBox(height: 4),
+        Wrap(
+          spacing: 1,
+          runSpacing: 1,
+          children: [
+            _SmallControl(
+              key: const Key('buddy-pause'),
+              label: model.paused ? 'Resume' : 'Pause',
+              tooltip: model.paused
+                  ? 'Conversation · paused'
+                  : 'Conversation · live',
+              icon: model.paused
+                  ? Icons.play_arrow_rounded
+                  : Icons.pause_rounded,
+              toggled: model.paused,
+              onPressed: model.canPause ? onPause : null,
+            ),
+            _SmallControl(
+              key: const Key('buddy-interrupt'),
+              label: 'Interrupt',
+              tooltip: 'Playback · interruption',
+              icon: Icons.stop_rounded,
+              onPressed: model.canInterrupt ? onInterrupt : null,
+            ),
+            _SmallControl(
+              key: const Key('buddy-settings'),
+              label: 'Voice settings',
+              tooltip: 'Voice settings',
+              icon: Icons.settings_outlined,
+              onPressed: onOpenSettings,
+            ),
+          ],
         ),
       ],
     );
@@ -651,8 +744,6 @@ class WorkspaceBuddyView extends StatelessWidget {
       ),
     );
   }
-
-  IconData _phaseIcon(BuddyPhase phase) => workspaceBuddyPhaseIcon(phase);
 
   Color _phaseColor(BuildContext context, BuddyPhase phase) =>
       workspaceBuddyPhaseColor(context, phase);
@@ -887,6 +978,7 @@ class _LabelControl extends StatefulWidget {
     required this.onPressed,
     this.filled = false,
     this.destructive = false,
+    this.toggled,
   });
 
   final String label;
@@ -895,6 +987,10 @@ class _LabelControl extends StatefulWidget {
   final VoidCallback? onPressed;
   final bool filled;
   final bool destructive;
+
+  /// Whether the control is a toggle, and whether it is on, for a reader.
+  /// Null for a control that is not a toggle at all.
+  final bool? toggled;
 
   @override
   State<_LabelControl> createState() => _LabelControlState();
@@ -969,6 +1065,7 @@ class _LabelControlState extends State<_LabelControl> {
         container: true,
         button: true,
         enabled: enabled,
+        toggled: widget.toggled,
         label: widget.label,
         tooltip: widget.tooltip,
         onTap: enabled ? widget.onPressed : null,

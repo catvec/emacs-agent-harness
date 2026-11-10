@@ -260,3 +260,117 @@ class BuddyViewModel {
   bool get failed => status.phase == BuddyPhase.failed;
   bool get ending => status.phase == BuddyPhase.ending;
 }
+
+/// The tone of the buddy's ring: the one thing on the circle that changes.
+///
+/// It is a *group* of the phases that mean the same thing at a glance, not a
+/// new state: every value is derived from a [BuddyStatus] the controller
+/// already reports, and the glyph and the words beside the circle carry the
+/// exact phase.
+enum BuddyRingTone {
+  /// No call, or one that has stopped: an outline, no fill.
+  neutral,
+
+  /// The call is open and the microphone or the player is really moving.
+  live,
+
+  /// The capture gate heard speech, before any transcript exists.
+  hearing,
+
+  /// The call is between stages: starting, transcribing, working, held back,
+  /// waiting on an approval.
+  attention,
+
+  /// Capture is closed by the person, paused, interrupted or stopping.
+  muted,
+
+  /// The backend reported a failure.
+  failed,
+
+  /// No phase can be named.
+  unknown,
+}
+
+/// How the circle draws the last reported state.
+///
+/// It holds no state of its own and runs nothing on a clock: the widget that
+/// draws it changes only when a report changes [tone], [weight], [dashed] or
+/// [pulse].
+@immutable
+class BuddyRing {
+  const BuddyRing({
+    required this.tone,
+    required this.word,
+    required this.micWord,
+    required this.weight,
+    this.dashed = false,
+    this.pulse = false,
+    this.gap = false,
+  });
+
+  final BuddyRingTone tone;
+
+  /// The status word, the same one the bar and the card show.
+  final String word;
+
+  /// The microphone word, so a reader never has to infer capture from colour.
+  final String micWord;
+
+  /// The ring's stroke width, in logical pixels.
+  final double weight;
+
+  /// A broken ring: capture is closed by the person, or the conversation is
+  /// paused.  The gap is the non-colour cue for `Muted` and `Paused`.
+  final bool dashed;
+
+  /// Whether the ring may follow a reported level.  It is off whenever the
+  /// microphone is not live or the backend reports no levels, and the widget
+  /// turns it off again under reduced motion.
+  final bool pulse;
+
+  /// A gap at the top of the ring: a reply is held back while the person may
+  /// still be heard.
+  final bool gap;
+
+  /// The whole state on one line, for a tooltip or a screen reader.
+  String get label => 'Status · $word · $micWord';
+}
+
+/// The ring for a status, from the same resolved fields the card and the bar
+/// use.  Every branch reads a reported value; nothing here invents a stage.
+BuddyRing buddyRingFor(BuddyStatus status) {
+  final tone = switch (status.phase) {
+    BuddyPhase.off || BuddyPhase.ended => BuddyRingTone.neutral,
+    BuddyPhase.failed => BuddyRingTone.failed,
+    BuddyPhase.unknown => BuddyRingTone.unknown,
+    BuddyPhase.listening || BuddyPhase.speaking => BuddyRingTone.live,
+    BuddyPhase.hearing => BuddyRingTone.hearing,
+    BuddyPhase.starting ||
+    BuddyPhase.transcribing ||
+    BuddyPhase.working ||
+    BuddyPhase.holdingReply ||
+    BuddyPhase.approval => BuddyRingTone.attention,
+    BuddyPhase.interrupted ||
+    BuddyPhase.muted ||
+    BuddyPhase.paused ||
+    BuddyPhase.ending => BuddyRingTone.muted,
+  };
+  return BuddyRing(
+    tone: tone,
+    word: status.phase.label,
+    micWord: status.mic.label,
+    // Speech heard gets a heavier ring: a second, shape-level cue beside the
+    // colour and the word.
+    weight: status.phase == BuddyPhase.hearing ? 4 : 3,
+    dashed:
+        status.phase == BuddyPhase.muted || status.phase == BuddyPhase.paused,
+    // Only a state whose words are about capture may move with the capture
+    // level: a speaking or working call has nothing to say about the
+    // microphone's loudness, so its ring stays still.
+    pulse:
+        status.showsLevel &&
+        (status.phase == BuddyPhase.listening ||
+            status.phase == BuddyPhase.hearing),
+    gap: status.phase == BuddyPhase.holdingReply,
+  );
+}

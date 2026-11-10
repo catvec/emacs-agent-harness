@@ -287,6 +287,27 @@ Future<void> _write(
   });
 }
 
+
+/// Draw the current frame, assert the circle is still one node, and write a
+/// picture when [shots] names a directory.  [act] runs one real event first.
+Future<void> _pumpCircle(
+  WidgetTester tester,
+  GlobalKey boundary,
+  String? shots,
+  String name,
+  Future<void> Function() act,
+) async {
+  await act();
+  // The fake backend emits on a stream, so the event lands one microtask
+  // later, and the status word's own switcher takes 160 ms to finish.  The
+  // picture is of the settled state, not of a cross-fade.
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 400));
+  expect(find.byKey(const Key('call-bar-dot')), findsOneWidget);
+  expect(tester.takeException(), isNull);
+  if (shots != null) await _write(tester, boundary, '$shots/$name');
+}
+
 Future<GlobalKey> _showGraph(
   WidgetTester tester, {
   double width = 390,
@@ -512,7 +533,11 @@ void main() {
     expect(find.byKey(const Key('workspace-call-bar')), findsOneWidget);
     expect(find.text('Listening'), findsWidgets);
     expect(find.text('Mic live'), findsWidgets);
-    expect(find.byKey(const Key('buddy-level')), findsOneWidget);
+    // The card is the glance: the circle carries the level, so the numeric
+    // meter is one step away.
+    expect(find.byKey(const Key('buddy-level')), findsNothing);
+    expect(find.byKey(const Key('call-bar-dot')), findsOneWidget);
+    expect(find.byKey(const Key('buddy-dot')), findsOneWidget);
     expect(tester.takeException(), isNull);
     if (shots != null) {
       await _write(tester, boundary, '$shots/workspace-buddy-away.png');
@@ -540,8 +565,10 @@ void main() {
         callBar: true,
       );
       expect(find.text('Hearing you'), findsWidgets);
-      expect(find.text('Speaking'), findsWidgets);
       expect(find.text('Mic live'), findsWidgets);
+      // The circle reads the same phase the bar does, and the output word
+      // is on the bar's call view and behind Details, not on the glance.
+      expect(find.byKey(const Key('buddy-dot')), findsOneWidget);
       expect(tester.takeException(), isNull);
       if (shots != null) {
         await _write(tester, boundary, '$shots/workspace-buddy-scale-150.png');
@@ -651,6 +678,78 @@ void main() {
     if (shots != null) {
       await _write(tester, boundary, '$shots/workspace-call-bar-phone.png');
     }
+    rig.controller.dispose();
+    await tester.pump();
+  });
+
+  testWidgets('the buddy circle follows the reported phases', (tester) async {
+    // One call, one controller: each picture is the same circle after a
+    // different real event, not a set of mocked-up states.
+    final rig = BuddyRig();
+    await rig.controller.enable();
+    await rig.controller.start();
+    final backend = rig.backends.single;
+    final (boundary, _) = await _show(
+      tester,
+      width: 1024,
+      height: 768,
+      buddy: rig,
+      callBar: true,
+      awayCard: false,
+    );
+    expect(find.byKey(const Key('call-bar-dot')), findsOneWidget);
+    await _pumpCircle(
+      tester,
+      boundary,
+      shots,
+      'voice-buddy-circle-listening.png',
+      () async => backend.emit(const VoiceLevelEvent(0.3)),
+    );
+    await _pumpCircle(
+      tester,
+      boundary,
+      shots,
+      'voice-buddy-circle-hearing.png',
+      () async => backend.emit(const VoiceSpeechEvent(true)),
+    );
+    await _pumpCircle(
+      tester,
+      boundary,
+      shots,
+      'voice-buddy-circle-speaking.png',
+      () async {
+        backend.emit(const VoiceSpeechEvent(false));
+        backend.emit(const VoicePhaseEvent(VoicePhase.speaking));
+      },
+    );
+    await _pumpCircle(
+      tester,
+      boundary,
+      shots,
+      'voice-buddy-circle-muted.png',
+      () async {
+        backend.emit(const VoicePhaseEvent(VoicePhase.listening));
+        await rig.controller.toggleMute();
+      },
+    );
+    await _pumpCircle(
+      tester,
+      boundary,
+      shots,
+      'voice-buddy-circle-failed.png',
+      () async {
+        await rig.controller.toggleMute();
+        backend.emit(
+          const VoiceFailureEvent(
+            VoiceProblem(
+              'Microphone permission denied',
+              detail: 'NotAllowedError',
+              recoverable: false,
+            ),
+          ),
+        );
+      },
+    );
     rig.controller.dispose();
     await tester.pump();
   });
