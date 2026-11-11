@@ -132,9 +132,12 @@ there, not here."
                       (const :tag "DeepSeek" deepseek)))
      (:capabilities (plist :tag "Capabilities" :value (:vision t :thinking t)
                            :doc "What the models can do, replacing what the flavor says: images
-and thinking, and for OpenRouter prices and costs too."
+and thinking, and for OpenRouter prices and costs too.  A server
+that takes a JSON schema says so in its model list, per model, and
+that is where `:structured-outputs' usually comes from."
                            :options ((:vision (const :tag "Images" t))
                                      (:thinking (const :tag "Thinking" t))
+                                     (:structured-outputs (const :tag "JSON schemas" t))
                                      (:pricing (const :tag "Prices come from the model list" dynamic))
                                      (:cost-reported (const :tag "Replies say what they cost" t)))))))
   "Customize type of an entry of `harness-openai-endpoints'.")
@@ -457,6 +460,12 @@ only carry an id, and get the endpoint's `:default-context' if any."
       (when (member "tools" params) (setq caps (plist-put caps :tools t)))
       (when efforts (setq caps (plist-put caps :thinking t)))
       (when modalities (setq caps (plist-put caps :vision (and (member "image" modalities) t))))
+      ;; A server that lists `structured_outputs' takes `response_format'
+      ;; with a JSON schema; one that lists only `response_format' takes
+      ;; the older `json_object' mode, which is no schema and is not read
+      ;; as this capability.
+      (when (member "structured_outputs" params)
+        (setq caps (plist-put caps :structured-outputs t)))
       (when caps (setq model (plist-put model :capabilities caps))))
     model))
 
@@ -778,6 +787,29 @@ DeepSeek does not know at all yields nil and no `reasoning_effort' is
 sent."
   (cdr (assoc (harness-openai--string level) harness-openai--deepseek-effort-map)))
 
+(defun harness-openai--response-format (endpoint request)
+  "Return the `response_format' of REQUEST at ENDPOINT, or nil.
+A request that names `:response-schema' asks for JSON in that schema,
+which only some routes take: this function returns the field where the
+transport of ENDPOINT can be told it does, and otherwise nothing.  A
+dialect that knows which of its endpoints take one says so with its
+`:response-format' hook, given ENDPOINT, the request and the schema; a
+dialect with no such hook passes the schema on, since a caller that
+names one asks a server it knows takes it.  An endpoint with no
+dialect is a plain OpenAI-compatible server, which the caller can only
+mean if it has checked: the field goes out as `json_schema', under
+`:response-schema-name' or the job's name."
+  (when-let* ((schema (plist-get request :response-schema)))
+    (let* ((dialect (harness-openai--dialect endpoint))
+           (hook (plist-get dialect :response-format))
+           (name (or (plist-get request :response-schema-name) "answer")))
+      (cond
+       (hook (funcall hook endpoint request schema name))
+       (dialect nil)                    ; this dialect takes none here
+       ((listp schema)
+        (list :type "json_schema"
+              :json_schema (list :name name :strict :true :schema schema)))))))
+
 (defun harness-openai--body (endpoint name request)
   "Build the chat completions body for model NAME at ENDPOINT from REQUEST.
 A request that asks for no thinking with `:no-thinking' says so on the
@@ -790,7 +822,12 @@ reasoning and stops at `max-tokens' with no text, as a naming request's
 asked for one of those (`harness-openai--effort'): a model that does
 not take `none' gets its weakest effort instead, and one that takes
 `max' or `xhigh' gets it.  An endpoint with no such listing sends no
-effort when it knows no off switch, as before."
+effort when it knows no off switch, as before.
+
+A request that names `:response-schema' has the answer constrained to
+it where the route takes a schema (`harness-openai--response-format');
+elsewhere no such field is sent, and the caller's prompt and reading
+alone keep the shape."
   (let* ((dialect (harness-openai--dialect endpoint))
          (deepseek (harness-openai--deepseek-p endpoint))
          (level (if (plist-get request :no-thinking) "none" (plist-get request :thinking)))
@@ -813,6 +850,8 @@ effort when it knows no off switch, as before."
                                    (list :effort effort)))
                        (t (plist-put body (or (plist-get dialect :reasoning-field) :reasoning_effort)
                                      effort)))))
+    (when-let* ((format (harness-openai--response-format endpoint request)))
+      (setq body (plist-put body :response_format format)))
     (when-let* ((extra (plist-get dialect :body-extra)))
       (dolist (pair (funcall extra endpoint name request))
         (setq body (plist-put body (car pair) (cdr pair)))))

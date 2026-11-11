@@ -144,6 +144,12 @@ replace the standard-tier default prices, discount and tier."
           :service_tier (plist-get overrides :tier)
           :quantization (or (plist-get overrides :quantization) "fp8")
           :context_length 1048576
+          ;; What the endpoint takes, as OpenRouter lists it: the ones
+          ;; the tests' endpoints take unless OVERRIDES says otherwise
+          ;; (`:supported-parameters' nil is an endpoint that lists none).
+          :supported_parameters (if (plist-member overrides :supported-parameters)
+                                    (plist-get overrides :supported-parameters)
+                                  '("tools" "response_format" "structured_outputs"))
           :pricing pricing)))
 
 (defun harness-openrouter-test--catalogue-json (&rest endpoints)

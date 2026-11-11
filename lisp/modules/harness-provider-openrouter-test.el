@@ -641,6 +641,84 @@ default so a priority endpoint cannot take the traffic."
         (should-not (member "deepinfra" (append (plist-get provider :only) nil)))
         (should-not (member "deepinfra" (append (plist-get provider :order) nil)))))))
 
+(ert-deftest harness-provider-openrouter-schema-only-where-the-endpoint-takes-one ()
+  "A verdict schema goes only to a pinned endpoint that says it takes one.
+OpenRouter passes `response_format' on to the endpoint, and only some
+endpoints take a JSON schema: the pin records what the chosen endpoint
+listed (`supported_parameters'), and a session with a pin whose endpoint
+said nothing of one sends no schema rather than a field that would fail
+the call.  Without routing there is no pin, and no schema."
+  (let* ((policy (harness-openrouter-test-policy))
+         (schema '(:type "object" :properties (:decision (:type "string"))
+                   :required ["decision"]))
+         (request (list :model (format "openrouter:%s" harness-openrouter-test-model)
+                        :messages '((:role user :content ((:type "text" :text "hi"))))
+                        :response-schema schema :response-schema-name "verdict")))
+    (let ((harness-openrouter-routing policy))
+      (let* ((pinned (plist-put (copy-sequence request) :session
+                                (list :id "s" :ext (list :openrouter-route
+                                                         (harness-openrouter-test--route
+                                                          '(:structured-outputs t))))))
+             (format (plist-get (harness-openai--body (harness-openrouter--endpoint) "m" pinned)
+                                :response_format)))
+        (should (equal "json_schema" (plist-get format :type)))
+        (should (equal "verdict" (plist-get (plist-get format :json_schema) :name)))
+        (should (equal schema (plist-get (plist-get format :json_schema) :schema))))
+      ;; An endpoint that listed no structured outputs gets no schema.
+      (let ((unlisted (plist-put (copy-sequence request) :session
+                                 (list :id "s" :ext (list :openrouter-route
+                                                          (harness-openrouter-test--route))))))
+        (should-not (plist-get (harness-openai--body (harness-openrouter--endpoint) "m" unlisted)
+                               :response_format)))
+      ;; A session with no pin yet is not sent one either: nothing has
+      ;; said the endpoint it will be pinned to takes one.
+      (should-not (plist-get (harness-openai--body (harness-openrouter--endpoint) "m" request)
+                             :response_format)))
+    ;; A new session's pin records what its endpoint listed, so a later
+    ;; request of the same session carries the schema.
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-session (harness-openrouter-test--session "s-new")
+        (harness-openrouter-test-with-fake
+            (list (harness-openrouter-test--catalogue-response)
+                  (harness-openrouter-test--completion-response))
+          (let* ((req (plist-put (copy-sequence request) :session (harness-openrouter-test--session "s-new")))
+                 (events (harness-openrouter-test--run req)))
+            (should (eq 'end-turn (plist-get (car (last events)) :stop-reason)))
+            (should (eq t (plist-get harness-openrouter-test--stored :structured-outputs)))
+            (should (plist-get (plist-get (car harness-openrouter-test--requests) :json)
+                               :response_format))))))))
+
+(ert-deftest harness-provider-openrouter-schema-withheld-from-an-endpoint-that-lists-none ()
+  "An endpoint that lists no `structured_outputs' is pinned without it.
+The catalogue's `supported_parameters' is what the pin records; an
+endpoint that takes none gets a verdict request with no schema, and the
+reply is read strictly as before."
+  (let ((policy (harness-openrouter-test-policy)))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-session (harness-openrouter-test--session "s-new")
+        (harness-openrouter-test-with-fake
+            (list (cons (harness-openrouter-test--catalogue-url-regexp)
+                        `(:body ,(harness-openrouter-test--catalogue-json
+                                  (harness-openrouter-test--endpoint-json
+                                   "deepinfra/fp8" "DeepInfra"
+                                   :supported-parameters '("tools"))
+                                  (harness-openrouter-test--endpoint-json
+                                   "cohere/fp8" "Cohere"
+                                   :supported-parameters '("tools")
+                                   :pricing '(:prompt "0.00000015" :completion "0.0000005"
+                                              :input_cache_read "0.000000003" :discount 0)))))
+                  (harness-openrouter-test--completion-response))
+          (let* ((req (harness-openrouter-test--request
+                       (harness-openrouter-test--session "s-new")))
+                 (req (plist-put req :response-schema '(:type "object")))
+                 (req (plist-put req :response-schema-name "verdict"))
+                 (events (harness-openrouter-test--run req)))
+            (should (eq 'end-turn (plist-get (car (last events)) :stop-reason)))
+            (should (equal "deepinfra/fp8" (plist-get harness-openrouter-test--stored :slug)))
+            (should-not (plist-get harness-openrouter-test--stored :structured-outputs))
+            (should-not (plist-get (plist-get (car harness-openrouter-test--requests) :json)
+                                   :response_format))))))))
+
 (ert-deftest harness-provider-openrouter-openrouter-fields-stay-openrouter-only ()
   "The dialect's fields go to an OpenRouter endpoint, and nowhere else.
 This is the body assertion for the boundary: the same request sent to a

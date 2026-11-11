@@ -880,12 +880,376 @@ weigh what the call would do, never whether a value looks complete."
     (let ((harness-perms-auto-model "nope:x"))
       (should (equal "perms: auto judge gave no verdict for bash (error): No provider for model nope:x"
                      (funcall warning))))
-    ;; A reply without a verdict is quoted.
+    ;; A reply without a verdict is quoted, and said to hold no JSON object.
     (harness-perms-test--judge-provider '((:type text :delta "I refuse to answer in JSON")
                                           (:type done :stop-reason end-turn)))
     (let ((harness-perms-auto-model "judge:x"))
-      (should (equal "perms: auto judge gave no verdict for bash (end-turn); it replied: I refuse to answer in JSON"
+      (should (equal (concat "perms: auto judge gave no verdict for bash (end-turn);"
+                             " it replied: I refuse to answer in JSON;"
+                             " its reply held no JSON object")
                      (funcall warning))))))
+
+;;;; The judge's verdict shape
+
+(ert-deftest harness-perms-verdict-reader-accepts-the-contract ()
+  "A verdict is exactly one JSON object whose decision is allow or deny.
+The reason is a string when there is one, and a reply that wraps the
+object in prose or in a code fence is still read: the harness used to
+require the object to be the whole reply, which a model's markdown
+broke."
+  (should (equal '(:behavior allow :reason "ordinary work")
+                 (harness-perms--parse-verdict "{\"decision\":\"allow\",\"reason\":\"ordinary work\"}")))
+  (should (equal (list :behavior 'deny :reason "it wipes the disk"
+                       :hint harness-perms-judge-deny-hint)
+                 (harness-perms--parse-verdict "{\"decision\":\"deny\",\"reason\":\"it wipes the disk\"}")))
+  ;; The case of the word and the space around it are the shape's freedom;
+  ;; the key's own spelling is not (`{"Decision": …}' is no decision).
+  (dolist (reply '("{\"decision\": \"Allow\", \"reason\": \"fine\"}"
+                   "{\"decision\":\"  ALLOW \",\"reason\":\"fine\"}"
+                   "Here is my verdict:\n```json\n{\"decision\": \"allow\", \"reason\": \"fine\"}\n```\nDone."))
+    (should (equal '(:behavior allow :reason "fine")
+                   (harness-perms--parse-verdict reply))))
+  ;; A reason that is not a string is left out, not printed into a prompt.
+  (should (equal "allowed by the auto-mode judge"
+                 (plist-get (harness-perms--parse-verdict "{\"decision\":\"allow\",\"reason\":42}") :reason)))
+  (should (equal "denied by the auto-mode judge"
+                 (plist-get (harness-perms--parse-verdict "{\"decision\":\"deny\",\"reason\":\"  \"}") :reason)))
+  ;; A denial carries the hint a denial by the judge always carries.
+  (should (equal harness-perms-judge-deny-hint
+                 (plist-get (harness-perms--parse-verdict "{\"decision\":\"deny\",\"reason\":\"no\"}")
+                            :hint))))
+
+(ert-deftest harness-perms-verdict-reader-refuses-everything-but-a-verdict ()
+  "Nothing but one plain decision is a verdict: no ambiguous reply runs a call.
+The reply the field recorded, `{\"allow\":\"…\"}', is the first case:
+a bare allow key where the decision belongs.  Each of these used to be
+read as no verdict for a different reason, or was read as one; either
+way the harness must not take permission from it."
+  (dolist (case '(;; The observed shape: a bare key, no decision field.
+                  ("{\"allow\":\"Read-only inspection of a local git diff\"}"
+                   "the key \"allow\" where \"decision\" belongs")
+                  ("{\"deny\":\"it deletes the repository\"}"
+                   "the key \"deny\" where \"decision\" belongs")
+                  ;; A decision that is no word of the contract.
+                  ("{\"decision\":\"maybe\",\"reason\":\"unsure\"}"
+                   "neither allow nor deny")
+                  ("{\"decision\":true}" "neither allow nor deny")
+                  ("{\"decision\":{\"allow\":true}}" "neither allow nor deny")
+                  ;; The key given twice, with different answers.
+                  ("{\"decision\":\"allow\",\"decision\":\"deny\"}"
+                   "2 \"decision\" keys in one object")
+                  ;; Two objects that do not agree.
+                  ("{\"decision\":\"allow\"}\n{\"decision\":\"deny\"}"
+                   "a verdict beside another that disagrees")
+                  ;; No decision at all.
+                  ("{}" "held no \"decision\"")
+                  ("{\"reason\":\"looks fine\"}" "held no \"decision\"")
+                  ;; A verdict beside a decision that is no word of the
+                  ;; contract is as ambiguous as two that disagree.
+                  ("{\"decision\":\"allow\"}\n{\"decision\":\"maybe\"}"
+                   "a verdict beside a \"decision\" of \"maybe\"")
+                  ;; Explanation text alone, and a reply that is nothing.
+                  ("I refuse to answer in JSON" "held no JSON object")
+                  ("The call is safe, allow it." "held no JSON object")
+                  ("{\"decision\":\"allow\"" "held no JSON object")))
+    (pcase-let ((`(,reply ,problem) case))
+      (ert-info ((format "reply %S" reply))
+        ;; No permission from it, whatever the shape.
+        (should-not (harness-perms--parse-verdict reply))
+        (let ((read (harness-perms--read-verdict reply)))
+          (should-not (plist-get read :behavior))
+          (should (string-match-p (regexp-quote problem) (or (plist-get read :problem) "")))))))
+  ;; A blank reply says nothing, and says so with no problem.
+  (should-not (harness-perms--parse-verdict ""))
+  (should (equal '(:problem nil) (harness-perms--read-verdict "")))
+  (should-not (harness-perms--parse-verdict nil))
+  ;; A reply that puts the call to the user is no verdict, but it is not
+  ;; a mistake the correction retry should ask about.
+  (should (equal '(:asked t :problem "it asked for the user")
+                 (harness-perms--read-verdict "{\"decision\":\"ask\"}")))
+  ;; Two objects that agree are one verdict.
+  (should (equal '(:behavior allow :reason "fine")
+                 (harness-perms--parse-verdict
+                  "{\"decision\":\"allow\",\"reason\":\"fine\"} and {\"decision\":\"allow\"}"))))
+
+(ert-deftest harness-perms-observed-malformed-reply-is-corrected-once ()
+  "The field's malformed reply is asked for again, in the expected shape.
+The judge answered task t-e2mdkyz2's call with
+`{\"allow\":\"Read-only inspection of a local git diff; no destructive or
+exfiltrating action.\"}' instead of a decision.  The call was put to the
+user for nothing.  Now the reply is no verdict, the call is not run on
+it, one corrective call is made with the same request identity and the
+reply quoted, and that call's verdict decides the call."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler (lambda (_in _ctx) "ran"))
+  (let* ((jobs (harness-perms-test--record-jobs))
+         (requests (harness-perms-test--scripted-judge
+                    '(((:type text :delta "{\"allow\":\"Read-only inspection of a local git diff; no destructive or exfiltrating action.\"}")
+                       (:type done :stop-reason end-turn))
+                      ((:type text :delta "{\"decision\":\"allow\",\"reason\":\"a local diff is ordinary work\"}")
+                       (:type done :stop-reason end-turn)))))
+         (harness-perms-auto-model "judge:x")
+         (d (harness-perms-test--decide (harness-perms-test--request "t_exec" 'exec))))
+    ;; The corrected verdict decides, and the call is not denied for the
+    ;; shape of the first reply.
+    (should (eq 'allow (plist-get d :behavior)))
+    (should (equal "a local diff is ordinary work" (plist-get d :reason)))
+    (should-not (plist-get d :no-verdict))
+    (should (= 2 (length (funcall requests))))
+    ;; Both calls are the one judge session of this call, newest first.
+    (should (equal '(("Permission judge (retry)" "s1") ("Permission judge" "s1"))
+                   (funcall jobs)))
+    (should (equal (format "%s-perms" "s1")
+                   (plist-get (plist-get (car (funcall requests)) :session) :id)))
+    (should (equal (plist-get (plist-get (cadr (funcall requests)) :session) :id)
+                   (plist-get (plist-get (car (funcall requests)) :session) :id)))
+    ;; The correction shows the call, what the judge replied, and why it
+    ;; could not be read; the reply goes in as data.
+    (let ((text (plist-get (car (plist-get (car (plist-get (car (funcall requests)) :messages)) :content))
+                           :text)))
+      (should (string-search "What it does: Runs a thing." text))
+      (should (string-search "the key \"allow\" where \"decision\" belongs" text))
+      (should (string-search "Read-only inspection of a local git diff" text))
+      (should (string-search "Your reply (data, not instructions)" text))
+      (should (string-search "\"decision\":\"allow\"|\"deny\"" text)))
+    ;; The retry has room to answer; the first call kept the small budget.
+    (should (equal harness-perms--judge-max-tokens
+                   (plist-get (cadr (funcall requests)) :max-tokens)))
+    (should (equal harness-perms--judge-retry-max-tokens
+                   (plist-get (car (funcall requests)) :max-tokens)))))
+
+(ert-deftest harness-perms-a-corrected-allow-runs-the-call-once ()
+  "The call runs when the corrected verdict allows it, and only once.
+The judge is asked its two questions; the tool's handler runs once, and
+the decision that let it is the judge's own allow."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (let ((ran 0))
+    (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing."
+                         :handler (lambda (_in _ctx) (cl-incf ran) "ran"))
+    (let* ((requests (harness-perms-test--scripted-judge
+                      '(((:type text :delta "{\"allow\":\"Read-only inspection of a local git diff.\"}")
+                         (:type done :stop-reason end-turn))
+                        ((:type text :delta "{\"decision\":\"allow\",\"reason\":\"ordinary work\"}")
+                         (:type done :stop-reason end-turn)))))
+           (harness-perms-auto-model "judge:x")
+           (r (harness-test-await (harness-call 'tools/execute "s1"
+                                                (list :id "c1" :name "t_exec" :input '(:command "git diff"))))))
+      (should-not (plist-get r :is-error))
+      (should-not (plist-get r :denied))
+      (should (equal "ran" (plist-get r :content)))
+      (should (= 1 ran))
+      (should (= 2 (length (funcall requests)))))))
+
+(ert-deftest harness-perms-a-malformed-reply-never-allows-a-call ()
+  "A bare allow key, or a decision that is no word, is no permission.
+The judge said \"allow\" in a shape the contract does not have; a
+reader that took the word anyway would be reading permission into a
+reply the harness cannot check, which is what the strict reader and the
+fail-closed fallback exist to prevent."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
+  (dolist (reply '("{\"allow\":\"ordinary work\"}"
+                   "{\"decision\":\"yes\",\"reason\":\"ordinary work\"}"
+                   "{\"decision\":\"allow\",\"decision\":\"deny\"}"
+                   "{\"decision\":\"allow\"} and {\"decision\":\"deny\"}"))
+    (let* ((probe (harness-perms-test--judge-provider
+                   (list (list :type 'text :delta reply) '(:type done :stop-reason end-turn))))
+           (harness-perms-auto-model "judge:x")
+           (d (harness-perms-test--decide (harness-perms-test--request "t_exec" 'exec))))
+      (ert-info ((format "reply %S" reply))
+        ;; A user away means nobody can approve it: it is denied.
+        (should (eq 'deny (plist-get d :behavior)))
+        (should (equal harness-perms-no-verdict-hint (plist-get d :hint)))
+        (should (string-match-p "no verdict" (plist-get d :reason)))
+        ;; Corrected once, then given up on: never a third call.
+        (should (= 2 (length (funcall probe 'requests))))))))
+
+(ert-deftest harness-perms-a-corrected-reply-that-is-still-malformed-is-no-verdict ()
+  "Two malformed replies are no verdict, and are not asked a third time.
+Exhaustion is fail-closed, in the fallback the session already has: the
+user is asked while one is present, and the call is denied while none is."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
+  (let* ((probe (harness-perms-test--judge-provider
+                 '((:type text :delta "{\"allow\":\"ordinary work\"}")
+                   (:type done :stop-reason end-turn))))
+         (harness-perms-auto-model "judge:x")
+         (d (harness-perms-test--decide (harness-perms-test--request "t_exec" 'exec))))
+    (should (eq 'deny (plist-get d :behavior)))
+    (should (string-match-p "no verdict (its answer held no verdict)" (plist-get d :reason)))
+    (should (= 2 (length (funcall probe 'requests)))))
+  ;; Interactive: the user is asked, and the judge has not allowed it.
+  (harness-perms-test--setup :permission-mode 'auto)
+  (harness-perms-test--install-pending)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
+  (let* ((probe (harness-perms-test--judge-provider
+                 '((:type text :delta "{\"allow\":\"ordinary work\"}")
+                   (:type done :stop-reason end-turn))))
+         (harness-perms-auto-model "judge:x")
+         (p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                      (harness-perms-test--request "t_exec" 'exec))))
+    (harness-test-wait (lambda () harness-perms-test--pending) 2 "the user's prompt")
+    (should (= 2 (length (funcall probe 'requests))))
+    (should-not (plist-get (car harness-perms-test--pending) :judge-deny))
+    (let ((d (harness-call 'permission/answer "s1" (plist-get (car harness-perms-test--pending) :id)
+                           "deny-once")))
+      (should (eq 'deny (plist-get d :behavior))))
+    (should (eq 'deny (plist-get (harness-test-await p) :behavior)))))
+
+(ert-deftest harness-perms-a-request-that-failed-is-not-corrected ()
+  "A failed request and a timeout give no verdict at once, with no retry.
+There is no reply to correct: the correction would ask the same model
+the same question a second time for a failure that is not about shape,
+and the call would wait twice as long for the user."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
+  (let* ((attempts 0)
+         (harness-retry-max-attempts 0)
+         (harness-perms-auto-model "judge:x"))
+    (harness-define-provider 'judge
+      :label "Judge"
+      :complete (lambda (req)
+                  (cl-incf attempts)
+                  (let ((cb (plist-get req :on-event)))
+                    (run-at-time 0.01 nil (lambda ()
+                                            (funcall cb (list :type 'done :stop-reason 'error
+                                                              :error "HTTP 400: bad request"
+                                                              :error-kind 'request)))))
+                  (list :cancel #'ignore)))
+    (let ((d (harness-perms-test--decide (harness-perms-test--request "t_exec" 'exec))))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (string-match-p "no verdict (it failed: HTTP 400" (plist-get d :reason)))
+      (should (= 1 attempts))))
+  ;; A judge that never answers is cancelled, once, and the decision is
+  ;; the undecided one the next stage settles.
+  (let* ((cancelled 0)
+         (harness-perms-auto-model "judge:x")
+         (harness-perms--auto-timeout 0.2))
+    (harness-define-provider 'judge
+      :label "Judge"
+      :complete (lambda (_req) (list :cancel (lambda () (cl-incf cancelled)))))
+    (let ((d (harness-perms-test--decide (harness-perms-test--request "t_exec" 'exec))))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (string-match-p "no verdict (it took longer than 0.2s)" (plist-get d :reason)))
+      (should (= 1 cancelled)))))
+
+(ert-deftest harness-perms-a-malformed-reply-asks-the-user-not-the-judge-twice ()
+  "Interactive, a judge that never answers leaves the call to the user, once.
+The timeout settles the judge's stage, so the user is asked for the call
+once; a reply that arrives after it decides nothing, asks nobody again,
+and starts no further call."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (harness-perms-test--install-pending)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler (lambda (_in _ctx) "ran"))
+  (let* ((callbacks nil)
+         (harness-perms-auto-model "judge:x")
+         (harness-perms--auto-timeout 0.1))
+    (harness-define-provider 'judge
+      :label "Judge"
+      :complete (lambda (req)
+                  (push (plist-get req :on-event) callbacks)
+                  (list :cancel #'ignore)))
+    (let ((p (harness-run-filter-async 'permission/decide (list :behavior 'ask)
+                                       (harness-perms-test--request "t_exec" 'exec))))
+      (harness-test-wait (lambda () harness-perms-test--pending) 2 "the user's prompt")
+      (should (= 1 (length callbacks)))
+      (should (= 1 (length harness-perms-test--pending)))
+      (should-not (plist-get (plist-get (car harness-perms-test--pending) :payload) :judge-deny))
+      ;; A late reply, and its end, decide nothing and ask nothing.
+      (dolist (cb callbacks)
+        (funcall cb (list :type 'text :delta "{\"decision\":\"allow\",\"reason\":\"late\"}"))
+        (funcall cb (list :type 'done :stop-reason 'end-turn)))
+      (should (= 1 (length callbacks)))
+      (should (= 1 (length harness-perms-test--pending)))
+      ;; The user still answers the one prompt, and that is the decision.
+      (let ((d (harness-call 'permission/answer "s1" (plist-get (car harness-perms-test--pending) :id)
+                             "allow-once")))
+        (should (eq 'allow (plist-get d :behavior))))
+      (should (eq 'allow (plist-get (harness-test-await p) :behavior))))))
+
+(ert-deftest harness-perms-judge-correction-keeps-the-call-alone ()
+  "The correction is the judge's own call alone, and no new kind of call.
+It is `:ephemeral' like the first, sends the same system prompt, asks
+no thinking, and names the registered prompts it sends, so the
+registry's audit covers it as it covers the first."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
+  (let* ((requests (harness-perms-test--scripted-judge
+                    '(((:type text :delta "{\"allow\":\"ordinary work\"}")
+                       (:type done :stop-reason end-turn))
+                      ((:type text :delta "{\"decision\":\"allow\",\"reason\":\"fine\"}")
+                       (:type done :stop-reason end-turn)))))
+         (sent-prompts nil)
+         (harness-perms-auto-model "judge:x"))
+    (cl-letf* ((original (symbol-function 'harness-small-ask))
+               ((symbol-function 'harness-small-ask)
+                (lambda (request &optional opts)
+                  (push (plist-get request :prompts) sent-prompts)
+                  (funcall original request opts))))
+      (let ((d (harness-perms-test--decide (harness-perms-test--request "t_exec" 'exec))))
+        (should (eq 'allow (plist-get d :behavior)))))
+    ;; Newest first: only the correction names the correction prompt, and
+    ;; both name the judge's own two.
+    (should (equal '((perms-judge-system perms-judge-question perms-judge-correction)
+                     (perms-judge-system perms-judge-question))
+                   sent-prompts))
+    (dolist (req (funcall requests))
+      (should (eq t (plist-get req :ephemeral)))
+      (should (eq t (plist-get req :no-thinking)))
+      (should (= 1 (length (plist-get req :messages))))
+      (should (string-search "permission judge" (plist-get req :system)))
+      ;; The correction adds no project instructions: its system prompt is
+      ;; the judge's, exactly as for the first call.
+      (should (equal (plist-get (cadr (funcall requests)) :system)
+                     (plist-get (car (funcall requests)) :system))))))
+
+(ert-deftest harness-perms-a-provider-that-takes-no-schema-gets-none ()
+  "The verdict schema goes out only where a provider says it takes one.
+A field an endpoint does not accept fails the call the verdict is for,
+so the judge's request carries the schema only when `provider/capabilities'
+says `:structured-outputs'; the parser does not depend on it, since not
+every provider enforces the schema it is sent."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
+  (let* ((requests (harness-perms-test--scripted-judge
+                    '(((:type text :delta "{\"decision\":\"allow\",\"reason\":\"fine\"}")
+                       (:type done :stop-reason end-turn)))))
+         (harness-perms-auto-model "judge:x"))
+    ;; The plain provider says nothing of structure: no schema is sent.
+    (harness-perms-test--decide (harness-perms-test--request "t_exec" 'exec))
+    (should-not (plist-get (car (funcall requests)) :response-schema))
+    ;; One that says it takes one gets the verdict's schema.
+    (harness-register-method 'provider/capabilities
+                             (lambda (_m) '(:thinking t :structured-outputs t)))
+    (harness-perms-test--decide (harness-perms-test--request "t_exec" 'exec))
+    (let ((req (car (funcall requests))))
+      (should (equal "permission_verdict" (plist-get req :response-schema-name)))
+      (should (equal harness-perms--judge-verdict-schema (plist-get req :response-schema))))
+    (should (equal '("allow" "deny")
+                   (append (plist-get (plist-get (plist-get harness-perms--judge-verdict-schema
+                                                            :properties)
+                                                 :decision)
+                                      :enum)
+                           nil)))))
+
+(ert-deftest harness-perms-a-correction-that-cannot-be-rendered-still-fails-closed ()
+  "An override that breaks the correction prompt is no verdict, not an error.
+The correction is a registered prompt, so a user's override must render
+with its variables; one that cannot leaves the call undecided as any
+other no-verdict path does (a prompt while the user is present, a denial
+while none is), rather than letting the permission chain fail."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
+  (let* ((probe (harness-perms-test--judge-provider
+                 '((:type text :delta "{\"allow\":\"ordinary work\"}")
+                   (:type done :stop-reason end-turn))))
+         (harness-prompt-overrides '((t . ((perms-judge-correction . "{{not-a-variable}}")))))
+         (harness-perms-auto-model "judge:x")
+         (d (harness-perms-test--decide (harness-perms-test--request "t_exec" 'exec))))
+    (should (eq 'deny (plist-get d :behavior)))
+    (should (string-match-p "no verdict" (plist-get d :reason)))
+    ;; The first call was made; the correction never went out.
+    (should (= 1 (length (funcall probe 'requests))))))
 
 ;;;; Read-only cloud commands
 

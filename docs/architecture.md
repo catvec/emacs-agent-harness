@@ -2256,7 +2256,9 @@ some of the efforts, asks for `none` where the model takes it and for
 the weakest effort it does where it does not; an endpoint with no off
 switch and no effort a model names sends nothing, so a model whose
 thinking is on by default may still think (see the auto-mode judge's
-retry below, which covers that).
+retry below, which covers that).  `:response-schema` asks for an answer
+in that JSON schema, with `:response-schema-name` naming it, and only
+where the route takes one (see "provider").
 
 A REQUEST with `:ephemeral t` is a one-off question, such as the
 auto-mode judge's.  The provider answers it from the request alone, as
@@ -2929,6 +2931,25 @@ audit, and the state an answer reports, as functions the transport
 calls.  The transport knows no provider's field names; an endpoint
 without a dialect is sent exactly the body it was always sent.
 OpenRouter is the first such module (`provider-openrouter`, below).
+
+A request may name `:response-schema`, a JSON schema its answer is to
+follow (`:response-schema-name` names the schema on the wire), and the
+`response_format` it means goes out only where the route takes one
+(`harness-openai--response-format`).  A plain endpoint is sent it as
+`{"type":"json_schema","json_schema":{...}}`: the caller named the
+schema, so it asks a server it knows accepts one.  A dialect that knows
+which of its endpoints take a schema says so with its own
+`:response-format` hook; a dialect with no hook is sent none, since the
+transport has no way to tell and a field an endpoint refuses fails the
+whole call.  OpenRouter's hook reads the pin: the catalogue's
+`supported_parameters` lists `structured_outputs` per endpoint, the pin
+records it (`harness-openrouter--route-plist`), and only a pin that
+recorded it carries a schema.  The capability a caller may consult
+before naming a schema is `:structured-outputs` on
+`provider/capabilities`, which a model gets when its listing names
+`structured_outputs`.  A schema constrains an answer where the server
+enforces it; the harness's own readers never rely on it (the permission
+judge's verdict is read strictly, schema or not).
 
 An endpoint that spends a ChatGPT plan reports it through
 `provider/quota`: an answer carrying `x-codex-primary-*` or
@@ -4238,6 +4259,52 @@ stage's label, else `gate`; the access module's judgements and the
   never whether a value looks complete, since a cut input once read as
   the agent's own truncated edit ("the replacement string is
   truncated ... that would corrupt the file").
+- A verdict is read strictly (`harness-perms--read-verdict`): one JSON
+  object whose `"decision"` is the word `allow` or the word `deny`, with
+  an optional `"reason"` string.  Nothing else is a verdict, and none of
+  it is permission: a reply with no JSON object, an object with no
+  `"decision"`, a bare `"allow"` or `"deny"` key standing in for the
+  decision, a decision that is neither word, the key given twice in one
+  object, and two objects that do not agree.  A reply that puts the call
+  to the user (`"decision":"ask"`) is no verdict either and is not
+  corrected: `ask` is the user's, not the judge's.  The reader walks the
+  reply for balanced objects, so prose or a code fence around the object
+  does not hide it, and braces inside a string are no braces.  It
+  returns the reason it found none (`:problem`), which the log, the
+  denial and the correction below use.  A judge that answered
+  `{"allow":"Read-only inspection of a local git diff"}` — the shape the
+  field recorded — gave no verdict, and that shape is never read as
+  one.
+- A judge call that gives no verdict is asked once more, and only once.
+  `harness-perms--auto` asks call 1 with the small output budget, and
+  call 2 (`harness-perms--judge-retry-max-tokens`) either when call 1
+  ran out of room before a verdict or when its reply held none in the
+  contract's shape.  Call 2 sends `perms-judge-correction`
+  (`harness-perms--judge-correction-text`): the call it already saw, its
+  own reply quoted as data under a heading that says so, and what could
+  not be read, so the model corrects the shape and not the judgement.
+  It keeps call 1's session id, `:job-parent` and prompts, and is
+  recorded as "Permission judge (retry)" under the same session.  A
+  failed request and a timeout are not corrected: there is no reply to
+  correct, and the call has waited long enough already.  Two replies
+  with no verdict are a no-verdict decision, in the fallback the
+  session already has (`harness-perms--unapproved`): the user is asked
+  while one is present, and the call is denied while none is.
+  The chain settles once, so however many judge calls it made, the call
+  is prompted for once, and a late reply neither answers a prompt nor
+  starts a second.
+- Where a provider says it takes a JSON schema, the verdict's schema
+  goes with the request (`harness-perms--judge-verdict-schema`, sent as
+  `:response-schema`), and the OpenAI-compatible transport turns it into
+  `response_format` only where it knows the route accepts it (see
+  "provider"): a plain endpoint passes it on, OpenRouter only when the
+  pinned endpoint's catalogue entry listed `structured_outputs`
+  (`harness-openrouter--response-format`).  The capability is
+  `:structured-outputs` on `provider/capabilities`, set from a listing's
+  `supported_parameters`.  A field an endpoint does not accept would
+  fail the call the verdict is for, so it is withheld rather than
+  guessed; the strict reading does not depend on it, since not every
+  provider enforces a schema it is sent.
 - The judge follows what Claude Code's own auto mode follows: the
   `autoMode` block of Claude Code's settings.  Its `environment`
   entries name the organization's trusted infrastructure (source
@@ -4317,9 +4384,10 @@ stage's label, else `gate`; the access module's judgements and the
   in every mode, and its verdict stands.  The judge gets two calls:
   when the first ends at its output limit (`max-tokens`) without a
   verdict, which a reasoning model does after spending the small first
-  budget thinking, stage 30 asks again with more room
-  (`harness-perms--judge-retry-max-tokens') before it gives the call
-  up; a verdict written before the cap is taken as it stands.  The
+  budget thinking, or answers in no shape the contract reads, stage 30
+  asks again with more room (`harness-perms--judge-retry-max-tokens')
+  and the correction prompt before it gives the call up; a verdict
+  written before the cap is taken as it stands.  The
   judge asks for no extended thinking (`:no-thinking`), so the verdict
   is not left unwritten or half written behind the model's thinking.
   A call

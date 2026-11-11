@@ -288,6 +288,7 @@ needs from them are looked up with `harness-method-exists-p`.
 - `decision/list` ([decisions](decisions.md)), when it is loaded
 - `decision/record` ([decisions](decisions.md)), when it is loaded
 - `decision/revise` ([decisions](decisions.md))
+- `provider/capabilities` ([provider](provider.md)), when it is loaded
 - `provider/complete` ([provider](provider.md)), when it is loaded
 - `provider/tier-model` ([provider](provider.md)), when it is loaded
 - `sandbox/confined-p` ([sandbox](sandbox.md)), when it is loaded

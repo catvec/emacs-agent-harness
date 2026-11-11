@@ -467,6 +467,46 @@ before a message of any other role: that is all the API checks."
       (should (equal (cdr case) (plist-get (harness-openai-test--last-request-json)
                                             :reasoning_effort))))))
 
+(ert-deftest harness-provider-openai-response-schema-only-when-asked ()
+  "A schema goes on the wire only for a request that names one, and only
+where the route takes it.  A plain OpenAI-compatible endpoint sends
+`response_format' as `json_schema'; a dialect that knows which of its
+endpoints take a schema says so instead of passing it on, and a request
+that names none sends no such field at all."
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "{\"decision\":\"allow\"}")
+                                                       :finish_reason "stop")))
+                                          "[DONE]")))))
+    (let ((schema '(:type "object" :properties (:decision (:type "string" :enum ["allow" "deny"]))
+                    :required ["decision"] :additionalProperties :false)))
+      ;; No schema named: no field.
+      (harness-openai-test--complete harness-openai-test-openai-endpoint
+                                     '(:model "testopenai:gpt-x"
+                                       :messages ((:role user :content ((:type "text" :text "hi"))))))
+      (should-not (plist-get (harness-openai-test--last-request-json) :response_format))
+      ;; A plain endpoint is sent it, with the name the request gives.
+      (harness-openai-test--complete harness-openai-test-openai-endpoint
+                                     (list :model "testopenai:gpt-x"
+                                           :response-schema schema
+                                           :response-schema-name "verdict"
+                                           :messages '((:role user :content ((:type "text" :text "hi"))))))
+      (let ((format (plist-get (harness-openai-test--last-request-json) :response_format)))
+        (should (equal "json_schema" (plist-get format :type)))
+        (should (equal "verdict" (plist-get (plist-get format :json_schema) :name)))
+        (should (equal :true (plist-get (plist-get format :json_schema) :strict)))
+        (should (equal schema (plist-get (plist-get format :json_schema) :schema))))
+      ;; A dialect that takes no schema swallows it rather than failing
+      ;; the call: this is what a provider that said nothing gets.
+      (let ((endpoint (list :id 'quiet :base-url "https://quiet.example/v1"
+                            :dialect '(:flavor quiet))))
+        (should-not (harness-openai--response-format
+                     endpoint (list :response-schema schema)))
+        (harness-openai-test--complete endpoint
+                                       (list :model "quiet:y" :response-schema schema
+                                             :messages '((:role user :content ((:type "text" :text "hi"))))))
+        (should-not (plist-get (harness-openai-test--last-request-json) :response_format))))))
+
 (ert-deftest harness-provider-openai-no-thinking-in-the-body ()
   "A request that asks for no thinking says so on the wire.
 `:no-thinking' wins over `:thinking', as it does for Claude."

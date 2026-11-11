@@ -3557,17 +3557,155 @@ is used."
   "The permission judge found this call unsafe for the reason given. Reach the goal another way that avoids that risk."
   "Hint attached to a denial by the auto-mode judge.")
 
+(defconst harness-perms--judge-verdict-schema
+  '(:type "object"
+    :properties (:decision (:type "string" :enum ["allow" "deny"])
+                 :reason (:type "string"))
+    :required ["decision" "reason"]
+    :additionalProperties :false)
+  "JSON schema of a judge's verdict, for a provider that enforces one.
+It goes on the judge's request as `:response-schema' and reaches the
+wire only where the provider says it takes one: a field an endpoint
+does not accept would fail the call the verdict is for (see
+`harness-openai--response-format').")
+
+(defun harness-perms--json-object-end (text start)
+  "Return the position after the JSON object that opens at START in TEXT, or nil.
+Nested objects count as one, and a brace inside a string is no brace."
+  (let ((i (1+ start)) (n (length text)) (depth 1) (in-string nil) (escape nil) (end nil))
+    (while (and (< i n) (not end))
+      (let ((c (aref text i)))
+        (cond
+         (escape (setq escape nil))
+         ((eq c ?\\) (when in-string (setq escape t)))
+         (in-string (when (eq c ?\") (setq in-string nil)))
+         ((eq c ?\") (setq in-string t))
+         ((eq c ?{) (setq depth (1+ depth)))
+         ((eq c ?}) (setq depth (1- depth)) (when (zerop depth) (setq end (1+ i))))))
+      (setq i (1+ i)))
+    end))
+
+(defun harness-perms--json-objects (text)
+  "Return the JSON objects TEXT holds, as plists, in the order they come.
+An object is found by its braces (`harness-perms--json-object-end'), so
+prose around it is no object, and a reply of several is all of them.  A
+brace that opens no valid JSON object is skipped."
+  (let ((i 0) (n (length (or text ""))) (objects nil))
+    (while (< i n)
+      (if (eq (aref text i) ?{)
+          (let ((end (harness-perms--json-object-end text i)))
+            (if (null end)
+                (setq i (1+ i))
+              (let ((obj (condition-case nil
+                             (harness-json-parse (substring text i end))
+                           (error nil))))
+                (when (or (null obj) (and (consp obj) (keywordp (car obj))))
+                  (push obj objects)))
+              (setq i end)))
+        (setq i (1+ i))))
+    (nreverse objects)))
+
+(defun harness-perms--judge-word (value)
+  "Return VALUE, a verdict's word, as a lower-case string without spaces, or nil.
+Anything but a string is no word, and is read as no verdict rather than
+coerced into one."
+  (when (stringp value)
+    (let ((word (downcase (string-trim value))))
+      (unless (string-empty-p word) word))))
+
+(defun harness-perms--verdict-reason (object)
+  "Return OBJECT's \"reason\" as a reason string, or nil.
+Only a string counts: a reason of another type is left out rather than
+printed into a prompt or a denial."
+  (let ((reason (and (listp object) (plist-get object :reason))))
+    (and (stringp reason)
+         (not (harness-string-blank-p reason))
+         (string-trim reason))))
+
+(defun harness-perms--verdict-word (object)
+  "Return what one JSON OBJECT says of a verdict, as a plist, or nil.
+That is (:word \"allow\"), (:word \"deny\"), (:asked t) for a reply that
+puts the call to the user, (:conflict WHY) when OBJECT talks about the
+decision without giving one plainly -- no \"decision\" where it names a
+verdict key, a decision that is neither word, or the key given twice --
+and nil for an object that says nothing of the decision at all."
+  (let ((values nil) (bare nil))
+    (cl-loop for (k v) on object by #'cddr
+             do (if (eq k :decision)
+                    (push v values)
+                  (when (memq k '(:allow :deny :allowed :denied))
+                    (push k bare))))
+    (cond
+     ;; A key repeated is no one decision: picking the first or the last
+     ;; would be reading a verdict the reply did not plainly give.
+     ((cdr values)
+      (list :conflict (format "%d \"decision\" keys in one object" (length values))))
+     ((null values)
+      (when bare
+        (list :conflict (format "the key \"%s\" where \"decision\" belongs"
+                                (string-remove-prefix ":" (symbol-name (car bare)))))))
+     (t
+      (let ((word (harness-perms--judge-word (car values))))
+        (cond ((member word '("allow" "deny")) (list :word word))
+              ((equal word "ask") (list :asked t))
+              (t (list :conflict (format "a \"decision\" of %S, which is neither allow nor deny"
+                                         (car values))))))))))
+
+(defun harness-perms--read-verdict (text)
+  "Return what a judge's reply TEXT says, a verdict or why it is none.
+The reply is read strictly: a verdict is one JSON object whose
+\"decision\" is the word allow or the word deny, which decides the call;
+a \"reason\" that is a string says why, and one that is not is left out
+rather than read.  Everything else is no verdict, which is never
+permission to run the call: a reply of no JSON object, an object with no
+\"decision\", a bare \"allow\" or \"deny\" key standing in for the
+verdict, a decision that is neither word, two decisions in one object,
+and two objects that do not agree.  An object that says nothing of the
+decision at all -- a note, an empty object -- neither makes nor breaks a
+verdict.
+
+A verdict is (:behavior allow|deny :reason R), a denial with its hint.
+A reply that asks for the user (\"decision\": \"ask\") is no verdict
+either, but is not a mistake to correct: it is (:asked t :problem WHY).
+Anything else is (:problem WHY), WHY a short phrase for the log and the
+correction asked for.  A blank reply is (:problem nil)."
+  (let ((verdicts nil) (conflicts nil) (asked nil) (objects nil))
+    (dolist (object (harness-perms--json-objects text))
+      (push object objects)
+      (let ((read (harness-perms--verdict-word object)))
+        (cond ((plist-get read :word)
+               (push (cons (plist-get read :word) object) verdicts))
+              ((plist-get read :asked) (setq asked t))
+              ((plist-get read :conflict) (push (plist-get read :conflict) conflicts)))))
+    (setq verdicts (nreverse verdicts) conflicts (nreverse conflicts))
+    (cond
+     ((null objects)
+      (list :problem (unless (harness-string-blank-p text)
+                       "its reply held no JSON object")))
+     ;; One object gave a verdict, and nothing else talks about a decision.
+     ((and verdicts (null conflicts)
+           (cl-every (lambda (v) (equal (car v) (caar verdicts))) verdicts))
+      (let ((reason (harness-perms--verdict-reason (cdar verdicts))))
+        (if (equal (caar verdicts) "allow")
+            (list :behavior 'allow :reason (or reason "allowed by the auto-mode judge"))
+          (list :behavior 'deny :reason (or reason "denied by the auto-mode judge")
+                :hint harness-perms-judge-deny-hint))))
+     ;; A verdict beside something that is no verdict on the call, or two
+     ;; that do not agree, is ambiguous: no permission either way.
+     (verdicts
+      (list :problem (if conflicts
+                         (format "a verdict beside %s" (car conflicts))
+                       "a verdict beside another that disagrees")))
+     (conflicts (list :problem (car conflicts)))
+     (asked (list :asked t :problem "it asked for the user"))
+     (t (list :problem "its reply held no \"decision\"")))))
+
 (defun harness-perms--parse-verdict (text)
-  "Return (:behavior allow|deny :reason R) from the first JSON object in TEXT.
-Return nil when TEXT holds no usable verdict."
-  (when (and text (string-match "{[^{}]*}" text))
-    (let* ((obj (condition-case nil (harness-json-parse (match-string 0 text)) (error nil)))
-           (decision (and (listp obj) (plist-get obj :decision)))
-           (reason (and (listp obj) (plist-get obj :reason))))
-      (pcase (and (stringp decision) (downcase decision))
-        ("allow" (list :behavior 'allow :reason (or reason "allowed by the auto-mode judge")))
-        ("deny" (list :behavior 'deny :reason (or reason "denied by the auto-mode judge")
-                      :hint harness-perms-judge-deny-hint))))))
+  "Return (:behavior allow|deny :reason R) from a judge's reply TEXT, or nil.
+TEXT is read strictly (see `harness-perms--read-verdict'): a reply that
+does not say allow or deny plainly is no verdict, never permission."
+  (let ((read (harness-perms--read-verdict text)))
+    (and (memq (plist-get read :behavior) '(allow deny)) read)))
 
 (defun harness-perms--judge-decision (verdict session)
   "Return the decision a judge VERDICT makes for SESSION.
@@ -3592,15 +3730,20 @@ they are being asked about."
     (format "The permission judge would deny this call: %s"
             (or (plist-get decision :reason) "no reason given"))))
 
-(defun harness-perms--no-verdict-message (tool event text)
+(defun harness-perms--no-verdict-message (tool event text &optional problem)
   "Return the warning for a judge of TOOL whose `done' EVENT brought no verdict.
 It names the stop reason and the provider's `:error', when there is
-one, and quotes the start of TEXT, what the judge replied."
+one, quotes the start of TEXT, what the judge replied, and says with
+PROBLEM what the strict reader made of it, when it says anything (see
+`harness-perms--read-verdict')."
   (let ((err (plist-get event :error)))
     (concat (format "perms: auto judge gave no verdict for %s (%s)" tool (plist-get event :stop-reason))
             (if err (concat ": " (harness-truncate-end (harness-error-message err) 300)) "")
             (if (harness-string-blank-p text) ""
-              (concat "; it replied: " (harness-truncate-end text 200))))))
+              (concat "; it replied: " (harness-truncate-end text 200)))
+            (if (and problem (not (equal problem "its reply held no verdict")))
+                (concat "; " problem)
+              ""))))
 
 (defun harness-perms--model-choice (choice session)
   "Return the model CHOICE, a setting of the user's, names for SESSION.
@@ -3627,39 +3770,90 @@ provider for its simple tier (falling back to the session's model), and
 nil uses the session's model."
   (harness-perms--model-choice harness-perms-auto-model session))
 
+(defconst harness-perms--judge-correction-chars 2000
+  "Characters of the judge's first reply the correction is shown.
+A reply that held no verdict is usually short; one that rambles is cut,
+since the correction is about the shape of the answer, not its length.")
+
+(defun harness-perms--judge-correction-text (question reply problem model)
+  "Return the judge's second message: QUESTION again, REPLY quoted, PROBLEM.
+It is a registered prompt (`perms-judge-correction'), for MODEL, which
+shows the call it already saw, what it answered, and why that was no
+verdict, so the model corrects the shape and not its judgement.  The
+reply goes in as data, under a heading that says so: it was written by
+the model the message corrects."
+  (harness-prompt
+   'perms-judge-correction
+   (list :question question
+         :reply (if (harness-string-blank-p reply)
+                    "(it replied nothing)"
+                  (harness-truncate-end (string-trim reply) harness-perms--judge-correction-chars))
+         :problem (or problem "it held no verdict"))
+   model))
+
+(defun harness-perms--judge-structured-output-p (model)
+  "Non-nil when MODEL's provider may be sent a schema for the verdict.
+That is `:structured-outputs' in its `provider/capabilities', which a
+listing gives when the provider says it takes `response_format' with a
+JSON schema.  A model nothing says that of gets none: the prompt is
+then the only place the shape is asked for, which is what the
+correction retry is for."
+  (and (stringp model)
+       (harness-method-exists-p 'provider/capabilities)
+       (let ((caps (ignore-errors (harness-call 'provider/capabilities model))))
+         (and (listp caps)
+              (harness-json-true-p (plist-get caps :structured-outputs))))))
+
 (defun harness-perms--judge-request (session model system text n)
   "Return the request that asks MODEL for a verdict on TEXT, call number N.
 SYSTEM is its system prompt; the request is SESSION's, in its place, and
 `:ephemeral': one question alone, no earlier verdicts, no project
-instructions, no thinking, a small output budget
-\(`harness-perms--judge-max-tokens', and for the second call
-`harness-perms--judge-retry-max-tokens'\).  It is sent through
-`harness-small-ask', which adds the `:on-event'."
-  (list :model model
-        :ephemeral t
-        :session (list :id (format "%s-perms" (plist-get session :id))
-                       :cwd (plist-get session :cwd) :host (plist-get session :host))
-        :job (if (= n 1) "Permission judge" "Permission judge (retry)")
-        :job-parent (plist-get session :id)
-        :system system
-        :messages (list (list :role 'user :content (list (list :type "text" :text text))))
-        :tools nil
-        :no-thinking t
-        :max-tokens (if (= n 1)
-                        harness-perms--judge-max-tokens
-                      harness-perms--judge-retry-max-tokens)))
+instructions, no thinking.  Call 1 gets a small output budget
+\(`harness-perms--judge-max-tokens'), call 2 the larger one
+\(`harness-perms--judge-retry-max-tokens').  A provider that says it
+takes a JSON schema (`:structured-outputs', see
+`harness-perms--judge-structured-output-p') is sent the verdict's
+schema with the request, so the shape is enforced where it is
+supported; the reply is still read strictly, since not every endpoint
+honours one.  It is sent through `harness-small-ask', which adds the
+`:on-event'."
+  (append
+   (list :model model
+         :ephemeral t
+         :session (list :id (format "%s-perms" (plist-get session :id))
+                        :cwd (plist-get session :cwd) :host (plist-get session :host))
+         :job (if (= n 1) "Permission judge" "Permission judge (retry)")
+         :job-parent (plist-get session :id)
+         :system system
+         :messages (list (list :role 'user :content (list (list :type "text" :text text))))
+         :tools nil
+         :no-thinking t
+         :max-tokens (if (= n 1)
+                         harness-perms--judge-max-tokens
+                       harness-perms--judge-retry-max-tokens))
+   (when (harness-perms--judge-structured-output-p model)
+     (list :response-schema harness-perms--judge-verdict-schema
+           :response-schema-name "permission_verdict"))))
 
 (defun harness-perms--auto (decision next request)
   "Ask a cheap model to decide REQUEST, in auto mode or for a user away.
 The judge decides what is still undecided in `auto' mode, and in every
 mode while the session is non-interactive (`harness-perms--judge-p').
-A judge call that ends at its output limit before writing a verdict is
-asked again with a larger budget (`harness-perms--judge-max-tokens',
-then `harness-perms--judge-retry-max-tokens'), since running out of
-room is no verdict on the call.  Without a verdict the call goes on
-undecided, so it asks the user, with `:no-verdict' saying why for the
-stage that denies it when the user is away.  DECISION is the current
-value and NEXT continues the chain."
+A judge call that gives no verdict is asked once more, and only once
+\(`harness-perms--judge-max-tokens', then
+`harness-perms--judge-retry-max-tokens'): a call that ran out of room
+before its verdict, and a reply whose shape could not be read, are no
+verdict on the call.  The second asks for a verdict in the exact shape
+\(`harness-perms--judge-correction-text'), with the first reply quoted
+so the model corrects the shape rather than the judgement.  A request
+that failed, and a timeout, are not corrected: they decide nothing.
+
+Without a verdict the call goes on undecided, so it asks the user, with
+`:no-verdict' saying why for the stage that denies it when the user is
+away.  DECISION is the current value and NEXT continues the chain,
+which runs once: a verdict, a timeout and an exhausted retry all settle
+the same call.  REQUEST is never run by the judge; it runs, at most
+once, if the chain the verdict feeds into allows it."
   (let ((session (plist-get request :session)))
     (if (not (and (eq (plist-get decision :behavior) 'ask)
                   (harness-perms--judge-p session)
@@ -3667,6 +3861,7 @@ value and NEXT continues the chain."
         (funcall next decision)
       (let* ((model (harness-perms--judge-model session))
              (system (harness-perms--judge-system-prompt model))
+             (question (harness-perms--judge-text request model))
              (attempt 0)                ; judge calls made so far
              (settled nil) (timer nil) (handle nil)
              (failure nil)              ; why the judge gave no verdict
@@ -3681,11 +3876,13 @@ value and NEXT continues the chain."
                                                       (or failure "it gave no answer"))
                                          (harness-perms--judge-decision d session)))))))
         (cl-labels
-            ;; Ask once, as call N.  Each call keeps its own reply and
-            ;; only speaks while it is the live one, so an event from a
-            ;; call that ran out cannot decide for its retry.
-            ((ask (n)
-                  (let ((text "") (live (setq attempt n)))
+            ;; Ask once, as call N.  TEXT is its message: the call, or
+            ;; the correction of the reply that held no verdict.  Each
+            ;; call keeps its own reply and only speaks while it is the
+            ;; live one, so an event from a call that ran out cannot
+            ;; decide for its retry.
+            ((ask (n text)
+                  (let ((reply "") (live (setq attempt n)))
                     (setq failure nil)
                     (when timer (cancel-timer timer))
                     (setq timer
@@ -3701,37 +3898,75 @@ value and NEXT continues the chain."
                     ;; as a step of a turn would be.
                     (setq handle
                           (harness-prompt-ask
-                           '(perms-judge-system perms-judge-question)
-                           (harness-perms--judge-request
-                            session model system
-                            (harness-perms--judge-text request model) n)
+                           ;; The correction is only the second call's.
+                           (if (> n 1)
+                               '(perms-judge-system perms-judge-question perms-judge-correction)
+                             '(perms-judge-system perms-judge-question))
+                           (harness-perms--judge-request session model system text n)
                            (list :label "perms judge"
                                  :on-event
                                  (lambda (ev)
-                                   (when (= live attempt)
+                                   ;; A call that is over -- timed out, or
+                                   ;; answered by its retry -- decides
+                                   ;; nothing more, and asks nothing more.
+                                   (when (and (= live attempt) (not settled))
                                      (pcase (plist-get ev :type)
                                        ;; A try that failed is thrown away:
                                        ;; so is what it wrote.
-                                       ('restart (setq text "" failure nil))
+                                       ('restart (setq reply "" failure nil))
                                        ('text
-                                        (setq text (concat text (or (plist-get ev :delta) ""))))
+                                        (setq reply (concat reply (or (plist-get ev :delta) ""))))
                                        ('done
-                                        (setq failure (harness-perms--judge-failure ev text))
-                                        (let ((verdict (harness-perms--parse-verdict text)))
+                                        (setq failure (harness-perms--judge-failure ev reply))
+                                        (let* ((read (harness-perms--read-verdict reply))
+                                               (verdict (and (plist-get read :behavior) read))
+                                               (problem (plist-get read :problem))
+                                               (err (plist-get ev :error))
+                                               ;; A call that answered with no
+                                               ;; verdict is asked once more,
+                                               ;; in the shape the contract
+                                               ;; reads.  One that failed, gave
+                                               ;; up, or asked for the user is
+                                               ;; not: there is nothing of its
+                                               ;; own to correct.
+                                               (correctable (and (= n 1) (not err)
+                                                                 (not (plist-get read :asked))
+                                                                 (null (plist-get read :behavior)))))
                                           (cond
                                            (verdict (funcall finish verdict))
-                                           ((and (= n 1) (eq (plist-get ev :stop-reason) 'max-tokens))
-                                            (harness-log
-                                             'info
-                                             "perms: auto judge ran out of output tokens for %s; asking once more"
-                                             (plist-get request :tool))
-                                            (ask 2))
+                                           ;; A reply that held no verdict in
+                                           ;; the expected shape is asked for
+                                           ;; once more, in that shape.  The
+                                           ;; call is not run on it.
+                                           (correctable
+                                            ;; An override that cannot be
+                                            ;; rendered leaves the call
+                                            ;; undecided rather than breaking
+                                            ;; the chain: the user is asked.
+                                            (let ((text (condition-case err
+                                                            (harness-perms--judge-correction-text
+                                                             question reply problem model)
+                                                          (error
+                                                           (harness-log
+                                                            'warn "perms: cannot ask the judge again: %s"
+                                                            (harness-error-message err))
+                                                           nil))))
+                                              (if text
+                                                  (progn
+                                                    (harness-log
+                                                     'info
+                                                     "perms: auto judge gave no verdict for %s (%s); asking once, in the expected shape"
+                                                     (plist-get request :tool)
+                                                     (or problem "it stopped at its output limit"))
+                                                    (ask 2 text))
+                                                (funcall finish decision))))
                                            (t
                                             (harness-log 'warn "%s" (harness-perms--no-verdict-message
-                                                                     (plist-get request :tool) ev text))
+                                                                     (plist-get request :tool) ev reply
+                                                                     problem))
                                             (funcall finish decision)))))
                                        (_ nil))))))))))
-          (ask 1))))))
+          (ask 1 question))))))
 
 ;;;; Auto mode: the rules Claude Code's own auto mode follows
 
@@ -3993,7 +4228,9 @@ from judging."
 
 (defun harness-perms--judge-failure (event text)
   "Return why a judge that replied TEXT may give no verdict, from its `done' EVENT.
-It is said to the agent and the user when that denies a call."
+It is said to the agent and the user when that denies a call.  What the
+strict reader made of a reply that answered is in the log, not here: the
+denial says the judge gave no verdict, which is what the call rests on."
   (let ((err (plist-get event :error)))
     (cond (err (format "it failed: %s" (harness-truncate-end (harness-error-message err) 200)))
           ((not (eq (plist-get event :stop-reason) 'end-turn))

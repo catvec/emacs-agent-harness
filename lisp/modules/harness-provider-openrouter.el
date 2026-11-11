@@ -332,6 +332,9 @@ component this module does not price."
               :pricing (and (listp pricing) pricing)
               :context (plist-get entry :context_length)
               :status (plist-get entry :status)
+              :supported-parameters (let ((params (plist-get entry :supported_parameters)))
+                                      (and (listp params) (cl-every #'stringp params)
+                                           (copy-sequence params)))
               :safety-retention (plist-get entry :safety_retention)
               :entry entry)))))
 
@@ -965,6 +968,9 @@ numbers and t, no symbols and no structs."
                      (plist-get record :discount))
           :catalogue-at reading
           :selected-at (float-time)
+          :structured-outputs (and (member "structured_outputs"
+                                           (plist-get record :supported-parameters))
+                                   t)
           :basis "chosen")))
 
 (defun harness-openrouter--store-route (session-id route)
@@ -1060,6 +1066,7 @@ the dialect is this module's whatever that entry says."
         :reasoning-field :reasoning
         :reasoning-object t
         :body-extra #'harness-openrouter--body-extra
+        :response-format #'harness-openrouter--response-format
         :stream-state #'harness-openrouter--stream-state
         :chunk #'harness-openrouter--chunk
         :audit #'harness-openrouter--audit
@@ -1110,6 +1117,24 @@ policy can bound, and is refused before the request is made."
                     :completion (float (/ (car completion) (float (cdr completion)))))
               (when (and request-fee recorded-request)
                 (list :request (float (/ (car request-fee) (float (cdr request-fee))))))))))
+
+(defun harness-openrouter--response-format (_endpoint request schema name)
+  "Return the `response_format' REQUEST asks for, or nil for no schema.
+OpenRouter passes `response_format' on to the endpoint it routes to,
+and only some endpoints take a JSON schema: its catalogue lists which,
+per endpoint, in `supported_parameters' (\"structured_outputs\").  The
+pin records what the pinned endpoint said when it was chosen
+\(`harness-openrouter--route-plist'), and this reads that.  A session
+with no pin, and an endpoint that said nothing, send no schema: a field
+the endpoint refuses would fail the call the schema was for.  Without a
+policy there is no pin to ask, and none is sent either."
+  (when (and (harness-openrouter-routing-enabled-p harness-openrouter-routing)
+             (let ((route (or (plist-get request :openrouter-route)
+                              (harness-openrouter--route-of (plist-get request :session)))))
+               (and (listp route)
+                    (harness-json-true-p (plist-get route :structured-outputs)))))
+    (list :type "json_schema"
+          :json_schema (list :name name :strict :true :schema schema))))
 
 (defun harness-openrouter--body-extra (_endpoint _name request)
   "Return the OpenRouter-only body fields for REQUEST.
