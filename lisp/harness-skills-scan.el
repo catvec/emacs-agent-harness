@@ -384,8 +384,10 @@ SIZE is nil when PATH is not a regular file."
   "Return the supporting files of skill directory DIR, as relative names.
 They are sorted, no deeper than `harness-skills-scan-max-depth', dot
 files left out, and at most `harness-skills-scan-max-files' of them
-within `harness-skills-scan-max-files-bytes'.  Return (FILES . TRUNCATED)
-where TRUNCATED says the bounds cut the list."
+within `harness-skills-scan-max-files-bytes'.  The skill's own
+`harness-skills-scan-file-name' is no supporting file and does not
+count against either bound.  Return (FILES . TRUNCATED) where TRUNCATED
+says the bounds cut the list."
   (let* ((dir (harness-skills-scan--directory dir))
          (seen nil)
          (out nil)
@@ -409,11 +411,15 @@ where TRUNCATED says the bounds cut the list."
               (push entry seen)
               (let* ((rel (file-relative-name entry dir))
                      (size (or (harness-skills-scan--size entry) 0)))
-                (cond
-                 ((>= (length out) harness-skills-scan-max-files) (setq truncated t))
-                 ((> (+ total size) harness-skills-scan-max-files-bytes) (setq truncated t))
-                 (t (setq total (+ total size))
-                    (push rel out))))))))))
+                ;; The skill's own file is listed by the skill, not among
+                ;; what it supports, so it takes no place of the bound.
+                (unless (or (equal entry (expand-file-name harness-skills-scan-file-name dir))
+                            (string= rel harness-skills-scan-file-name))
+                  (cond
+                   ((>= (length out) harness-skills-scan-max-files) (setq truncated t))
+                   ((> (+ total size) harness-skills-scan-max-files-bytes) (setq truncated t))
+                   (t (setq total (+ total size))
+                      (push rel out)))))))))))
     (cons (sort out #'string<) truncated)))
 
 (defun harness-skills-scan--fingerprint (text files dir)

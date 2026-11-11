@@ -1786,6 +1786,46 @@ disabled module stays out with its UI half, whatever brings it."
     (let ((harness-enabled-modules '(extra nope ui-solo)))
       (should (equal '(nope) (harness--unknown-modules))))))
 
+(ert-deftest harness-loader-never-loads-a-test-file-as-a-module ()
+  "No suite, and no fixture a suite shares, is a module a harness loads.
+The suites live beside their modules as harness-NAME-test.el, and one
+of them, harness-NAME-test-helpers.el, holds the fixtures two suites
+share.  A file such as that looks like a module by its name, and the
+loader once took it for one: with every module enabled, a harness,
+the user's own or a development daemon, loaded it, which requires the
+shared helper of the tests.  That helper sets `harness-state-directory'
+and the session temporary root to a throwaway directory of the test
+run and deletes it when Emacs exits, so the harness moved the user's
+sessions, task board and temporary directories there, leaving its own
+state -- every task it had kept -- behind as something it no longer
+looked at."
+  (dolist (file '("harness-tasks-test.el"
+                  "harness-tasks-test-helpers.el"
+                  "harness-provider-openrouter-test-helpers.el"
+                  "harness-ui-chat-test.el"
+                  "harness-patch-review-test.el"))
+    (ert-info ((format "%s" file))
+      (should (harness--test-file-p file))
+      (should-not (harness--module-file-p file))))
+  (dolist (file '("harness-tasks.el" "harness-patch-review.el" "harness-ui-chat.el"
+                  "harness-testiness.el"))
+    (ert-info ((format "%s" file))
+      (should-not (harness--test-file-p file))
+      (should (harness--module-file-p file))))
+  ;; The loader's own list, with every module enabled: no fixture of a
+  ;; suite is in it, though the suites are beside the modules.
+  (let ((harness-enabled-modules t)
+        (harness-off-by-default-modules nil))
+    (let ((files (harness--module-files))
+          (sources (harness--module-sources)))
+      (should sources)
+      (should-not (cl-some #'harness--test-file-p files))
+      (should-not (cl-some (lambda (s) (harness--test-file-p (cdr s))) sources))
+      ;; The fixtures file that was in the module sources is not any more,
+      ;; while its module, the provider it prepares, still is.
+      (should (assq 'provider-openrouter sources))
+      (should-not (assq 'provider-openrouter-test-helpers sources)))))
+
 (ert-deftest harness-loader-core-of-the-harness ()
   "The harness's own core, and the UI halves named after their modules.
 Every name of `harness-core-modules' is a module of the harness.  Out

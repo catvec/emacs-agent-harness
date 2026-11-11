@@ -6,11 +6,23 @@
 ;; (a throwaway state directory, a fresh bus), waiting primitives for
 ;; asynchronous code, the integration-test switch, and checks shared by
 ;; the buffers that host a compose box (chat and the task board).
+;;
+;; It is loaded by a test run and never by a harness: its name makes it
+;; a test file, which the loader leaves out (`harness--test-file-p' in
+;; harness.el), and it refuses a harness that is already running, whose
+;; state it would replace.  It sets `harness-state-directory' and the
+;; session temporary root to a directory of its own making and deletes
+;; both when Emacs exits, so loading it into a live harness would leave
+;; the user's sessions, task board and temporary directories behind, in
+;; a state it no longer looks at.
 
 ;;; Code:
 
 (require 'ert)
 (require 'cl-lib)
+
+(when (and (boundp 'harness-started) harness-started)
+  (error "harness-test-helpers is for a test run, not a harness that is already running"))
 
 (defvar harness-test-root
   (expand-file-name ".." (file-name-directory (or load-file-name buffer-file-name))))

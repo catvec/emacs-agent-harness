@@ -391,16 +391,37 @@ never shadows a library."
 
 (defconst harness--module-file-regexp "\\`harness-[a-z0-9-]+\\.el\\'"
   "Names of module files: harness-NAME.el holds module NAME.
-A module's test, harness-NAME-test.el beside it, matches this too;
-`harness--module-file-p' is what leaves the tests out.")
+A module's test, harness-NAME-test.el beside it, and a file of test
+fixtures, harness-NAME-test-helpers.el, match this too;
+`harness--module-file-p' is what leaves both out.")
+
+(defconst harness--test-file-regexp "-test\\(?:-[a-z0-9-]+\\)?\\.el\\'"
+  "Names of the files that hold tests and their fixtures, not modules.
+That is a suite, harness-NAME-test.el or harness-NAME-ASPECT-test.el
+beside its module (docs/design/co-located-module-tests.md), and the
+fixtures suites share, harness-NAME-test-helpers.el.  No file whose
+name matches it is ever loaded as a module, whichever directory it is
+in: the helper of the tests sets the state the harness runs with, so a
+harness that loaded it would move the user's sessions, tasks and
+temporary directories into a test run's throwaway state, and delete
+them when it exited (`harness-test-helpers', in test/).")
+
+(defun harness--test-file-p (file)
+  "Non-nil when FILE holds tests or their fixtures, not a module.
+See `harness--test-file-regexp'.  The suites' shared helper is such a
+file although it is in test/, not beside a module, so that a live
+harness never loads one."
+  (and (string-match-p harness--test-file-regexp file) t))
 
 (defun harness--module-file-p (file)
   "Non-nil when FILE names a module, not the test of one.
 A module's tests live beside it, as harness-NAME-test.el next to
 harness-NAME.el (see docs/design/co-located-module-tests.md), and the
-harness never loads one as a module."
+harness never loads one as a module -- nor the fixtures such a suite
+shares, such as harness-NAME-test-helpers.el, see
+`harness--test-file-p'."
   (and (string-match-p harness--module-file-regexp (file-name-nondirectory file))
-       (not (string-match-p "-test\\.el\\'" file))))
+       (not (harness--test-file-p file))))
 
 (defun harness--file-module-name (file)
   "Return the module name symbol for FILE (harness-NAME.el -> NAME)."

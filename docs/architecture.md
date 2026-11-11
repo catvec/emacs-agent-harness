@@ -451,6 +451,22 @@ of the process split, from every module file of either side
 - Each side then loads the files of its own directories
   (`harness--module-files`), in directory then name order.
 
+A test file is no module, wherever it lives: `harness--module-file-p`
+leaves out every file that holds tests or their fixtures, which is a
+suite beside its module (`harness-NAME-test.el`,
+`harness-NAME-ASPECT-test.el`) and the fixtures suites share
+(`harness-NAME-test-helpers.el`).  The name alone would take one for a
+module -- `harness-provider-openrouter-test-helpers.el` holds the
+fixtures of the OpenRouter suites, and requires the tests' shared
+helper, `harness-test-helpers` in test/ -- and a live harness that
+loaded it would take a test run's throwaway state as its own:
+`harness-test-helpers` sets `harness-state-directory` and the session
+temporary root to a directory of its own making and deletes it when
+Emacs exits, so the user's sessions, task board and temporary
+directories would be gone.  `harness-loader-never-loads-a-test-file-as-a-module`
+holds the loader and the module pages (`harness-module-docs-files`) to
+this.
+
 A module requires only modules that load where it does.  The user's
 Emacs loads the UI modules and the ACP client, the harness process the
 others, and a module whose requirement loads on the other side never
@@ -8414,10 +8430,14 @@ priority).
   merges and the merge queue never see it.  It is
   `{"state-directory": DIR, "tasks": [...]}`, DIR being the state
   directory of the harness it belongs to, which holds the tasks'
-  sessions: a harness with another state directory that still exists
-  leaves it alone and keeps its tasks of that repository in its own
-  state directory; one whose owner is gone takes it over.  Other
-  projects' records, and every record with
+  sessions.  DIR is the whole of the ownership: a harness with another
+  state directory leaves the store alone, keeps its tasks of that
+  repository in its own state directory, and never rewrites the owner
+  the store names -- also when it cannot see DIR, as a sandbox that
+  hides the user's state directory cannot, or when DIR is another
+  machine's.  Nothing takes a store over: an unowned one, a bare array
+  of records from before repository stores, is the only kind a harness
+  may take up.  Other projects' records, and every record with
   `harness-tasks-store-in-repository` nil, are a JSON array in
   `tasks.json` in the state directory.  `task-stores.json` there lists
   the repository stores, which a start reads before `tasks.json` (a
@@ -8427,8 +8447,8 @@ priority).
   upgrade (or after an in-place reload) moves git projects' tasks out of
   `tasks.json` into their repositories, copying it to `tasks.json.bak`
   first, and turning the option off brings them back.  A repository
-  store left without records is deleted; one that cannot be written
-  leaves its records in `tasks.json`.
+  store left without records is deleted, when it is this harness's; one
+  that cannot be written leaves its records in `tasks.json`.
 - Restarts: when the module starts, an active task without an outcome
   that nothing in this process works on was interrupted.  Without a
   session it starts over (as pending, or in its worktree when it has

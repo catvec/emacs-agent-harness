@@ -193,15 +193,22 @@ listing that was cut says so; the SKILL.md is never among them."
       (dotimes (i 6)
         (with-temp-file (expand-file-name (format "file-%d.txt" i) dir)
           (insert (make-string 8 ?x))))
+      ;; The skill's own file is no supporting file, so it takes no place
+      ;; of the bound: 3 leaves 3 files, not 2 and the skill itself.
       (let ((harness-skills-scan-max-files 3))
         (let ((skill (harness-skills-scan-read dir entry)))
-          (should (= 3 (length (plist-get skill :files))))
+          (should (equal '("file-0.txt" "file-1.txt" "file-2.txt")
+                         (plist-get skill :files)))
           (should (plist-get skill :files-truncated))
           (should (cl-find "files-truncated"
                            (mapcar (lambda (d) (plist-get d :code)) (plist-get skill :diagnostics))
                            :test #'equal))))
-      (let ((harness-skills-scan-max-files 100))
+      ;; No bound reached: every supporting file, the skill's own not among
+      ;; them, and nothing truncated.  It counts against neither bound.
+      (let ((harness-skills-scan-max-files 200)
+            (harness-skills-scan-max-files-bytes 100))
         (let ((skill (harness-skills-scan-read dir entry)))
+          (should-not (plist-get skill :files-truncated))
           (should-not (cl-intersection '("SKILL.md") (plist-get skill :files) :test #'equal))
           (should (equal (sort (copy-sequence (plist-get skill :files)) #'string<)
                          (plist-get skill :files))))))))

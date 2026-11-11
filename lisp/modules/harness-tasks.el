@@ -876,7 +876,11 @@ move to where they belong by themselves, at the next save.
 A repository's store belongs to the harness whose state directory it
 names, which holds the tasks' sessions.  Another harness (one with a
 state directory of its own, like a test run) keeps its tasks of that
-repository in its state directory instead."
+repository in its state directory instead, and leaves that store as it
+is: the name is the whole of the ownership, so a harness that cannot
+see the owner's directory -- a sandbox hides it, or it is another
+machine's -- does not take the store over, and no save rewrites the
+owner a store names."
   :type 'boolean :group 'harness)
 
 (defvar harness-state-directory)
@@ -1460,8 +1464,15 @@ follow-up, not feedback sent back from review
 ;; and all of them when `harness-tasks-store-in-repository' is nil, are
 ;; in the global store in the state directory.  A repository store names
 ;; the state directory of the harness it belongs to, where the tasks'
-;; sessions are, and another harness leaves it alone.  The registry lists
-;; the repository stores, so a start reads them all.
+;; sessions are, and that name is the whole of its ownership: another
+;; harness leaves it alone, whether or not it can see that directory.
+;; Nothing takes a store over, so a sandbox that hides the owner's
+;; directory, a test run, a development daemon, or the directory merely
+;; moving cannot make one harness the keeper of another's board, and no
+;; save rewrites the owner a store names.  A store that names no state
+;; directory, such as a bare array of records from before repository
+;; stores, is nobody's and is taken up.  The registry lists the
+;; repository stores, so a start reads them all.
 ;;
 ;; A save resolves the store of every record and writes the stores whose
 ;; text changes.  So a record kept where its project does not keep it
@@ -1515,6 +1526,20 @@ non-ASCII text compares equal too."
     (or (equal (file-name-as-directory (expand-file-name owner)) mine)
         (ignore-errors (file-equal-p owner mine)))))
 
+(defun harness-tasks--store-mine-p (store)
+  "Non-nil when the repository STORE is this harness's to keep and write.
+STORE is the parsed content of the store, or nil for one that is not
+there.  Its `:state-directory' is the harness that owns it: this one,
+which keeps the tasks there, or an unowned store.  A store naming
+another state directory is another harness's whatever can be seen of
+that directory here -- a sandbox may hide it, and a test run or a
+development daemon must not take the user's board over because it
+cannot -- so this one leaves it alone."
+  (let ((owner (plist-get store :state-directory)))
+    (or (not (stringp owner))
+        (string-empty-p owner)
+        (harness-tasks--own-store-p owner))))
+
 (defun harness-tasks--add-records (records)
   "Add the stored RECORDS whose ids are not known yet; return the tasks added."
   (let (added)
@@ -1529,10 +1554,11 @@ non-ASCII text compares equal too."
 (defun harness-tasks--open-store (path)
   "Return non-nil when this harness keeps tasks in the repository store PATH.
 The first time, read PATH and add its records.  A store naming another
-state directory, one that still exists, is another harness's: it is
-left alone and nil returned.  One whose owner is gone is taken over,
-records and all.  Records found after a start are announced and picked
-up like those of a start."
+state directory is another harness's, whether or not that directory can
+be seen from here: it is left alone, its records are not taken up, and
+nil is returned.  Only a store this harness owns, or an unowned one, is
+read and kept -- nothing takes another harness's over.  Records found
+after a start are announced and picked up like those of a start."
   (pcase (gethash path harness-tasks--stores)
     ('mine t)
     ('foreign nil)
@@ -1540,21 +1566,20 @@ up like those of a start."
      (let* ((data (harness-tasks--read-json path))
             ;; A bare array of records, like the global store's, names no owner.
             (store (cond ((keywordp (car-safe data)) data)
-                         ((listp data) (list :tasks data))))
-            (owner (plist-get store :state-directory)))
-       (if (and (stringp owner) (not (harness-tasks--own-store-p owner)) (file-directory-p owner))
+                         ((listp data) (list :tasks data)))))
+       (if (harness-tasks--store-mine-p store)
            (progn
-             (harness-log 'warn "tasks: %s belongs to the harness of %s; this one keeps its tasks of that repository in %s"
-                          path owner (harness-tasks--global-store))
-             (puthash path 'foreign harness-tasks--stores)
-             nil)
-         (puthash path 'mine harness-tasks--stores)
-         (let ((added (harness-tasks--add-records (plist-get store :tasks))))
-           (when (and added (not harness-tasks--loading))
-             (dolist (task added) (harness-emit 'task/changed (harness-tasks--view task)))
-             (harness-tasks--save-soon)
-             (harness-tasks--pick-up)))
-         t)))))
+             (puthash path 'mine harness-tasks--stores)
+             (let ((added (harness-tasks--add-records (plist-get store :tasks))))
+               (when (and added (not harness-tasks--loading))
+                 (dolist (task added) (harness-emit 'task/changed (harness-tasks--view task)))
+                 (harness-tasks--save-soon)
+                 (harness-tasks--pick-up)))
+             t)
+         (harness-log 'warn "tasks: %s belongs to the harness of %s; this one keeps its tasks of that repository in %s"
+                      path (plist-get store :state-directory) (harness-tasks--global-store))
+         (puthash path 'foreign harness-tasks--stores)
+         nil)))))
 
 (defun harness-tasks--drop-store (path)
   "Delete the repository store PATH, left without records.

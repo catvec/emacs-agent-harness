@@ -85,6 +85,35 @@ UI call sites, version headers, frame audit, patch-review ownership)
 also skip `*-test.el`, so a test's own source cannot satisfy a check
 about production code.
 
+### Fixtures are not modules either
+
+`-test.el` was too narrow a rule, because a suite may keep its
+fixtures in a file of its own beside it: the OpenRouter suites share
+`harness-provider-openrouter-test-helpers.el`. That name matches
+`harness-NAME.el` and does not end in `-test.el`, so the loader
+counted it as module `provider-openrouter-test-helpers` and loaded it
+whenever every module was enabled -- in the user's harness, in a
+development daemon, in any `harness-enabled-modules` t. The file
+`require`s `harness-test-helpers`, the suites' shared helper in
+`test/`, which sets `harness-state-directory` and the session
+temporary root to a throwaway directory of the test run and deletes
+both in its `kill-emacs-hook`. A live harness that loaded it therefore
+moved its whole state -- sessions, the task board, the temporary
+directories -- into that directory and lost sight of the state it had
+been using: the task board came back empty, with a store owning a
+state directory nobody had chosen, and the previous board was hidden
+from every harness that read it.
+
+The rule is now one predicate, `harness--test-file-p`: a file holds
+tests, or the fixtures they share, when its name is
+`harness-NAME-test.el`, `harness-NAME-ASPECT-test.el`, or
+`harness-NAME-test-helpers.el`. `harness--module-file-p` uses it, and
+so does `harness-module-docs-files`, so a fixtures file is neither
+loaded nor documented as a module. `harness-test-helpers` itself also
+refuses to load once `harness-started` is set, so a harness that is
+already running is never restated into a test's throwaway state by any
+path.
+
 ## Updating from a version before the move
 
 An installed harness checks an update before installing it, and a

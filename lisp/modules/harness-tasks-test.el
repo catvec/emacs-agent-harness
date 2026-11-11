@@ -4470,34 +4470,50 @@ the task's own session.  With one slot, the next task starts meanwhile."
       (should (= 0 writes)))))
 
 (ert-deftest harness-tasks-leave-another-harness-store-alone ()
-  "Another live harness's repository store is left alone; a gone one's taken over."
+  "Another harness's repository store is left alone, its owner visible or not.
+Its state directory is the whole of its ownership.  A harness cannot see
+another's from a suite's throwaway state, a sandbox or another machine,
+and must not take the board over because it cannot: no save rewrites the
+owner a store names, and no record of the other harness shows here."
   (harness-tasks-test-with
     (let* ((harness-tasks-store-in-repository t)
            (harness-tasks-max-running 0)
            (root (harness-tasks-test--make-repo))
-           (other (harness-test-temp-dir))
+           (visible (harness-test-temp-dir))
+           (hidden (expand-file-name "not-here/" (harness-test-temp-dir)))
            (store (harness-tasks-test--store root))
            (global (harness-tasks-test--global))
            (theirs (harness-json-encode
-                    (list :state-directory other
+                    (list :state-directory visible
                           :tasks (list (list :id "t-theirs" :project root :cwd root
                                              :prompt "another harness's" :state "pending" :created 1.0))))))
+      (should (file-directory-p visible))
+      (should-not (file-directory-p hidden))
       (harness-write-file-atomically store theirs)
       (let ((id (harness-tasks-test-submit "this harness's" root)))
         (harness-tasks-flush)
+        ;; Its own tasks, never the other harness's, and the file unchanged.
         (should (equal theirs (harness-read-file store)))
         (should (equal (list id) (harness-tasks-test--ids (harness-call 'task/list root))))
         (should (equal (list id) (harness-tasks-test--stored-ids global)))
-        ;; With its harness gone, the store is this one's, records and all.
-        (delete-directory other t)
-        (harness-tasks-test--restart)
-        (harness-tasks-flush)
-        (harness-tasks-test--settle)
-        (should (equal (list "t-theirs" id) (harness-tasks-test--ids (harness-call 'task/list root))))
-        (should (equal (list "t-theirs" id) (harness-tasks-test--stored-ids store)))
-        (should (equal (harness-tasks--state-directory)
-                       (plist-get (harness-tasks-test--read store) :state-directory)))
-        (should-not (harness-tasks-test--stored-ids global))))))
+        ;; A store whose owner's directory cannot be seen here is no more
+        ;; this harness's: it is not inspected, rewritten or taken over.
+        (harness-write-file-atomically
+         store (harness-json-encode
+                (list :state-directory hidden
+                      :tasks (list (list :id "t-gone" :project root :cwd root
+                                         :prompt "a harness out of sight" :state "pending"
+                                         :created 2.0)))))
+        (let ((hidden-text (harness-read-file store)))
+          (harness-tasks-test--restart)
+          (harness-tasks-flush)
+          (harness-tasks-test--settle)
+          (should (equal hidden-text (harness-read-file store)))
+          (should-not (gethash "t-gone" harness-tasks--table))
+          (should (equal (list id) (harness-tasks-test--ids (harness-call 'task/list root))))
+          (should (equal (list id) (harness-tasks-test--stored-ids global)))
+          (should-not (file-exists-p (expand-file-name "task-stores.json"
+                                                       harness-state-directory))))))))
 
 (ert-deftest harness-tasks-unwritable-repository-store-falls-back ()
   "The tasks of a repository whose store cannot be written stay in the state directory."
