@@ -46,6 +46,17 @@ callback and chunk reader stay in `harness-openrouter-test--requests'
 for a test to call itself -- which is how a test cancels a request that
 has reached the transport and has not been answered.")
 
+(defvar harness-openrouter-test--hold-catalogue nil
+  "When non-nil, catalogue requests are recorded but left unanswered.
+The test then answers one with `harness-openrouter-test--answer-catalogue'
+or fails it with `harness-openrouter-test--fail-catalogue', which call
+the production callback.  That is how a test edits the policy while a
+reading is genuinely in flight: the real completion callbacks run, with
+no network.")
+
+(defvar harness-openrouter-test--held-catalogues nil
+  "The ARGS of the catalogue requests the fake is holding, oldest first.")
+
 (defun harness-openrouter-test--fake-request (url &rest args)
   "Record a request to URL with ARGS and replay the matching canned response."
   (let* ((response (or (and harness-openrouter-test--completion-script
@@ -62,7 +73,13 @@ has reached the transport and has not been answered.")
     (push (list :url url :method (or (plist-get args :method) "GET")
                 :headers (plist-get args :headers) :json (plist-get args :json) :args args)
           harness-openrouter-test--requests)
-    (unless held
+    (cond
+     ((and harness-openrouter-test--hold-catalogue
+           (string-match-p "/endpoints\\'" url))
+      (setq harness-openrouter-test--held-catalogues
+            (append harness-openrouter-test--held-catalogues (list args))))
+     (held nil)
+     (t
       (harness-run-soon
        (lambda ()
          (unless (harness-http-handle-cancelled handle)
@@ -78,8 +95,28 @@ has reached the transport and has not been answered.")
                  (funcall (plist-get args :on-chunk) chunk))
                (funcall (plist-get args :callback) status nil "" nil))
               (t (funcall (plist-get args :callback) status nil
-                          (or (plist-get response :body) "") nil))))))))
+                          (or (plist-get response :body) "") nil)))))))))
     handle))
+
+(defun harness-openrouter-test--take-held-catalogue ()
+  "Return the ARGS of the oldest held catalogue request, and forget it."
+  (let ((args (car harness-openrouter-test--held-catalogues)))
+    (setq harness-openrouter-test--held-catalogues
+          (cdr harness-openrouter-test--held-catalogues))
+    args))
+
+(defun harness-openrouter-test--answer-catalogue (&optional body)
+  "Answer the oldest held catalogue request with BODY, from the fixture.
+The production callback runs, as the HTTP layer would call it."
+  (let ((args (harness-openrouter-test--take-held-catalogue)))
+    (funcall (plist-get args :callback) 200 nil
+             (or body (harness-openrouter-test--catalogue-json)) nil)))
+
+(defun harness-openrouter-test--fail-catalogue (&optional error)
+  "Fail the oldest held catalogue request with ERROR, as curl would."
+  (let ((args (harness-openrouter-test--take-held-catalogue)))
+    (funcall (plist-get args :callback) nil nil ""
+             (or error (list 'error "connection reset by peer")))))
 
 (defmacro harness-openrouter-test-with-fake (responses &rest body)
   "Run BODY with `harness-http-request' replaced by a fake serving RESPONSES.
@@ -89,6 +126,8 @@ unanswered, so a test can cancel one mid-transport."
   `(let ((harness-openrouter-test--requests nil)
          (harness-openrouter-test--responses ,responses)
          (harness-openrouter-test--hold nil)
+         (harness-openrouter-test--hold-catalogue nil)
+         (harness-openrouter-test--held-catalogues nil)
          (auth-sources nil))
      (cl-letf (((symbol-function 'harness-http-request) #'harness-openrouter-test--fake-request))
        ,@body)))
@@ -173,72 +212,25 @@ replace the standard-tier default prices, discount and tier."
   "Return a regexp matching this model's catalogue URL."
   (concat (regexp-quote harness-openrouter-test-model) "/endpoints\\'"))
 
-(defun harness-openrouter-test--evidence (&rest overrides)
-  "Return per-endpoint privacy evidence, with OVERRIDES applied.
-It states, for one exact endpoint, everything the policy requires; a
-test replaces a field to check that the missing or wrong one blocks."
-  (let ((evidence (list :no-training t
-                        :retention "zero"
-                        :zdr-eligible t
-                        :safety-retention :excluded
-                        :regions '("US")
-                        :host "deepinfra.com"
-                        :checked-at (float-time)
-                        :source "test fixture, not evidence"
-                        :max-age 86400)))
-    (while overrides
-      (setq evidence (plist-put evidence (car overrides) (cadr overrides))
-            overrides (cddr overrides)))
-    evidence))
-
-(defconst harness-openrouter-test--privacy
-  '(:no-training t :retention "zero" :zdr-eligible t :safety-retention :excluded
-    :regions ("US"))
-  "The privacy requirement a test policy states.
-It is a requirement, not evidence: each endpoint's own dated evidence
-must meet it (`harness-openrouter-test--evidence').")
-
-(defconst harness-openrouter-test--owner-price-peak
-  '(:prompt 0.30 :completion 1.20 :cache-read 0.006)
-  "DeepSeek's own peak rate for this model, as the policy's price filter.
-It is the most DeepSeek itself charges for the checkpoint, read from
-its published pricing page; a test value here, not a proposal.")
+(defconst harness-openrouter-test--max-price
+  '(:prompt 0.15 :completion 0.60 :cache-read 0.003)
+  "A test policy's spending limits, in USD per million tokens.
+They are the most this policy pays per component; the prices they are
+compared against come from the catalogue fixture, never from here.  The
+numbers are the example configuration's, and a test value: no provider's
+rate is written into a policy.")
 
 (defun harness-openrouter-test-policy (&rest overrides)
   "Return a complete routing policy, with OVERRIDES applied.
-The owner price is DeepSeek's own peak rate, so both vetted endpoints
-fit under the filter and the cheaper one is chosen.  OVERRIDES replace
-top-level keys, so `:endpoints' and `:owner-price' can be swapped
+The limits are `harness-openrouter-test--max-price', so both allowed
+endpoints fit and the cheaper one is chosen.  OVERRIDES replace
+top-level keys, so `:providers' and `:max-price' can be swapped
 wholesale."
-  (let* ((now (float-time))
-         (owner (plist-put (plist-put (copy-sequence
-                                       harness-openrouter-test--owner-price-peak)
-                                      :source "test fixture, not evidence")
-                           :read-at now))
-         (owner (plist-put owner :max-age 86400))
-         (policy (list :enabled t
-                       :model harness-openrouter-test-model
-                       :owner-price owner
-                       :freshness 300
-                       :privacy (copy-sequence harness-openrouter-test--privacy)
-                       :retry '(:max-attempts 2 :max-seconds 30 :max-output-tokens 4096)
-                       :endpoints
-                       (list (list :key "deepinfra-standard"
-                                   :slug "deepinfra/fp8"
-                                   :tag "deepinfra/fp8"
-                                   :provider "DeepInfra"
-                                   :quantization "fp8"
-                                   :host "deepinfra.com"
-                                   :evidence (harness-openrouter-test--evidence))
-                             (list :key "cohere-standard"
-                                   :slug "cohere/fp8"
-                                   :tag "cohere/fp8"
-                                   :provider "Cohere"
-                                   :quantization "fp8"
-                                   :host "cohere.com"
-                                   :evidence (harness-openrouter-test--evidence
-                                              :host "cohere.com"
-                                              :source "test fixture for Cohere, not evidence"))))))
+  (let ((policy (list :enabled t
+                      :model harness-openrouter-test-model
+                      :providers '("DeepInfra" "Cohere")
+                      :max-price (copy-sequence harness-openrouter-test--max-price)
+                      :freshness 300)))
     (while overrides
       (setq policy (plist-put policy (car overrides) (cadr overrides))
             overrides (cddr overrides)))
@@ -346,10 +338,23 @@ bus, so `provider/complete' still works."
         (apply #'harness-openrouter-test--stream-body
                (harness-openrouter-test--answer-chunks))))
 
+(defun harness-openrouter-test--answer-from (provider)
+  "Return a completion response whose answer names PROVIDER as served it.
+The chunks are `harness-openrouter-test--answer-chunks' with the
+provider replaced, so a test can pin one provider and answer as it."
+  (let* ((chunks (harness-openrouter-test--answer-chunks))
+         (chunks (mapcar (lambda (chunk)
+                           (if (plist-member chunk :provider)
+                               (plist-put (copy-sequence chunk) :provider provider)
+                             chunk))
+                         chunks)))
+    (cons "chat/completions"
+          (apply #'harness-openrouter-test--stream-body chunks))))
+
 (defun harness-openrouter-test--route (&optional overrides)
   "Return a pinned route for this model, with OVERRIDES applied."
   (let ((route (list :model harness-openrouter-test-model
-                     :key "deepinfra-standard" :slug "deepinfra/fp8"
+                     :slug "deepinfra/fp8"
                      :provider "DeepInfra" :tier "default" :quantization "fp8"
                      :prompt 0.098 :completion 0.294 :cache-read 0.00294
                      :discount 0.51 :catalogue-at (float-time)
@@ -358,6 +363,16 @@ bus, so `provider/complete' still works."
       (setq route (plist-put route (car overrides) (cadr overrides))
             overrides (cddr overrides)))
     route))
+
+(defun harness-openrouter-test--routed-body (policy route request)
+  "Return REQUEST's wire body as `harness-openrouter--dispatch' would send it.
+POLICY is the checked policy and ROUTE the pinned one; both are what the
+dispatch binds around the transport, so the body is built exactly as it
+is for a request that left the dispatch."
+  (let ((harness-openrouter--sending policy))
+    (harness-openai--body
+     (harness-openrouter--endpoint) harness-openrouter-test-model
+     (plist-put (copy-sequence request) :openrouter-route route))))
 
 (defun harness-openrouter-test--request (&optional session)
   "Return a request for the policy's model in SESSION."

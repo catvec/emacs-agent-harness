@@ -37,31 +37,78 @@ provider behaves exactly as it always did: no `provider` object, no
 catalogue request of this module's, no pin.
 
 When it is set (and `:enabled` is on), it names one exact model, the
-vetted endpoint identities that may serve it, the model owner's own
-published price as the most this may cost, a freshness bound, what
-each endpoint's privacy evidence must establish, and retry bounds.  A
-new session gets the cheapest vetted endpoint that is not dearer than
-the owner's own price; the choice is stored on the session and every
-later request is restricted to it.  Nothing is switched
+providers allowed to serve it, the most the operator is willing to
+pay, and retry bounds.  Every price it compares is read from
+OpenRouter's catalogue when the decision is made: `:max-price` is a
+spending limit, never a claim about what a provider charges.  A new
+session gets the cheapest allowed endpoint whose current catalogue
+price is inside the limits; the choice is stored on the session and
+every later request is restricted to it.  Nothing is switched
 automatically: a pin that stops qualifying pauses the session,
 because a switch is a cache-cold transition and so is the user's
 decision.
 
-Every dispatch of a pinned session checks the whole policy again --
-the owner price's age and the ceiling under the price the pin
-recorded, the endpoint's own evidence and its age, and the catalogue
--- and pauses rather than sending.  It never falls back: a pinned
-session is guarded from `harness-fallback` too, so running out of
-quota or money stops the turn instead of moving a cache-cold
-conversation to a model the policy never vetted.
+Every dispatch of a pinned session checks the policy again -- that
+the pinned provider is still allowed and the pin still the exact
+endpoint it was made on, that the price the pin recorded is inside
+the current limits, and that the catalogue reading is fresh -- and
+pauses rather than sending.  It never falls back: a pinned session is
+guarded from `harness-fallback` too, so running out of quota or money
+stops the turn instead of moving a cache-cold conversation to a model
+the policy never allowed.
 
-The policy's `:privacy` is a requirement, and each endpoint carries
-its own evidence.  They are separate facts, not one badge: no
-training, ZDR eligibility, whether Safety Retention is acceptable,
-and the processing geography are compared one by one, because
-OpenRouter's `zdr: true` can include Safety Retention when the account
-allows it and is therefore not proof of strict zero retention on its
-own.
+The catalogue read is asynchronous, so the policy is read again
+immediately before the body is built, and that reading -- not the one
+the dispatch began with -- is the only one the request's fields come
+from (`harness-openrouter--sending`).  A policy disabled, removed or
+otherwise changed while a request was in flight refuses it with
+`policy-changed`; the next request is prepared afresh under the policy
+then in force.  Sending the old request would send under a policy the
+operator has replaced, and silently choosing again under the new one
+would be a fallback to a provider the old policy never authorised.
+
+A retry is a send like any other, so it goes through the same check.
+Which is why retrying is not decided here: the shared retry layer
+(`harness-retry`) owns the bounds, the wait, the counting and the
+repeating for every provider, and this module says only what its
+requests need (`harness-openrouter--retry-policy`): `:count-sends`,
+because a request this policy governs must be authorised -- pin,
+price, privacy, catalogue -- every time it is sent, and so the lower
+layer never replays one it did not authorise.  `harness-retry-send`
+counts the sends at the dispatch and measures the request from its
+first one; a send the shared bounds no longer allow is refused there,
+not converted into another request.  A failure this provider's typed
+codes say no identical request can pass is decoded to the shared kind
+`permanent`, so the turn ends at once instead of being retried
+unchanged.
+
+What authorised a send travels with the request.  The dispatch records
+the checked policy and the exact pinned route in the request's own
+state (`harness-retry-authorise`), and the shared layer hands that back
+in the request's `done` event.  A repeat is therefore a repeat of
+*that* request: its own count and clock, its own endpoint, and the
+policy that checked it -- so a policy edited, disabled or removed
+while it was in flight refuses the repeat (`policy-changed`) instead of
+re-selecting under the new one or being sent unrestricted.  A recap or
+a judge's call made for the same session is a request of its own, with
+its own state, so it neither spends nor resets the step's budget.
+
+A configured policy is not nil, and the two kinds of off are not the
+same: nil is the legacy pass-through for a request started under it
+(`nil` above), while a policy with `:enabled` off refuses every request
+it would otherwise govern and sends nothing.  Rolling back to nil
+deliberately un-governs the *next* request; it never un-governs one
+already sent, whose repeat is refused if it is still being retried.
+
+The privacy side is not a schema here.  Requests always carry
+`data_collection: "deny"` and `zdr: true`, and the operator's
+provider policy -- DeepInfra and Cohere, nothing in China, US, Canada
+and the EU acceptable -- is a documented decision about the
+allowlist, with its sources in docs/openrouter-pinning.md.  `zdr:
+true' is a routing control, not a proof of strict zero retention:
+OpenRouter documents that it can include Safety Retention endpoints
+depending on account settings, so the distinction is written down
+rather than asserted to be zero by this module.
 
 A listing whose rate depends on the time of the week is refused
 rather than read: the top-level figure is only the rate outside its
@@ -109,22 +156,14 @@ behaviour of filter-then-cheapest, not a special case.
 - `session/hint` ([session](session.md)), when it is loaded
 - `session/set-ext` ([session](session.md)), when it is loaded
 
-### Events it handles
-
-- `agent/turn-ended` → `harness-openrouter--forget-attempts`
-- `agent/turn-started` → `harness-openrouter--forget-attempts`
-
 ### Events it emits
 
 - `openrouter/response-mismatch`
 - `openrouter/route-paused`
 - `openrouter/route-selected`
 
-### Filter chains it joins
-
-- `agent/step-error` at 45 → `harness-openrouter--step-error`
-
 ### Hooks it adds to
 
 - `harness-fallback-guard-functions` → `harness-openrouter--guard`
+- `harness-retry-policy-functions` → `harness-openrouter--retry-policy`
 

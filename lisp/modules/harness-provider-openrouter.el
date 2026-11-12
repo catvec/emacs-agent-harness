@@ -28,31 +28,78 @@
 ;; catalogue request of this module's, no pin.
 ;;
 ;; When it is set (and `:enabled' is on), it names one exact model, the
-;; vetted endpoint identities that may serve it, the model owner's own
-;; published price as the most this may cost, a freshness bound, what
-;; each endpoint's privacy evidence must establish, and retry bounds.  A
-;; new session gets the cheapest vetted endpoint that is not dearer than
-;; the owner's own price; the choice is stored on the session and every
-;; later request is restricted to it.  Nothing is switched
+;; providers allowed to serve it, the most the operator is willing to
+;; pay, and retry bounds.  Every price it compares is read from
+;; OpenRouter's catalogue when the decision is made: `:max-price' is a
+;; spending limit, never a claim about what a provider charges.  A new
+;; session gets the cheapest allowed endpoint whose current catalogue
+;; price is inside the limits; the choice is stored on the session and
+;; every later request is restricted to it.  Nothing is switched
 ;; automatically: a pin that stops qualifying pauses the session,
 ;; because a switch is a cache-cold transition and so is the user's
 ;; decision.
 ;;
-;; Every dispatch of a pinned session checks the whole policy again --
-;; the owner price's age and the ceiling under the price the pin
-;; recorded, the endpoint's own evidence and its age, and the catalogue
-;; -- and pauses rather than sending.  It never falls back: a pinned
-;; session is guarded from `harness-fallback' too, so running out of
-;; quota or money stops the turn instead of moving a cache-cold
-;; conversation to a model the policy never vetted.
+;; Every dispatch of a pinned session checks the policy again -- that
+;; the pinned provider is still allowed and the pin still the exact
+;; endpoint it was made on, that the price the pin recorded is inside
+;; the current limits, and that the catalogue reading is fresh -- and
+;; pauses rather than sending.  It never falls back: a pinned session is
+;; guarded from `harness-fallback' too, so running out of quota or money
+;; stops the turn instead of moving a cache-cold conversation to a model
+;; the policy never allowed.
 ;;
-;; The policy's `:privacy' is a requirement, and each endpoint carries
-;; its own evidence.  They are separate facts, not one badge: no
-;; training, ZDR eligibility, whether Safety Retention is acceptable,
-;; and the processing geography are compared one by one, because
-;; OpenRouter's `zdr: true' can include Safety Retention when the account
-;; allows it and is therefore not proof of strict zero retention on its
-;; own.
+;; The catalogue read is asynchronous, so the policy is read again
+;; immediately before the body is built, and that reading -- not the one
+;; the dispatch began with -- is the only one the request's fields come
+;; from (`harness-openrouter--sending').  A policy disabled, removed or
+;; otherwise changed while a request was in flight refuses it with
+;; `policy-changed'; the next request is prepared afresh under the policy
+;; then in force.  Sending the old request would send under a policy the
+;; operator has replaced, and silently choosing again under the new one
+;; would be a fallback to a provider the old policy never authorised.
+;;
+;; A retry is a send like any other, so it goes through the same check.
+;; Which is why retrying is not decided here: the shared retry layer
+;; (`harness-retry') owns the bounds, the wait, the counting and the
+;; repeating for every provider, and this module says only what its
+;; requests need (`harness-openrouter--retry-policy'): `:count-sends',
+;; because a request this policy governs must be authorised -- pin,
+;; price, privacy, catalogue -- every time it is sent, and so the lower
+;; layer never replays one it did not authorise.  `harness-retry-send'
+;; counts the sends at the dispatch and measures the request from its
+;; first one; a send the shared bounds no longer allow is refused there,
+;; not converted into another request.  A failure this provider's typed
+;; codes say no identical request can pass is decoded to the shared kind
+;; `permanent', so the turn ends at once instead of being retried
+;; unchanged.
+;;
+;; What authorised a send travels with the request.  The dispatch records
+;; the checked policy and the exact pinned route in the request's own
+;; state (`harness-retry-authorise'), and the shared layer hands that back
+;; in the request's `done' event.  A repeat is therefore a repeat of
+;; *that* request: its own count and clock, its own endpoint, and the
+;; policy that checked it -- so a policy edited, disabled or removed
+;; while it was in flight refuses the repeat (`policy-changed') instead of
+;; re-selecting under the new one or being sent unrestricted.  A recap or
+;; a judge's call made for the same session is a request of its own, with
+;; its own state, so it neither spends nor resets the step's budget.
+;;
+;; A configured policy is not nil, and the two kinds of off are not the
+;; same: nil is the legacy pass-through for a request started under it
+;; (`nil' above), while a policy with `:enabled' off refuses every request
+;; it would otherwise govern and sends nothing.  Rolling back to nil
+;; deliberately un-governs the *next* request; it never un-governs one
+;; already sent, whose repeat is refused if it is still being retried.
+;;
+;; The privacy side is not a schema here.  Requests always carry
+;; `data_collection: "deny"' and `zdr: true', and the operator's
+;; provider policy -- DeepInfra and Cohere, nothing in China, US, Canada
+;; and the EU acceptable -- is a documented decision about the
+;; allowlist, with its sources in docs/openrouter-pinning.md.  `zdr:
+;; true' is a routing control, not a proof of strict zero retention:
+;; OpenRouter documents that it can include Safety Retention endpoints
+;; depending on account settings, so the distinction is written down
+;; rather than asserted to be zero by this module.
 ;;
 ;; A listing whose rate depends on the time of the week is refused
 ;; rather than read: the top-level figure is only the rate outside its
@@ -71,6 +118,7 @@
 (require 'harness-http)
 (require 'harness-provider)
 (require 'harness-provider-openai)
+(require 'harness-retry)
 
 (defvar harness-fallback-guard-functions)
 (declare-function harness-fallback-refusal "harness-fallback")
@@ -98,72 +146,73 @@ nil (the default) leaves OpenRouter as it was: no `provider' object, no
 catalogue request of this module's, no pin, no audit of the answer's
 endpoint.  When set it is a plist:
 
-  :enabled  t to let the policy route requests.  Without it a
-            configured policy still allows nothing: it is a policy, not
-            an activation.
-  :model    the exact model the policy was vetted for, e.g.
-            \"deepseek/deepseek-v4.1-flash-1017\".  Only
-            \"openrouter:MODEL\" is routed by it.
-  :owner-price  the model owner's own published platform price, in US
-            dollars per million tokens: (:prompt N :completion N
-            :cache-read N).  It is the most this policy will pay, so a
-            vetted endpoint dearer than it is never chosen.  It must
-            name where it was read and when, because it is a claim
-            about someone else's price list:
-              :source  the page it was read from
-              :read-at a float time
-              :max-age seconds it may be trusted for
-  :endpoints  the vetted endpoints that may serve the model; the
-            cheapest one under `:owner-price' is chosen:
-            :key           a name for the endpoint in state and hints
-            :slug          the exact endpoint tag, e.g. \"deepinfra/fp8\";
-                           a base provider slug is refused, because
-                           OpenRouter matches one across every variant
-                           and region of that provider
-            :provider      the provider name the catalogue gives it
-            :tag           the catalogue tag; must equal :slug
-            :tier          nil for the standard tier, else \"flex\"
-            :quantization  the quantization the catalogue must report
-            :host          the host its traffic goes to
-            :evidence      this endpoint's own privacy evidence, a plist
-                           with the same keys as `:privacy' plus
-                           `:checked-at', `:source' and `:max-age'
-  :freshness  seconds a catalogue reading may be old at dispatch
-  :privacy    what every endpoint's evidence must establish, each key
-            machine-checkable because a free-text claim cannot be
-            compared: :no-training t, :retention a
-            `harness-openrouter--retention-classes' member (\"zero\"),
-            :zdr-eligible t, :safety-retention `:excluded' or
-            `:allowed', and :regions the allowed processing geography.
-            This is a requirement, not evidence: one endpoint's
-            evidence never stands for another's.
-  :retry      (:max-attempts N :max-seconds N :max-output-tokens N),
-            bounds for retrying the same pinned endpoint
+  :enabled    t to let the policy route requests.  Without it a
+              configured policy still allows nothing: it is a policy,
+              not an activation.
+  :model      the exact model the policy is for, e.g.
+              \"deepseek/deepseek-v4.1-flash-1017\".  Only
+              \"openrouter:MODEL\" is routed by it.
+  :providers  the providers allowed to serve it, by the name the
+              catalogue gives them, e.g. (\"DeepInfra\" \"Cohere\").
+              They are the allowlist, and the order they are written in
+              decides nothing: an endpoint of any other provider is
+              never a candidate, however cheap it is, and among those
+              allowed the cheapest that fits is chosen.
+  :max-price  the most this policy is willing to pay, in US dollars per
+              million tokens: (:prompt N :completion N :cache-read N).
+              A spending limit, not a claim about a provider's rate --
+              every price it is compared with is read from OpenRouter's
+              catalogue at the time of the decision.
+  :freshness  seconds a catalogue reading may be old at dispatch.
 
-Selection filters the endpoints it is given to those not dearer than
-`:owner-price' in any priced component and takes the cheapest of them.
-`:endpoints' is the allowlist: an endpoint the policy does not name is
-never a candidate, however cheap the catalogue says it is.  A candidate
-whose listing cannot be read blocks the whole decision rather than being
-dropped, because `cannot read this price' is not `this price is too
-high', and dropping it would quietly pick the next provider.  A listing
-whose rate depends on the time of the week blocks the same way: one
-fixed number cannot stand for it.
+There is no retry bound and no output limit here: how often and how
+long a failed request is tried again is the shared retry layer's
+(`harness-retry-max-attempts', `harness-retry-delay',
+`harness-retry-max-seconds' and the rest), the same for every provider,
+and what a request asks a model to write is the request's own
+`:max-tokens' (see `harness-provider-max-output-tokens' for a ceiling
+on all of them).  This policy decides who serves a request and what it
+may cost, and nothing else.
 
-Once a session is pinned every dispatch checks the whole policy again --
-the owner price's age, the price the pin recorded against the current
-ceiling, the endpoint's own evidence and its age, and the catalogue the
-pin was chosen from -- and pauses the session when any of them fails.
-It never chooses another endpoint: a switch is the user's
-(`harness-openrouter-switch').  A session this policy routes is also
-guarded from `harness-fallback': running out of quota, out of money or
-out of anything else stops the turn instead of moving a cache-cold
-conversation to a model the vetted set never covered.
+Once a session is pinned, every send is checked again: the pinned
+provider still allowed, the pin still the identity it was vetted as, the
+price it recorded still inside the limits, and the catalogue still
+fresh.  A send that fails is offered to the shared retry layer like any
+other provider's, and a repeat of it is a send like any other: it is
+checked again before it goes out, and refused -- with the bound or the
+change that stopped it -- if the answer now differs.
 
-Every field a check needs must be present and well formed: a policy with
-a hole blocks rather than guesses.  No value here is a default: see
-`harness-openrouter-routing-validate', docs/openrouter-pinning.md, and
-the concrete values in it that wait for approval."
+Selection reads the model's current catalogue and considers the
+endpoints of `:providers' only.  For each provider the exact endpoint
+must be unambiguous: one standard-tier record of this model, with no
+regional or tier sibling the catalogue could route to instead.  The
+cheapest one whose prompt, completion and cache-read prices are all at
+or under `:max-price' is chosen; its exact tag, provider name and tier
+are stored on the session.  A listing that cannot be read -- absent,
+ambiguous, another model, a missing or malformed price, a price that
+varies by the time of the week, a component the limits do not cover --
+blocks the decision rather than being dropped, because `cannot read
+this price' is not `this price is too high', and dropping it would
+quietly pick the next provider.
+
+Once a session is pinned every dispatch checks the policy again -- that
+the pin's provider is still allowed and the pin still the identity it
+was vetted as, that the price the pin recorded is inside the current
+limits, and that the catalogue reading is fresh -- and pauses the
+session when any of it fails.  It never chooses another endpoint: a
+switch is the user's (`harness-openrouter-switch').  A session this
+policy routes is also guarded from `harness-fallback': running out of
+quota, out of money or out of anything else stops the turn instead of
+moving a cache-cold conversation to a model the policy never allowed.
+
+No provider's price is ever written into this option: the operator's
+limits are the only numbers here.  Where those numbers come from -- for
+example that they match a rate the operator picked from a model owner's
+published list -- is a comment in the operator's own configuration, not
+something the harness reads.
+Every field a check needs must be present and well formed: a policy
+with a hole blocks rather than guesses.  See
+`harness-openrouter-routing-validate' and docs/openrouter-pinning.md."
   :type '(choice (const :tag "Off" nil) (plist :tag "Policy"))
   :group 'harness)
 
@@ -186,7 +235,17 @@ dispatch; this only keeps a burst of requests from fetching twice."
   "Model id -> (:at FLOAT :endpoints LIST).")
 
 (defvar harness-openrouter--fetching (make-hash-table :test 'equal)
-  "Model id -> promise of an in-flight catalogue fetch.")
+  "Model id -> promise of an in-flight catalogue reading.
+It is the reading promise every concurrent caller shares
+\(`harness-openrouter--reading-of'), not the bare fetch: a second caller
+must be answered with the same shape and the same `:at' as the first.")
+
+(defvar harness-openrouter--sending nil
+  "The checked routing policy of the request being built, or nil.
+Bound around the transport call by `harness-openrouter--dispatch', after
+the policy was checked and its route put on the request, so the headers
+and the body of that one request describe the policy that authorised
+it.  Nothing a handler does meanwhile can change what it carries.")
 
 (harness-declare-event 'openrouter/route-selected
                        "(SESSION-ID ROUTE) when a session is pinned to an endpoint.")
@@ -198,10 +257,10 @@ dispatch; this only keeps a burst of requests from fetching twice."
 ;;;; Prices, exactly
 ;;
 ;; The catalogue gives prices in US dollars per *token* as decimal
-;; strings, and a policy gives ceilings in US dollars per *million*
+;; strings, and a policy gives its maximum in US dollars per *million*
 ;; tokens.  Emacs floats are binary, so a decimal such as 0.098 has no
 ;; exact float value and comparing through one puts rounding at the
-;; boundary: a ceiling can end up under the price it was meant to admit,
+;; boundary: a limit can end up under the price it was meant to admit,
 ;; or above a price it was meant to exclude.  Every price here is
 ;; therefore read as an exact decimal -- a numerator over a power of
 ;; ten, both exact integers -- and every comparison cross-multiplies.
@@ -228,12 +287,12 @@ many fractional places as the text names, up to
 `harness-openrouter--decimal-places'.  A negative value, a non-number,
 an empty string, a value with a larger exponent, or one too long to be
 a price is nil: unreadable, never zero.  No step goes through floating
-point, so a ceiling and the price it bounds compare exactly whatever
+point, so a limit and the price it bounds compare exactly whatever
 their precision."
   (let ((text (cond ((integerp value) (and (>= value 0) (number-to-string value)))
                     ((floatp value)
                      ;; The decimal it prints as, not its binary value:
-                     ;; 0.098 reads as 98/1000, which is the ceiling the
+                     ;; 0.098 reads as 98/1000, which is the limit the
                      ;; policy's author wrote.
                      (and (>= value 0) (number-to-string value)))
                     ((and (stringp value) (not (string-empty-p value))) value))))
@@ -284,10 +343,10 @@ their precision."
         (cons (* (car value) (expt 10 places)) (cdr value))
       (cons (car value) (* (cdr value) (expt 10 (- places)))))))
 
-(defun harness-openrouter--ceiling-per-token (usd-per-million)
-  "Return USD-PER-MILLION, a policy ceiling, as exact US dollars per token.
-The division is exact, so no rounding decides whether a price is over
-the ceiling.  Nil when it is not a decimal, which validation refuses."
+(defun harness-openrouter--limit-per-token (usd-per-million)
+  "Return USD-PER-MILLION, a policy maximum, as exact US dollars per token.
+The division is exact, so no rounding decides whether a price is over the
+limit.  Nil when it is not a decimal, which validation refuses."
   (harness-openrouter--decimal-scale (harness-openrouter--decimal usd-per-million) -6))
 
 (defun harness-openrouter--price-per-token (value)
@@ -387,232 +446,94 @@ judged from."
            (harness-openrouter-parse-endpoints json)
          (error (harness-rejected err)))))))
 
+(defun harness-openrouter--reading-of (model)
+  "Return a promise of one reading of MODEL's catalogue, fetching once.
+Every caller that asks while the fetch is in flight shares the same
+promise, so it is answered with the same shape -- `:at' and `:endpoints'
+-- and the same timestamp; the alternative is one caller getting a bare
+list of endpoint records and failing its checks for no reason.  A failed
+fetch rejects the shared promise for all of them, leaves no reading, and
+the next call fetches again.  A reading is stored only when it settles,
+so a fetch that answers immediately is never stored settled."
+  (or (gethash model harness-openrouter--fetching)
+      (let* ((fetch (harness-openrouter--fetch-catalogue model))
+             (reading (harness-then
+                       fetch
+                       (lambda (records)
+                         (remhash model harness-openrouter--fetching)
+                         (let ((reading (list :at (float-time) :endpoints records)))
+                           (puthash model reading harness-openrouter--catalogue)
+                           reading))
+                       (lambda (err)
+                         (remhash model harness-openrouter--fetching)
+                         (signal (car err) (cdr err))))))
+        (unless (harness-promise-settled-p reading)
+          (puthash model reading harness-openrouter--fetching))
+        reading)))
+
 (defun harness-openrouter--catalogue (model &optional refresh)
   "Return a promise of MODEL's endpoint catalogue, read at `:at'.
 A reading older than `harness-openrouter-catalogue-ttl' is fetched
 again; REFRESH always fetches.  A failed fetch rejects rather than
 answering an older reading: a stale reading is never evidence that a
-price changed."
+price changed.  A fetch already in flight is shared by every caller
+\(`harness-openrouter--reading-of'), REFRESH included: it is read now,
+which is what refresh asks for."
   (let ((cached (gethash model harness-openrouter--catalogue)))
-    (cond
-     ((and cached (not refresh)
-           (< (- (float-time) (or (plist-get cached :at) 0))
-              harness-openrouter-catalogue-ttl))
-      (harness-resolved cached))
-     ((gethash model harness-openrouter--fetching))
-     (t
-      (let ((promise (harness-openrouter--fetch-catalogue model)))
-        (puthash model promise harness-openrouter--fetching)
-        (harness-then
-         promise
-         (lambda (records)
-           (remhash model harness-openrouter--fetching)
-           (let ((reading (list :at (float-time) :endpoints records)))
-             (puthash model reading harness-openrouter--catalogue)
-             reading))
-         (lambda (err)
-           (remhash model harness-openrouter--fetching)
-           (signal (car err) (cdr err)))))))))
+    (if (and cached (not refresh)
+             (< (- (float-time) (or (plist-get cached :at) 0))
+                harness-openrouter-catalogue-ttl))
+        (harness-resolved cached)
+      (harness-openrouter--reading-of model))))
 
 ;;;; Policy validation
 
 (defconst harness-openrouter--price-keys '(:prompt :completion :cache-read)
-  "Prices every vetted endpoint and the owner's own price must name.
-These are the three the policy compares.  A catalogue listing may carry
-others (`input_cache_write', `internal_reasoning', a per-request fee,
-an audio or image charge); those are not compared, so a listing that
-prices them is `harness-openrouter--unpriceable-components' and blocks
-rather than being read as if they cost nothing.")
+  "Prices every candidate and the policy's limits must name.
+These are the three the policy compares, each in US dollars per million
+tokens.  A catalogue listing may carry others (`input_cache_write',
+`internal_reasoning', a per-request fee, an audio or image charge);
+those are not compared, so a listing that prices them is
+`harness-openrouter--unpriceable-components' and blocks rather than
+being read as if they cost nothing.")
 
 (defconst harness-openrouter--known-pricing-keys
   '(:prompt :completion :input_cache_read :discount :overrides)
   "The catalogue pricing keys this module reads.
 `:prompt', `:completion' and `:input_cache_read' are compared against
-the owner price, `:discount' is recorded, and `:overrides' marks a rate
+`:max-price', `:discount' is recorded, and `:overrides' marks a rate
 that varies by the time of the week.  Any other key is a billable
 component this module cannot weigh.")
 
-(defconst harness-openrouter--retention-classes '("zero")
-  "Retention classes a policy and an endpoint's evidence may name.
-\"zero\" is no retention of the request or the response after
-processing.  A provider that states anything else -- a number of days,
-\"unknown\", \"safety only\" -- is not this class, and a policy that
-requires this class refuses it.  This is a vocabulary, not a claim: what
-an endpoint's evidence records is what its source said, dated.")
-
-(defconst harness-openrouter--privacy-keys
-  '(:no-training :retention :zdr-eligible :safety-retention :regions :host)
-  "What an endpoint's privacy evidence must state, each of it checkable.
-`:no-training' t, `:retention' a `harness-openrouter--retention-classes'
-member, `:zdr-eligible' t, `:safety-retention' `:excluded' or
-`:allowed', `:regions' the hosting or processing geography, and `:host'
-the host the endpoint's traffic goes to.  `:source', `:checked-at' and
-`:max-age' date it.")
-
-(defconst harness-openrouter--retry-keys
-  '(:max-attempts :max-seconds :max-output-tokens)
-  "The bounds a policy's `:retry' must give, each a positive integer.")
-
-(defun harness-openrouter--retry-error (retry)
-  "Return why RETRY, a policy's `:retry', is not a set of bounds, or nil."
+(defun harness-openrouter--providers-error (providers)
+  "Return why PROVIDERS is not an allowlist of provider names, or nil."
   (cond
-   ((not (listp retry)) "the policy names no retry bounds")
-   ((cl-some (lambda (key)
-               (let ((value (plist-get retry key)))
-                 (not (and (integerp value) (> value 0)))))
-             harness-openrouter--retry-keys)
-    "the retry bounds are incomplete or not positive integers")
-   (t nil)))
-
-(defun harness-openrouter--evidence-error (policy endpoint evidence)
-  "Return why EVIDENCE may not stand for ENDPOINT under POLICY, or nil.
-EVIDENCE must state, for this exact endpoint, everything the policy
-requires (`harness-openrouter--privacy-keys'), date itself, cite where
-it was read and still be inside the age it names.  Anything missing,
-unknown, expired, or about another host blocks this endpoint: a policy
-does not infer an endpoint's data policy from another one's, and it does
-not decide on Noah's behalf what is acceptable."
-  (let ((wanted (plist-get policy :privacy))
-        (slug (plist-get endpoint :slug)))
-    ;; The shape only: whether the evidence is still fresh is decided at
-    ;; each dispatch, not here, so a policy that is complete is still a
-    ;; valid policy once its evidence ages, and the stop says what lapsed.
-    (cond
-     ((not (and (listp evidence) evidence))
-      (format "%s has no privacy evidence of its own" slug))
-     ((not (equal (plist-get evidence :host) (plist-get endpoint :host)))
-      (format "%s's evidence names host %s, not the vetted %s"
-              slug (or (plist-get evidence :host) "none")
-              (or (plist-get endpoint :host) "none")))
-     ((not (harness-json-true-p (plist-get evidence :no-training)))
-      (format "%s's evidence does not rule out training" slug))
-     ((not (member (plist-get evidence :retention) harness-openrouter--retention-classes))
-      (format "%s's evidence states retention %s, not one this policy can read"
-              slug (or (plist-get evidence :retention) "none")))
-     ((not (equal (plist-get evidence :retention) (plist-get wanted :retention)))
-      (format "%s keeps %s; the policy requires %s"
-              slug (plist-get evidence :retention) (plist-get wanted :retention)))
-     ((not (harness-json-true-p (plist-get evidence :zdr-eligible)))
-      (format "%s's evidence does not establish ZDR eligibility" slug))
-     ;; Compared as values, not as truth: `:excluded' and `:allowed' are
-     ;; both non-nil, so `(and value t)' would make them the same fact.
-     ((not (eq (plist-get evidence :safety-retention)
-               (plist-get wanted :safety-retention)))
-      (format "%s's Safety Retention standing (%s) is not the one the policy requires (%s)"
-              slug (or (plist-get evidence :safety-retention) "none")
-              (or (plist-get wanted :safety-retention) "none")))
-     ((not (and (listp (plist-get evidence :regions)) (plist-get evidence :regions)
-                (cl-every #'stringp (plist-get evidence :regions))))
-      (format "%s's evidence names no processing or hosting region" slug))
-     ((not (cl-subsetp (plist-get evidence :regions)
-                       (plist-get wanted :regions) :test #'equal))
-      (format "%s's regions (%s) are outside the regions the policy allows (%s)"
-              slug (string-join (plist-get evidence :regions) ", ")
-              (string-join (plist-get wanted :regions) ", ")))
-     ((not (and (stringp (plist-get evidence :source))
-                (not (string-empty-p (plist-get evidence :source)))))
-      (format "%s's evidence cites no source" slug))
-     ((not (numberp (plist-get evidence :checked-at)))
-      (format "%s's evidence is not dated" slug))
-     ((not (and (numberp (plist-get evidence :max-age))
-                (> (plist-get evidence :max-age) 0)))
-      (format "%s's evidence names no maximum age" slug))
-     (t nil))))
-
-(defun harness-openrouter--evidence-stale-error (endpoint evidence)
-  "Return why ENDPOINT's EVIDENCE is too old to be trusted now, or nil.
-This is the check a dispatch makes every time, not the policy's shape:
-an endpoint whose evidence was inside its own age when the policy was
-written and is not any more stops the request, with what to recheck."
-  (let ((checked-at (plist-get evidence :checked-at))
-        (max-age (plist-get evidence :max-age))
-        (slug (plist-get endpoint :slug)))
-    (when (and (numberp checked-at) (numberp max-age) (> max-age 0)
-               (> (- (float-time) checked-at) max-age))
-      (format "%s's privacy evidence was checked %d s ago; it is trusted for %s s, so recheck %s"
-              slug (round (- (float-time) checked-at)) max-age
-              (or (plist-get evidence :source) "its source")))))
-
-(defun harness-openrouter--privacy-requirement-error (privacy)
-  "Return why PRIVACY is not a machine-checkable requirement, or nil."
-  (cond
-   ((not (and (listp privacy) privacy)) "the policy states no privacy requirement")
-   ((not (harness-json-true-p (plist-get privacy :no-training)))
-    "the policy does not require that training on prompts is ruled out")
-   ((not (member (plist-get privacy :retention) harness-openrouter--retention-classes))
-    (format "the policy requires retention %s, which is not one this module can check"
-            (or (plist-get privacy :retention) "none")))
-   ((not (harness-json-true-p (plist-get privacy :zdr-eligible)))
-    "the policy does not require ZDR eligibility")
-   ((not (memq (plist-get privacy :safety-retention) '(:excluded :allowed)))
-    "the policy does not say whether Safety Retention endpoints are acceptable")
-   ((not (and (listp (plist-get privacy :regions)) (plist-get privacy :regions)
-              (cl-every #'stringp (plist-get privacy :regions))))
-    "the policy names no allowed processing region")))
+   ((not (and (listp providers) providers))
+    "the policy names no provider")
+   ((cl-some (lambda (name) (not (and (stringp name) (not (string-empty-p name)))))
+             providers)
+    "a provider name is empty or not a string")
+   ((not (= (length providers) (length (delete-dups (copy-sequence providers)))))
+    "a provider is named twice")))
 
 (defun harness-openrouter--policy-error (policy)
   "Return why POLICY may not be used, a string, or nil when it is complete."
-  (let ((problem nil)
-        (model (plist-get policy :model))
-        (endpoints (plist-get policy :endpoints))
-        (freshness (plist-get policy :freshness))
-        (owner (plist-get policy :owner-price))
-        (retry (plist-get policy :retry)))
+  (let ((model (plist-get policy :model))
+        (limits (plist-get policy :max-price))
+        (freshness (plist-get policy :freshness)))
     (cond
-     ((not (listp policy)) (setq problem "the policy is not a plist"))
+     ((not (listp policy)) "the policy is not a plist")
      ((not (and (stringp model)
                 (string-match-p "\\`[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\\'" model)))
-      (setq problem "the policy names no exact model"))
-     ((not (and (listp endpoints) endpoints))
-      (setq problem "the policy names no endpoint"))
-     ((not (and (numberp freshness) (>= freshness 0)))
-      (setq problem "the policy names no freshness bound"))
-     ((not (listp owner))
-      (setq problem "the policy names no owner price to cap what it may pay"))
-     ((cl-some (lambda (k) (not (harness-openrouter--decimal-p (plist-get owner k))))
+      "the policy names no exact model")
+     ((harness-openrouter--providers-error (plist-get policy :providers)))
+     ((not (and (listp limits) limits))
+      "the policy names no maximum price to spend")
+     ((cl-some (lambda (key) (not (harness-openrouter--decimal-p (plist-get limits key))))
                harness-openrouter--price-keys)
-      (setq problem "the owner price is incomplete or not a plain decimal"))
-     ((not (and (numberp (plist-get owner :read-at))
-                (stringp (plist-get owner :source))
-                (not (string-empty-p (plist-get owner :source)))))
-      (setq problem "the owner price names no source or no date it was read"))
-     ((not (and (numberp (plist-get owner :max-age))
-                (> (plist-get owner :max-age) 0)))
-      (setq problem "the owner price names no maximum age"))
-     (t
-      (setq problem (harness-openrouter--privacy-requirement-error
-                     (plist-get policy :privacy)))))
-    (unless problem
-      (setq problem (harness-openrouter--retry-error retry)))
-    (unless problem
-      (let ((seen nil))
-        (dolist (endpoint endpoints)
-          (let ((key (plist-get endpoint :key))
-                (slug (plist-get endpoint :slug)))
-            (unless problem
-              (cond
-               ((not (and (stringp key) (not (string-empty-p key))))
-                (setq problem "an endpoint has no key"))
-               ((member key seen)
-                (setq problem "an endpoint key is repeated"))
-               ((not (and (stringp slug) (string-match-p "/" slug)))
-                (setq problem (format "an endpoint names no exact slug (%s)" slug)))
-               ((not (equal slug (plist-get endpoint :tag)))
-                (setq problem (format "an endpoint's tag and slug differ (%s)" slug)))
-               ((not (and (stringp (plist-get endpoint :provider))
-                          (not (string-empty-p (plist-get endpoint :provider)))))
-                (setq problem (format "an endpoint names no provider (%s)" slug)))
-               ((and (plist-get endpoint :tier)
-                     (not (equal (plist-get endpoint :tier) "flex")))
-                (setq problem (format "an endpoint is not on the standard or flex tier (%s)" slug)))
-               ((not (and (stringp (plist-get endpoint :host))
-                          (not (string-empty-p (plist-get endpoint :host)))))
-                (setq problem (format "an endpoint names no host (%s)" slug)))
-               (t
-                (setq problem (harness-openrouter--evidence-error
-                               policy endpoint (plist-get endpoint :evidence))))))
-            (push key seen)))))
-    problem))
+      "the maximum price is incomplete or not a plain decimal")
+     ((not (and (numberp freshness) (>= freshness 0)))
+      "the policy names no freshness bound"))))
 
 (defun harness-openrouter-routing-validate (&optional policy)
   "Return nil when POLICY, or `harness-openrouter-routing', may be used.
@@ -637,10 +558,15 @@ That takes a configured policy, `:enabled' in it, and no missing field."
 ;;
 ;; The rule is a filter and a sort, and nothing else:
 ;;
-;;   * only the endpoints the policy names (the allowlist) are candidates;
-;;   * any whose fresh listing is dearer than the model owner's own
-;;     published price is dropped -- that is the most this policy pays;
+;;   * only the endpoints of the policy's providers are candidates;
+;;   * any whose fresh catalogue listing is dearer than `:max-price' in
+;;     any component is dropped -- that is the most this policy spends;
 ;;   * the cheapest of what remains is chosen.
+;;
+;; Every price compared is the one OpenRouter's catalogue gives at the
+;; time of the decision.  Nothing here reads a provider's price from the
+;; policy: `:max-price' is a spending limit, and the catalogue is the
+;; only source of what a provider charges.
 ;;
 ;; A candidate whose listing cannot be read at all -- absent, ambiguous,
 ;; another model, a missing or malformed price, a stale reading -- blocks
@@ -655,33 +581,21 @@ That takes a configured policy, `:enabled' in it, and no missing field."
     (and (numberp at) (numberp freshness)
          (not (> (- (float-time) at) freshness)))))
 
-(defun harness-openrouter--owner-price (policy)
-  "Return POLICY's owner price as exact per-token prices, or nil.
+(defun harness-openrouter--limits (policy)
+  "Return POLICY's `:max-price' as exact per-token limits, or nil.
 A plist of `:prompt', `:completion' and `:cache-read', each the exact
-decimal US dollars per token the owner's published per-million figure
-names.  The division is exact, so a price at the ceiling the owner
-charges is not over it and a price above it is never admitted."
-  (let ((owner (plist-get policy :owner-price)))
-    (when (listp owner)
+decimal US dollars per token the configured per-million figure names.
+The division is exact, so a price at the limit is not over it and a
+price above it is never admitted."
+  (let ((most (plist-get policy :max-price)))
+    (when (listp most)
       (let ((prices (mapcar (lambda (key)
-                              (harness-openrouter--ceiling-per-token (plist-get owner key)))
+                              (harness-openrouter--limit-per-token (plist-get most key)))
                             harness-openrouter--price-keys)))
         (and (cl-every #'consp prices)
              (list :prompt (nth 0 prices)
                    :completion (nth 1 prices)
                    :cache-read (nth 2 prices)))))))
-
-(defun harness-openrouter--owner-price-error (policy)
-  "Return why POLICY's owner price may not be trusted now, or nil."
-  (let* ((owner (plist-get policy :owner-price))
-         (read-at (plist-get owner :read-at))
-         (max-age (plist-get owner :max-age)))
-    (cond
-     ((not (and (numberp read-at) (numberp max-age)))
-      "the owner price is not dated")
-     ((> (- (float-time) read-at) max-age)
-      (format "the owner price was read %d s ago; the policy trusts it for %s s"
-              (round (- (float-time) read-at)) max-age)))))
 
 (defconst harness-openrouter--tier-slugs
   '("priority" "fast" "turbo" "flex" "ultrafast" "highspeed" "prime")
@@ -702,66 +616,51 @@ tag's last segment says so in the provider's own spelling."
              (member (car (last (split-string tag "/"))) harness-openrouter--tier-slugs)
              t))))
 
-(defun harness-openrouter--slug-matches-p (slug record)
-  "Non-nil when OpenRouter's SLUG selector would match RECORD.
-OpenRouter documents a slug as `provider[/variant][/region][/tier]' and
-matches it against every endpoint whose tag shares its segments, with
-one exception: a slug that does not name a tier never matches a
-tier endpoint.  So `deepinfra/fp8' selects `deepinfra/fp8' alone, not
-its `flex' or `priority' siblings, while a later `deepinfra/fp8/us'
-would be selected too -- which makes the slug ambiguous, and
-`harness-openrouter--matching' refuses to pin an ambiguous one.  This is
-that comparison: exact tag first, then a prefix at a segment boundary
-unless the record is a tier endpoint."
-  (let ((tag (plist-get record :tag)))
-    (and (stringp slug) (stringp tag)
-         (or (equal slug tag)
-             (and (not (harness-openrouter--tier-endpoint-p record))
-                  (string-prefix-p slug tag)
-                  (> (length tag) (length slug))
-                  (eq ?/ (aref tag (length slug))))))))
+(defun harness-openrouter--candidate (policy records provider)
+  "Return the record of RECORDS that is PROVIDER's endpoint of POLICY's model.
+Exactly one standard-tier record of this model may name PROVIDER.  A
+second one -- a new region or a variant of the same endpoint -- is not
+the endpoint the policy allowed, so two of them make the identity
+ambiguous and this returns nil as well: an ambiguous identity is no
+identity, and blocking is what keeps a new regional variant from joining
+the allowed set silently.  A tier endpoint (`flex', `priority') is not
+the standard one a provider's name selects; only tier endpoints leave
+the provider unresolved too."
+  (let* ((model (plist-get policy :model))
+         (records (cl-remove-if-not (lambda (record)
+                                      (and (equal (plist-get record :model) model)
+                                           (equal (plist-get record :provider) provider)))
+                                    records)))
+    (let ((standard (cl-remove-if #'harness-openrouter--tier-endpoint-p records)))
+      ;; Only one standard record of this model may be the provider: a
+      ;; second one is a region or a variant, and neither is the endpoint
+      ;; the policy allowed.  Tier records are never it.
+      (and standard (null (cdr standard)) (car standard)))))
 
-(defun harness-openrouter--match-set (policy records endpoint)
-  "Return the records of RECORDS that ENDPOINT's slug would select.
-Every record whose model is POLICY's and whose tag the slug matches, as
-OpenRouter selects them (`harness-openrouter--slug-matches-p')."
-  (let ((model (plist-get policy :model))
-        (slug (plist-get endpoint :slug)))
-    (cl-remove-if-not
-     (lambda (record)
-       (and (equal (plist-get record :model) model)
-            (harness-openrouter--slug-matches-p slug record)))
-     records)))
+(defun harness-openrouter--candidates (policy records)
+  "Return the allowed endpoints of POLICY in RECORDS, as candidate plists.
+One per name in `:providers', in that order: `:provider', `:record' when
+exactly one record is it, and `:reason' plus `:detail' when it cannot be
+resolved."
+  (mapcar (lambda (provider)
+            (let ((record (harness-openrouter--candidate policy records provider)))
+              (if record
+                  (list :provider provider :record record)
+                (list :provider provider
+                      :reason 'unknown-endpoint
+                      :detail (format "%s serves this model at no single exact standard endpoint"
+                                      provider)))))
+          (plist-get policy :providers)))
 
-(defun harness-openrouter--matching (policy records endpoint)
-  "Return the record of RECORDS that is exactly ENDPOINT, or nil.
-Exactly means the slug selects exactly one record of this model, and
-that record agrees on the tag, the provider name, the service tier and,
-when the policy names one, the quantization.  Two records the slug
-selects -- a new region or variant of the same endpoint -- make the
-identity ambiguous, which returns nil as well: an ambiguous identity is
-no identity, and blocking is what keeps a new regional variant from
-joining the vetted set silently."
-  (let ((matches (harness-openrouter--match-set policy records endpoint)))
-    (when (and matches (null (cdr matches)))
-      (let ((record (car matches)))
-        (when (and (equal (plist-get record :tag) (plist-get endpoint :slug))
-                   (equal (plist-get record :provider) (plist-get endpoint :provider))
-                   (equal (plist-get record :tier) (plist-get endpoint :tier))
-                   (or (null (plist-get endpoint :quantization))
-                       (equal (plist-get record :quantization)
-                              (plist-get endpoint :quantization))))
-          record)))))
-
-(defun harness-openrouter--prices-over (ceiling record)
-  "Return the components of RECORD priced above CEILING, as strings.
+(defun harness-openrouter--prices-over (limits record)
+  "Return the components of RECORD priced above LIMITS, as strings.
 A price the record does not give is over: unknown is not free, and it is
 not a reading either, so it never earns a place in the sort.  Every
-comparison is exact, so a price equal to the ceiling is not over it and
-no rounding admits a price above it."
+comparison is exact, so a price equal to the limit is not over it and no
+rounding admits a price above it."
   (let (over)
     (dolist (key harness-openrouter--price-keys)
-      (let ((most (plist-get ceiling key))
+      (let ((most (plist-get limits key))
             (price (plist-get record key)))
         (when (or (null price) (harness-openrouter--decimal> price most))
           (push (format "%s %s > %s" (substring (symbol-name key) 1)
@@ -772,11 +671,11 @@ no rounding admits a price above it."
 
 (defun harness-openrouter--unpriceable-components (record)
   "Return the billable components of RECORD this policy cannot weigh.
-The policy compares prompt, completion and cache-read against the
-owner's price.  A listing that also prices something else -- a
+The policy compares prompt, completion and cache-read against its
+`:max-price'.  A listing that also prices something else -- a
 per-request fee, an image, audio, a cache write, internal reasoning --
-charges for a component the ceiling does not bound, so it is not a
-listing the policy can read as under the ceiling.  Nil when the listing
+charges for a component the maximum does not bound, so it is not a
+listing the policy can read as inside the maximum.  Nil when the listing
 prices nothing but what is compared."
   (let ((pricing (plist-get record :pricing))
         (unknown nil))
@@ -794,8 +693,8 @@ A listing whose rate depends on the time of the week is not one price:
 the top-level figure is only the rate outside its override windows, and
 which window a request lands in is not something this module reads.  It
 blocks, like any other reading it cannot make.  So does a listing that
-prices a component the ceiling does not cover, and one whose endpoint
-the catalogue reports as unavailable (`:status' anything but zero)."
+prices a component the limits do not cover, and one whose endpoint the
+catalogue reports as unavailable (`:status' anything but zero)."
   (cond
    ((null record)
     (cons 'unknown-endpoint
@@ -814,55 +713,52 @@ the catalogue reports as unavailable (`:status' anything but zero)."
     (cons 'price-unknown "gives no price for every component"))
    ((harness-openrouter--unpriceable-components record)
     (cons 'price-component-unknown
-          (format "prices %s, which the owner price does not cover"
+          (format "prices %s, which the maximum price does not cover"
                   (string-join (harness-openrouter--unpriceable-components record) ", "))))))
 
-(defun harness-openrouter--standing (policy records endpoint ceiling)
-  "Return ENDPOINT's standing against POLICY from RECORDS and CEILING.
-A plist with `:standing' one of:
+(defun harness-openrouter--standing (candidate limits)
+  "Return CANDIDATE's standing against LIMITS, from its catalogue listing.
+CANDIDATE is `harness-openrouter--candidates''s: a provider and the
+record resolved for it, or why it could not be resolved.  A plist with
+`:standing' one of:
 
   `eligible' -- its fresh listing is exact and no component is dearer
-                than the owner price; `:order' is the sort key
+                than the limits; `:order' is the sort key
   `out'      -- its fresh listing is exact and some component is dearer,
                 so it is known not to qualify
   `unknown'  -- its listing cannot be read, which says nothing about its
                 price, so it blocks rather than being dropped
 
-and `:endpoint', `:record', `:reason' and `:detail'."
-  (let* ((slug (plist-get endpoint :slug))
-         (record (harness-openrouter--matching policy records endpoint))
-         (unreadable (harness-openrouter--unreadable record))
-         (stale (harness-openrouter--evidence-stale-error
-                 endpoint (plist-get endpoint :evidence))))
+and `:provider', `:record', `:reason' and `:detail'."
+  (let* ((provider (plist-get candidate :provider))
+         (record (plist-get candidate :record))
+         (unreadable
+          (if record
+              (harness-openrouter--unreadable record)
+            (cons (or (plist-get candidate :reason) 'unknown-endpoint)
+                  (or (plist-get candidate :detail) "is not listed"))))
+         (over (and record (harness-openrouter--prices-over limits record))))
     (cond
-     ;; An endpoint whose evidence is too old to be trusted now is not one
-     ;; this policy may send to, and it blocks rather than being dropped:
-     ;; it could have been the one chosen.
-     (stale
-      (list :standing 'unknown :endpoint endpoint :record record
-            :reason 'privacy-stale :detail stale))
      (unreadable
-      (list :standing 'unknown :endpoint endpoint :record record
+      (list :standing 'unknown :provider provider :record record
             :reason (car unreadable)
-            :detail (format "%s %s" slug (cdr unreadable))))
-     ((let ((over (harness-openrouter--prices-over ceiling record)))
-        over)
-      (list :standing 'out :endpoint endpoint :record record
-            :reason 'over-owner-price
-            :detail (format "%s over the owner price: %s"
-                            slug (string-join (harness-openrouter--prices-over ceiling record)
-                                              ", "))))
+            :detail (format "%s %s" provider (cdr unreadable))))
+     (over
+      (list :standing 'out :provider provider :record record
+            :reason 'over-max-price
+            :detail (format "%s is over the maximum price: %s"
+                            provider (string-join over ", "))))
      (t
-      (list :standing 'eligible :endpoint endpoint :record record
+      (list :standing 'eligible :provider provider :record record
             ;; One input token and one output token, in the same unit, so
             ;; the sort needs no guess at the traffic's mix; the cache-read
-            ;; price breaks a tie, and the key makes the order total.  The
-            ;; prices stay exact decimals; `harness-openrouter--cheapest'
-            ;; compares them exactly.
+            ;; price breaks a tie, and the provider name makes the order
+            ;; total.  The prices stay exact decimals;
+            ;; `harness-openrouter--cheapest' compares them exactly.
             :order (list (harness-openrouter--decimal-sum
                           (plist-get record :prompt) (plist-get record :completion))
                          (plist-get record :cache-read)
-                         (plist-get endpoint :key)))))))
+                         provider))))))
 
 (defun harness-openrouter--decimal-sum (&rest values)
   "Return the exact sum of exact decimals VALUES, or nil if any is unreadable."
@@ -874,7 +770,7 @@ and `:endpoint', `:record', `:reason' and `:detail'."
 
 (defun harness-openrouter--order< (a b)
   "Non-nil when sort key A orders before sort key B, exactly.
-A key is (EXACT-SUM EXACT-CACHE-READ KEY-STRING)."
+A key is (EXACT-SUM EXACT-CACHE-READ PROVIDER-STRING)."
   (cond
    ((not (= 0 (harness-openrouter--decimal-compare (nth 0 a) (nth 0 b))))
     (< (harness-openrouter--decimal-compare (nth 0 a) (nth 0 b)) 0))
@@ -893,32 +789,30 @@ catalogue's order for which one wins."
                                                        (plist-get b :order))))))
 
 (defun harness-openrouter-select (policy records read-at)
-  "Choose the cheapest endpoint POLICY allows among RECORDS read at READ-AT.
-RECORDS are `harness-openrouter-parse-endpoints''s.  Return
-\(:ok t :endpoint ENDPOINT :record RECORD :reading READ-AT) or
-\(:ok nil :reason SYMBOL :detail STRING).
+  "Choose the cheapest allowed endpoint among RECORDS read at READ-AT.
+RECORDS are `harness-openrouter-parse-endpoints''s, read from
+OpenRouter's catalogue at READ-AT.  Return (\=':ok t :provider NAME
+:record RECORD :reading READ-AT) or (:ok nil :reason SYMBOL :detail
+STRING).
 
-Only the policy's own endpoints are candidates.  One whose fresh listing
-is dearer than the model owner's published price is dropped; the
-cheapest of the rest is chosen.  One whose listing cannot be read blocks
-the decision, because that is not evidence about its price."
+Only the policy's providers are candidates, and each is resolved to one
+exact standard endpoint of this model.  One whose fresh listing is
+dearer than `:max-price' in any component is dropped; the cheapest of
+the rest is chosen.  One whose listing cannot be read blocks the
+decision, because that is not a reading about its price."
   (let ((problem (harness-openrouter--policy-error policy)))
     (cond
      (problem (list :ok nil :reason 'policy-invalid :detail problem))
-     ((harness-openrouter--owner-price-error policy)
-      (list :ok nil :reason 'owner-price-stale
-            :detail (harness-openrouter--owner-price-error policy)))
      ((not (harness-openrouter--fresh-p policy read-at))
       (list :ok nil :reason 'catalogue-stale
             :detail (format "the endpoint catalogue was read %d s ago; the policy allows %s s"
                             (round (- (float-time) (or read-at 0)))
                             (plist-get policy :freshness))))
      (t
-      (let* ((ceiling (harness-openrouter--owner-price policy))
-             (standings (mapcar (lambda (endpoint)
-                                  (harness-openrouter--standing
-                                   policy records endpoint ceiling))
-                                (plist-get policy :endpoints)))
+      (let* ((limits (harness-openrouter--limits policy))
+             (standings (mapcar (lambda (candidate)
+                                  (harness-openrouter--standing candidate limits))
+                                (harness-openrouter--candidates policy records)))
              (unknown (cl-find-if (lambda (s) (eq (plist-get s :standing) 'unknown))
                                   standings))
              (chosen (harness-openrouter--cheapest standings)))
@@ -928,17 +822,26 @@ the decision, because that is not evidence about its price."
          (unknown
           (list :ok nil :reason (plist-get unknown :reason)
                 :detail (plist-get unknown :detail)
-                :endpoint (plist-get unknown :endpoint)))
+                :provider (plist-get unknown :provider)))
          (chosen
-          (list :ok t :endpoint (plist-get chosen :endpoint)
+          (list :ok t :provider (plist-get chosen :provider)
+                :endpoint (harness-openrouter--endpoint-of
+                           (plist-get chosen :record))
                 :record (plist-get chosen :record)
                 :reading read-at))
          (t
-          (list :ok nil :reason 'over-owner-price
-                :detail (format "no vetted endpoint is under the owner price: %s"
+          (list :ok nil :reason 'over-max-price
+                :detail (format "no allowed endpoint is within the maximum price: %s"
                                 (string-join (mapcar (lambda (s) (plist-get s :detail))
                                                      standings)
                                              "; "))))))))))
+
+(defun harness-openrouter--endpoint-of (record)
+  "Return RECORD's exact endpoint identity: tag, provider, tier, quantization."
+  (list :slug (plist-get record :tag)
+        :provider (plist-get record :provider)
+        :tier (or (plist-get record :tier) "default")
+        :quantization (plist-get record :quantization)))
 
 ;;;; The pinned route
 
@@ -951,16 +854,16 @@ the decision, because that is not evidence about its price."
 (defun harness-openrouter--route-plist (decision)
   "Return DECISION as the route stored on a session.
 Every value survives the JSON store of a session record: strings,
-numbers and t, no symbols and no structs."
-  (let ((endpoint (plist-get decision :endpoint))
-        (record (plist-get decision :record))
+numbers and t, no symbols and no structs.  The tag, provider and tier
+are the exact identity the pin is checked against; the prices are the
+catalogue's, recorded for display and for the limit check at dispatch."
+  (let ((record (plist-get decision :record))
         (reading (plist-get decision :reading)))
     (list :model (plist-get record :model)
-          :key (plist-get endpoint :key)
-          :slug (plist-get endpoint :slug)
-          :provider (plist-get endpoint :provider)
-          :tier (or (plist-get endpoint :tier) "default")
-          :quantization (plist-get endpoint :quantization)
+          :slug (plist-get record :tag)
+          :provider (plist-get record :provider)
+          :tier (or (plist-get record :tier) "default")
+          :quantization (plist-get record :quantization)
           :prompt (harness-openrouter--usd-per-million (plist-get record :prompt))
           :completion (harness-openrouter--usd-per-million (plist-get record :completion))
           :cache-read (harness-openrouter--usd-per-million (plist-get record :cache-read))
@@ -1004,12 +907,9 @@ that fails rejects."
 
 (defun harness-openrouter--select-decision (policy records read-at)
   "Return POLICY's decision for a brand new session from RECORDS read at READ-AT.
-The privacy requirement and every endpoint's own dated evidence were
-checked by `harness-openrouter--policy-error' before this: an endpoint
-without evidence of its own is not in the allowlist `select' sees."
+The policy's completeness, and so its providers and limits, were checked
+before this: `select' sees only the endpoints of the named providers."
   (harness-openrouter-select policy records read-at))
-
-;;;; Request fields
 
 ;;;; Request fields
 
@@ -1070,15 +970,33 @@ the dialect is this module's whatever that entry says."
         :stream-state #'harness-openrouter--stream-state
         :chunk #'harness-openrouter--chunk
         :audit #'harness-openrouter--audit
-        :error-detail #'harness-openrouter--error-detail))
+        :error-detail #'harness-openrouter--error-detail
+        ;; OpenRouter names the kind of its failures in its own fields;
+        ;; the hook turns those into the kinds every provider's failures
+        ;; are read as (`harness-retry-failure-kind').  Whether a governed
+        ;; request may be replayed by the transport is not a dialect
+        ;; question: the shared retry layer answers it for the session.
+        :failure-kind #'harness-openrouter--failure-kind))
+
+(defun harness-openrouter--authorising-policy (request)
+  "Return the policy a routed REQUEST was authorised with, or nil.
+That is the policy `harness-openrouter--dispatch' checked and bound in
+`harness-openrouter--sending', never the configured variable: the body
+and headers of a request must describe the policy that permitted it,
+even if the variable is edited afterwards.  A request the dispatch did
+not mark with a route is not routed, and has no authorising policy."
+  (and (plist-get request :openrouter-route)
+       harness-openrouter--sending))
 
 (defun harness-openrouter--headers (_endpoint _key)
   "Return the OpenRouter-specific headers of a request.
 The app title names this client (it is not a secret).  The router
-metadata header is sent only when a policy is configured, so an
-unconfigured provider sends exactly what it sent before."
+metadata header is sent only for a routed request, whose policy the
+dispatch checked and bound in `harness-openrouter--sending', so an
+unconfigured provider sends exactly what it sent before and a governed
+request always asks for the metadata its audit reads."
   (append (list (cons "X-Title" "Emacs agent harness"))
-          (when (harness-openrouter-routing-enabled-p)
+          (when harness-openrouter--sending
             (list (cons "X-OpenRouter-Metadata" "enabled")))))
 
 (defun harness-openrouter--session-id (request)
@@ -1090,33 +1008,25 @@ within the endpoint the pin names."
   (let ((id (plist-get (plist-get request :session) :id)))
     (and (stringp id) (<= (length id) 256) id)))
 
-(defun harness-openrouter--max-price (policy route)
-  "Return the request-level `max_price' for ROUTE under POLICY, or nil.
+(defun harness-openrouter--wire-price (policy)
+  "Return the request-level `max_price' for POLICY, or nil.
 OpenRouter's `provider.max_price' takes prompt and completion prices in
-USD per million tokens, and a `request' fee where an endpoint charges
-per request.  Sending the owner price there is a second defence: the
-router itself refuses an endpoint dearer than the ceiling, whatever this
-module's own reading of the catalogue said.  It covers prompt and
-completion only.  It says nothing about cache reads -- OpenRouter's
-documentation does not offer a cache-read cap, and this module does not
-assume one -- so the cache-read price is checked here
+USD per million tokens.  Sending the configured maximum there is a
+second defence: the router itself refuses an endpoint dearer than the
+limit, whatever this module's own reading of the catalogue said.  It
+covers prompt and completion only.  It says nothing about cache reads --
+OpenRouter's documentation does not offer a cache-read cap, and this
+module does not assume one -- so the cache-read price is checked here
 \(`harness-openrouter--prices-over') and never inferred to be protected
-by the wire field.  A per-request fee is only bounded when the policy
-sets `:request' in its owner price and the recorded endpoint charged
-one; otherwise the endpoint that charges per request is not one this
-policy can bound, and is refused before the request is made."
-  (let* ((owner (plist-get policy :owner-price))
-         (prompt (harness-openrouter--decimal (plist-get owner :prompt)))
-         (completion (harness-openrouter--decimal (plist-get owner :completion)))
-         (request-fee (harness-openrouter--decimal (plist-get owner :request)))
-         (recorded-request (and (numberp (plist-get route :request))
-                                (harness-openrouter--decimal
-                                 (number-to-string (plist-get route :request))))))
+by the wire field.  A per-request fee is not bounded by it either: an
+endpoint that prices one is refused before the request is made
+\(`harness-openrouter--unpriceable-components')."
+  (let* ((limits (plist-get policy :max-price))
+         (prompt (harness-openrouter--decimal (plist-get limits :prompt)))
+         (completion (harness-openrouter--decimal (plist-get limits :completion))))
     (when (and prompt completion)
-      (append (list :prompt (float (/ (car prompt) (float (cdr prompt))))
-                    :completion (float (/ (car completion) (float (cdr completion)))))
-              (when (and request-fee recorded-request)
-                (list :request (float (/ (car request-fee) (float (cdr request-fee))))))))))
+      (list :prompt (float (/ (car prompt) (float (cdr prompt))))
+            :completion (float (/ (car completion) (float (cdr completion))))))))
 
 (defun harness-openrouter--response-format (_endpoint request schema name)
   "Return the `response_format' REQUEST asks for, or nil for no schema.
@@ -1141,32 +1051,45 @@ policy there is no pin to ask, and none is sent either."
 Without an enabled policy this is the usage object OpenRouter always
 got.  With one, the request is restricted to the session's pinned
 endpoint -- its exact slug in `only' and `order', fallbacks off, the
-standard tier -- carries the data-collection and retention controls, and
-states the owner price as `max_price'.  A request with no pinned route
-is never sent (`harness-openrouter--complete'); this function only
-describes one that is."
+standard tier -- always carries the no-training and retention controls,
+and states that policy's maximum as `max_price'.  A request with no
+pinned route is never sent (`harness-openrouter--complete'); this
+function only describes one that is.
+
+The policy read here is the one `harness-openrouter--dispatch' checked
+and bound in `harness-openrouter--sending', not the configured one: the
+body of a request must describe the policy that authorised it, even if
+the variable is edited between the check and the body being built.  A
+routed request -- one the dispatch marked with `:openrouter-route' --
+without that checked policy is a bug in the caller, not a reason to
+send an unrestricted body, so it signals and the transport sends
+nothing."
   (let ((fields (list (cons :usage '(:include t))))
-        (policy harness-openrouter-routing))
-    (when (harness-openrouter-routing-enabled-p policy)
-      (when-let* ((route (or (plist-get request :openrouter-route)
-                             (harness-openrouter--route-of (plist-get request :session)))))
-        (let ((slug (plist-get route :slug))
-              (max-price (harness-openrouter--max-price policy route)))
-          (setq fields (append fields
-                               (list (cons :provider
-                                           (append
-                                            (list :only (vector slug)
-                                                  :order (vector slug)
-                                                  :allow_fallbacks :false
-                                                  :require_parameters t
-                                                  :data_collection "deny"
-                                                  :zdr t)
-                                            (when max-price
-                                              (list :max_price max-price))))
-                                     (cons :service_tier "default")))))
-        (when-let* ((sid (harness-openrouter--session-id request)))
-          (setq fields (append fields (list (cons :session_id sid)))))))
-    fields))
+        (route (plist-get request :openrouter-route))
+        (policy (harness-openrouter--authorising-policy request)))
+    (cond
+     ((null (plist-get request :openrouter-route)) fields)
+     ((null policy)
+      (signal 'harness-error
+              (list "OpenRouter routing: a routed request was built without a checked policy")))
+     (t
+      (let ((slug (plist-get route :slug))
+            (max-price (harness-openrouter--wire-price policy)))
+        (setq fields (append fields
+                             (list (cons :provider
+                                         (append
+                                          (list :only (vector slug)
+                                                :order (vector slug)
+                                                :allow_fallbacks :false
+                                                :require_parameters t
+                                                :data_collection "deny"
+                                                :zdr t)
+                                          (when max-price
+                                            (list :max_price max-price))))
+                                   (cons :service_tier "default")))))
+      (when-let* ((sid (harness-openrouter--session-id request)))
+        (setq fields (append fields (list (cons :session_id sid)))))
+      fields))))
 
 ;;;; Reading a streamed answer
 
@@ -1179,14 +1102,28 @@ describes one that is."
     "image_download_failed" "authentication" "permission_denied"
     "payment_required")
   "Typed OpenRouter error codes that repeating the identical request cannot pass.
-This is what makes an upstream HTTP 400 stop with a reason instead of
-being tried again unchanged.")
+The chunk reader keeps the code or the message reports
+\(`harness-openrouter--error-type'), `harness-openrouter--failure-kind'
+turns it into the shared kind `permanent', and the shared retry layer
+then ends the turn instead of repeating the request unchanged.  That is
+what makes an upstream HTTP 400 stop with a reason.")
+
+(defconst harness-openrouter--transient-types
+  '("rate_limit_exceeded" "rate_limit" "overloaded" "provider_unavailable"
+    "server_error" "internal_error" "timeout" "upstream_timeout"
+    "provider_timeout" "unavailable" "too_many_requests")
+  "Typed OpenRouter error codes that name a provider's or a gateway's bad minute.
+They are a repeat's to pass, so `harness-openrouter--failure-kind' reads
+them as the shared kinds `transport' or `rate-limit', and the shared
+retry layer decides -- under its own bounds -- whether it tries again.")
 
 (defun harness-openrouter--stream-state (request)
-  "Return the dialect state a new stream for REQUEST starts with."
+  "Return the dialect state a new stream for REQUEST starts with.
+The route audited is the one the dispatch checked and put on REQUEST,
+so the audit describes the request that was actually sent."
   (let ((session (plist-get request :session)))
-    (list :route (and (harness-openrouter-routing-enabled-p)
-                      (harness-openrouter--route-of session))
+    (list :route (and (harness-openrouter--authorising-policy request)
+                      (plist-get request :openrouter-route))
           :session-id (plist-get session :id))))
 
 (defun harness-openrouter--state (stream)
@@ -1293,9 +1230,10 @@ What the API does not give is written down rather than assumed: the
 streamed answer names no endpoint tag, and the routing summary names a
 provider and a model, not a tag.  So a new regional variant of the same
 provider cannot be distinguished from the pinned one by the answer
-alone -- which is why `harness-openrouter--matching' refuses to pin a
-slug more than one catalogue record selects, and why the pin also sends
-`only' with the exact slug and `allow_fallbacks: false'."
+alone -- which is why `harness-openrouter--candidate' refuses to pin a
+provider the catalogue lists at more than one standard endpoint, and why
+the pin also sends `only' with the exact tag and `allow_fallbacks:
+false'."
   (let ((model (plist-get state :model))
         (served (or (plist-get state :served-provider) (plist-get state :provider)))
         (tier (plist-get state :service-tier))
@@ -1378,37 +1316,90 @@ turns \"Upstream returned HTTP 400\" into something to act on."
 
 ;;;; Dispatch: the pin, checked before every request
 
-(defun harness-openrouter--pin-endpoint (policy route)
-  "Return POLICY's endpoint for ROUTE, or nil when the pin is not vetted now.
-The pin names an endpoint key; the policy's allowlist says whether that
-key may serve the model, and the route's own model, slug, provider, tier
-and quantization must agree with the endpoint it names.  A key the
-policy no longer lists, or one whose identity changed, leaves the pin
-unvetted."
-  (when-let* ((key (plist-get route :key))
-              (endpoint (cl-find key (plist-get policy :endpoints)
-                                 :key (lambda (e) (plist-get e :key))
-                                 :test #'equal)))
-    (and (equal (plist-get endpoint :slug) (plist-get route :slug))
-         (equal (plist-get endpoint :provider) (plist-get route :provider))
-         (equal (or (plist-get endpoint :tier) "default")
-                (or (plist-get route :tier) "default"))
-         (or (null (plist-get endpoint :quantization))
-             (equal (plist-get endpoint :quantization)
-                    (plist-get route :quantization)))
-         endpoint)))
+(defun harness-openrouter--not-routing-refusal (policy)
+  "Return (REASON . DETAIL) when POLICY, read now, routes nothing.
+A request is prepared under one policy and sent later -- the catalogue
+may take a moment to answer -- so the policy is read again at dispatch.
+A policy edited to something incomplete, turned off, or removed
+altogether stops the request: a restricted request cannot be described
+by a policy that routes nothing, and an unrestricted one is exactly what
+a governed session must never be sent."
+  (cond
+   ((null policy)
+    (cons 'policy-changed
+          "the routing policy was removed while the request was being prepared, so no restricted request can be built and an unrestricted one is not sent"))
+   ((harness-openrouter--policy-error policy)
+    (cons 'policy-invalid (harness-openrouter--policy-error policy)))
+   ((not (harness-json-true-p (plist-get policy :enabled)))
+    (cons 'disabled "the policy is configured but not enabled"))))
 
-(defun harness-openrouter--recorded-over (ceiling route)
-  "Return the components of ROUTE's recorded price above CEILING, as strings.
-The route records the price it was vetted at, for display; this reads
-it back exactly, so a policy whose ceiling was lowered under a pin that
-is still fresh stops the pin instead of sending at the old price."
+(defconst harness-openrouter--policy-keys
+  '(:enabled :model :providers :max-price :freshness)
+  "The keys of a policy that decide what a request may be.
+They are the whole schema; a policy that differs in any of them is not
+the policy a request in flight was prepared under.")
+
+(defun harness-openrouter--policy-change (authorising now)
+  "Return a description of how NOW differs from AUTHORISING, or nil.
+Only the fields that decide a request are compared, and a field that is
+equal is not named.  A policy replaced by an equal one is the same
+policy: nothing it would decide changes."
+  (when (and (listp authorising) (listp now))
+    (let (changed)
+      (dolist (key harness-openrouter--policy-keys)
+        (unless (equal (plist-get authorising key) (plist-get now key))
+          (push (concat ":" (substring (symbol-name key) 1)) changed)))
+      (when changed
+        (format "the policy changed while the request was being prepared: %s now differ%s"
+                (string-join (nreverse changed) ", ")
+                (if (= 1 (length changed)) "s" ""))))))
+
+(defun harness-openrouter--policy-changed-refusal (authorising now)
+  "Return (REASON . DETAIL) when NOW is not the policy AUTHORISING a request.
+A request is prepared under one policy -- it is what chose the endpoint,
+read the limits and authorised the privacy fields -- and sent after an
+asynchronous catalogue read.  A policy replaced meanwhile, by a valid
+one or not, is a different authority than the one the request was
+prepared under: silently sending the old request would send under a
+policy the operator has already replaced, and quietly reselecting under
+the new one would be a fallback to a provider the old policy did not
+authorise.  So the request is refused and the next one is prepared
+afresh under the new policy, which is the policy that then decides.
+Only an equal policy is not a change: if every field that decides a
+request is the same, the operator has edited nothing that matters."
+  (when (and (listp authorising) (listp now))
+    (let ((change (harness-openrouter--policy-change authorising now)))
+      (when change (cons 'policy-changed change)))))
+
+(defun harness-openrouter--pin-allowed (policy route)
+  "Non-nil when POLICY still allows ROUTE, by provider and exact identity.
+The pin names a provider; the policy's `:providers' says whether that
+provider may serve the model, and the route's own exact tag, provider
+and tier are what every request is restricted to.  A provider the
+policy no longer names leaves the pin unvetted, and a change of
+identity under the same name is not the endpoint the pin was made on.
+
+The tag itself is not in the policy: it is the catalogue's, recorded
+when the pin was made, and re-read from a fresh catalogue at dispatch
+\(`harness-openrouter--pin-refusal'), so a new tag cannot be adopted
+here."
+  (and (member (plist-get route :provider) (plist-get policy :providers))
+       (stringp (plist-get route :slug))
+       (string-match-p "/" (plist-get route :slug))
+       (equal (plist-get route :model) (plist-get policy :model))
+       t))
+
+(defun harness-openrouter--recorded-over (limits route)
+  "Return the components of ROUTE's recorded price above LIMITS, as strings.
+The route records the catalogue price it was pinned at, for display;
+this reads it back exactly, so a maximum lowered under a pin that is
+still fresh stops the pin instead of sending at the old price."
   (let (over)
     (dolist (key harness-openrouter--price-keys)
-      (let* ((most (plist-get ceiling key))
+      (let* ((most (plist-get limits key))
              (million (plist-get route key))
              (price (and (numberp million)
-                         (harness-openrouter--ceiling-per-token
+                         (harness-openrouter--limit-per-token
                           (number-to-string million)))))
         (when (or (null price) (harness-openrouter--decimal> price most))
           (push (format "%s %s > %s" (substring (symbol-name key) 1)
@@ -1420,51 +1411,33 @@ is still fresh stops the pin instead of sending at the old price."
 (defun harness-openrouter--pin-refusal (policy route &optional reading)
   "Return (REASON . DETAIL) when POLICY may not send ROUTE now, or nil.
 Everything a dispatch depends on is checked here, every time: that the
-policy is still complete, that its owner price is still trusted, that
-the pin is still in the allowlist and still the identity it was vetted
-as, that the owner price still covers the price the pin recorded, and
-that the pinned endpoint still states the privacy evidence the policy
-requires.  When READING -- a catalogue reading, `:endpoints' and `:at'
--- is given it must be fresh, must list the pin exactly once, at a price
-under the owner price and with no component the ceiling does not cover.
+policy is still complete, that the pin's provider is still allowed and
+the pin still the identity it was vetted as, that the maximum price
+still covers the price the pin recorded, and that the catalogue still
+lists the pinned endpoint exactly once under it.  When READING -- a
+catalogue reading, `:endpoints' and `:at' -- is given it must be fresh,
+must list the pin exactly once as its provider's single standard
+endpoint, at a price under the maximum and with no component the limits
+do not cover.
 
 A READING that is nil, empty or unreadable is a refusal, never `no
 refresh': `harness-openrouter--choose-now' rejects a failed fetch, so
 nil here can only be a catalogue that says this model has no endpoints
 at all, which is not evidence that the pin still exists."
   (let* ((problem (harness-openrouter--policy-error policy))
-         (endpoint (and (not problem) (harness-openrouter--pin-endpoint policy route)))
-         (owner-error (and (not problem) (harness-openrouter--owner-price-error policy)))
-         (ceiling (and (not problem) (harness-openrouter--owner-price policy)))
+         (limits (and (not problem) (harness-openrouter--limits policy)))
          (freshness (plist-get policy :freshness)))
     (cond
      (problem (cons 'policy-invalid problem))
-     ((not (equal (plist-get route :model) (plist-get policy :model)))
-      (cons 'model-mismatch
-            (format "the pin is for %s, the policy for %s"
-                    (plist-get route :model) (plist-get policy :model))))
-     ((null endpoint)
+     ((not (harness-openrouter--pin-allowed policy route))
       (cons 'pin-not-vetted
-            (format "the pinned endpoint %s%s is not vetted by the policy now"
-                    (or (plist-get route :slug) (plist-get route :key) "?")
-                    (if (equal (plist-get route :slug) (or (plist-get route :key) ""))
-                        ""
-                      (format " (key %s)" (or (plist-get route :key) "?"))))))
-     (owner-error (cons 'owner-price-stale owner-error))
-     ((harness-openrouter--recorded-over ceiling route)
-      (cons 'over-owner-price
-            (format "the pin's price is over the owner price now: %s"
-                    (string-join (harness-openrouter--recorded-over ceiling route) ", "))))
-     ;; The endpoint's own evidence, every dispatch: a policy edited to
-     ;; drop an endpoint's evidence, or evidence that has expired since
-     ;; the pin was made, stops the pin.
-     ((harness-openrouter--evidence-error policy endpoint (plist-get endpoint :evidence))
-      (cons 'privacy-stale
-            (harness-openrouter--evidence-error policy endpoint
-                                               (plist-get endpoint :evidence))))
-     ((harness-openrouter--evidence-stale-error endpoint (plist-get endpoint :evidence))
-      (cons 'privacy-stale
-            (harness-openrouter--evidence-stale-error endpoint (plist-get endpoint :evidence))))
+            (format "the pinned provider %s, at %s, is not allowed by the policy now"
+                    (or (plist-get route :provider) "?")
+                    (or (plist-get route :slug) "?"))))
+     ((harness-openrouter--recorded-over limits route)
+      (cons 'over-max-price
+            (format "the pin's price is over the maximum price now: %s"
+                    (string-join (harness-openrouter--recorded-over limits route) ", "))))
      ((null reading)
       (unless (harness-openrouter--fresh-p policy (plist-get route :catalogue-at))
         (cons 'catalogue-stale
@@ -1472,22 +1445,36 @@ at all, which is not evidence that the pin still exists."
                       (round (- (float-time) (or (plist-get route :catalogue-at) 0)))
                       freshness))))
      (reading
-      (let ((records (plist-get reading :endpoints))
-            (at (plist-get reading :at)))
+      (let* ((records (plist-get reading :endpoints))
+             (at (plist-get reading :at))
+             (provider (plist-get route :provider))
+             (record (and records (harness-openrouter--candidate
+                                   policy records provider))))
         (cond
          ((not records)
           (cons 'catalogue-empty
                 "the fresh catalogue lists no endpoint for this model at all"))
-         ((null (harness-openrouter--match-set policy records endpoint))
-          (cons 'unknown-endpoint
-                (format "the pinned endpoint %s is no longer listed for %s"
-                        (plist-get route :slug) (plist-get policy :model))))
          ((not (harness-openrouter--fresh-p policy at))
           (cons 'catalogue-stale
                 (format "the endpoint catalogue was read %d s ago; the policy allows %s s"
                         (round (- (float-time) (or at 0))) freshness)))
+         ((null record)
+          (cons 'unknown-endpoint
+                (format "the catalogue no longer lists exactly one standard endpoint of %s for this model, so %s cannot be shown to be it"
+                        provider (plist-get route :slug))))
+         ((not (equal (plist-get record :tag) (plist-get route :slug)))
+          (cons 'pin-not-vetted
+                (format "the catalogue now lists %s's endpoint as %s, not the pinned %s"
+                        provider (plist-get record :tag) (plist-get route :slug))))
+         ((not (equal (or (plist-get record :tier) "default")
+                      (or (plist-get route :tier) "default")))
+          (cons 'pin-not-vetted
+                (format "the catalogue now serves %s at the %s tier, not the pinned %s"
+                        (plist-get route :slug) (or (plist-get record :tier) "default")
+                        (or (plist-get route :tier) "default"))))
          (t
-          (let* ((standing (harness-openrouter--standing policy records endpoint ceiling))
+          (let* ((standing (harness-openrouter--standing
+                            (list :provider provider :record record) limits))
                  (kind (plist-get standing :standing)))
             (cond
              ((eq kind 'unknown)
@@ -1495,8 +1482,8 @@ at all, which is not evidence that the pin still exists."
                     (format "the pinned endpoint %s can no longer be read: %s"
                             (plist-get route :slug) (plist-get standing :detail))))
              ((eq kind 'out)
-              (cons 'over-owner-price
-                    (format "the pinned endpoint %s is now dearer than the owner's own price: %s"
+              (cons 'over-max-price
+                    (format "the pinned endpoint %s is now dearer than the maximum price: %s"
                             (plist-get route :slug) (plist-get standing :detail))))))))))
      (t nil))))
 
@@ -1534,43 +1521,97 @@ has already set the flag, and nothing is sent."
   nil)
 
 (defun harness-openrouter--dispatch (snapshot request on-event)
-  "Send REQUEST through the shared transport, unless the check refuses it.
-STATE is the dispatch's shared state (see `harness-openrouter--cancel-handle'),
-SNAPSHOT what the dispatch was authorised with: its policy, its pinned
-route and, when the catalogue was just read, that reading.  The checks
-run again here, immediately before the body is built, so a policy
-edited, an owner price expired or a pin whose evidence lapsed since the
-check stops the request rather than slipping through."
-  (let* ((policy (plist-get snapshot :policy))
-         (route (plist-get snapshot :route))
-         (refusal (harness-openrouter--pin-refusal policy route
-                                                  (plist-get snapshot :reading))))
+  "Send REQUEST through the shared transport, unless a check refuses it.
+SNAPSHOT is what the dispatch was authorised with: its policy, its
+pinned route and, when the catalogue was just read, that reading.  The
+policy is read again here -- the configured one now, not the one the
+dispatch began with -- and the whole check runs against it immediately
+before the body is built.  So a policy disabled, removed, made invalid
+or pointed at another model while the catalogue was in flight refuses
+the request instead of sending it under a weakened one.  The checked
+policy is the only one the body, its restriction fields and its
+headers are built from: `harness-openrouter--sending' carries it, and
+`harness-openrouter--body-extra' reads that, never the variable.
+
+The send is counted here, where it happens, and only after every check
+passed: the shared retry layer counts what this policy authorised, so
+one request of a pinned session is one POST, and a send beyond the
+attempts or the seconds it allows -- a bound reached while a retry
+waited, or a setting edited to a smaller one -- is refused, not sent.
+The count and the clock are the request's own: they travel with it under
+`harness-retry--request-key', so a recap or a judge's question made for
+the same session beside this request neither spends this request's
+budget nor starts it again.
+
+What authorised the send -- the checked policy and the exact pinned
+route -- is recorded in that same request-local state, and handed back
+in the request's `done' event.  A repeat of the request is therefore a
+repeat of *that* request (`harness-openrouter--resend-refusal'), not a
+new one prepared under whatever policy is in force by then.
+What a request asks a model to write is not decided here: its own
+`:max-tokens' is its own, and a ceiling on it belongs to the request
+layer (`harness-provider-max-output-tokens'), not to a routing policy."
+  (let* ((route (plist-get snapshot :route))
+         (session (plist-get request :session))
+         (session-id (plist-get session :id))
+         (in-force harness-openrouter-routing)
+         (earlier (or (harness-openrouter--not-routing-refusal in-force)
+                      (harness-openrouter--policy-changed-refusal
+                       (plist-get snapshot :policy) in-force)
+                      (harness-openrouter--pin-refusal
+                       in-force route (plist-get snapshot :reading))))
+         ;; The shared layer reads the bounds as they are now, so a retry
+         ;; that waited through an edit is measured by them, and only a
+         ;; request every other check allowed takes a send from the count.
+         (sent (harness-retry-send request))
+         (refusal (or earlier (plist-get sent :refusal)))
+         (policy in-force))
     (if refusal
         (progn
-          (harness-openrouter--refuse (plist-get (plist-get request :session) :id)
-                                      on-event refusal)
+          (harness-openrouter--refuse session-id on-event refusal)
           (list :cancel #'ignore))
-      (harness-openai--complete
-       (harness-openrouter--endpoint)
-       (plist-put (harness-openrouter--bounded-request request) :openrouter-route route)))))
-
-
+      (let* ((counted (plist-get sent :request))
+             (harness-openrouter--sending policy)
+             ;; What this send was authorised by, in the request's own
+             ;; state: a repeat of it is checked against this, never
+             ;; against a policy or a pin read later, and never sent
+             ;; ungoverned when this is gone.
+             (counted (harness-retry-authorise
+                       counted (list :policy policy :route route))))
+        (harness-openai--complete
+         (harness-openrouter--endpoint)
+         (plist-put counted :openrouter-route route))))))
 
 (defun harness-openrouter--complete (request)
   "Send REQUEST to the session's pinned endpoint, or refuse to send it.
 A request without an enabled policy is the generic completion,
 unchanged.  With one: a session with no pin is a new session and gets
 one chosen from a fresh catalogue; a pinned session is checked again --
-model, policy, owner price, the pin's recorded price, the endpoint's
-privacy evidence and the catalogue -- and refused with a stop reason
-when the check fails.  Nothing is switched: a switch is the user's
+model, providers, the pin's recorded identity and price, the maximum
+and the catalogue -- and refused with a stop reason when the check
+fails.  Nothing is switched: a switch is the user's
 \(`harness-openrouter-switch')."
-  (let ((on-event (or (plist-get request :on-event) #'ignore))
-        (policy harness-openrouter-routing)
-        (session (plist-get request :session))
-        (session-id (plist-get (plist-get request :session) :id)))
+  (let* ((on-event (or (plist-get request :on-event) #'ignore))
+         (policy harness-openrouter-routing)
+         (session (plist-get request :session))
+         (session-id (plist-get session :id))
+         ;; A request this module already sent carries what authorised it:
+         ;; this is a repeat of that request, not a new one, and it is
+         ;; judged as such whatever the configured policy says now.
+         (repeat (harness-retry-authority-of request))
+         (resend-refusal (and repeat (harness-openrouter--resend-refusal repeat policy))))
     (cond
-     ;; No policy at all: the provider as it always was.
+     ;; A repeat is the request it repeats -- the same endpoint, under the
+     ;; policy that authorised it.  One whose policy was removed, disabled,
+     ;; narrowed or otherwise edited is refused here, before any branch
+     ;; that would prepare a request afresh under the policy of the moment:
+     ;; re-selecting for it would be the silent switch the policy prevents,
+     ;; and sending it ungoverned would be worse.
+     (resend-refusal
+      (harness-openrouter--refuse session-id on-event resend-refusal)
+      (list :cancel #'ignore))
+     ;; No policy at all: the provider as it always was.  (A repeat never
+     ;; reaches here: it is refused above.)
      ((not (harness-openrouter-routing-p))
       (harness-openai--complete (harness-openrouter--endpoint) request))
      ;; A policy that cannot be checked, or one that is configured but not
@@ -1604,6 +1645,17 @@ when the check fails.  Nothing is switched: a switch is the user's
                                   :error (format "OpenRouter routing: %s was asked for, not %s"
                                                  (plist-get request :model) wanted)))
           (list :cancel #'ignore))
+         ;; A repeat goes back to the endpoint the request that failed was
+         ;; authorised for, under the policy that authorised it -- never to
+         ;; the session's pin of the moment, which a switch may have moved
+         ;; since: the request is disclosed where it was disclosed, or not
+         ;; at all.  The recorded route is checked exactly as a pin is, so
+         ;; its price and its endpoint identity are re-read, and a stale
+         ;; reading is refreshed before anything is sent.
+         (repeat
+          (harness-openrouter--complete-pinned
+           (plist-get repeat :policy) session-id (plist-get repeat :route)
+           request on-event))
          ((harness-openrouter--route-of session)
           (harness-openrouter--complete-pinned
            policy session-id (harness-openrouter--route-of session) request on-event))
@@ -1630,11 +1682,21 @@ refusal stands."
          (harness-openrouter--choose-now policy)
          (lambda (reading)
            (unless (harness-openrouter--cancelled-p state)
-             (let ((refusal (harness-openrouter--pin-refusal policy route reading)))
+             ;; The catalogue may have taken a moment, and the policy that
+             ;; sent for it is not necessarily the one in force now: the
+             ;; route, the limits and the privacy fields all have to
+             ;; describe one policy, and only a policy still in force can
+             ;; authorise the request.
+             (let* ((in-force harness-openrouter-routing)
+                    (refusal (or (harness-openrouter--not-routing-refusal in-force)
+                                 (harness-openrouter--policy-changed-refusal
+                                  policy in-force)
+                                 (harness-openrouter--pin-refusal
+                                  in-force route reading))))
                (if refusal
                    (harness-openrouter--refuse session-id on-event refusal)
                  (harness-openrouter--start-pinned
-                  state (list :policy policy :route route :reading reading)
+                  state (list :policy in-force :route route :reading reading)
                   request on-event)))))
          (lambda (err)
            (unless (harness-openrouter--cancelled-p state)
@@ -1658,17 +1720,29 @@ Nothing is sent until the pin exists."
      (harness-openrouter--choose-now policy)
      (lambda (reading)
        (unless (harness-openrouter--cancelled-p state)
-         (let ((decision (harness-openrouter--select-decision
-                          policy (plist-get reading :endpoints)
-                          (plist-get reading :at))))
-           (if (not (plist-get decision :ok))
-               (harness-openrouter--refuse
-                session-id on-event
-                (cons (or (plist-get decision :reason) 'route-paused)
-                      (plist-get decision :detail)))
+         ;; The policy is the one in force now, not the one that sent for
+         ;; the catalogue: a session must not be pinned by a policy the
+         ;; operator has replaced, and the pin, the limits and the privacy
+         ;; fields must all come from the one policy that authorised it.
+         (let* ((in-force harness-openrouter-routing)
+                (refusal (or (harness-openrouter--not-routing-refusal in-force)
+                             (harness-openrouter--policy-changed-refusal
+                              policy in-force)))
+                (decision (and (not refusal)
+                               (harness-openrouter--select-decision
+                                in-force (plist-get reading :endpoints)
+                                (plist-get reading :at)))))
+           (cond
+            (refusal (harness-openrouter--refuse session-id on-event refusal))
+            ((not (plist-get decision :ok))
+             (harness-openrouter--refuse
+              session-id on-event
+              (cons (or (plist-get decision :reason) 'route-paused)
+                    (plist-get decision :detail))))
+            (t
              (let* ((route (harness-openrouter--store-route
                             session-id (harness-openrouter--route-plist decision)))
-                    (snapshot (list :policy policy :route route)))
+                    (snapshot (list :policy in-force :route route)))
                (harness-openrouter--hint
                 session-id
                 (format "OpenRouter endpoint %s pinned for this session (cache cold)"
@@ -1683,7 +1757,7 @@ Nothing is sent until the pin exists."
                 (plist-put (copy-sequence request) :session
                            (or (ignore-errors (harness-call 'session/get session-id))
                                (plist-get request :session)))
-                on-event))))))
+                on-event)))))))
      (lambda (err)
        (unless (harness-openrouter--cancelled-p state)
          (harness-openrouter--catalogue-failure session-id on-event err))))
@@ -1700,265 +1774,207 @@ Nothing is sent until the pin exists."
 
 ;;;; Switching, by hand only
 
-(defun harness-openrouter-switch (session-id endpoint-key &optional why)
-  "Pin SESSION-ID to ENDPOINT-KEY, explicitly, and return the new route.
-A switch starts a conversation the provider's cache does not hold, so it
-is never automatic: the policy's price rule selects for a new session
-only.  This is the one way a pin moves, and it is the user's.  It
-refuses while the session has a turn at work, checks the whole policy
-again -- the endpoint's own privacy evidence, its exact identity in a
-fresh catalogue, its price under the current owner price -- and records
-the route as `switched' with WHY.  An endpoint whose evidence is
-missing or expired cannot be switched to: this call never relaxes the
-vetted set."
+(defun harness-openrouter-switch (session-id provider &optional why)
+  "Pin SESSION-ID to PROVIDER's endpoint, explicitly, and return the new route.
+PROVIDER is one of the policy's `:providers'.  A switch starts a
+conversation the provider's cache does not hold, so it is never
+automatic: the price rule selects for a new session only.  This is the
+one way a pin moves, and it is the user's.  It refuses while the session
+has a turn at work, and checks the whole policy again -- the provider is
+allowed, its endpoint is exactly one standard endpoint of this model in a
+fresh catalogue, and its current price is inside the maximum -- and
+records the route as `switched' with WHY.  A provider the policy does not
+name cannot be switched to: this call never relaxes the allowlist."
   (unless (harness-openrouter-routing-enabled-p)
     (error "OpenRouter routing is not enabled"))
   (let* ((policy harness-openrouter-routing)
          (session (harness-call 'session/get session-id))
-         (endpoint (cl-find (format "%s" endpoint-key) (plist-get policy :endpoints)
-                            :key (lambda (e) (plist-get e :key))
-                            :test #'equal)))
-    (unless endpoint (error "No vetted endpoint %s in the policy" endpoint-key))
+         (named (format "%s" provider)))
+    (unless (member named (plist-get policy :providers))
+      (error "No allowed provider %s in the policy" provider))
     (when (memq (plist-get session :status) '(running blocked))
       (error "Session %s is busy; stop its turn before switching endpoint" session-id))
     (when-let* ((problem (harness-openrouter--policy-error policy)))
       (error "Cannot switch: %s" problem))
-    (when-let* ((problem (harness-openrouter--evidence-error
-                          policy endpoint (plist-get endpoint :evidence))))
-      (error "Cannot switch to %s: %s" endpoint-key problem))
     (harness-then
      (harness-openrouter--choose-now policy)
      (lambda (reading)
-       (let* ((narrow (list :model (plist-get policy :model)
-                            :endpoints (list endpoint)
-                            :freshness (plist-get policy :freshness)
-                            :owner-price (plist-get policy :owner-price)
-                            :privacy (plist-get policy :privacy)
-                            :retry (plist-get policy :retry)))
-              (decision (harness-openrouter-select
-                         narrow (plist-get reading :endpoints) (plist-get reading :at))))
-         (unless (plist-get decision :ok)
-           (error "Cannot switch to %s: %s" endpoint-key (plist-get decision :detail)))
-         (let ((route (plist-put (harness-openrouter--route-plist decision) :basis "switched")))
-           (setq route (plist-put route :why (or why "requested")))
-           (harness-openrouter--store-route session-id route)
-           (harness-openrouter--hint session-id
-                                     (format "OpenRouter endpoint %s pinned by hand; its cache starts cold"
-                                             (plist-get route :slug)))
-           route))))))
+       ;; A switch is a person's decision, made about the policy they had
+       ;; in hand: one replaced while the catalogue was in flight is not
+       ;; the policy to pin under, so the switch is refused and can be
+       ;; asked for again under the new one.
+       (let ((in-force harness-openrouter-routing))
+         (when-let* ((refusal (or (harness-openrouter--not-routing-refusal in-force)
+                                  (harness-openrouter--policy-changed-refusal
+                                   policy in-force))))
+           (error "Cannot switch to %s: %s" named (cdr refusal)))
+         (unless (member named (plist-get in-force :providers))
+           (error "No allowed provider %s in the policy" named))
+         (let* ((narrow (list :model (plist-get in-force :model)
+                              :providers (list named)
+                              :max-price (plist-get in-force :max-price)
+                              :freshness (plist-get in-force :freshness)))
+                (decision (harness-openrouter-select
+                           narrow (plist-get reading :endpoints) (plist-get reading :at))))
+           (unless (plist-get decision :ok)
+             (error "Cannot switch to %s: %s" named (plist-get decision :detail)))
+           (let ((route (plist-put (harness-openrouter--route-plist decision) :basis "switched")))
+             (setq route (plist-put route :why (or why "requested")))
+             (harness-openrouter--store-route session-id route)
+             (harness-openrouter--hint session-id
+                                       (format "OpenRouter endpoint %s pinned by hand; its cache starts cold"
+                                               (plist-get route :slug)))
+             route)))))))
 
-;;;; Bounded retry, the same endpoint only
+;;;; What this provider's requests need from the shared retry layer
 ;;
-;; A policy names three bounds for retrying the same pinned endpoint:
-;; `:max-attempts', `:max-seconds' and `:max-output-tokens'.  This
-;; module enforces all three for a session it routes, in the `agent/step-error'
-;; chain, before `harness-retry' (priority 45 here, 60 there):
+;; Retrying is not this module's: the bounds, the wait, the count and
+;; the repeat are `harness-retry''s, for every provider alike.  What is
+;; this module's is which requests may be sent at all, and that is why
+;; it asks for them to be counted: a request a policy governs is
+;; authorised -- pin, provider allowlist, recorded price, the fresh
+;; catalogue -- immediately before it is sent (`harness-openrouter--dispatch'),
+;; and a repeat is a send like any other.  Counting them there is what
+;; makes "one request" mean one POST; the lower layer is asked for no
+;; replay of a governed request, since a replay inside one transport call
+;; would be a send after a policy, a price or a pin it never re-read.
 ;;
-;;   * a transient failure the transport or this module can name
-;;     (`transport', `rate-limit', a 5xx, a timeout) is tried again only
-;;     while the attempts and the elapsed time are inside the bounds;
-;;     the wait and the count are this module's, so the bounds hold
-;;     whatever `harness-retry-max-attempts' says;
-;;   * a typed permanent failure stops at once, with `:final', so no
-;;     later filter -- `harness-retry' after this one, a module loaded
-;;     later with a lower priority number -- can turn it into a retry;
-;;   * `:max-output-tokens' bounds the output the request asks for
-;;     (`harness-openrouter--bounded-request'), so a request's own
-;;     `:max-tokens' or a resumed session's never sends more.
+;; The shared layer keeps the two bounds it keeps for every provider:
+;; `harness-retry-max-attempts' (the first attempt and its tries) and
+;; `harness-retry-max-seconds' (the request and its retries, from its
+;; first send).  A send either bound no longer allows is refused at the
+;; dispatch with the bound that stopped it, and nothing is replayed.
 ;;
-;; The count is per session and reset when a turn starts, like the
-;; generic one, and a failure that is neither transient nor typed
-;; permanent is left to the modules after this one.
+;; A typed rejection that no identical request can pass is decoded here,
+;; as `permanent' (`harness-openrouter--failure-kind'), and the shared
+;; layer ends the turn at once instead of repeating it.
 
-(defvar harness-openrouter--attempts (make-hash-table :test 'equal)
-  "Session id -> (:count N :since FLOAT) of the same-endpoint retries this turn.")
-
-(defvar harness-openrouter--retrying (make-hash-table :test 'equal)
-  "Session id -> t while a retry this module decided is being run.
-This is what keeps a second round of `agent/step-error' from counting
-the same failure twice: the retry that runs returns one step, and the
-attempt it already counted is not counted again when it fails.")
-
-(defconst harness-openrouter--transient-types
-  '("rate_limit_exceeded" "rate_limit" "overloaded" "provider_unavailable"
-    "server_error" "internal_error" "timeout" "upstream_timeout"
-    "provider_timeout" "unavailable" "too_many_requests")
-  "Typed codes a repeat of the same request can pass.
-These are a provider's or a gateway's bad minute, not the request's
-fault; they are tried again inside the policy's bounds.")
-
-(defun harness-openrouter--failure-type (failure)
-  "Return the typed OpenRouter error code FAILURE carries, or nil."
-  (when-let* ((text (plist-get failure :error)))
-    (when (string-match "error_type=\\([a-z_]+\\)" text)
-      (match-string 1 text))))
-
-(defun harness-openrouter--transient-failure-p (failure)
-  "Non-nil when FAILURE is one a repeat of the same request may pass.
-The transport's kind (`transport', `rate-limit') counts, and so does a
-typed code in `harness-openrouter--transient-types' or an HTTP status
-that a repeat can pass (408, 425, 429, 500, 502, 503, 504).  A typed
-permanent code is not transient however its status read."
-  (let* ((kind (plist-get failure :error-kind))
-         (type (harness-openrouter--failure-type failure))
-         (text (format "%s" (or (plist-get failure :error) ""))))
-    (and (not (and type (member type harness-openrouter--permanent-types)))
-         (or (memq kind '(transport rate-limit))
-             (and type (member type harness-openrouter--transient-types))
-             (string-match-p "\\b\\(?:HTTP \\)?\\(?:408\\|425\\|429\\|500\\|502\\|503\\|504\\)\\b"
-                             text)))))
-
-(defun harness-openrouter--bounded-request (request)
-  "Return REQUEST with its output ceiling inside the policy's bound.
-A policy's `:retry' `:max-output-tokens' is a ceiling on what a request
-of the routed session may ask for, so a request that asks for more is
-cut to it, and a request that asks for nothing is bounded by it too: a
-model's own default output can be far larger.  This is what makes the
-configured bound real, for a request of the harness's own and for a
-resumed session whose last request asked for more.  Without a valid
-policy or bound the request is returned unchanged."
-  (let* ((policy harness-openrouter-routing)
-         (bound (and (harness-openrouter-routing-enabled-p policy)
-                     (plist-get (plist-get policy :retry) :max-output-tokens)))
-         (asked (plist-get request :max-tokens)))
-    (if (not (and (integerp bound) (> bound 0)))
-        request
-      (plist-put (copy-sequence request) :max-tokens
-                 (if (and (integerp asked) (> asked 0)) (min asked bound) bound)))))
-
-(defun harness-openrouter--retry-state (session-id &optional attempt)
-  "Return the retry state of SESSION-ID's turn, made if absent.
-A state that is made here counts ATTEMPT, the attempt that just failed:
-the policy's `:max-attempts' is the most attempts of one endpoint in a
-turn, the first included, so a policy of one attempt allows no retry at
-all."
-  (or (gethash session-id harness-openrouter--attempts)
-      (puthash session-id (list :count (or attempt 1) :since (float-time))
-               harness-openrouter--attempts)))
-
-(defun harness-openrouter--retry-exhausted (policy session-id)
-  "Return why SESSION-ID may not try the same endpoint again, or nil.
-Both bounds are checked: the number of attempts this turn and the time
-since its first one."
-  (let* ((state (harness-openrouter--retry-state session-id))
-         (retry (plist-get policy :retry))
-         (most (plist-get retry :max-attempts))
-         (seconds (plist-get retry :max-seconds))
-         (count (plist-get state :count))
-         (elapsed (- (float-time) (plist-get state :since))))
-    (cond
-     ((>= count most)
-      (format "the policy allows %d attempt%s of the same endpoint, and %d %s made"
-              most (if (= most 1) "" "s") count (if (= count 1) "was" "were")))
-     ((>= elapsed seconds)
-      (format "the policy allows %d s of retrying the same endpoint, and %d s passed"
-              seconds (round elapsed))))))
-
-(defun harness-openrouter--retry-delay (attempt failure)
-  "Return how long to wait before ATTEMPT tries FAILURE's request again.
-The generic backoff is used, so this module's waits read like the
-transport's: a provider's Retry-After first, then a growing wait capped
-at `harness-retry-max-delay'.  When `harness-retry' is not loaded, a
-provider's own Retry-After, else one second."
-  (if (fboundp 'harness-retry-backoff)
-      (harness-retry-backoff attempt failure)
-    (let ((asked (plist-get failure :retry-after)))
-      (if (and (numberp asked) (>= asked 0)) asked 1.0))))
+(defun harness-openrouter--retry-policy (session)
+  "Return what SESSION's requests need retried, for the shared retry layer.
+A session on the policy's model is one this policy governs: its sends
+are counted (`:count-sends') and the transport replays none of them
+\(`harness-retry-transport-retries').  A session this policy does not
+route -- another model, another provider, or any session while no policy
+routes -- has nothing of its own to say and is answered here with nil,
+so that the shared layer treats it exactly as any other provider's."
+  (when (harness-openrouter--routed-session-p harness-openrouter-routing session)
+    (list :owner "OpenRouter" :count-sends t)))
 
 (defun harness-openrouter--routed-session-p (policy session)
-  "Non-nil when SESSION is one POLICY routes."
+  "Non-nil when SESSION is one POLICY routes.
+The model is the policy's, and the session's provider is OpenRouter: a
+session of another provider on a same-named model is not this policy's
+to govern."
   (and (harness-openrouter-routing-enabled-p policy)
        (equal (plist-get session :model)
               (format "openrouter:%s" (plist-get policy :model)))))
 
-(defun harness-openrouter--bounded-stop (session reason)
-  "Return a stop decision with REASON, leaving it as a hint on SESSION.
-`:final' ends the filter chain, so a handler after this one -- whichever
-priority it registered with -- cannot turn this stop into a retry."
-  (harness-openrouter--hint (plist-get session :id) reason)
-  (list :retry nil :stop t :final t :reason reason))
+(defun harness-openrouter--failure-type-of (stream error)
+  "Return the typed code STREAM failed with ERROR, or nil.
+The chunk reader keeps `error.metadata.error_type' when the failure
+arrives as a chunk (`harness-openrouter--error-type'); an HTTP error
+body is not a chunk, so the code is read from the `error_type=' this
+module appended to the message it built (`harness-openrouter--error-detail')."
+  (or (plist-get (harness-openai--stream-dialect-state stream) :error-type)
+      (when (and (stringp error)
+                 (string-match "error_type=\\([a-z0-9_]+\\)" error))
+        (match-string 1 error))))
 
-(defun harness-openrouter--step-error (value next session failure)
-  "`agent/step-error' handler: bound retries of one pinned OpenRouter endpoint.
-Only a session on the policy's model is handled, and only a failure no
-handler before this one answered.  A typed permanent rejection stops at
-once and ends the chain (`:final'), so no later filter retries it.  A
-transient failure is tried again at the same endpoint only while the
-policy's attempt and time bounds allow; past them it stops with the
-reason.  An output ceiling is enforced when the request is made
-\(`harness-openrouter--bounded-request')."
-  (let ((policy harness-openrouter-routing))
-    (if (not (and (harness-openrouter--routed-session-p policy session)
-                  (not (plist-get value :retry))))
-        (funcall next value)
-      (let* ((type (harness-openrouter--failure-type failure))
-             (decision
-              (cond
-               ((and type (member type harness-openrouter--permanent-types))
-                (harness-openrouter--bounded-stop
-                 session (format "OpenRouter error_type=%s; an identical retry cannot pass it"
-                                 type)))
-               ((harness-openrouter--transient-failure-p failure)
-                (harness-openrouter--retry-decision
-                 policy session failure type))
-               (t value))))
-        (funcall next decision))))
-  nil)
+(defun harness-openrouter--failure-kind (stream error)
+  "Return the shared kind of STREAM's failure, from its typed code, or nil.
+OpenRouter names the kind of a failure in `error.metadata.error_type'.
+A code in `harness-openrouter--permanent-types' is `permanent': the
+identical request cannot pass it, so it is worth no repeat, and the
+shared retry layer ends the turn at once.  A code in
+`harness-openrouter--transient-types' is the transport's or a rate
+limit's bad minute (`transport', `rate-limit'), which the shared layer
+bounds like any other provider's.
 
-(defun harness-openrouter--retry-decision (policy session failure type)
-  "Return the decision for a transient FAILURE of SESSION under POLICY.
-A retry stays at the same pinned endpoint and is allowed only while the
-policy's attempts and elapsed seconds allow it; past either, the turn
-stops with the reason."
-  (let* ((session-id (plist-get session :id))
-         (exhausted (harness-openrouter--retry-exhausted policy session-id)))
+Only a request a routing policy governs is read this way: its typed
+codes were what the policy's own retry bounds were written for.  Any
+other request of this endpoint -- the provider with no policy, the
+provider as it always was -- answers nil and keeps the generic reading,
+so nothing about an ordinary provider changes."
+  (when (plist-get (harness-openai--stream-dialect-state stream) :route)
+    (let* ((type (harness-openrouter--failure-type-of stream error))
+           (status (harness-openai--stream-status stream)))
+      (cond
+       ((and (stringp type) (member type harness-openrouter--permanent-types))
+        'permanent)
+       ((and (stringp type) (member type harness-openrouter--transient-types))
+        (if (string-match-p "rate_limit\\|too_many" type) 'rate-limit 'transport))
+       ((equal status 429) 'rate-limit)
+       (t nil)))))
+
+(defun harness-openrouter--withdrawn-refusal (request)
+  "Return (REASON . DETAIL) when REQUEST would repeat a governed one ungoverned.
+A request this module already sent carries what authorised it
+\(`harness-retry-authority-of').  Sending it again with no policy
+configured would repeat a restricted request with no restriction, no pin
+and no count -- the shape of widening this module exists to prevent --
+so it is refused, and the request a session starts afresh under no policy
+is the operator's plain provider again.  Nil for anything that is not
+such a repeat."
+  (when (harness-retry-authority-of request)
+    (cons 'policy-changed
+          "the routing policy was removed while this request was being retried, so it is not sent unrestricted")))
+
+(defun harness-openrouter--resend-refusal (authority policy)
+  "Return (REASON . DETAIL) when a repeat under AUTHORITY may not be sent.
+AUTHORITY is what this module recorded when it sent the request --
+`:policy', the checked policy, and `:route', the exact pinned endpoint --
+and POLICY is the policy in force now.  A repeat is that request's
+repeat, so it is sent under the policy that authorised it, to the
+endpoint that policy pinned, and never to one chosen since: a policy
+edited to another model, another provider, another maximum or another
+freshness bound is a different authority, and the repeat is refused
+rather than reselected under it."
+  (let ((authorised (plist-get authority :policy)))
     (cond
-     (exhausted
-      (harness-openrouter--bounded-stop
-       session
-       (format "%s; not trying %s again"
-               exhausted
-               (or (plist-get (harness-openrouter--route-of session) :slug) "the endpoint"))))
+     ((not (listp authorised))
+      (cons 'policy-changed
+            "this request carries no record of what authorised it, so its repeat cannot be sent"))
+     ((null (harness-openrouter-routing-p))
+      (cons 'policy-changed
+            "the routing policy was removed while this request was being retried, so it is not sent unrestricted"))
      (t
-      (let* ((state (harness-openrouter--retry-state session-id 1))
-             (retry (plist-get policy :retry))
-             (most (plist-get retry :max-attempts))
-             (delay (harness-openrouter--retry-delay (plist-get state :count) failure))
-             (count (1+ (plist-get state :count))))
-        (setcar (cdr (plist-member state :count)) count)
-        (harness-openrouter--hint
-         session-id
-         (format "OpenRouter %s; trying the same endpoint again in %s (%d of %d)"
-                 (or type "transient failure")
-                 (if (fboundp 'harness-retry-duration)
-                     (harness-retry-duration delay)
-                   (format "%.1f s" delay))
-                 count most))
-        (list :retry t :delay delay :reason "a transient failure"))))))
+      (when-let* ((change (harness-openrouter--policy-change authorised policy)))
+        (cons 'policy-changed change))))))
 
-(defun harness-openrouter--forget-attempts (session-id &rest _)
-  "Forget SESSION-ID's same-endpoint retry count, at a new turn."
-  (remhash session-id harness-openrouter--attempts))
-
-(defun harness-openrouter--guard (session target _why)
+(defun harness-openrouter--guard (session target _why &optional failure)
   "`harness-fallback-guard-functions' guard: keep a pinned session pinned.
-A session this policy routes has one vetted endpoint and one model on
+A session this policy routes has one pinned endpoint and one model on
 purpose; moving it to another model -- another provider, another host or
 another checkpoint -- is not a fallback but a silent widening of the
-vetted set, and it is the user's decision (`harness-openrouter-switch').
+allowed set, and it is the user's decision (`harness-openrouter-switch').
 So a move is refused, with the reason and what to do about it, whether
-the quota ran out, the budget did, or anything else did.  A session this
-policy does not route is not guarded."
-  (let ((policy harness-openrouter-routing))
-    (when (and (harness-openrouter-routing-enabled-p policy)
-               (equal (plist-get session :model)
-                      (format "openrouter:%s" (plist-get policy :model)))
-               (not (equal target (plist-get session :model))))
+the quota ran out, the budget did, or anything else did.
+
+FAILURE, when the fallback asks after a failed step, is that step's
+`done' event.  A request this module sent carries what authorised it
+\(`harness-retry-authority-of'), and that is what decides here: the
+request was disclosed to one endpoint under one policy, so it is not
+disclosed to another host because the policy was disabled or removed
+while it was in flight.  An authority is therefore refused whether or
+not a policy is configured now -- disabling a policy is documented as a
+refusal, never as permission to send the request elsewhere.  A session
+this policy does not route, whose failure carries no such record, is not
+guarded."
+  (let* ((policy harness-openrouter-routing)
+         (pin (harness-openrouter--route-of session))
+         (authority (and failure (harness-retry-authority-of failure)))
+         (authorised (or (plist-get authority :route) pin)))
+    (when (and (not (equal target (plist-get session :model)))
+               (or authority
+                   (and (harness-openrouter-routing-enabled-p policy)
+                        (equal (plist-get session :model)
+                               (format "openrouter:%s" (plist-get policy :model))))))
       (format (concat "session %s is pinned to OpenRouter endpoint %s for %s, and the policy allows no other; "
                       "stop it, top up or wait for the quota, or switch endpoint by hand with M-x harness-openrouter-switch")
               (or (plist-get session :id) "?")
-              (or (plist-get (harness-openrouter--route-of session) :slug) "(none chosen yet)")
-              (plist-get policy :model)))))
+              (or (plist-get authorised :slug) "(none chosen yet)")
+              (or (plist-get (or (plist-get authority :policy) policy) :model)
+                  (plist-get session :model))))))
 
 ;;;; Registration
 
@@ -1980,27 +1996,22 @@ from is separate (`harness-openrouter--catalogue')."
   'openrouter)
 
 (defun harness-openrouter--init ()
-  "Register the provider, its retry bounds and its fallback guard.
-The `agent/step-error' filter runs ahead of `harness-fallback' (50) and
-`harness-retry' (60), so a typed permanent rejection is ended here
-before either can retry it, and a transient one is bounded here before
-the generic retry counts it.  The guard keeps a pinned session on its
-pinned endpoint however it failed."
+  "Register the provider, what its requests need retried, and its guard.
+The shared retry layer asks `harness-openrouter--retry-policy' how a
+session's requests are retried, so this module answers it here, once,
+and answers nothing else about retrying: the bounds, the wait and the
+repeat are that layer's.  The guard keeps a pinned session on its pinned
+endpoint however it failed."
   (harness-openrouter-refresh)
-  (harness-add-filter 'agent/step-error #'harness-openrouter--step-error 45)
-  (harness-on 'agent/turn-started #'harness-openrouter--forget-attempts)
-  (harness-on 'agent/turn-ended #'harness-openrouter--forget-attempts)
+  (add-hook 'harness-retry-policy-functions #'harness-openrouter--retry-policy)
   (add-hook 'harness-fallback-guard-functions #'harness-openrouter--guard))
 
 (defun harness-openrouter--shutdown ()
-  "Drop this module's filters, its guard and its cached catalogues."
-  (harness-remove-filter 'agent/step-error #'harness-openrouter--step-error)
-  (harness-off (cons 'agent/turn-started #'harness-openrouter--forget-attempts))
-  (harness-off (cons 'agent/turn-ended #'harness-openrouter--forget-attempts))
+  "Drop what this module added and its cached catalogues."
+  (remove-hook 'harness-retry-policy-functions #'harness-openrouter--retry-policy)
   (remove-hook 'harness-fallback-guard-functions #'harness-openrouter--guard)
   (clrhash harness-openrouter--catalogue)
-  (clrhash harness-openrouter--fetching)
-  (clrhash harness-openrouter--attempts))
+  (clrhash harness-openrouter--fetching))
 
 (harness-defmethod openrouter/route (session-id)
   "Return SESSION-ID's pinned OpenRouter route, or nil."

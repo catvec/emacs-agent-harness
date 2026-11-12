@@ -81,6 +81,7 @@ only the models allowed, and a tier's model is chosen among them.
 - `harness-cache-ttl` — Seconds a provider keeps a session's prompt cache after its last use.
 - `harness-cache-ttl-overrides` — Prompt cache lifetimes of particular providers or models.
 - `harness-provider-fallback-context-window` — Context window, in tokens, of a model nothing else gives a size to.
+- `harness-provider-max-output-tokens` — Ceiling, in tokens, on what one completion request may ask a model to write.
 
 ## Uses
 

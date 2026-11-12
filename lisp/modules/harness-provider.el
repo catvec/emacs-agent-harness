@@ -149,6 +149,41 @@ reads besides those of every model."
 (defvar harness-providers (make-hash-table :test 'eq)
   "Provider id -> `harness-provider'.")
 
+(defcustom harness-provider-max-output-tokens nil
+  "Ceiling, in tokens, on what one completion request may ask a model to write.
+Nil (the default) imposes none: a request that names its own
+`:max-tokens' sends that, and one that names none sends no limit at all,
+so the model answers with its provider's own default.  A number is a
+ceiling for every provider: a request asking for more is cut to it, and
+a request asking for nothing is bounded by it too.
+
+It is a limit the user chooses, not a fact about any model: a model's
+maximum output (`:max-output' in its catalogue entry) is what the
+endpoint allows, which is far larger than any default and is not what
+this names.  The reasoning a model does and the arguments of the tool
+calls it makes are completion tokens like any other, so a ceiling that
+is too low truncates a large tool call as readily as it shortens a
+reply.  A one-off call that names its own, smaller `:max-tokens' (a
+session's name, a judge's verdict) is cut to the smaller of the two."
+  :type '(choice (const :tag "The provider's own default" nil)
+                 (integer :tag "Tokens"))
+  :group 'harness)
+
+(defun harness-provider-bound-output (request &optional bound)
+  "Return REQUEST with its output cut to BOUND, or to the option's ceiling.
+BOUND, when given, is the ceiling to use; otherwise
+`harness-provider-max-output-tokens' is.  A request that asks for more
+is cut to the ceiling, and one that asks for nothing gets it, because a
+model's own default may be far larger.  With no ceiling -- the default
+-- the request is returned exactly as it is, so an omitted
+`:max-tokens' stays omitted and the provider's own default applies."
+  (let ((most (or bound harness-provider-max-output-tokens))
+        (asked (plist-get request :max-tokens)))
+    (if (not (and (integerp most) (> most 0)))
+        request
+      (plist-put (copy-sequence request) :max-tokens
+                 (if (and (integerp asked) (> asked 0)) (min asked most) most)))))
+
 (defcustom harness-provider-fallback-context-window 200000
   "Context window, in tokens, of a model nothing else gives a size to.
 A model whose provider does not say how large its window is gets the
@@ -1267,7 +1302,12 @@ the call asked and answered."
                            ;; `done' once.
                            (harness-provider--guard-events
                             (if job-id (harness-provider--job-events job-id caller) caller))))
-               (request (plist-put (copy-sequence request) :on-event on-event))
+               ;; One place bounds what a completion may ask a model to
+               ;; write, and it does nothing unless the user set a ceiling
+               ;; (`harness-provider-max-output-tokens'): an ordinary
+               ;; request keeps the `:max-tokens' it came with, or none.
+               (request (harness-provider-bound-output
+                         (plist-put (copy-sequence request) :on-event on-event)))
                (refusal (harness-provider-model-refusal (plist-get request :model))))
     (cond
      (refusal

@@ -77,7 +77,7 @@ the `done' event's keys."
        (harness-retry-kind failure)))
 
 (defun harness-small-ask (request &optional opts)
-  "Send REQUEST as one of the harness's own small model calls; return a handle.
+  "Send REQUEST as one of the harness's small model calls; return a handle.
 REQUEST is a `provider/complete' request without `:on-event': this
 function adds its own and hands every event to OPTS' `:on-event', a
 function of one event that defaults to ignoring them.  A caller keeps
@@ -93,22 +93,28 @@ from reaching a model with text nobody registered.  `harness-prompt-ask'
 is the function that supplies the names.
 
 A failure a retry may get past (see `harness-small-retryable-p') is not
-the call's end: the caller is sent `harness-small-restart-event' to
-forget what the failed try had gathered, the wait `harness-retry-backoff'
-asks for is taken (a rate limit's Retry-After honoured, else a growing,
-jittered backoff), and the request is sent again, at most
-`harness-retry-max-attempts' times, exactly as a step of a turn is.
+the call's end: the bounds are the shared retry layer's, read in the one
+place a step's are (`harness-retry-attempt-plan'), so this call and a
+step of a turn are tried again alike, under the same attempt count and
+the same elapsed bound, and never past either.  The caller is sent
+`harness-small-restart-event' to forget what the failed try had
+gathered, the wait the plan drew is taken (a rate limit's Retry-After
+honoured, else a growing, jittered backoff), and the request is sent
+again carrying the state of the request it repeats -- so a provider that
+authorises each send sees the same request's budget and its authority,
+and refuses the repeat if what allowed it is gone -- rather than a fresh
+request that would neither be counted nor stopped.
 The `done' of the last try, whatever
 it says, is the one the caller reads.  A request that raises instead of
 failing is handed over as a `done' with `:stop-reason' error, so a caller
 handles it the one way.
 
-OPTS also take `:label', a few words naming the call in the log (\"small
-call\" by default); `:retries', how many times the call may be tried again
-after the first (`harness-retry-max-attempts' by default, 0 for a caller
-that does its own trying); and `:on-event' as above.  Return a handle
-plist with `:cancel', a function that stops the call and any wait for a
-retry."
+OPTS also take `:label', a few words naming the call in the log (the
+text \"small call\" by default); `:retries', how many times the call may be
+tried again after the first (`harness-retry-max-attempts' by default, 0
+for a caller that does its own trying); and `:on-event' as above.
+Return a handle plist with `:cancel', a function that stops the call and
+any wait for a retry."
   (let ((prompts (plist-get request :prompts)))
     (unless prompts
       (signal 'harness-prompt-error
@@ -125,13 +131,14 @@ retry."
          (body (harness-plist-remove request :on-event :prompts))
          (tries 0) (handle nil) (timer nil) (cancelled nil))
     (cl-labels
-        ((start ()
-           ;; Send the request, TRY counting the tries from 1.
+        ((start (state)
+           ;; Send the request, TRY counting the tries from 1, STATE the
+           ;; state of the request this one repeats (nil for the first).
            (let ((serial (cl-incf tries)))
              (condition-case err
                  (setq handle
                        (harness-call 'provider/complete
-                                     (append body
+                                     (append (if state (harness-retry-attach body state) body)
                                              (list :on-event
                                                    (lambda (ev) (receive ev serial))))))
                (error (funcall on-event (list :type 'done :stop-reason 'error
@@ -139,24 +146,47 @@ retry."
          (receive (ev serial)
            ;; Only the try in flight speaks, and a `done' is its last word.
            (when (and (not cancelled) (= serial tries))
-             (if (and (eq (plist-get ev :type) 'done) (<= tries most) (harness-small-retryable-p ev))
-                 ;; A failure worth another try: the half answer is
-                 ;; forgotten, the wait the failure asks for is taken, and
-                 ;; the request is sent again.
+             (if (and (eq (plist-get ev :type) 'done) (harness-small-retryable-p ev))
                  (let* ((kind (harness-retry-kind ev))
-                        (delay (harness-retry-backoff tries ev)))
-                   (funcall on-event harness-small-restart-event)
-                   (harness-log 'info "small: %s: %s; trying again in %s (%d of %d)"
-                                label (harness-retry-say kind ev)
-                                (harness-retry-duration delay) tries most)
-                   (setq timer (run-at-time delay nil (lambda () (setq timer nil) (start)))))
+                        ;; The request this try sent, and what it spent:
+                        ;; the provider handed both back in the `done'.
+                        (state (harness-retry-state-of ev))
+                        (session (plist-get body :session))
+                        (attempt (harness-retry-request-attempts session nil ev tries))
+                        (elapsed (harness-retry-request-elapsed session nil ev)))
+                   (if (> attempt most)
+                       ;; This caller's own bound is spent -- no retry after
+                       ;; the first try, or no tries left -- and the call is
+                       ;; over.  The `done' says only what the shared layer
+                       ;; said of a request this caller bounded itself.
+                       (funcall on-event ev)
+                     (let ((plan (harness-retry-attempt-plan
+                                  session ev kind attempt elapsed
+                                  (and state (harness-retry-attach body state))
+                                  most)))
+                       (if (plist-get plan :retry)
+                           ;; A failure worth another try: the half answer is
+                           ;; forgotten, the wait the plan drew is taken, and
+                           ;; the request is sent again as the same request.
+                           (let ((delay (plist-get plan :delay)))
+                             (funcall on-event harness-small-restart-event)
+                             (harness-log 'info "small: %s: %s; trying again in %s (%d of %d)"
+                                          label (harness-retry-say kind ev)
+                                          (harness-retry-duration delay) attempt most)
+                             (setq timer (run-at-time
+                                          delay nil
+                                          (lambda ()
+                                            (setq timer nil)
+                                            (start (plist-get plan :state))))))
+                         ;; Nothing left under the shared bounds.
+                         (funcall on-event ev)))))
                (funcall on-event ev))))
          (cancel ()
            (setq cancelled t)
            (when timer (cancel-timer timer) (setq timer nil))
            (when (and handle (functionp (plist-get handle :cancel)))
              (ignore-errors (funcall (plist-get handle :cancel))))))
-      (start)
+      (start nil)
       (list :cancel #'cancel))))
 
 (harness-define-module 'small
