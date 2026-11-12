@@ -9,7 +9,6 @@ OpenAI-compatible chat completions provider (OpenAI, local servers, custom endpo
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [provider](provider.md)
 - **Required by:** [provider-deepseek](provider-deepseek.md), [provider-openrouter](provider-openrouter.md)
-- **Brings along:** [retry](retry.md) (its file requires it)
 
 ## About
 

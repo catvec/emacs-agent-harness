@@ -2,7 +2,7 @@
 
 # retry
 
-Try a step again after a transient network or rate-limit failure, within the bounds one place sets.
+Try a step again after a transient network or rate-limit failure.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-retry.el](../../lisp/modules/harness-retry.el)
@@ -34,58 +34,22 @@ time, so a provider that is really down ends the turn rather than
 keeping it busy.
 
 A provider that knows names its failure's kind in `:error-kind`
-(`transport`, `rate-limit`, `permanent`, see
-`harness-provider-openai`); a transport failure that arrives as text
-alone (a CLI provider's, say) is read the same way by
-`harness-retry-failure-kind`.  So is a CLI provider's process killed
-mid-turn (out of memory, say): the next try starts it again.  The kind
-`permanent` is a rejection a provider decoded from its own fields as
-one an identical request cannot pass: it ends the turn here, at once,
-before any handler after this one can retry it.
+(`transport` or `rate-limit`, see `harness-provider-openai`); a
+transport failure that arrives as text alone (a CLI provider's, say)
+is read the same way by `harness-retry-kind`.  So is a CLI
+provider's process killed mid-turn (out of memory, say): the next
+try starts it again.
 
 The harness's own one-off calls -- a session's name, the permission
 judge, a recap, a summary (see harness-small.el) -- are no step of a
 turn, so `agent/step-error` never sees them; they take the same
 treatment from the same code, to which `harness-small` adds nothing
 but the request itself: `harness-retry-kind` says whether their
-failure is worth another try, and `harness-retry-wait-plan` how long
-to wait.  One place decides for both what a provider's bad minute looks
+failure is worth another try, and `harness-retry-backoff` how long to
+wait.  One place decides for both what a provider's bad minute looks
 like and how long the harness waits it out.
 
-A provider that keeps its own retry bounds keeps none: it says what
-its requests need (`harness-retry-policy-functions`) and this module
-decides how they are repeated.  OpenRouter, whose policy pins one
-endpoint per session and refuses a request whose price, privacy or
-pin no longer checks out, is one: it authorises and counts every send
-itself, so its policy says `:count-sends` and this module counts what
-goes on the wire, measures one request from its first send against
-`harness-retry-max-seconds`, and keeps the transport from replaying a
-request that provider never authorised.  All the numbers are here:
-`harness-retry-max-attempts`, `harness-retry-delay`,
-`harness-retry-max-delay`, `harness-retry-jitter` and
-`harness-retry-max-seconds`, so one setting decides every provider.
-
-What one request has spent is the request's, not the session's: a
-turn's step and a recap of the same session are two requests, and
-neither may consume or reset the other's budget.  The state travels
-on the request and comes back in its `done` event
-(`harness-retry--request`), and a provider may record in it what
-authorised the send (`harness-retry-authorise`).  That record is
-opaque here: the module that wrote it is the only one that can say
-what it still allows (`harness-retry-authority-of`), so a repeat is a
-repeat of that request even when the session has moved on or another
-request of it is in flight.
-
-A wait is drawn once and the value drawn is the value waited
-(`harness-retry-wait-plan`): a jittered backoff that is checked as one
-delay and spent as another could be admitted under a bound and then
-sleep past it.
-
 ## Provides
-
-### Hooks
-
-- `harness-retry-policy-functions` — Functions that say how a session's requests are retried.
 
 ### Options
 
@@ -93,13 +57,11 @@ sleep past it.
 - `harness-retry-jitter` — Fraction of the backoff a retry may be spread by, for randomness.
 - `harness-retry-max-attempts` — Most times one turn tries a transiently failed step again.
 - `harness-retry-max-delay` — Longest a step is waited for before it is tried again, in seconds.
-- `harness-retry-max-seconds` — Longest one request and its retries may take, in seconds; nil for no bound.
 
 ## Uses
 
 ### Methods it calls
 
-- `session/exists-p` ([session](session.md))
 - `session/hint` ([session](session.md))
 
 ### Events it handles
