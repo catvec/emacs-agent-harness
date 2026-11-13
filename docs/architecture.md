@@ -3009,21 +3009,46 @@ object, `service_tier`, `session_id`, `usage.include`, the `reasoning`
 object and `max_tokens`.  Behind an opt-in policy
 (`harness-openrouter-routing`, nil by default) a new session is pinned
 to one exact endpoint of one exact model, chosen by price: only the
-policy's vetted endpoints are candidates, one dearer than the model
-owner's own published price in any priced component is dropped, and the
-cheapest of the rest is chosen.  The pin lives in the session's `ext`
-and every request carries `only`/`order` with `allow_fallbacks: false`,
-the standard tier and the session id as OpenRouter's sticky hint.  A
-pinned session is revalidated before dispatch and pauses rather than
-switching; a switch is by hand (`harness-openrouter-switch`) and starts
-a cache-cold conversation.  A candidate whose listing cannot be read
-blocks the decision instead of falling through to the next provider.
+endpoints of the policy's `:providers` are candidates, each must
+resolve to exactly one standard endpoint of the model, one dearer than
+the policy's `:max-price` in any priced component is dropped, and the
+cheapest of the rest is chosen.  The prices compared are always the
+ones OpenRouter's catalogue gives at the time of the decision -- the
+policy holds spending limits, never a provider's price.  The pin lives
+in the session's `ext` and every request carries `only`/`order` with
+`allow_fallbacks: false`, the standard tier, the session id as
+OpenRouter's sticky hint, and `data_collection: "deny"` with `zdr:
+true`.  A pinned session is revalidated before dispatch and pauses
+rather than switching; a switch is by hand
+(`harness-openrouter-switch`) and starts a cache-cold conversation.  A
+candidate whose listing cannot be read blocks the decision instead of
+falling through to the next provider.  Because the catalogue read is
+asynchronous, the policy is read again immediately before the body is
+built and that reading is the only one the request's fields come from:
+a policy disabled, removed or changed while a request was in flight
+refuses it with `policy-changed` instead of sending under another one.
 The answer is audited for the model, provider, tier and region it names,
-and a typed error code an identical retry cannot pass stops the step
-instead of retrying it.  A pinned session is also guarded from
-`harness-fallback`, so running out of quota or money stops the turn
-rather than moving to an unvetted model.  Prices are compared as exact
-decimals, never floats.  See docs/openrouter-pinning.md.
+and a typed error code an identical retry cannot pass (`permanent`) stops
+the step instead of retrying it.  Retrying is not the policy's: the
+shared `retry` module owns the bounds, the wait and the repeat for every
+provider, and this module says only that its sends are counted
+(`harness-retry-policy-functions`, `:count-sends`) -- so the shared layer
+counts them where they happen, measures one request from its first send,
+and keeps the transport from replaying a governed request at all (one
+dispatch is one POST).  The count travels with the request, so a recap
+or a judge's call made for the same session is budgeted apart from a step
+of it.  A retry is not waited for at all when its wait would start it
+after `harness-retry-max-seconds`.  Each send records what authorised it
+in the request's own state, and a repeat is sent under that or refused
+with `policy-changed`: a policy disabled, removed, narrowed or given
+lower limits while a request was in flight stops its repeat rather than
+re-selecting for it or sending it unrestricted.  A pinned session is also
+guarded from `harness-fallback`, and the guard is given the failed
+step's `done` event -- so the fallback cannot move a request that was
+sent under a policy that is gone, and running out of quota or money
+stops the turn rather than moving to a model the policy never allowed.
+Prices are compared as exact decimals, never floats.  See
+docs/openrouter-pinning.md.
 
 The Copilot provider (`copilot:` models) drives `copilot --headless
 --stdio`, the GitHub Copilot CLI's server mode that GitHub's Copilot
@@ -5901,20 +5926,51 @@ answer, or a transport failure that outlived those tries.
 - What counts: a failed step whose FAILURE (see `agent/step-error`) has
   `:error-kind` `transport` (`harness-provider-openai' names a 5xx, a
   connection-level failure curl reported, and a stream that ended
-  without headers that way) or `rate-limit` (HTTP 429), or, without a
-  kind, whose error text reads as one of those
-  (`harness-retry-transient-p`: "connection reset", "empty
-  reply", "could not resolve", "timed out", "rate limit"...).  Quota
-  and billing failures are the fallback module's and are never answered
-  here; neither is a failure another handler already answered.
+  without headers that way), `rate-limit` (HTTP 429) or `process` (a CLI
+  provider's process killed mid-turn), or, without a kind, whose error
+  text reads as one of those (`harness-retry-failure-kind`: "connection
+  reset", "empty reply", "could not resolve", "timed out", "rate
+  limit"...).  A provider whose own fields say a rejection is one no
+  identical request passes (`permanent`) ends the turn at once, `:final`
+  for the filters after this one.  Quota and billing failures are the
+  fallback module's and are never answered here; neither is a failure
+  another handler already answered.
 - Bounded: at most `harness-retry-max-attempts` (3) times per turn; the
   count resets when a turn starts.  The wait before each try doubles
   (`harness-retry-delay`, 1s, doubled, spread by
   `harness-retry-jitter`), capped at `harness-retry-max-delay` (30s)
   and never shorter than the `:retry-after` a rate limit asked for.
+  The wait is drawn once and the value drawn is the value waited
+  (`harness-retry-wait-plan`: `:delay`, and `:fit` for that very delay).
   Each wait, and the giving up, is a hint on the session
   ("network error: the connection was reset by the peer (curl 56: ...);
   trying again in 2 s (1 of 3)").
+- A session whose provider authorises and counts its own sends says so
+  through `harness-retry-policy-functions` (`:owner`, `:count-sends`),
+  and none of the numbers comes from that provider.  For such a session
+  the count is the wire's: `harness-retry-send` counts each send at the
+  dispatch -- the first and `harness-retry-max-attempts` more per
+  request -- and `harness-retry-max-seconds` measures that request from
+  its first send.  A wait that cannot start the next attempt inside that
+  bound stops the request at once rather than being slept
+  (`harness-retry-wait-plan`, `harness-retry-time-spent`), and the
+  transport is asked for no replay of the request
+  (`harness-retry-transport-retries`, 0 for it).  A session no policy
+  answers for is exactly as it was: per-turn, the transport retries as
+  it always did, and nothing measures it.
+- The budget and the authority are the *request's*, not the session's.
+  `harness-retry--request` (count, clock, `retrying`, `authority`)
+  travels on the request plist under `harness-retry--request-key` and
+  comes back in its `done` event (`harness-retry--carry`, in the
+  OpenAI transport).  A step that repeats a failed one sends it back
+  with the state the failure returned (`harness-agent-turn-retry`); a
+  one-off call does the same through `harness-small-ask`; a fresh
+  request starts no state at all.  So two requests of one session -- a
+  step and a recap -- cannot consume or reset each other's budget, and
+  `harness-retry-attempt-plan` is the one decision for both.  What a
+  provider recorded in `authority` is opaque to this layer: the module
+  that wrote it reads it back and refuses a repeat whose authority is
+  gone, instead of re-reading a policy that may have changed.
 - `agent/step-error` filter at priority 60, after the fallback (50), so
   a provider that ran out is moved before this module is asked.
 - A step tried again runs with the partial answer the failed one
@@ -5943,7 +5999,10 @@ The providers that speak HTTP ask for it: the OpenAI-compatible ones
 So a lost connection *before the answer began* is repeated for the
 harness's own calls -- a task's title, a permission judge, a recap --
 which no step layer covers (they are no agent step), as well as for a
-turn's.  The Claude Code CLI retries its own API calls.
+turn's.  The Claude Code CLI retries its own API calls.  A session whose
+provider counts its sends is the exception (`harness-retry-transport-retries`):
+the transport is given 0 for it, so a replay cannot send a request that
+provider did not authorise -- and every other session keeps `t`.
 
 A failure that got further, though -- a 429 answered with a body, a
 stream cut in the middle, a process that died -- arrives as a `done'

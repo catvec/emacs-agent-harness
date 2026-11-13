@@ -86,8 +86,10 @@ shows and edits this list beside the plans' quota."
 
 (defvar harness-fallback-guard-functions nil
   "Functions that may refuse to move a session off its model.
-Each is called as (SESSION TARGET WHY) with the session plist, the model
-it would move to and why (`out', `back' or `up'), and returns nil when
+Each is called as (SESSION TARGET WHY &optional FAILURE) with the session
+plist, the model it would move to, why (`out', `back' or `up'), and --
+when the fallback asks after a failed step -- that step's `done' event,
+which says what the failed request was sent under.  It returns nil when
 the move may happen, or a string saying why it may not.  A string blocks
 the move: the session stays where it is, the reason is left as a hint and
 `fallback/refused' says so.  This is for a provider whose model is
@@ -606,17 +608,21 @@ failing, and when to look again."
             (if (plist-get mark :guess) ""
               (format " until %s" (harness-fallback--clock (plist-get mark :until)))))))
 
-(defun harness-fallback-refusal (session target why)
+(defun harness-fallback-refusal (session target why &optional failure)
   "Return why SESSION may not move to TARGET for WHY, or nil.
-Asks each of `harness-fallback-guard-functions'; the first that answers
-a string blocks the move.  A guard that fails blocks too, with its
-error: a guard that cannot say yes has not said the move is allowed."
+FAILURE, when the move follows a failed step, is that step's `done'
+event: it tells a guard what the request that failed was sent under, so
+a session pinned on purpose stays pinned even if the policy that pinned
+it was disabled or removed while the request was in flight.  Asks each of
+`harness-fallback-guard-functions'; the first that answers a string
+blocks the move.  A guard that fails blocks too, with its error: a guard
+that cannot say yes has not said the move is allowed."
   (let ((refusal nil))
     (dolist (fn harness-fallback-guard-functions)
       (when (and (null refusal) (functionp fn))
         (setq refusal
               (condition-case err
-                  (funcall fn session target why)
+                  (funcall fn session target why failure)
                 (error (format "the guard %S failed: %s" fn (harness-error-message err)))))))
     refusal))
 
@@ -769,14 +775,14 @@ just because the quota ran out."
               (cond
                ((and choice (not (equal (plist-get choice :model) (plist-get session :model))))
                 (if-let* ((refusal (harness-fallback-refusal
-                                    session (plist-get choice :model) 'out)))
+                                    session (plist-get choice :model) 'out failure)))
                     (progn
                       (harness-fallback--hint-refusal
                        session (plist-get choice :model) refusal)
                       (harness-emit 'fallback/refused (plist-get session :id)
                                     (plist-get session :model)
                                     (plist-get choice :model) refusal)
-                      (setq decision (list :retry nil :stop t
+                      (setq decision (list :retry nil :stop t :final t
                                            :reason (format "Not switching to %s: %s"
                                                            (plist-get choice :model) refusal))))
                   (when (harness-fallback--switch session (plist-get choice :model) 'out mark)

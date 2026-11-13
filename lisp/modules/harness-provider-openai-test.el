@@ -909,6 +909,58 @@ stays a reading, the miss it is."
       (should (equal '(start done) (harness-openai-test--types (reverse events))))
       (should (string-match-p "connection refused" (plist-get (car events) :error))))))
 
+(ert-deftest harness-provider-openai-a-counted-session-gets-no-lower-replay ()
+  "A session whose sends are counted elsewhere is not replayed by the transport.
+The shared retry layer answers how many times the HTTP layer may replay
+a request (`harness-retry-transport-retries'): none for a session a
+provider counts and re-authorises itself, and the transport's own count
+for every other, so an ordinary provider is sent exactly what it was."
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:chunks (,(harness-openai-test--sse
+                                          '(:choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))
+                                          "[DONE]")))))
+    (dolist (case '(((:session (:id "s-counted")) . 0)
+                    ((:session (:id "s-ordinary")) . t)
+                    (() . t)))
+      (setq harness-openai-test--requests nil)
+      (let ((harness-retry-policy-functions
+             (list (lambda (session)
+                     (when (equal (plist-get session :id) "s-counted")
+                       (list :owner "Counted" :count-sends t))))))
+        (harness-openai-test--complete
+         harness-openai-test-endpoint
+         (append '(:model "testrouter:m"
+                   :messages ((:role user :content ((:type "text" :text "hi")))))
+                 (car case)))
+        (should (equal (cdr case)
+                       (plist-get (plist-get (car harness-openai-test--requests) :args) :retry)))))))
+
+(ert-deftest harness-provider-openai-a-dialects-failure-kind-is-used ()
+  "A dialect that knows its own failure fields can name the shared kind.
+Its `:failure-kind' hook is asked first; a hook that fails is silent and
+the transport's own reading stands, so a provider can refine a failure
+but never keep one from being classified."
+  (let* ((stream (make-harness-openai--stream :on-event #'ignore))
+         (endpoint (list :id 'kinded :label "Kinded" :base-url "https://k.example/v1"
+                         :dialect (list :failure-kind (lambda (_stream _error) 'permanent)))))
+    (setf (harness-openai--stream-endpoint stream) endpoint)
+    (should (eq 'permanent (harness-openai--failure-kind stream "HTTP 400: no"))))
+  ;; A hook that returns nothing leaves the generic reading.
+  (let* ((stream (make-harness-openai--stream :on-event #'ignore))
+         (endpoint (list :id 'kinded :label "Kinded" :base-url "https://k.example/v1"
+                         :dialect (list :failure-kind (lambda (_stream _error) nil)))))
+    (setf (harness-openai--stream-endpoint stream) endpoint)
+    (setf (harness-openai--stream-status stream) 429)
+    (should (eq 'rate-limit (harness-openai--failure-kind stream "HTTP 429: slow down"))))
+  ;; And one that fails is logged, not fatal.
+  (let* ((stream (make-harness-openai--stream :on-event #'ignore))
+         (endpoint (list :id 'kinded :label "Kinded" :base-url "https://k.example/v1"
+                         :dialect (list :failure-kind (lambda (_stream _error)
+                                                        (error "cannot read"))))))
+    (setf (harness-openai--stream-endpoint stream) endpoint)
+    (setf (harness-openai--stream-status stream) 503)
+    (should (eq 'transport (harness-openai--failure-kind stream "HTTP 503: busy")))))
+
 (ert-deftest harness-provider-openai-transient-failures-say-so ()
   "A connection failure and a 5xx carry `:error-kind transport'; a 429 its wait.
 The streamed request asks the HTTP layer to retry a lost connection, and
@@ -1308,6 +1360,31 @@ A model no field sizes has none: the catalogue estimates it."
                      (mapcar (lambda (m) (plist-get m :context-window)) models)))
       (should (= 8192 (plist-get (nth 1 models) :max-output)))
       (should (= 128000 (plist-get (nth 3 models) :max-output)))))
+  (harness-openai-clear-models-cache))
+
+(ert-deftest harness-provider-openai-models-carry-the-canonical-slug ()
+  "A listing that names a canonical slug has it kept; one that does not, not.
+OpenRouter's listing gives every model a `canonical_slug' beside the
+`id' that was asked for, and the two differ wherever the id is an alias
+(299 of its 431 models on 2026-11-12).  The field is the provider's own
+statement about its own model, so it is carried as it stands and never
+inferred; a server that lists no such field gains nothing."
+  (harness-openai-test-with-fake
+      `(("/models"
+         . (:body ,(harness-json-encode
+                    '(:object "list"
+                      :data ((:id "alias" :canonical_slug "vendor/alias-20261017" :name "Alias")
+                             (:id "self" :canonical_slug "self")
+                             (:id "plain" :name "Plain")))))))
+    (harness-openai-clear-models-cache)
+    (let ((models (harness-test-await (harness-openai--models harness-openai-test-openai-endpoint))))
+      (should (equal "vendor/alias-20261017"
+                     (plist-get (nth 0 models) :canonical-slug)))
+      ;; A model whose slug is its own canonical one is carried as it came:
+      ;; the reader does not decide what is an alias, it records what it read.
+      (should (equal "self" (plist-get (nth 1 models) :canonical-slug)))
+      ;; No field, no value -- never a guess from the id.
+      (should-not (plist-member (nth 2 models) :canonical-slug))))
   (harness-openai-clear-models-cache))
 
 (ert-deftest harness-provider-openai-models-refresh-and-failure ()

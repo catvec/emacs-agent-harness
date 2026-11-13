@@ -76,10 +76,6 @@ whether the step was sent again."
      (clrhash harness-tools)
      (clrhash harness-agent--turns)
      (clrhash harness-retry--attempts)
-     ;; The module's own attempt counter exists only where its retry bounds
-     ;; are enforced; a test run against a tree without it still runs.
-     (when (boundp 'harness-openrouter--attempts)
-       (clrhash harness-openrouter--attempts))
      (clrhash harness-fallback--marks)
      (clrhash harness-fallback--moved)
      (setq harness-openrouter-test--completion-script nil
@@ -173,11 +169,11 @@ pass into a retry.  Nothing is sent a second time."
   "A transient failure is retried on the same endpoint, inside the bounds.
 Every request of the turn goes to the pinned OpenRouter endpoint, and the
 catalogue is not read again: a retry is the same endpoint, not a new
-choice."
+choice.  The bounds are the shared retry layer's -- one setting for
+every provider -- and the hint says whose request was repeated."
   (harness-openrouter-test-with-chain
-    (setq harness-openrouter-routing
-          (harness-openrouter-test-policy :retry '(:max-attempts 2 :max-seconds 30
-                                                   :max-output-tokens 4096)))
+    (setq harness-retry-max-attempts 1)
+    (setq harness-openrouter-routing (harness-openrouter-test-policy))
     (setq harness-openrouter-test--completion-script
           (lambda (step)
             (if (= step 1)
@@ -191,57 +187,83 @@ choice."
       (dolist (request (harness-openrouter-test--completion-requests))
         (should (equal "https://openrouter.ai/api/v1/chat/completions"
                        (plist-get request :url))))
-      ;; The first retry is announced as the same endpoint.
-      (should (cl-some (lambda (h) (string-match-p "same endpoint" h))
+      ;; The first retry is announced as the same endpoint, for OpenRouter.
+      (should (cl-some (lambda (h) (string-match-p "OpenRouter: network error.*trying again" h))
                        (harness-openrouter-test--chain-hints sid)))
       ;; The pin did not move and no catalogue request was made.
       (should (equal "deepinfra/fp8"
                      (plist-get (harness-openrouter-test--chain-state sid) :slug))))))
 
 (ert-deftest harness-provider-openrouter-attempt-bound-stops-the-retries ()
-  "Past the policy's attempts, the turn stops instead of trying again.
-The bound is the policy's, not `harness-retry-max-attempts': a policy of
-one attempt stops after the first failure however high the generic
-setting is, and the reason says which bound was reached."
+  "Past the shared attempts bound, the turn stops instead of trying again.
+`harness-retry-max-attempts' 0 allows one request's first send and no
+retry, so a provider that keeps failing is sent once and no more -- the
+non-OpenRouter `harness-retry` module cannot send it again by itself,
+because a send it made would be one this policy never authorised."
   (harness-openrouter-test-with-chain
-    (setq harness-retry-max-attempts 9)
-    (setq harness-openrouter-routing
-          (harness-openrouter-test-policy :retry '(:max-attempts 1 :max-seconds 60
-                                                   :max-output-tokens 4096)))
+    (setq harness-retry-max-attempts 0)
+    (setq harness-openrouter-routing (harness-openrouter-test-policy))
     (setq harness-openrouter-test--completion-script
           (lambda (_) (harness-openrouter-test--chain-http 503)))
     (let ((sid (harness-openrouter-test--chain-session)))
       (should (eq 'error (plist-get (harness-test-await
                                      (harness-call 'agent/prompt sid "go") 20)
                                     :stop-reason)))
-      ;; One attempt, and no more: the failure that follows it reaches the
-      ;; bound before it is ever sent again.
-      (should (= 1 (length (harness-openrouter-test--completion-requests))))
-      (should (cl-some (lambda (h) (string-match-p "allows 1 attempt" h))
-                       (harness-openrouter-test--chain-hints sid))))))
+      ;; One attempt, and no more.
+      (should (= 1 (length (harness-openrouter-test--completion-requests)))))))
 
 (ert-deftest harness-provider-openrouter-time-bound-stops-the-retries ()
-  "Past the policy's elapsed seconds, the turn stops instead of trying again.
-A first attempt that was waited out counts against the time bound: the
-second failure, with no time left in the policy, is where it ends."
+  "A retry that cannot start inside the shared seconds bound is never sent.
+The wait the backoff asks for is compared with what is left of
+`harness-retry-max-seconds' when the retry is scheduled: a one-second
+wait under a one-second bound would start the next attempt after the
+bound, so the turn stops instead of sleeping first and finding out at
+the next send."
   (harness-openrouter-test-with-chain
-    (setq harness-openrouter-routing
-          (harness-openrouter-test-policy :retry '(:max-attempts 5 :max-seconds 1
-                                                   :max-output-tokens 4096)))
+    (setq harness-retry-max-seconds 1)
+    (setq harness-retry-max-attempts 5)
+    (setq harness-openrouter-routing (harness-openrouter-test-policy))
     (setq harness-openrouter-test--completion-script
           (lambda (_) (harness-openrouter-test--chain-error 'transport)))
-    ;; The waits between attempts are the policy's own bound: a first wait
-    ;; of a second takes the elapsed time past `:max-seconds', so the
-    ;; failure after it is not tried again.
     (let ((harness-retry-delay 1.0)
           (harness-retry-max-delay 5.0))
       (let ((sid (harness-openrouter-test--chain-session)))
         (should (eq 'error (plist-get (harness-test-await
                                        (harness-call 'agent/prompt sid "go") 20)
                                       :stop-reason)))
-        (should (cl-some (lambda (h) (string-match-p "allows 1 s of retrying" h))
+        (should (cl-some (lambda (h) (string-match-p "would start the next attempt after" h))
                          (harness-openrouter-test--chain-hints sid)))
-        (should (= 2 (length (harness-openrouter-test--completion-requests))))))))
+        ;; The one attempt was made; the wait that would overrun the bound
+        ;; was not spent, and nothing was sent after it.
+        (should (= 1 (length (harness-openrouter-test--completion-requests))))))))
+
+(ert-deftest harness-provider-openrouter-time-bound-counts-the-sent-time ()
+  "Time spent making the first attempt is already inside the bound.
+The clock starts at the request's first send, not at its first failure,
+so an attempt that took a while leaves less than a full bound for a
+retry: with the bound spent by the attempt, no retry is scheduled."
+  (harness-openrouter-test-with-chain
+    (setq harness-retry-max-seconds 1)
+    (setq harness-retry-max-attempts 5)
+    (setq harness-openrouter-routing (harness-openrouter-test-policy))
+    ;; The fake spends the bound making the first attempt, as a slow
+    ;; provider does, and then fails.
+    (setq harness-openrouter-test--completion-script
+          (lambda (_) (sleep-for 1.1) (harness-openrouter-test--chain-error 'transport)))
+    (setq harness-retry-delay 0.01)
+    (setq harness-retry-max-delay 0.05)
+    (let ((sid (harness-openrouter-test--chain-session)))
+      (should (eq 'error (plist-get (harness-test-await
+                                     (harness-call 'agent/prompt sid "go") 20)
+                                    :stop-reason)))
+      ;; The bound is spent by the attempt itself; how many seconds the
+      ;; answer says passed depends on the machine, so only that it is
+      ;; past the one-second bound is asserted.
+      (should (cl-some (lambda (h) (string-match-p
+                                    "OpenRouter: one request and its retries may take 1 s, and [0-9]+ s passed"
+                                    h))
+                       (harness-openrouter-test--chain-hints sid)))
+      (should (= 1 (length (harness-openrouter-test--completion-requests)))))))
 
 ;;;; Nothing implicit may move a pinned session off its endpoint
 
@@ -295,6 +317,121 @@ the guard refuses, the turn does not start, and the reason is recorded."
       (should (equal (format "openrouter:%s" harness-openrouter-test-model)
                      (plist-get (harness-call 'session/get sid) :model)))
       (should-not (harness-openrouter-test--completion-requests)))))
+
+;;;; A governed request is never handed to another host
+
+(defun harness-openrouter-test--other-provider-sends ()
+  "Return the requests the other provider was sent, newest first."
+  (cl-remove-if-not (lambda (r) (equal "other-provider" (plist-get r :url)))
+                    harness-openrouter-test--requests))
+
+(defun harness-openrouter-test--during-failure (edit)
+  "Return a completion script that makes a 402 fail while EDIT runs.
+EDIT is called once, from inside the failed step, before the failure
+reaches `agent/step-error' -- which is what an in-flight policy change
+looks like to the fallback and the guard that then run."
+  (lambda (_)
+    (funcall edit)
+    (harness-openrouter-test--chain-http
+     402 (harness-json-encode '(:error (:code 402 :message "Insufficient credits."))))))
+
+(ert-deftest harness-openrouter-a-disabled-policy-does-not-hand-a-request-on ()
+  "Disabling the policy during an in-flight 402 sends nothing to another host.
+This is the reported finding: the guard asked whether a policy was
+*enabled* now, so disabling it mid-request read as permission to disclose
+the request elsewhere, and the fallback moved the session to
+`other-provider:other-model'.  What authorises a send is the request's
+own record of what it was sent under, so the request stays pinned: the
+turn fails, the session keeps its model, and the other provider is sent
+nothing at all."
+  (harness-openrouter-test-with-chain
+    (setq harness-fallback-models '("other-provider:other-model"))
+    (setq harness-openrouter-routing (harness-openrouter-test-policy))
+    (let* ((policy harness-openrouter-routing)
+           (sends 0))
+      (harness-on 'fallback/switched (lambda (&rest _) (cl-incf sends)))
+      (setq harness-openrouter-test--completion-script
+            (harness-openrouter-test--during-failure
+             (lambda ()
+               (setq harness-openrouter-routing
+                     (plist-put (copy-sequence policy) :enabled nil)))))
+      (let ((sid (harness-openrouter-test--chain-session)))
+        (should (eq 'error (plist-get (harness-test-await
+                                       (harness-call 'agent/prompt sid "go") 20)
+                                      :stop-reason)))
+        ;; Nothing was disclosed anywhere else, and the session did not move.
+        (should (= 0 (length (harness-openrouter-test--other-provider-sends))))
+        (should (= 0 sends))
+        (should (equal (format "openrouter:%s" harness-openrouter-test-model)
+                       (plist-get (harness-call 'session/get sid) :model)))
+        ;; The one request went to the pinned endpoint, restricted.
+        (should (= 1 (length (harness-openrouter-test--completion-requests))))
+        (let ((body (plist-get (car (harness-openrouter-test--completion-requests)) :json)))
+          (should (equal '("deepinfra/fp8")
+                         (append (plist-get (plist-get body :provider) :only) nil))))
+        (should (cl-some (lambda (h) (string-match-p "pinned" h))
+                         (harness-openrouter-test--chain-hints sid)))))))
+
+(ert-deftest harness-openrouter-a-removed-policy-does-not-hand-a-request-on ()
+  "Rolling the policy back to nil during an in-flight 402 changes nothing either.
+Nil is documented as the legacy pass-through for the *next* request; a
+request already sent under the policy keeps its restrictions, so the
+rollback cannot return a governed workload to unrestricted routing.  The
+fallback is refused, no other provider is sent anything, and the next
+turn is the operator's plain provider again."
+  (harness-openrouter-test-with-chain
+    (setq harness-fallback-models '("other-provider:other-model"))
+    (setq harness-openrouter-routing (harness-openrouter-test-policy))
+    (setq harness-openrouter-test--completion-script
+          (harness-openrouter-test--during-failure
+           (lambda () (setq harness-openrouter-routing nil))))
+    (let ((sid (harness-openrouter-test--chain-session)))
+      (should (eq 'error (plist-get (harness-test-await
+                                     (harness-call 'agent/prompt sid "go") 20)
+                                    :stop-reason)))
+      (should (= 0 (length (harness-openrouter-test--other-provider-sends))))
+      (should (equal (format "openrouter:%s" harness-openrouter-test-model)
+                     (plist-get (harness-call 'session/get sid) :model)))
+      (should (= 1 (length (harness-openrouter-test--completion-requests)))))))
+
+(ert-deftest harness-openrouter-a-lowered-policy-does-not-hand-a-request-on ()
+  "Narrowing the policy during an in-flight 402 is a refusal, not a fallback.
+Dropping the pinned provider, lowering the maximum and changing the
+model are the edits that decide a request; the request that was sent
+under the policy is disclosed nowhere else because of any of them."
+  (harness-openrouter-test-with-chain
+    (setq harness-fallback-models '("other-provider:other-model"))
+    (dolist (edit '(drop-provider lower-limit narrow-model))
+      ;; Each edit is one turn of one session: the marks a 402 leaves are
+      ;; this iteration's, so the next starts with none.
+      (clrhash harness-fallback--marks)
+      (let ((harness-openrouter-test--completion-script nil))
+        (setq harness-openrouter-routing (harness-openrouter-test-policy))
+        (let ((policy harness-openrouter-routing))
+          (setq harness-openrouter-test--completion-script
+                (harness-openrouter-test--during-failure
+                 (lambda ()
+                   (setq harness-openrouter-routing
+                         (pcase edit
+                           ('drop-provider (plist-put (copy-sequence policy)
+                                                      :providers (list "Cohere")))
+                           ('lower-limit (plist-put (copy-sequence policy) :max-price
+                                                    '(:prompt 0.01 :completion 0.01
+                                                      :cache-read 0.0001)))
+                           ('narrow-model (plist-put (copy-sequence policy)
+                                                     :model "deepseek/deepseek-v3")))))))
+          (let* ((before (length (harness-openrouter-test--completion-requests)))
+                 (sid (harness-openrouter-test--chain-session)))
+            (should (eq 'error (plist-get (harness-test-await
+                                           (harness-call 'agent/prompt sid "go") 20)
+                                          :stop-reason)))
+            (should (= 0 (length (harness-openrouter-test--other-provider-sends))))
+            (should (equal (format "openrouter:%s" harness-openrouter-test-model)
+                           (plist-get (harness-call 'session/get sid) :model)))
+            ;; One POST for this edit: the request failed once, and was
+            ;; neither repeated nor re-pointed.
+            (should (= (1+ before)
+                       (length (harness-openrouter-test--completion-requests))))))))))
 
 (provide 'harness-provider-openrouter-chain-test)
 ;;; harness-provider-openrouter-chain-test.el ends here

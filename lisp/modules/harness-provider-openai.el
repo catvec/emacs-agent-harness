@@ -65,6 +65,10 @@
 (require 'harness-util)
 (require 'harness-http)
 (require 'harness-provider)
+;; The shared retry layer says how many times the transport may replay a
+;; request, and reads a provider's own typed failures.  It requires none
+;; of the providers, so a provider may load it.
+(require 'harness-retry)
 
 ;;;; Customisation
 
@@ -218,7 +222,13 @@ Harness-provider-openrouter.el builds one for the endpoints it owns
 response reading a dialect needs, as functions this transport calls.
 The transport itself knows no provider's fields; an endpoint without a
 dialect -- plain OpenAI, a local server, a custom compatible server --
-is sent exactly the body this module builds."
+is sent exactly the body this module builds.
+
+One key is not about a provider's wire format: `:http-retry' is a
+function of a request returning the transport's own retry policy for it
+\(see `harness-openai--transport-retry').  A module that bounds its
+requests' attempts itself uses it so the transport does not replay them
+behind its back.  Without the key the transport's default stands."
   (let ((dialect (plist-get endpoint :dialect)))
     (and (listp dialect) dialect)))
 
@@ -449,7 +459,15 @@ only carry an id, and get the endpoint's `:default-context' if any."
          (params (plist-get entry :supported_parameters))
          (efforts (harness-openai--entry-efforts endpoint entry))
          (pricing (harness-openai--pricing (plist-get entry :pricing)))
+         ;; OpenRouter's listing names the model's canonical slug beside its
+         ;; id, and the two are not always the same string: the id may be an
+         ;; undated alias ("anthropic/claude-fable-5.2") whose canonical slug
+         ;; is the dated snapshot it resolves to.  A listing without the
+         ;; field is not read as naming one.
+         (canonical (plist-get entry :canonical_slug))
          (model (list :name name :label (or (plist-get entry :name) name))))
+    (when (and (stringp canonical) (not (string-empty-p canonical)))
+      (setq model (plist-put model :canonical-slug canonical)))
     (when context (setq model (plist-put model :context-window context)))
     (when max-output (setq model (plist-put model :max-output max-output)))
     (when modalities (setq model (plist-put model :input-modalities modalities)))
@@ -867,6 +885,26 @@ the answer and hands it back to the hooks that read it."
     (when-let* ((fn (plist-get dialect :stream-state)))
       (funcall fn request))))
 
+(defun harness-openai--transport-retry (endpoint request)
+  "Return the lower-layer retry policy for ENDPOINT and REQUEST.
+This is what `harness-http-request' is given as `:retry': how many
+times the transport itself may replay a completion that failed before
+any of the answer reached the caller.  A completion is worth repeating
+\(`t': the default policy of `harness-http-max-retries'), and an
+endpoint without a dialect is sent exactly what it was always sent.
+
+A session whose provider authorises and counts every send itself gets
+no replay here: the shared retry module says so
+\(`harness-retry-transport-retries'), and a replay of a request that
+provider never re-checked would be a send after a policy, a price or a
+pin it did not revalidate.  An answer that fails is not allowed to
+change how a request is sent: it is logged and the default stands."
+  (condition-case err
+      (or (harness-retry-transport-retries request) t)
+    (error (harness-log 'error "openai: the transport retry of %s failed: %S"
+                        (plist-get endpoint :id) err)
+           t)))
+
 (defun harness-openai--error-detail (endpoint body status)
   "Return ENDPOINT's own description of error BODY, or nil.
 A dialect's `:error-detail' hook is given BODY and STATUS; what it
@@ -1061,13 +1099,41 @@ A provider that goes on another host, or a gateway answering for one,
 may report a connection failure in words rather than as an HTTP status;
 a step that failed that way is worth trying again.")
 
+(defun harness-openai--dialect-failure-kind (stream error)
+  "Return what STREAM's dialect says the kind of ERROR was, or nil.
+A dialect's `:failure-kind' hook is given STREAM and ERROR, and reads
+whatever its own chunk reader kept of the answer
+\(`harness-openai--stream-dialect-state').  It answers with a kind the
+shared retry layer reads: `transport', `rate-limit', `permanent' (a
+rejection no identical request passes), or another module's (`quota',
+`billing').  Nil leaves the generic reading to decide, and a hook that
+fails is logged and treated as silent, so a provider's own reading can
+refine a failure but never stop the harness from classifying it."
+  (when-let* ((dialect (harness-openai--dialect (harness-openai--stream-endpoint stream)))
+              (fn (plist-get dialect :failure-kind)))
+    (let ((kind (condition-case err
+                    (funcall fn stream error)
+                  (error (harness-log 'error "openai: the :failure-kind hook of %s failed: %S"
+                                      (plist-get (harness-openai--stream-endpoint stream) :id) err)
+                         nil))))
+      (and kind (intern (format "%s" kind))))))
+
 (defun harness-openai--failure-kind (stream error)
   "Return the kind of failure STREAM ended with ERROR, or nil.
-An HTTP 402 is out of money, a 401 or 403 a refused login, a 429 a
+A dialect's own reading comes first (`harness-openai--dialect-failure-kind'):
+a provider that knows its typed codes says what a failure is, and a
+`permanent' answer is one no identical request passes.  Otherwise an
+HTTP 402 is out of money, a 401 or 403 a refused login, a 429 a
 short-term rate limit unless its body says the account's quota is used
 up (`insufficient_quota', DeepSeek's \"Insufficient Balance\"), and a
 5xx or a connection-level failure (`transport') one another try may get
 past.  Without a status, the error's text is read the same way."
+  (or (harness-openai--dialect-failure-kind stream error)
+      (harness-openai--generic-failure-kind stream error)))
+
+(defun harness-openai--generic-failure-kind (stream error)
+  "Return the kind the transport itself reads STREAM's ERROR as, or nil.
+See `harness-openai--failure-kind', which asks a dialect first."
   (let ((status (harness-openai--stream-status stream))
         (text (downcase (or error "")))
         (reported (harness-openai--stream-error-kind stream)))
@@ -1149,9 +1215,18 @@ reply from an endpoint it did not choose."
      (t (harness-openai--stream-finish stream 'end-turn)))))
 
 (defun harness-openai--complete (endpoint request)
-  "Start a streamed chat completion for REQUEST at ENDPOINT; return a handle."
+  "Start a streamed chat completion for REQUEST at ENDPOINT; return a handle.
+A request that carries the state of a logical request
+\(`harness-retry-state-of') hands it back in its `done' event
+\(`harness-retry--carry'), so a layer above the provider sees what
+authorised the attempt that failed and how much of its budget it spent.
+An ordinary request carries none, and its events are unchanged."
   (pcase-let* ((`(,_ . ,name) (harness-provider-parse-model (plist-get request :model)))
-               (on-event (or (plist-get request :on-event) #'ignore))
+               (on-event (let ((caller (or (plist-get request :on-event) #'ignore))
+                               (state (harness-retry-state-of request)))
+                           (if state
+                               (lambda (event) (funcall caller (harness-retry--carry event request)))
+                             caller)))
                (stream (make-harness-openai--stream
                         :on-event on-event :endpoint endpoint
                         :dialect-state (harness-openai--stream-state endpoint request)))
@@ -1180,8 +1255,9 @@ reply from an endpoint it did not choose."
                  ;; before any of the answer arrived is tried again by the
                  ;; HTTP layer, and one that got further is retried as a
                  ;; step, with the partial answer discarded (see
-                 ;; `harness-retry').
-                 :retry t
+                 ;; `harness-retry').  A dialect whose caller bounds the
+                 ;; attempts itself asks for no lower-layer replay here.
+                 :retry (harness-openai--transport-retry endpoint request)
                  :on-headers (lambda (s headers)
                                (setq status s)
                                (setf (harness-openai--stream-status stream) s)

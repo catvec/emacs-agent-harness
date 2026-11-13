@@ -76,6 +76,10 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+;; What one request has spent travels with it, and a retry of a failed
+;; step continues that request rather than starting another
+;; (`harness-retry--request').
+(require 'harness-retry)
 
 (declare-function harness-tool-title "harness-tools")
 (declare-function harness-tools-tail-line "harness-tools" (text))
@@ -192,6 +196,7 @@ WHY says what stopped it."
   text-node text-buf think-node think-buf
   step-nodes                            ; the nodes this step wrote, for a retry
   (pending 0) waiting-done stop-reason error hosted last-usage started
+  retry                                 ; the request the next step repeats, once a failure decided one
   ending)                               ; a tool ended the turn (hand_in): its provider's usage still counts
 
 (defvar harness-agent--turns (make-hash-table :test 'equal)
@@ -1585,7 +1590,14 @@ the payload)."
              (model (plist-get session :model))
              (state (harness-agent--provider-state sid model))
              (request (harness-agent-step-request
-                       sid state (lambda (ev) (harness-agent--on-event turn ev model)))))
+                       sid state (lambda (ev) (harness-agent--on-event turn ev model))))
+             ;; A step that repeats a failed request is that request: what
+             ;; its attempt spent, and what authorised it, goes with it
+             ;; (`harness-retry--request'), so the attempt bound and the
+             ;; clock continue instead of starting again.  Any other step
+             ;; is a new request and carries nothing.
+             (repeat (harness-agent-turn-retry turn))
+             (request (if repeat (harness-retry-attach request repeat) request)))
         ;; The payload is kept before it is sent: a provider that reads it
         ;; writes its prompt cache, and the next step is continued from it
         ;; (harness-replay.el).  A provider that holds the conversation
@@ -1595,7 +1607,12 @@ the payload)."
             (harness-agent--try (format "keeping the request of %s" sid)
               (harness-call 'replay/save-request request))))
         (puthash sid model harness-agent--step-models)
-        (puthash sid (harness-plist-remove request :on-event) harness-agent--last-requests)
+        ;; What is kept for a cache refresh or the next step is the payload,
+        ;; never the request's own budget: sending the payload again is a new
+        ;; request, and must not spend the failed one's attempts.
+        (puthash sid (harness-plist-remove request :on-event harness-retry--request-key)
+                harness-agent--last-requests)
+        (setf (harness-agent-turn-retry turn) nil)
         (harness-emit 'agent/step-started sid (harness-agent-turn-steps turn))
         (harness-agent--update-activity sid '(:phase waiting))
         (setf (harness-agent-turn-handle turn) (harness-call 'provider/complete request)))))))
@@ -2582,6 +2599,10 @@ Otherwise, and once the turn was cancelled, it ends with `error'."
                     (harness-call 'session/exists-p sid))
                (progn (harness-agent--rewind-step turn)
                       (puthash sid (1+ count) harness-agent--retries)
+                      ;; The step that follows repeats the request that
+                      ;; failed, with what it spent and what authorised it.
+                      (setf (harness-agent-turn-retry turn)
+                            (plist-get decision :state))
                       (harness-agent--step turn))
              (harness-agent--end turn 'error error))))
        (lambda (err)
