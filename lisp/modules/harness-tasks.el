@@ -6842,7 +6842,11 @@ A task being written up stops; once it has stopped, cancelling drops it.
 A task that never started -- waiting for a slot, or in the backlog --
 takes its session with it: it holds the task's priority and nothing
 else, and a write-up's transcript goes with the task it was written
-up for."
+up for.  A task at work emits `task/cancelled' before its turn is
+stopped, so what its session left running outside the turn -- a
+supervisor's workers, a job (`bash_job') -- stops with it: a cancel is
+the user ending the work, and work that goes on without the task is not
+what they asked for."
   (let* ((task (harness-tasks--get id))
          (state (plist-get task :state)))
     (if (or (eq state 'pending) (and (eq state 'refining) (not (harness-tasks--turn-p task))))
@@ -6852,6 +6856,7 @@ up for."
           (when (and sid (harness-call 'session/exists-p sid))
             (harness-call 'session/delete sid))
           nil)
+      (harness-emit 'task/cancelled (harness-tasks--view task))
       (when (and (plist-get task :session) (harness-method-exists-p 'agent/cancel))
         (harness-call 'agent/cancel (plist-get task :session)))
       t)))
@@ -7095,6 +7100,7 @@ turn that stopped without a plan back (`harness-tasks--plan-stop')."
 (harness-declare-event 'task/deleted "(ID) after a task is removed.")
 (harness-declare-event 'task/review "(TASK) when a task's finished work starts waiting for the user's review.")
 (harness-declare-event 'task/done "(TASK HOW) when a task becomes done; HOW is merged, finished, verified or completed.")
+(harness-declare-event 'task/cancelled "(TASK) when the user cancels a task at work: what its session left running outside its turn stops.")
 (harness-declare-event 'task/backlog-mode "(PROJECT MODE) when a project's backlog mode changes: manual or auto.")
 (harness-declare-event 'task/queue "(PROJECT SUSPENDED) when a project's pending queue is suspended or resumed.")
 

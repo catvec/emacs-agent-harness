@@ -41,6 +41,10 @@ The script is chosen from the last user message:
   "stream"      two model calls paced like a real model's: thinking
                 without text, then with it, text, a tool call's input,
                 each call's usage -- for the live token count
+  "jobs"        a server as a job of the session (`bash_job`): one
+                turn starts it, the next reaches it with a bash call,
+                the last stops it -- the workflow a long-lived process
+                needs, over the real sandbox
   a thread      a reply that is a comment in a thread of the task's
                 review, whose <thread> block names the thread
                 (`harness-thread-marker`): a <thread> block answers it

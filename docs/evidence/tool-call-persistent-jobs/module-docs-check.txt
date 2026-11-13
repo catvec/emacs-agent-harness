@@ -1,0 +1,8 @@
+156 pages in docs/modules
+The module pages in docs/modules are out of date: run scripts/module-docs.sh
+Files docs/modules/speech.md and /tmp/tmp.MmRwyDnRwE/speech.md differ
+Files docs/modules/ui-config.md and /tmp/tmp.MmRwyDnRwE/ui-config.md differ
+Files docs/modules/ui.md and /tmp/tmp.MmRwyDnRwE/ui.md differ
+Files docs/modules/ui-memory.md and /tmp/tmp.MmRwyDnRwE/ui-memory.md differ
+Files docs/modules/ui-sessions.md and /tmp/tmp.MmRwyDnRwE/ui-sessions.md differ
+Files docs/modules/ui-supervisor.md and /tmp/tmp.MmRwyDnRwE/ui-supervisor.md differ

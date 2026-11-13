@@ -389,6 +389,23 @@ the same literal would be read as part of the same character instead."
     (set-buffer-multibyte t)
     (buffer-string)))
 
+(ert-deftest harness-util-error-message-is-what-a-caller-reads ()
+  "`harness-error-message' gives the text of a signal, not its wrapper.
+A `harness-error' is the harness's own: its data is what the session and
+the person are shown, so the defined type's own \"Harness error: ...\"
+prefix must not reach them.  Another defined type keeps its own prefix,
+which names what went wrong, and a plain error list reads as its text."
+  ;; The harness's own: the data alone.
+  (should (equal "harness-sandbox-policy is `off' for /tmp/x"
+                 (harness-error-message '(harness-error "harness-sandbox-policy is `off' for /tmp/x"))))
+  (should-not (string-match-p "Harness error"
+                              (harness-error-message '(harness-error "read-only session"))))
+  ;; Another defined type: its own message, then the data.
+  (should (string-match-p "\\`No such harness method" (harness-error-message '(harness-no-such-method "x"))))
+  ;; A plain string, and a list that is no defined type.
+  (should (equal "plain" (harness-error-message "plain")))
+  (should (equal "curl said no" (harness-error-message '(curl "curl said no" :code 56)))))
+
 (ert-deftest harness-util-valid-text ()
   "`harness-valid-text' repairs a raw byte and leaves good text alone."
   ;; Multibyte text with no raw byte: unchanged, not even copied.

@@ -52,6 +52,38 @@
 ;;   so is one in a remote directory, like any command that needs the
 ;;   sandbox.
 ;;
+;;   The runtime is shared, and it is held on demand.  A session may have
+;;   one confined runtime, the harness builds it when the first call needs
+;;   it, and every bash call of the session runs in it while it lasts, so
+;;   a file one call writes is there for the next and so is a process it
+;;   leaves running (docs/design/tool-call-persistent-jobs.md; the
+;;   sandbox-session module).  Nothing of the session is left in it -- no
+;;   command in flight and no process it left running -- and it is
+;;   destroyed, so a session that is not working holds no process at all.
+;;   What persists between calls is its files and its permission
+;;   generation, never a sandbox kept warm for nobody.
+;;
+;;   The runtime is asked of the generic sandbox layer and not of a
+;;   backend: `sandbox/hold' says how the harness's one supervisor is held
+;;   and which lifecycle facts the backend can promise, and the
+;;   sandbox-session module either gets an instance or the reason it
+;;   cannot have one.  Where it cannot -- a session that may only read,
+;;   another host, the `off' policy, a backend whose adapter gives no
+;;   verifiable cancel and teardown -- a call gets a sandbox of its own,
+;;   exactly as before: the same confinement, and a process it leaves
+;;   running ends with its call (`docs/design/tool-call-persistent-jobs.md`
+;;   has the backend table and what each path does and does not promise).
+;;   `sandbox/session' says which of the two a session has, and why.
+;;
+;;   A shared runtime costs one thing, and the settings say it: its mounts
+;;   are fixed when it starts, so a change to what the session may reach
+;;   -- a granted or a revoked directory, a directory made read-only, a
+;;   read-only session, the policy -- ends it, and what it was running
+;;   stops.  The session is told in its transcript.  `bash_job' is the
+;;   same runtime seen as jobs: a run it starts is marked detached and
+;;   listed, with its output and its stop, until the runtime, the job's
+;;   own time or its stop ends it.
+;;
 ;;   Remote (TRAMP) directories run the command on that host,
 ;;   unwrapped, as the ssh tool does (tools-ssh): through
 ;;   `harness-tools-shell-remote-command', with bash, or sh on a host
@@ -121,6 +153,15 @@
 (require 'harness-util)
 (require 'harness-tools)
 (require 'harness-elisp)
+
+;; The sandbox a session's calls share (the sandbox-session module).  It
+;; is asked for at run time, not required: a harness without it, and every
+;; test of one, calls bash exactly as before, with a sandbox per call.
+(declare-function harness-sandbox-session-start-run "harness-sandbox-session"
+                  (ctx cwd command &rest args))
+(declare-function harness-sandbox-session-wait "harness-sandbox-session" (run &optional deadline))
+(declare-function harness-sandbox-session-problem "harness-sandbox-session" (ctx cwd))
+(declare-function harness-tools-jobs--bash-job-shared "harness-tools-jobs" (input ctx))
 
 (defconst harness-tools-shell--program "bash"
   "Shell used by the bash tool.")
@@ -386,74 +427,148 @@ opens the latest line under that."
               "still running \N{U+00B7} no output yet")
             (if last (concat "\n" last) ""))))
 
+(defun harness-tools-shell--bash-shared (input ctx cwd timeout)
+  "Run CTX's command from INPUT in CWD in its session's shared sandbox.
+TIMEOUT is the seconds it may run.  Return a promise of the tool's
+result, or nil where the session has no shared sandbox it can use, in
+which case the caller runs the command in a sandbox of the call's own,
+as before (see `harness-tools-shell--bash-unshared')."
+  (let ((command (plist-get input :command))
+        (report (plist-get ctx :report))
+        (note (plist-get ctx :note))
+        ;; The note's own counters: the command's output arrives in
+        ;; chunks, and its size is not ours to keep whole.
+        (lines 0) (tail "") (noted 0))
+    ;; The method is what says the module is running, not that its file
+    ;; has been loaded once: a harness with no sandbox-session module
+    ;; calls bash exactly as it did before there was one.
+    (when (and (fboundp 'harness-sandbox-session-start-run)
+               (harness-method-exists-p 'sandbox/session)
+               (null (harness-sandbox-session-problem ctx cwd)))
+      (let* ((started (float-time))
+             (run (condition-case err
+                      (harness-sandbox-session-start-run
+                       ctx cwd command
+                       :seconds timeout
+                       :on-output
+                       (lambda (chunk)
+                         (when report (funcall report chunk))
+                         (setq lines (+ lines (cl-count ?\n chunk))
+                               tail (let ((text (concat tail chunk)))
+                                      (if (> (length text) 4000)
+                                          (substring text (- (length text) 4000))
+                                        text)))
+                         (let ((now (float-time)))
+                           (when (and note (> (- now noted) harness-tools-shell--note-interval))
+                             (setq noted now)
+                             (harness-tools-note
+                              ctx (harness-tools-shell--bash-note lines tail))))))
+                    (error (list :error (harness-error-message err))))))
+        (cond
+         ((and (consp run) (eq (car run) :error)) nil)
+         (t
+          (harness-tools-note ctx (harness-tools-shell--bash-note 0 ""))
+          (harness-then
+           (harness-sandbox-session-wait run)
+           (lambda (r)
+             (let ((exit (plist-get r :exit))
+                   (dropped (plist-get r :dropped)))
+               (funcall
+                (if (eql exit 0) #'harness-tool-ok #'harness-tool-error)
+                (harness-tools-shell--format-output r timeout)
+                :meta (list :exit exit :cwd cwd
+                            :duration (- (float-time) started)
+                            :shared-sandbox t
+                            :sandboxed t
+                            :dropped dropped
+                            :log (plist-get r :log))))))))))))
+
 (defun harness-tools-shell--bash (input ctx)
-  "Handler for the bash tool with INPUT under CTX; returns a promise."
+  "Handler for the bash tool with INPUT under CTX; returns a promise.
+The command runs in its session's shared sandbox where the harness can
+hold one (see `harness-sandbox-session'), so its files and the processes
+it leaves running are there for the session's next call; where it
+cannot -- another host, another backend, the `off' policy -- the command
+gets a sandbox of the call's own, as before."
   (let* ((command (plist-get input :command))
          (timeout (min harness-tools-shell--max-timeout
                        (max 1 (harness-tools-shell--number (plist-get input :timeout)
                                                            harness-tools-shell--default-timeout))))
-         (cwd (harness-tools-shell--bash-cwd input ctx))
-         (report (plist-get ctx :report))
-         (note (plist-get ctx :note))
-         ;; The note's own counters: the command's output arrives in
-         ;; chunks, and its size is not ours to keep whole.
-         (lines 0) (tail "") (noted 0))
+         (cwd (harness-tools-shell--bash-cwd input ctx)))
     (cond
      ((or (not (stringp command)) (string-blank-p command))
       (harness-tool-error "Missing command"))
      ((not (file-directory-p cwd))
       (harness-tool-error (format "Working directory does not exist: %s" cwd)))
+     ;; A remote command runs on its own host, unwrapped: the session has
+     ;; no sandbox there to share.
+     ((file-remote-p cwd)
+      (harness-tools-shell--bash-unshared input ctx cwd timeout))
+     ((harness-tools-shell--bash-shared input ctx cwd timeout))
      (t
-      (let* ((remote (file-remote-p cwd))
-             (cmd (condition-case err
-                      (let ((options (harness-tools-shell--sandbox-options ctx)))
-                        ;; A remote command runs unwrapped, so one that needs
-                        ;; the sandbox goes to `harness-tools-shell--wrap', which
-                        ;; refuses it.
-                        (if (and remote (null options))
-                            (harness-tools-shell-remote-command command)
-                          ;; Not a login shell: the harness already has the user's
-                          ;; environment, and a login profile's side effects (starting
-                          ;; an ssh-agent, importing keys) go wrong in a sandbox, whose
-                          ;; PID namespace hides the user's processes from it.
-                          (let ((dirs (harness-tools-shell--session-dirs ctx)))
-                            (harness-tools-shell--wrap
-                             cwd (list harness-tools-shell--program "-c" command)
-                             (delete-dups (delq nil (cons (harness-tools-shell--tmp-dir ctx) (car dirs))))
-                             (append (harness-tools-shell--skill-dirs ctx) (cdr dirs))
-                             options nil nil (harness-tools-shell--tmp-dir ctx)))))
-                    (error (list :error (harness-error-message err))))))
-        (if (and (consp cmd) (eq (car cmd) :error))
-            (harness-tool-error (format "Cannot run command: %s" (plist-get cmd :error)))
-          (let ((started (float-time)))
-            (harness-tools-note ctx (harness-tools-shell--bash-note 0 ""))
-            (harness-then
-             (harness-run-command cmd :cwd cwd :timeout timeout :name "harness-bash"
-                                  :merge-remote-stderr t
-                                  :on-output
-                                  (lambda (chunk)
-                                    (when report (funcall report chunk))
-                                    (setq lines (+ lines (cl-count ?\n chunk))
-                                          tail (let ((text (concat tail chunk)))
-                                                 (if (> (length text) 4000)
-                                                     (substring text (- (length text) 4000))
-                                                   text)))
-                                    (let ((now (float-time)))
-                                      (when (and note (> (- now noted) harness-tools-shell--note-interval))
-                                        (setq noted now)
-                                        (harness-tools-note ctx (harness-tools-shell--bash-note lines tail))))))
-             (lambda (r)
-               (let ((exit (plist-get r :exit)))
-                 (funcall (if (eql exit 0) #'harness-tool-ok #'harness-tool-error)
-                          (harness-tools-shell--format-output r timeout)
-                          :meta (list :exit exit :cwd cwd
-                                      :duration (- (float-time) started)
-                                      :sandboxed (and (not remote)
-                                                      (not (equal (car cmd) harness-tools-shell--program)))))))))))))))
+      (harness-tools-shell--bash-unshared input ctx cwd timeout)))))
+
+(defun harness-tools-shell--bash-unshared (input ctx cwd timeout)
+  "Run INPUT's command in a sandbox of its own call, in CWD, for TIMEOUT.
+This is what a bash call did before a session shared one sandbox, and
+what it still does where no shared sandbox can be held."
+  (let ((command (plist-get input :command))
+        (report (plist-get ctx :report))
+        (note (plist-get ctx :note))
+        ;; The note's own counters: the command's output arrives in
+        ;; chunks, and its size is not ours to keep whole.
+        (lines 0) (tail "") (noted 0))
+    (let* ((remote (file-remote-p cwd))
+           (cmd (condition-case err
+                    (let ((options (harness-tools-shell--sandbox-options ctx)))
+                      ;; A remote command runs unwrapped, so one that needs
+                      ;; the sandbox goes to `harness-tools-shell--wrap', which
+                      ;; refuses it.
+                      (if (and remote (null options))
+                          (harness-tools-shell-remote-command command)
+                        ;; Not a login shell: the harness already has the user's
+                        ;; environment, and a login profile's side effects (starting
+                        ;; an ssh-agent, importing keys) go wrong in a sandbox, whose
+                        ;; PID namespace hides the user's processes from it.
+                        (let ((dirs (harness-tools-shell--session-dirs ctx)))
+                          (harness-tools-shell--wrap
+                           cwd (list harness-tools-shell--program "-c" command)
+                           (delete-dups (delq nil (cons (harness-tools-shell--tmp-dir ctx) (car dirs))))
+                           (append (harness-tools-shell--skill-dirs ctx) (cdr dirs))
+                           options nil nil (harness-tools-shell--tmp-dir ctx)))))
+                  (error (list :error (harness-error-message err))))))
+      (if (and (consp cmd) (eq (car cmd) :error))
+          (harness-tool-error (format "Cannot run command: %s" (plist-get cmd :error)))
+        (let ((started (float-time)))
+          (harness-tools-note ctx (harness-tools-shell--bash-note 0 ""))
+          (harness-then
+           (harness-run-command cmd :cwd cwd :timeout timeout :name "harness-bash"
+                                :merge-remote-stderr t
+                                :on-output
+                                (lambda (chunk)
+                                  (when report (funcall report chunk))
+                                  (setq lines (+ lines (cl-count ?\n chunk))
+                                        tail (let ((text (concat tail chunk)))
+                                               (if (> (length text) 4000)
+                                                   (substring text (- (length text) 4000))
+                                                 text)))
+                                  (let ((now (float-time)))
+                                    (when (and note (> (- now noted) harness-tools-shell--note-interval))
+                                      (setq noted now)
+                                      (harness-tools-note ctx (harness-tools-shell--bash-note lines tail))))))
+           (lambda (r)
+             (let ((exit (plist-get r :exit)))
+               (funcall (if (eql exit 0) #'harness-tool-ok #'harness-tool-error)
+                        (harness-tools-shell--format-output r timeout)
+                        :meta (list :exit exit :cwd cwd
+                                    :duration (- (float-time) started)
+                                    :shared-sandbox nil
+                                    :sandboxed (and (not remote)
+                                                    (not (equal (car cmd) harness-tools-shell--program)))))))))))))
 
 (harness-define-tool "bash"
   :label "Bash"
-  :description "Run a shell command with bash in the working directory (or a subdirectory). Output is stdout, then stderr if any, then the exit status. Long jobs are killed at timeout seconds (default 120). Prefer read_file, grep, glob and edit_file over cat, grep, find and sed. Commands may run in a sandbox that shows the system directories and only the directories the session may use (the working directory, its temporary directory, the directories granted to it), each at its real path; anything else, the rest of the home directory included, looks missing there, so reach it with the file tools, which ask the user. In that sandbox /tmp is the session's temporary directory and TMPDIR is /tmp, so a script that writes /tmp leaves its files where the next command and the file tools find them. The sandbox gives a command no Linux capability, so strace, gdb -p, ping or a raw socket can answer \"Operation not permitted\": ask the user for one with request_escalation (attribute capability, value such as CAP_SYS_PTRACE); it counts inside the sandbox only, never on another machine."
+  :description "Run a shell command with bash in the working directory (or a subdirectory). Output is stdout, then stderr if any, then the exit status. Long commands are killed at timeout seconds (default 120). The sandbox is shared and held on demand: a session may have one confined runtime, a call builds it when one is needed, and every call of the session runs in it while it lasts, so a process a call leaves running is still there for the next call -- a dev server, a display, an emulator, a playtest -- while the files it writes stay where the session works and in its /tmp. When nothing of the session is left in it, no command running and no process it left behind, the runtime is destroyed; a call then builds the next one, and the session's files are still there. A permission change that gives, takes or narrows a directory ends the runtime, stops what it was running, and the session is told so. Where no runtime can be held -- another host, a read-only session, the `off' policy, a sandbox backend that cannot promise a verifiable cancel and teardown -- the command runs in a sandbox of the call's own and a background process ends with it, as it always did. Prefer read_file, grep, glob and edit_file over cat, grep, find and sed. Commands may run in a sandbox that shows the system directories and only the directories the session may use (the working directory, its temporary directory, the directories granted to it), each at its real path; anything else, the rest of the home directory included, looks missing there, so reach it with the file tools, which ask the user. In that sandbox /tmp is the session's temporary directory and TMPDIR is /tmp, so a script that writes /tmp leaves its files where the next command and the file tools find them. The sandbox gives a command no Linux capability, so strace, gdb -p, ping or a raw socket can answer \"Operation not permitted\": ask the user for one with request_escalation (attribute capability, value such as CAP_SYS_PTRACE); it counts inside the sandbox only, never on another machine."
   :schema '(:type "object"
             :properties (:command (:type "string" :description "The command line to run")
                          :timeout (:type "integer" :description "Seconds before the command is killed. Default 120")

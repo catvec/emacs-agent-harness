@@ -32,6 +32,10 @@
 ;;   "stream"      two model calls paced like a real model's: thinking
 ;;                 without text, then with it, text, a tool call's input,
 ;;                 each call's usage -- for the live token count
+;;   "jobs"        a server as a job of the session (`bash_job'): one
+;;                 turn starts it, the next reaches it with a bash call,
+;;                 the last stops it -- the workflow a long-lived process
+;;                 needs, over the real sandbox
 ;;   a thread      a reply that is a comment in a thread of the task's
 ;;                 review, whose <thread> block names the thread
 ;;                 (`harness-thread-marker'): a <thread> block answers it
@@ -207,6 +211,16 @@ temporary directory, deleted when Emacs exits, when the session has none."
                 path))
             harness-provider-demo--layout-images)))
 
+(defun harness-provider-demo--transcript-text (request)
+  "Return the text of REQUEST's messages, joined, for a script to read.
+A script needs what it said before: the id of a job it started, say.
+A tool_result block carries its text as `:content', not as `:text', so
+both are read; anything else is left out."
+  (mapconcat (lambda (m)
+               (mapconcat (lambda (b) (or (plist-get b :text) (plist-get b :content) ""))
+                          (plist-get m :content) " "))
+             (plist-get request :messages) " "))
+
 (defun harness-provider-demo--last-user-text (request)
   "Return the text of the last text block of REQUEST's user messages.
 Not an image's token, [image 1], which the agent puts before each
@@ -333,6 +347,41 @@ one (see the Commentary)."
         (:type text :delta "Done.")
         (:type usage :input 900 :output 60 :cache-read 0 :cache-write 900 :cost 0.003 :context 1500)
         (:type done :stop-reason end-turn)))
+     ((string-match-p "\\bjobs\\b" text)
+      ;; A job of the session's: started in one turn, reached in the next,
+      ;; stopped in the third, so a long-lived server can be watched over
+      ;; the real sandbox.  The id comes from the conversation, so the stop
+      ;; names the job the start made, and the port is the session's own --
+      ;; a session's server does not wait on another session's port.
+      (let* ((port (+ 24000 (% (abs (sxhash-equal (or (plist-get (plist-get request :session) :id)
+                                                      (float-time))))
+                               1000)))
+             (curl (format "curl -fsS --max-time 5 http://127.0.0.1:%d/served.txt" port))
+             (transcript (harness-provider-demo--transcript-text request))
+             (id (and (string-match "job-[a-z0-9]\\{6\\}" transcript)
+                      (match-string 0 transcript))))
+        (cond
+         ((and (string-match-p "\\bstop\\b" text) id)
+          `((:type text :delta "Stopping the job: its sandbox ends with it, and the files it wrote stay.\n")
+            (:type tool-call :id "demo-j4" :name "bash_job" :input (:action "stop" :id ,id))
+            (:type tool-call :id "demo-j5" :name "bash"
+                   :input (:command ,(format "(%s || echo 'no server any more'); cat served.txt" curl)))
+            (:type done :stop-reason end-turn)))
+         ((string-match-p "\\breach\\b" text)
+          `((:type text :delta "Calling the server the job started, from a bash call of its own: another sandbox, another PID namespace, the same port.\n")
+            (:type tool-call :id "demo-j2" :name "bash"
+                   :input (:command ,(format "%s; echo; ls -l served.txt | tr -s ' ' | cut -d' ' -f5,9" curl)))
+            (:type text :delta "\nAnd the session lists it among its own.\n")
+            (:type tool-call :id "demo-j3" :name "bash_job" :input (:action "list"))
+            (:type done :stop-reason end-turn)))
+         (t
+          `((:type text :delta "A server as a job of this session, so the calls after this one reach it. Its sandbox is the session's own: the working directory, the temporary directory, the network, and a PID namespace of the job's.")
+            (:type tool-call :id "demo-j1" :name "bash_job"
+                   :input (:action "start"
+                           :command ,(format "printf 'served-by-the-job\\n' > served.txt; exec python3 -m http.server %d --bind 127.0.0.1" port)
+                           :timeout 300))
+            (:type text :delta "\nStarted. The call that started it is over; the job keeps running, and stop ends it.")
+            (:type done :stop-reason end-turn))))))
      ((string-match-p "\\bwork\\b" text)
       (let ((todos (lambda (&rest statuses)
                      (list :todos (cl-mapcar (lambda (id label status) (list :id id :text label :status status))

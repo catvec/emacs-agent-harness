@@ -8,7 +8,7 @@ Kernel sandbox (bwrap / systemd-run / MXC on macOS, or NVIDIA OpenShell on reque
 - **Source:** [lisp/modules/harness-sandbox.el](../../lisp/modules/harness-sandbox.el)
 - **Loaded:** by default
 - **Requires:** [config](config.md)
-- **Required by:** [secret-sandbox](secret-sandbox.md)
+- **Required by:** [sandbox-session](sandbox-session.md), [secret-sandbox](secret-sandbox.md), [tools-jobs](tools-jobs.md)
 
 ## About
 
@@ -123,6 +123,45 @@ passes -- the harness falls back to the backend `auto` would pick,
 logs why, and `sandbox/status` says so (`:requested`, `:problem`);
 it falls back to no sandbox only when there is no other.
 
+A command runs in a sandbox made for it alone, and the sandbox ends
+with it: nothing a command leaves running outlives the call that ran
+it, where the backend's own sandbox does.  For bwrap, the backend a
+Linux harness picks by default and the one the containment tests
+measure, this is the kernel's: the command runs in a PID namespace of
+its own, and `--die-with-parent` ends that namespace's init when the
+command exits, so the kernel ends every process still in it -- a
+daemon, a background `&` job, and a `nohup` or `setsid` child that
+left the command's process group included, a child that left the
+namespace not being possible.  systemd-run's unit is the command's and
+its cgroup holds everything the command starts: systemd stops the
+unit when the command exits, and killing a unit's cgroup kills its
+members, so a background process goes too -- but systemd-run is not
+given `PrivatePIDs`, so the command is in the machine's PID namespace
+with its own PID, and a process that escaped the cgroup (by starting
+its own scope, say) would not be ended by it.  That is a narrower
+guarantee than bwrap's, and it is the one the backend has.  MXC has no
+PID namespace and no unit: a background process there can outlive the
+call.  OpenShell's ephemeral sandbox is deleted after the command, by
+the gateway, which is the same bound by another rule.
+
+What a command leaves for a later tool call is therefore the files it
+wrote in the directories the caller showed it, not a process: a
+server a later command would connect to has gone, and a caller that
+needs one either starts and stops it within the one command that uses
+it, or runs it as a job of the session's (`bash_job`, the tools-jobs
+module) -- one run in the runtime the session's calls share, meant to
+outlive the call that started it, bounded by its timeout and stopped
+with its session, so that what a later call reaches is a process the
+session owns and the user can see and stop, not one nothing ends.
+The runtime itself is held above this module's `sandbox/wrap`, by
+`sandbox/hold` below and the sandbox-session module above it, so what
+confines a job is what confines a command of the same profile and not
+a backend this file picks.  Nothing here stops the process a
+command of the `off` policy runs unconfined, or one of a remote
+directory, later: those are processes of the user's own.
+docs/design/tool-call-sandbox-lifetime.md records what was measured;
+docs/design/tool-call-persistent-jobs.md is the job.
+
 A command runs in a sandbox made for it alone: openshell's
 `sandbox create` (detached, ephemeral) makes it, `sandbox exec` runs
 the command, whose output, standard error and exit status come back
@@ -232,6 +271,7 @@ Methods: `sandbox/wrap`, `sandbox/status`, `sandbox/profiles`,
 - `sandbox/check` — Start a throwaway OpenShell sandbox, run a command in it, say how it went.
 - `sandbox/confined-p` (cwd) — Non-nil when commands run in CWD are confined by a sandbox backend.
 - `sandbox/detect` — Look for the backends again, choose one, and return `sandbox/status`.
+- `sandbox/hold` (cwd command &rest opts) — Return how COMMAND can be held as a confined instance running in CWD.
 - `sandbox/profiles` (&optional cwd) — Say which sandbox profiles `sandbox/wrap` can enforce for CWD, and how.
 - `sandbox/status` — Return (:backend BACKEND :available (BACKENDS…) :policy POLICY :limits (TEXT…)).
 - `sandbox/wrap` (cwd command &rest opts) — Return COMMAND (a list of strings) wrapped to run confined in CWD.

@@ -138,6 +138,8 @@ window shows when it is shown again.
 - `permission/revoke-dir` ([perms](perms.md))
 - `sandbox/check` ([sandbox](sandbox.md))
 - `sandbox/detect` ([sandbox](sandbox.md))
+- `sandbox/job-stop` ([tools-jobs](tools-jobs.md))
+- `sandbox/jobs` ([tools-jobs](tools-jobs.md))
 
 ### Events it hears over ACP
 

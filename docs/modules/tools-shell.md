@@ -8,7 +8,7 @@ Bash (asynchronous, sandboxed when available) and Emacs Lisp evaluation.
 - **Source:** [lisp/modules/harness-tools-shell.el](../../lisp/modules/harness-tools-shell.el)
 - **Loaded:** by default
 - **Requires:** [tools](tools.md)
-- **Required by:** [tools-ssh](tools-ssh.md)
+- **Required by:** [sandbox-session](sandbox-session.md), [tools-jobs](tools-jobs.md), [tools-ssh](tools-ssh.md)
 
 ## About
 
@@ -61,6 +61,38 @@ Two ways for a model to run things:
   sandbox cannot give them (systemd-run, MXC, NVIDIA OpenShell), and
   so is one in a remote directory, like any command that needs the
   sandbox.
+
+  The runtime is shared, and it is held on demand.  A session may have
+  one confined runtime, the harness builds it when the first call needs
+  it, and every bash call of the session runs in it while it lasts, so
+  a file one call writes is there for the next and so is a process it
+  leaves running (docs/design/tool-call-persistent-jobs.md; the
+  sandbox-session module).  Nothing of the session is left in it -- no
+  command in flight and no process it left running -- and it is
+  destroyed, so a session that is not working holds no process at all.
+  What persists between calls is its files and its permission
+  generation, never a sandbox kept warm for nobody.
+
+  The runtime is asked of the generic sandbox layer and not of a
+  backend: `sandbox/hold` says how the harness's one supervisor is held
+  and which lifecycle facts the backend can promise, and the
+  sandbox-session module either gets an instance or the reason it
+  cannot have one.  Where it cannot -- a session that may only read,
+  another host, the `off` policy, a backend whose adapter gives no
+  verifiable cancel and teardown -- a call gets a sandbox of its own,
+  exactly as before: the same confinement, and a process it leaves
+  running ends with its call (`docs/design/tool-call-persistent-jobs.md`
+  has the backend table and what each path does and does not promise).
+  `sandbox/session` says which of the two a session has, and why.
+
+  A shared runtime costs one thing, and the settings say it: its mounts
+  are fixed when it starts, so a change to what the session may reach
+  -- a granted or a revoked directory, a directory made read-only, a
+  read-only session, the policy -- ends it, and what it was running
+  stops.  The session is told in its transcript.  `bash_job` is the
+  same runtime seen as jobs: a run it starts is marked detached and
+  listed, with its output and its stop, until the runtime, the job's
+  own time or its stop ends it.
 
   Remote (TRAMP) directories run the command on that host,
   unwrapped, as the ssh tool does (tools-ssh): through
@@ -126,7 +158,7 @@ Two ways for a model to run things:
 
 ### Tools
 
-- `bash` — Run a shell command with bash in the working directory (or a subdirectory). Output is stdout, then stderr if any, then the exit status. Long jobs are killed at timeout seconds (default 120). Prefer read_file, grep, glob and edit_file over cat, grep, find and sed. Commands may run in a sandbox that shows the system directories and only the directories the session may use (the working directory, its temporary directory, the directories granted to it), each at its real path; anything else, the rest of the home directory included, looks missing there, so reach it with the file tools, which ask the user. In that sandbox /tmp is the session's temporary directory and TMPDIR is /tmp, so a script that writes /tmp leaves its files where the next command and the file tools find them. The sandbox gives a command no Linux capability, so strace, gdb -p, ping or a raw socket can answer "Operation not permitted": ask the user for one with request_escalation (attribute capability, value such as CAP_SYS_PTRACE); it counts inside the sandbox only, never on another machine.
+- `bash` — Run a shell command with bash in the working directory (or a subdirectory). Output is stdout, then stderr if any, then the exit status. Long commands are killed at timeout seconds (default 120). The sandbox is shared and held on demand: a session may have one confined runtime, a call builds it when one is needed, and every call of the session runs in it while it lasts, so a process a call leaves running is still there for the next call -- a dev server, a display, an emulator, a playtest -- while the files it writes stay where the session works and in its /tmp. When nothing of the session is left in it, no command running and no process it left behind, the runtime is destroyed; a call then builds the next one, and the session's files are still there. A permission change that gives, takes or narrows a directory ends the runtime, stops what it was running, and the session is told so. Where no runtime can be held -- another host, a read-only session, the `off` policy, a sandbox backend that cannot promise a verifiable cancel and teardown -- the command runs in a sandbox of the call's own and a background process ends with it, as it always did. Prefer read_file, grep, glob and edit_file over cat, grep, find and sed. Commands may run in a sandbox that shows the system directories and only the directories the session may use (the working directory, its temporary directory, the directories granted to it), each at its real path; anything else, the rest of the home directory included, looks missing there, so reach it with the file tools, which ask the user. In that sandbox /tmp is the session's temporary directory and TMPDIR is /tmp, so a script that writes /tmp leaves its files where the next command and the file tools find them. The sandbox gives a command no Linux capability, so strace, gdb -p, ping or a raw socket can answer "Operation not permitted": ask the user for one with request_escalation (attribute capability, value such as CAP_SYS_PTRACE); it counts inside the sandbox only, never on another machine.
 - `elisp` — Evaluate Emacs Lisp with lexical binding in a fresh background Emacs process, never the user's: its working directory is the working directory, its load path has the harness, so a harness library can be required to inspect or drive it, and it is killed at timeout seconds (30 by default). Use it as the Emacs-native alternative to bash for file work, such as a dired-style batch rename; it may run in the same sandbox as bash commands, and sees what they see and has what they have (no Linux capability unless the user gave this session some: request_escalation, attribute capability). Read or drive the user's live Emacs with the emacs_* tools instead. Returns the value of the last form, anything printed to standard-output, and messages logged during evaluation. With snapshot the process starts from a copy of the user's Emacs: the values of its variables and its buffers (name, mode, file, directory, point, text), to compute over. The code can change the copy and never the user's Emacs; the process then runs read-only and offline, whatever the session otherwise has, and is refused where no sandbox can give that. Credentials are left out of the copy by the names of variables and buffers, and the copy says what it left out: (harness-snapshot-info). The variables the process needs for itself, hooks and every variable that holds a function keep the process's own value: read the user's with (harness-user-value 'load-path).
 
 ### Filter chains it runs
@@ -140,6 +172,7 @@ Two ways for a model to run things:
 - `config/get` ([config](config.md)), when it is loaded
 - `emacs/attached` ([acp](acp.md)), when it is loaded
 - `permission/dirs` ([perms](perms.md)), when it is loaded
+- `sandbox/session` ([sandbox-session](sandbox-session.md)), when it is loaded
 - `sandbox/wrap` ([sandbox](sandbox.md)), when it is loaded
 - `session/tmp-dir` ([session](session.md)), when it is loaded
 - `skills/directories` ([skills](skills.md)), when it is loaded

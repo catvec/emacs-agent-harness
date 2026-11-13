@@ -2387,12 +2387,20 @@ list whose first element is no defined error type and whose second is a
 string, (curl MESSAGE :code 56), reads as that string: the details would
 otherwise print as \"peculiar error: \\\"...\\\", :code, 56\".  A defined
 error type keeps its own message, (harness-no-such-method NAME) reading
-as \"No such harness method: NAME\"."
+as \"No such harness method: NAME\", except the harness's own
+`harness-error', whose data is the text a caller reads: its
+\"Harness error: \\\"...\\\"\" wrapper is an internal prefix, not
+something a session or a person is told."
   (cond ((stringp err) err)
         ((and (eq (car-safe err) 'acp-error) (stringp (nth 2 err)) (not (string-empty-p (nth 2 err))))
          (nth 2 err))
         ((and (consp err) (symbolp (car err)) (stringp (cadr err))
               (not (get (car err) 'error-conditions)))
+         (cadr err))
+        ;; A `harness-error' is the harness's own signal: its data is the
+        ;; text a caller reads, and "Harness error: \"...\"" around it is
+        ;; an internal prefix, not what a session or a person is told.
+        ((and (eq (car-safe err) 'harness-error) (stringp (cadr err)))
          (cadr err))
         ((and (consp err) (symbolp (car err)))
          (condition-case nil (error-message-string err)

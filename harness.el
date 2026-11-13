@@ -141,7 +141,7 @@ after changing it run \\[harness-restart]."
   '(access acp agent compaction config images linking mcp naming perms priority project provider provider-check provider-claude
     replay resilience retry sandbox session store usage worktree
     tools tools-agent tools-emacs tools-fs tools-plan tools-question tools-session-info
-    tools-shell tools-todo
+    tools-shell tools-todo tools-jobs sandbox-session
     computers tools-computers
     ui ui-chat ui-compose ui-notify ui-pending ui-server ui-sessions ui-computers)
   "The modules that load whatever `harness-enabled-modules' says.
@@ -151,7 +151,8 @@ on after a restart and reporting the ones that stall, session names,
 the links agents put in their messages to sessions, messages, tool
 calls and threads,
 the file, shell and Emacs tools with the permissions and the sandbox
-that guard them, the pictures tools return, kept as the tool saw them,
+that guard them, the long-lived jobs a session's later calls reach
+(`bash_job'), the pictures tools return, kept as the tool saw them,
 the access view of what each session may reach and
 how its calls were judged, the tools that ask the user, plan, keep a todo list,
 describe the session and start sub-agents, worktrees, usage and

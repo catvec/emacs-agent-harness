@@ -1,0 +1,71 @@
+
+(Shell command succeeded with no output)
+Session: 67597ac5-8252-4c09-b868-dc2e965c5211
+Sandbox: (:backend bwrap :available (bwrap systemd) :policy preferred :limits nil)
+
+== Call 1: launch the game as a job of the session ==
+job-wrrn3d started · runs until 12:04, or until stop
+  exec python3 game.py --dir . --port 26786
+  in /tmp/harness-tmp-l1HYjg/
+  output: /tmp/harness-test-state-cWq2Vj/session-tmp/67597ac5-8252-4c09-b868-dc2e965c5211/job-wrrn3d.log
+
+== Call 2: a later call takes a screenshot of the running game ==
+the game says: tick 1 · score 0 · at 160,100 · caught nothing
+exit 0
+screenshot: 01-launch.png (2891 bytes)
+
+== Call 3: another call sends it input ==
+tick 18 · score 0 · at 178,112 · caught nothing
+exit 0
+the game is at 178,112
+
+== Call 4: a later call takes the second screenshot, and the move is in it ==
+screenshot: 02-after-input.png (2958 bytes)
+the game says: tick 20 · score 0 · at 178,112 · caught nothing
+exit 0
+the world file, as a call of its own reads it: ticks 20 score 0 at 178 112
+exit 0
+
+== Call 5: the playtest leaves a file the harness's own tools read ==
+hiscore 0 tick 22
+exit 0
+exit 0
+read by the file tools, not by a shell: hiscore 0 tick 22
+exit 0
+
+== Call 6: the game is still the session's, and lists as a job ==
+job-wrrn3d  running · 1.2s of 5m00s · pid 9  exec python3 game.py --dir . --port 26786
+the runtime that holds it: bwrap, running, holding 1 command
+
+== Call 7: stop it, and nothing of it answers or draws ==
+job-wrrn3d stopped; its files stay where it wrote them
+after the stop: no game any more
+exit 0
+the frame the game drew was last written at 1794416350
+exit 0; a second later it is 1794416350
+exit 0
+the files it wrote are still there: control.json frame.png hiscore.txt status.txt world.json
+exit 0
+the runtime the game was in: bwrap, running
+
+== Call 8: the runtime went when nothing of the session was left in it ==
+runtime: none
+and the session's next call builds another, with its files intact: hiscore 0 tick 22
+exit 0
+pid-1: bwrap
+exit 0
+
+== Call 9: the working directory is downgraded, and the runtime cannot write in it ==
+/tmp/harness-tmp-l1HYjg/ (the working directory) is given up for this session: it may still be read, not written. Ask the user with request_escalation if you need it again.
+a write into the downgraded directory, from a call in 67597ac5-8252-4c09-b868-dc2e965c5211: REFUSED
+hiscore 0 tick 22
+exit 0
+--- stderr ---
+/tmp/harness-test-state-cWq2Vj/session-tmp/67597ac5-8252-4c09-b868-dc2e965c5211/sandbox/runs//r0a6brjz060/cmd: line 2: /tmp/harness-tmp-l1HYjg/after-downgrade.txt: Read-only file system
+exit 0
+the file exists anyway: nil
+the profile of the runtime it has now says: cwd-writable=nil
+
+== The screenshots, side by side ==
+wrote /tmp/game-shots/jobs-game-01-launch-and-02-after-input.png (1956, 650)
+the screenshots, kept: /tmp/game-shots/jobs-game-01-launch-and-02-after-input.png

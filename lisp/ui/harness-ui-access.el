@@ -144,6 +144,9 @@ one fetch covers.")
   "What `access/judgements' said last, for the buffer's filter.
 The Overview page asks for the counts only, the newest judgement beside them.")
 
+(defvar-local harness-ui-access--jobs nil
+  "What `sandbox/jobs' said last of this buffer's session's jobs.")
+
 (defvar-local harness-ui-access--error nil
   "Why the last fetch failed, a string, or nil.")
 
@@ -285,9 +288,11 @@ pages draw none, and ask for none."
     (let* ((sid harness-ui-session-id)
            (page harness-ui-access--page)
            (judged (and (memq page '(overview judgements)) t))
+           (jobs-p (eq page 'overview))
            (limit (if (eq page 'judgements) harness-ui-access-judgements-limit 1))
            (generation (cl-incf harness-ui-access--generation))
-           (describe nil) (judgements nil) (left (if judged 2 1)) (failure nil)
+           (describe nil) (judgements nil) (jobs nil)
+           (left (+ 1 (if judged 1 0) (if jobs-p 1 0))) (failure nil)
            (current-p (lambda ()
                         (and (buffer-live-p buffer)
                              (= generation (buffer-local-value 'harness-ui-access--generation buffer)))))
@@ -298,7 +303,8 @@ pages draw none, and ask for none."
                            (setq harness-ui-access--error failure)
                          (setq harness-ui-access--error nil
                                harness-ui-access--describe describe
-                               harness-ui-access--judgements judgements))
+                               harness-ui-access--judgements judgements
+                               harness-ui-access--jobs jobs))
                        (harness-ui-access--render)))))
            (failed (lambda (e)
                      (unless (harness-ui-connection-replaced-p e)
@@ -313,7 +319,13 @@ pages draw none, and ask for none."
                          (append (list :session-id sid :limit limit)
                                  (and (eq page 'judgements) (harness-ui-access--filter-params)))
                          (lambda (j) (setq judgements j) (funcall done))
-                         failed)))))
+                         failed))
+      (when jobs-p
+        ;; A harness without the jobs module answers that it has none, and
+        ;; the page draws none; a call that fails leaves what it had.
+        (harness-ui-call "_harness/sandbox/jobs" (list :session-id sid)
+                         (lambda (entries) (setq jobs entries) (funcall done))
+                         (lambda (_e) (funcall done)))))))
 
 (defun harness-ui-access--schedule (buffer)
   "Fetch BUFFER again soon, or once a window shows it."
@@ -531,13 +543,67 @@ SANDBOX is the `:sandbox' of `access/describe'."
     ("mxc" "MXC")
     (_ backend)))
 
+(defun harness-ui-access--shared-line (shared)
+  "Return the line the Sandbox row says of SHARED, a session's runtime.
+It is the adjective that says whether the session can hold one and
+whether it holds one now, then what it is doing and how many of the
+session's processes run in it; where it cannot, the reason.  A runtime is
+built on demand, so a session that is not working holds none and says so
+rather than reading as broken.  One that holds a runtime is told what a
+permission change costs it, because that is where access is changed:
+
+  Shared · bwrap · held · running · 2 processes
+  Shared · bwrap · held · 1 process · restart on permission change
+  Shared · no runtime
+  Not shared · read-only session
+
+`Owned' counts what no command of the harness started -- a server, a
+display, a game a command left running -- because that is what keeps the
+runtime alive."
+  (let ((available (harness-ui-access--true-p (plist-get shared :available)))
+        (held (harness-ui-access--true-p (plist-get shared :held)))
+        (problem (harness-ui-access--str (plist-get shared :problem)))
+        (state (harness-ui-access--str (plist-get shared :state)))
+        (processes (plist-get shared :processes))
+        (owned (plist-get shared :owned))
+        (backend (let ((name (harness-ui-access--str (plist-get shared :backend))))
+                   (and name (harness-ui-access--backend-label name)))))
+    (cond
+     ((null shared) nil)
+     ((not available)
+      (format "Not shared · %s" (or problem "no reason given")))
+     ((not held) "Shared · no runtime")
+     (t
+      (string-join
+       (delq nil
+             (list "Shared"
+                   backend
+                   "held"
+                   (or state "not started")
+                   (and (integerp processes) (> processes 0)
+                        ;; The count and the noun, plural said whole:
+                        ;; counting appends an s, and this one ends in
+                        ;; one.
+                        (format "%d %s" processes
+                                (if (= processes 1) "process" "processes")))
+                   (and (integerp owned) (> owned 0)
+                        (format "%d owned" owned))
+                   (and (integerp processes) (>= processes 1)
+                        ;; What sharing costs, where access is changed: the
+                        ;; mounts are fixed when the runtime starts.
+                        "restart on permission change · processes stop")))
+       " · ")))))
+
 (defun harness-ui-access--insert-sandbox (d)
   "Insert the sandbox row of the settings of the session described as D.
 It names the backend, and says whether commands in the session's
 directory run confined, which backends this machine has and the policy.
 A backend that was asked for and could not be used (OpenShell, with no
 gateway to reach) is named beside the one in use, with why, and what
-the backend in use cannot do of the access model is listed under it."
+the backend in use cannot do of the access model is listed under it.
+The sandbox the session's calls share is named too, and what a
+permission change does to it, so a user changing access knows what it
+stops."
   (let* ((sandbox (plist-get d :sandbox))
          (backend (or (harness-ui-access--str (plist-get sandbox :backend)) "none"))
          (available (mapcar #'harness-ui-access--str (plist-get sandbox :available)))
@@ -570,7 +636,10 @@ the backend in use cannot do of the access model is listed under it."
            (append (and requested
                         (list (format "%s cannot be used: %s" (harness-ui-access--backend-label requested)
                                       (or problem "no reason given"))))
-                   (mapcar (lambda (line) (concat "Limit · " line)) limits))))))
+                   (mapcar (lambda (line) (concat "Limit · " line)) limits)
+                   (when-let* ((shared (harness-ui-access--shared-line
+                                        (plist-get d :shared))))
+                     (list shared)))))))
 
 (defun harness-ui-access--insert-mode (d)
   "Insert the permission mode row of the settings of the session described as D.
@@ -835,6 +904,92 @@ only where it lies: a third of what is kept is the start."
            (head (max 1 (/ keep 3)))
            (tail (- keep head)))
       (concat (substring path 0 head) "…" (substring path (max head (- (length path) tail)))))))
+
+(defun harness-ui-access--job-state (state)
+  "Return what the view says of a job's STATE, a string from the harness."
+  (pcase (harness-ui-access--str state)
+    ("running" (propertize "running" 'face 'harness-ui-access-allowed-face))
+    ("exited" (propertize "exited" 'face 'harness-dim-face))
+    ("stopped" (propertize "stopped" 'face 'harness-ui-access-waiting-face))
+    ("failed" (propertize "failed" 'face 'harness-ui-access-denied-face))
+    (_ (or (harness-ui-access--str state) "unknown"))))
+
+(defun harness-ui-access--job-line (job)
+  "Return the row of a job's own column, for the view's Jobs section.
+The job's id, what it is doing and how long of its time it has run."
+  (let ((span (if-let* ((timeout (plist-get job :timeout)))
+                  (format "%s/%s" (harness-format-duration (or (plist-get job :elapsed) 0))
+                          (harness-format-duration timeout))
+                (harness-format-duration (or (plist-get job :elapsed) 0)))))
+    (format "%s  %s  %s"
+            (plist-get job :id)
+            (harness-ui-access--job-state (plist-get job :state))
+            ;; "12.0s/20m00s" is the widest a pair of these is: the
+            ;; elapsed time and the time the job may run.  Cutting it
+            ;; would hide the bound, so the column is that wide.
+            (harness-ui-access--pad span 13))))
+
+(defun harness-ui-access--job-note (job)
+  "Return the line under a job's row: why it ended, or that it runs yet."
+  (let ((state (harness-ui-access--str (plist-get job :state)))
+        (reason (harness-ui-access--str (plist-get job :reason))))
+    (cond (reason reason)
+          ((equal state "running")
+           (format "output %s" (harness-abbreviate-file-name (or (plist-get job :log) ""))))
+          (t nil))))
+
+(defun harness-ui-access--insert-jobs (d)
+  "Insert the jobs section of the session described as D.
+A job is a process a later call reaches: it runs it, this view shows it,
+and [Stop] ends it.  A harness that cannot hold one here says why."
+  (let* ((sandbox (plist-get d :sandbox))
+         ;; The entries come from `sandbox/jobs', which the page fetched
+         ;; beside the description; a caller that hands them in the
+         ;; description (a test) has them there.
+         (jobs (or (plist-get d :jobs) harness-ui-access--jobs))
+         (problem (harness-ui-access--str (plist-get (plist-get sandbox :jobs) :problem))))
+    (harness-ui-access--heading
+     "Jobs" 'jobs
+     (cond (problem (format "unavailable · %s" problem))
+           ;; What the section is for is only worth a line when the page is
+           ;; narrow enough to need it: a heading alone says it.
+           (t nil)))
+    (unless problem
+      (if (null jobs)
+          (insert (propertize "  No jobs\n" 'face 'harness-dim-face))
+        (let ((stop (lambda (id) (lambda () (harness-ui-access-stop-job id)))))
+          (dolist (job jobs)
+            (let* ((start (point))
+                   (id (plist-get job :id))
+                   (command (harness-ui-one-line (or (plist-get job :command) "")))
+                   (lead (format "  %s  " (harness-ui-access--job-line job)))
+                   ;; A job that already ended has nothing to stop: the
+                   ;; button is for one that runs.
+                   (button (and (equal "running" (harness-ui-access--str (plist-get job :state)))
+                                (harness-ui-access--button
+                                 "[Stop]" (funcall stop id)
+                                 "Stop the job · its sandbox ends with it" nil)))
+                   ;; The command shares the row with the button when the
+                   ;; window has room for both; in a narrow one it takes a
+                   ;; line of its own under them, as a directory's buttons
+                   ;; go under it, rather than cut what a reader needs.
+                   (room (- (harness-ui-access--width) (string-width lead)
+                            (if button 11 1)))
+                   (stacked (< (- room (string-width command)) 1)))
+              (if stacked
+                  (progn
+                    (insert (string-trim-right lead) "\n")
+                    (harness-ui-access--insert-note command "      ")
+                    (when button (insert "      " button "\n")))
+                (insert lead (propertize command 'face 'harness-dim-face)
+                        (if button "  " "") (or button "") "\n"))
+              ;; The note lines up under the row whatever the window did
+              ;; with it: the job's output, or why it ended.
+              (when-let* ((note (harness-ui-access--job-note job)))
+                (harness-ui-access--insert-note note (if stacked "      " "  ")))
+              (add-text-properties start (point)
+                                   (list 'harness-ui-access-anchor (cons 'job id))))))))
+    (when problem (insert "\n"))))
 
 (defun harness-ui-access--insert-dirs (d)
   "Insert the directories section of the session described as D.
@@ -1485,6 +1640,7 @@ EXPANDED are the ids of the calls to draw unfolded."
          (harness-ui-access--insert-judgements harness-ui-access--judgements expanded))
         (_
          (harness-ui-access--insert-settings d)
+         (harness-ui-access--insert-jobs d)
          (harness-ui-access--insert-dirs d)
          (harness-ui-access--insert-details d harness-ui-access--judgements)))))
     (let ((restore (lambda (spot)
@@ -1658,6 +1814,12 @@ a kernel without Landlock."
   "Keep this buffer's session from writing when ON, else let it write."
   (harness-ui-call "_harness/access/set-read-only" (list :session-id (harness-ui-access--session) :on (if on t :false))
                    (harness-ui-access--after (if on "Writing off" "Writing on"))))
+
+(defun harness-ui-access-stop-job (id)
+  "Stop the job ID of this buffer's session, and draw the section again.
+Its sandbox ends with it, so every process the job started goes too."
+  (harness-ui-call "_harness/sandbox/job-stop" (list :session-id (harness-ui-access--session) :id id)
+                   (harness-ui-access--after (format "%s stopped" id))))
 
 (defun harness-ui-access-toggle-writing ()
   "Make this buffer's session read-only, or let it write again."

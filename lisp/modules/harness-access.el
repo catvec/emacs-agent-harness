@@ -154,6 +154,14 @@
 (require 'harness-readonly)
 (require 'harness-computers)
 
+;; The sandbox a session's calls share (the sandbox-session module).  It
+;; is asked for at run time, not required: a harness without it has no
+;; shared sandbox, and the access view says so.
+(declare-function harness-sandbox-session-problem "harness-sandbox-session" (ctx cwd))
+(declare-function harness-sandbox-session-sandbox "harness-sandbox-session" (session-id))
+(declare-function harness-sandbox-session-state "harness-sandbox-session" (sandbox))
+(declare-function harness-sandbox-session-live-runs "harness-sandbox-session" (sandbox))
+
 (defvar harness-corporate-mode)
 
 ;;;; Names
@@ -1562,7 +1570,43 @@ the tool, the reason, the call id or the call's title) and `:limit'
                   :remote remote
                   :module (and status t)
                   ;; What the backend cannot do of the access model, in lines.
-                  :limits (plist-get status :limits))
+                  :limits (plist-get status :limits)
+                  ;; Whether a long-lived job can run here, and why not: the
+                  ;; access view says it where it lists the session's jobs,
+                  ;; so a user meets the reason before a job is refused.
+                  :jobs (and (fboundp 'harness-tools-jobs--backend-problem)
+                             (list :available (and (null (harness-tools-jobs--backend-problem)) t)
+                                   :problem (harness-tools-jobs--backend-problem)))
+                  ;; The sandbox a session's calls share (the sandbox-session
+                  ;; module): whether it has one, what it is doing, and why
+                  ;; not where it cannot.  The settings say what sharing
+                  ;; costs, so a user who changes access knows before they
+                  ;; do it that a restart stops what the sandbox runs.
+                  :shared (and (fboundp 'harness-sandbox-session-problem)
+                               (let* ((ctx (list :session-id (plist-get session :id)
+                                                 :cwd (plist-get session :cwd)
+                                                 :host (plist-get session :host)))
+                                      (problem (harness-sandbox-session-problem
+                                                ctx (plist-get session :cwd)))
+                                      (sandbox (and (fboundp 'harness-sandbox-session-sandbox)
+                                                    (harness-sandbox-session-sandbox
+                                                     (plist-get session :id)))))
+                                 (list :available (and (null problem) t)
+                                       :problem problem
+                                       ;; A runtime exists only while the
+                                       ;; session is using it: no state and
+                                       ;; no count where it holds none, and
+                                       ;; which backend holds it when it does.
+                                       :held (and sandbox t)
+                                       :backend (and sandbox (plist-get sandbox :backend))
+                                       :state (and sandbox (harness-sandbox-session-state sandbox))
+                                       :generation (and sandbox (plist-get sandbox :generation))
+                                       :idle-seconds (and (boundp 'harness-sandbox-session-idle-seconds)
+                                                          harness-sandbox-session-idle-seconds)
+                                       :processes (and sandbox
+                                                       (length (harness-sandbox-session-live-runs
+                                                                sandbox)))
+                                       :owned (and sandbox (plist-get sandbox :owned))))))
             ;; The backend that was asked for and could not be used, and why.
             (and (plist-get status :requested)
                  (list :requested (plist-get status :requested)
@@ -1717,7 +1761,10 @@ own) and `:read-only-by' (another module's policy), `:profile',
 nil), `:secrets' (`secrets/status' for this session, or `:available'
 nil without that module), `:dirs' (`permission/dirs' entries with
 `:read-only', and the directories it gave up with `:dropped'),
-`:inspect' and `:skills'
+`:shared' (`:available', `:problem', `:held', `:backend', `:state',
+`:generation', `:idle-seconds', `:processes' and `:owned' of the runtime
+the session's calls share, which exists only while it is used), `:inspect'
+and `:skills'
 \(directories every read may reach), `:tools' (`:on', `:off' entries with
 `:why', `:builtin'), `:never-ask' and `:rules' (`:session', `:always',
 `:pinned')."

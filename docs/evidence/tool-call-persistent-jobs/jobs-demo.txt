@@ -1,0 +1,37 @@
+Session: 17efe903-3201-4906-b8c6-be050dd72484
+Sandbox: (:backend bwrap :available (bwrap systemd) :policy preferred :limits nil)
+
+== Call 1: start a server as a job of the session ==
+job-obe7zq started · runs until 02:53, or until stop
+  printf 'written-in-call-1\n' > served.txt
+  in /tmp/harness-tmp-2PgtZ6/
+  output: /tmp/harness-test-state-BSWLqa/session-tmp/17efe903-3201-4906-b8c6-be050dd72484/job-obe7zq.log
+
+== Call 2: a separate bash call reaches it ==
+call 2 got: written-in-call-1
+exit 0
+
+== Call 3: another bash call, another sandbox, still reachable ==
+call 3 got: <!DOCTYPE HTML>
+18 served.txt
+exit 0
+
+job-obe7zq  running · 118ms of 2m00s · pid 8  printf 'written-in-call-1\n' > served.txt
+
+== Call 4: the job writes a file the file tools see ==
+written-in-call-1
+
+== Call 5: stop, and the file stays ==
+job-obe7zq stopped; its files stay where it wrote them
+call 6 got: no server any more
+exit 0
+served.txt still there: t
+
+== Confinement, on a call that runs now ==
+pid-1: bwrap
+exit 0
+
+== What a job cannot reach, in its own output ==
+pid-1: bwrap
+secret outside the session: grep: /tmp/harness-tmp-c4UQj2/secret.txt: No such file or directory
+hidden

@@ -113,6 +113,45 @@
 ;; logs why, and `sandbox/status' says so (`:requested', `:problem');
 ;; it falls back to no sandbox only when there is no other.
 ;;
+;; A command runs in a sandbox made for it alone, and the sandbox ends
+;; with it: nothing a command leaves running outlives the call that ran
+;; it, where the backend's own sandbox does.  For bwrap, the backend a
+;; Linux harness picks by default and the one the containment tests
+;; measure, this is the kernel's: the command runs in a PID namespace of
+;; its own, and `--die-with-parent' ends that namespace's init when the
+;; command exits, so the kernel ends every process still in it -- a
+;; daemon, a background `&' job, and a `nohup' or `setsid' child that
+;; left the command's process group included, a child that left the
+;; namespace not being possible.  systemd-run's unit is the command's and
+;; its cgroup holds everything the command starts: systemd stops the
+;; unit when the command exits, and killing a unit's cgroup kills its
+;; members, so a background process goes too -- but systemd-run is not
+;; given `PrivatePIDs', so the command is in the machine's PID namespace
+;; with its own PID, and a process that escaped the cgroup (by starting
+;; its own scope, say) would not be ended by it.  That is a narrower
+;; guarantee than bwrap's, and it is the one the backend has.  MXC has no
+;; PID namespace and no unit: a background process there can outlive the
+;; call.  OpenShell's ephemeral sandbox is deleted after the command, by
+;; the gateway, which is the same bound by another rule.
+;;
+;; What a command leaves for a later tool call is therefore the files it
+;; wrote in the directories the caller showed it, not a process: a
+;; server a later command would connect to has gone, and a caller that
+;; needs one either starts and stops it within the one command that uses
+;; it, or runs it as a job of the session's (`bash_job', the tools-jobs
+;; module) -- one run in the runtime the session's calls share, meant to
+;; outlive the call that started it, bounded by its timeout and stopped
+;; with its session, so that what a later call reaches is a process the
+;; session owns and the user can see and stop, not one nothing ends.
+;; The runtime itself is held above this module's `sandbox/wrap', by
+;; `sandbox/hold' below and the sandbox-session module above it, so what
+;; confines a job is what confines a command of the same profile and not
+;; a backend this file picks.  Nothing here stops the process a
+;; command of the `off' policy runs unconfined, or one of a remote
+;; directory, later: those are processes of the user's own.
+;; docs/design/tool-call-sandbox-lifetime.md records what was measured;
+;; docs/design/tool-call-persistent-jobs.md is the job.
+;;
 ;; A command runs in a sandbox made for it alone: openshell's
 ;; `sandbox create' (detached, ephemeral) makes it, `sandbox exec' runs
 ;; the command, whose output, standard error and exit status come back
@@ -1336,7 +1375,7 @@ would break the sandbox itself."
                     (list "--ro-bind" "/dev/null" path))))
 
 (cl-defun harness-sandbox--bwrap-command (program cwd command &key (network t) writable readable read-only
-                                                   scratch capabilities env profile hide tmp)
+                                                   scratch capabilities env profile hide tmp (cwd-writable t))
   "Build the bwrap command line running COMMAND in CWD.
 PROGRAM is the bwrap executable.  NETWORK nil unshares the network
 namespace; WRITABLE and READABLE list extra directories or files to
@@ -1416,7 +1455,11 @@ under it too."
      ;; the working directory stays writable inside a read-only directory.
      (cl-loop for (mode source dest) in mounts
               append (list (if (and (eq mode 'rw) (not read-only)) "--bind" "--ro-bind") source dest))
-     (list (if read-only "--ro-bind" "--bind") cwd cwd)
+     ;; The working directory as the session may have it: one it may
+     ;; only read is shown read-only, whatever the caller lists, so a
+     ;; directory that was downgraded cannot stay writable through the
+     ;; bind that shows it.
+     (list (if (or read-only (not cwd-writable)) "--ro-bind" "--bind") cwd cwd)
      (harness-sandbox--bwrap-git-args cwd read-only registry)
      ;; The scratch directories last, writable whatever holds them.
      (cl-loop for (source . dest) in scratch-mounts
@@ -1447,7 +1490,7 @@ under it too."
      command)))
 
 (cl-defun harness-sandbox--systemd-command (program cwd command &key (network t) writable readable read-only
-                                                     scratch env hide tmp)
+                                                     scratch env hide tmp (cwd-writable t))
   "Build the systemd-run command line running COMMAND in CWD.
 PROGRAM is the systemd-run executable; NETWORK, WRITABLE, READABLE,
 READ-ONLY, SCRATCH, ENV and TMP are as for
@@ -1501,7 +1544,11 @@ reaches them."
                "-p" (concat "ReadWritePaths=" harness-sandbox--tmp))
        (list "-p" "PrivateTmp=yes"))
      (list "-p" "ProtectHome=tmpfs")
-     (if read-only
+     ;; ProtectSystem=strict is what makes everything else read-only; a
+     ;; working directory the session may only read is bound read-only
+     ;; and given no ReadWritePaths, whether or not the command as a whole
+     ;; is read-only.
+     (if (or read-only (not cwd-writable))
          (list "-p" "ProtectSystem=strict"
                "-p" (concat "BindReadOnlyPaths=" cwd))
        (list "-p" (concat "BindPaths=" cwd)
@@ -1590,7 +1637,7 @@ temporary directory (see `harness-sandbox--mxc-command').")
   (directory-file-name (file-truename (expand-file-name path))))
 
 (cl-defun harness-sandbox--mxc-command (program cwd command &key (network t) writable readable read-only tmp
-                                                 scratch extra-env profile hide)
+                                                 scratch extra-env profile hide (cwd-writable t))
   "Build the MXC command line running COMMAND in CWD, on macOS.
 PROGRAM is MXC's executor, mxc-exec-mac, given the whole description
 of the command as base64-encoded JSON (`--config-base64').  NETWORK,
@@ -1669,7 +1716,7 @@ This only reads the file system: it writes nothing, TMP included."
                                                (funcall sources 'rw)
                                                (list common)))))
          (rw (cl-remove-if (lambda (path) (member path protected))
-                           (delq nil (append (unless read-only shown) (list tmp)
+                           (delq nil (append (unless (or read-only (not cwd-writable)) shown) (list tmp)
                                              (mapcar (lambda (m) (harness-sandbox--mxc-path (car m)))
                                                      scratch-mounts)))))
          (system (cl-loop for dir in (append harness-sandbox--mxc-system-dirs
@@ -1679,7 +1726,8 @@ This only reads the file system: it writes nothing, TMP included."
                           when (and path (not (cl-some (lambda (w) (harness-path-within-p w path)) rw)))
                           collect path))
          (ro (cl-remove-if (lambda (path) (member path rw))
-                           (delete-dups (append (and read-only shown) (funcall sources 'ro)
+                           (delete-dups (append (and (or read-only (not cwd-writable)) shown)
+                                                (funcall sources 'ro)
                                                 system protected))))
          ;; The command's status is the command line's, after the
          ;; private TMPDIR is gone.  A command killed by a signal leaves
@@ -2061,7 +2109,7 @@ that is neither is left out, with a line in the log."
                 harness-sandbox--openshell-image-roots)
     "it would replace the sandbox image's own system directory")))
 
-(defun harness-sandbox--openshell-mounts (cwd readable writable read-only scratch)
+(defun harness-sandbox--openshell-mounts (cwd readable writable read-only scratch &optional cwd-writable)
   "Return the mounts of the sandbox of a command in CWD.
 They are lists (TARGET SOURCE MODE).  MODE is `ro' or `rw' for a bind
 mount of SOURCE, and `tmpfs' (SOURCE nil) for the sandbox's $HOME,
@@ -2075,7 +2123,8 @@ READ-ONLY every bind mount is read-only but the scratch directories'.
 `harness-sandbox-extra-read-only-dirs' is not shown: it names
 directories of this machine's toolchains, which the image has no use for.
 A target the gateway would refuse is left out, with a line in the log."
-  (let* ((cwd (directory-file-name (expand-file-name cwd)))
+  (let* ((cwd-writable (if (null cwd-writable) t (harness-json-true-p cwd-writable)))
+         (cwd (directory-file-name (expand-file-name cwd)))
          (real-cwd (directory-file-name (file-truename cwd)))
          (private (and (not (harness-sandbox--home-inside-p cwd)) harness-sandbox--home))
          (git (harness-sandbox--worktree-git cwd))
@@ -2091,7 +2140,7 @@ A target the gateway would refuse is left out, with a line in the log."
                      (harness-sandbox--mounts readable writable cwd private))
         (add target source (if (and (eq mode 'rw) (not read-only)) 'rw 'ro)))
       (dolist (target (delete-dups (list cwd real-cwd)))
-        (add target real-cwd (if read-only 'ro 'rw)))
+        (add target real-cwd (if (or read-only (not cwd-writable)) 'ro 'rw)))
       (when git
         (let ((common (directory-file-name (plist-get git :common))))
           (add common (directory-file-name (file-truename common)) (if read-only 'ro 'rw))
@@ -2104,7 +2153,8 @@ A target the gateway would refuse is left out, with a line in the log."
         (add private nil 'tmpfs)))
     (nreverse mounts)))
 
-(cl-defun harness-sandbox--openshell-spec (cwd &key (network t) writable readable read-only scratch env)
+(cl-defun harness-sandbox--openshell-spec (cwd &key (network t) writable readable read-only scratch env
+                                                 (cwd-writable t))
   "Describe the sandbox of a command in CWD, as a plist.
 NETWORK, WRITABLE, READABLE, READ-ONLY, SCRATCH and ENV are as for
 `harness-sandbox--bwrap-command'.  The plist is `:cwd', `:mounts'
@@ -2115,7 +2165,7 @@ NETWORK, else none: a session without the network gets none), and the
 `:env' of the command as (NAME . VALUE) pairs, ENV after the ones the
 spec sets, so it wins over them."
   (let* ((cwd (directory-file-name (expand-file-name cwd)))
-         (mounts (harness-sandbox--openshell-mounts cwd readable writable read-only scratch))
+         (mounts (harness-sandbox--openshell-mounts cwd readable writable read-only scratch cwd-writable))
          (system harness-sandbox--openshell-system-paths)
          (image-paths (mapcar #'directory-file-name
                               (default-value 'harness-sandbox-openshell-image-paths)))
@@ -2255,7 +2305,7 @@ WHY says what stands in the way."
           (list (format "OpenShell cannot run this command: %s" why))))
 
 (cl-defun harness-sandbox--openshell-command (program cwd command &key (network t) writable readable
-                                                     read-only scratch env)
+                                                     read-only scratch env (cwd-writable t))
   "Build the command line running COMMAND in CWD in an OpenShell sandbox.
 PROGRAM is the openshell executable; NETWORK, WRITABLE, READABLE,
 READ-ONLY, SCRATCH and ENV are as for `harness-sandbox--bwrap-command'.
@@ -2279,7 +2329,8 @@ policy file, and nothing else."
   (let* ((cwd (directory-file-name (expand-file-name cwd)))
          (spec (harness-sandbox--openshell-spec cwd :network network :writable writable
                                                 :readable readable :read-only read-only
-                                                :scratch scratch :env env))
+                                                :scratch scratch :env env
+                                                :cwd-writable cwd-writable))
          (listed (+ (length (plist-get spec :read-only)) (length (plist-get spec :read-write))))
          (policy (progn
                    (when (> listed harness-sandbox--openshell-max-paths)
@@ -2480,6 +2531,12 @@ the debug log."
          (writable (plist-get opts :writable))
          (readable (plist-get opts :readable))
          (read-only (harness-json-true-p (plist-get opts :read-only)))
+         ;; Whether CWD may be written: a working directory the session may
+         ;; only read is shown read-only even when the command itself is not
+         ;; a read-only one.
+         (cwd-writable (if (plist-member opts :cwd-writable)
+                           (and (harness-json-true-p (plist-get opts :cwd-writable)) t)
+                         t))
          (scratch (plist-get opts :scratch))
          (tmp (plist-get opts :tmp))
          (env (plist-get opts :env))
@@ -2538,6 +2595,7 @@ the debug log."
                                         :network network :writable writable :readable readable
                                         :read-only read-only :scratch scratch
                                         :env env :profile profile :hide hide :tmp tmp
+                                        :cwd-writable cwd-writable
                                         :capabilities (and capabilities
                                                            (harness-sandbox--bwrap-capabilities
                                                             command capabilities program)))))
@@ -2549,7 +2607,7 @@ the debug log."
       (harness-sandbox--systemd-command (alist-get 'systemd harness-sandbox--programs) cwd command
                                         :network network :writable writable :readable readable
                                         :read-only read-only :scratch scratch :env env :hide hide
-                                        :tmp tmp))
+                                        :tmp tmp :cwd-writable cwd-writable))
      ((eq harness-sandbox--backend 'openshell)
       (when capabilities
         (harness-sandbox--refuse-capabilities
@@ -2574,7 +2632,8 @@ the debug log."
                                           :network network :writable writable :readable readable
                                           :read-only read-only :tmp tmp
                                           :scratch scratch :extra-env env
-                                          :profile profile :hide hide)
+                                          :profile profile :hide hide
+                                          :cwd-writable cwd-writable)
           (error (ignore-errors (delete-directory tmp t))
                  (signal (car err) (cdr err))))))
      (read-only
@@ -2590,6 +2649,166 @@ the debug log."
       (when capabilities
         (harness-log 'debug "sandbox: no backend, so %S runs with its user's own capabilities" (car command)))
       command))))
+
+;;;; Holding an instance
+
+;; What makes a runtime persist, above the backends and not inside one.
+;;
+;; `sandbox/wrap' says how a command is confined for as long as it runs.
+;; Holding an instance is a different question: how a program's standard
+;; input and output are reached by the harness for longer than one command,
+;; what confines it while it is there, and what the backend can promise
+;; about ending it.  The answer is a command line and a set of capability
+;; facts; the harness's runtime manager
+;; (`harness-sandbox-session') speaks one protocol over that command line
+;; and names no backend at all.
+;;
+;; The capability facts are what a backend *can* promise, not what the
+;; manager hopes:
+;;
+;;   :exec       a command can be started in the instance and its output
+;;               reported as it arrives
+;;   :stream     the output is the harness's own pipe, not a file the
+;;               instance or a command in it can name
+;;   :cancel     one command can be ended without ending the instance
+;;   :enumerate  every process of a command can be found, including one
+;;               that left its process group or session, so a cancel can
+;;               be verified rather than hoped
+;;   :destroy    the whole instance and everything in it can be ended, and
+;;               the end verified
+;;
+;; Two ways to answer are honest.  A backend whose wrapper keeps one program
+;; alive under the harness's own standard input and output -- bwrap, and
+;; systemd-run's unit -- holds the instance itself, and its confinement is
+;; what ends the processes in it.  A backend that only wraps one command at a
+;; time, such as OpenShell -- which creates a sandbox, runs one command in it
+;; and deletes it -- can still hold a supervisor as one long command, and
+;; then either say which facts it cannot give or say that it cannot hold an
+;; instance at all.  A backend with no wrapper, a remote directory and the
+;; `off' policy hold nothing, and the runtime manager falls back to a sandbox
+;; per call: the answer is a reason, never an unconfined persistent process.
+
+(defun harness-sandbox--hold-facts (backend)
+  "Return the lifecycle facts a backend BACKEND can promise, as a plist.
+`:exec', `:stream', `:cancel', `:enumerate' and `:destroy', each t or
+nil, and `:why' for one that is missing when it can be said in a line.
+`harness-sandbox--hold' turns them into the method's answer."
+  (pcase backend
+    ('bwrap
+     ;; The instance is a namespace of its own: one supervisor is its init,
+     ;; its output is the pipe the harness holds, a command's processes are
+     ;; in the namespace (so `/proc' there is all of them, a `setsid' child
+     ;; or a double-forked daemon included), and ending the init ends them.
+     (list :exec t :stream t :cancel t :enumerate t :destroy t))
+    ('systemd
+     ;; One unit holds the supervisor, its output is the pipe
+     ;; systemd-run passes through, and stopping the unit with
+     ;; KillMode=control-group ends its cgroup.  The unit is not given
+     ;; `PrivatePIDs', so the command's processes are in the machine's PID
+     ;; namespace: a process that left the cgroup would not be listed by
+     ;; `/proc' and would not be ended by stopping the unit, and that is
+     ;; the one fact this adapter cannot promise.
+     (list :exec t :stream t :cancel t :enumerate nil :destroy t
+           :why "its unit has no PID namespace of its own"))
+    ('mxc
+     ;; Seatbelt exec runs one program and confines what it does; it has no
+     ;; persistent handle of its own, so the supervisor can be that one
+     ;; program, but there is no second operation to end part of it and no
+     ;; PID namespace to enumerate it by.
+     (list :exec t :stream t :cancel nil :enumerate nil :destroy t
+           :why "Seatbelt has no handle to end one command of it"))
+    ('openshell
+     ;; A sandbox created for the instance can run `sandbox exec' more than
+     ;; once, but the harness's wrapper deletes it with the command that
+     ;; made it.  Retaining it is a change to that adapter, not a claim
+     ;; made here.
+     (list :exec t :stream t :cancel nil :enumerate nil :destroy t
+           :why "its wrapper deletes the sandbox with the command that made it"))
+    (_ nil)))
+
+(cl-defun harness-sandbox--hold (cwd command &key writable readable read-only scratch env hide tmp
+                                      capabilities cwd-writable network)
+  "Return what holds COMMAND as a confined instance in CWD, or why it cannot.
+See `harness-sandbox/hold'.  The backend that answers is the one
+`sandbox/wrap' uses now, and the options are the ones it takes, so what
+confines the instance is what confines a one-shot command of the same
+profile."
+  (let* ((policy (harness-sandbox--policy cwd))
+         (backend harness-sandbox--backend)
+         (facts (harness-sandbox--hold-facts backend))
+         (network (if network network t)))
+    (cond
+     ((eq policy 'off)
+      (list :command nil :backend (or backend 'none) :capabilities nil
+            :why "the sandbox policy is `off'"))
+     ((file-remote-p cwd)
+      (list :command nil :backend (or backend 'none) :capabilities nil
+            :why (format "%s is on another host" (harness-abbreviate-file-name cwd))))
+     ((null backend)
+      (list :command nil :backend 'none :capabilities nil
+            :why (harness-sandbox--missing-programs)))
+     ((not (eq (plist-get facts :exec) t))
+      (list :command nil :backend backend :capabilities facts
+            :why (or (plist-get facts :why)
+                     (format "%s holds no instance" backend))))
+     (t
+      (let ((wrapped
+             (condition-case err
+                 (harness-call 'sandbox/wrap cwd command
+                               :network network :writable writable :readable readable
+                               :read-only (and read-only t) :scratch scratch :env env
+                               :hide hide :tmp tmp :capabilities capabilities
+                               :cwd-writable (and cwd-writable t))
+               (error (list :unavailable (harness-error-message err))))))
+        (cond
+         ((and (consp wrapped) (eq (car wrapped) :unavailable))
+          (list :command nil :backend backend :capabilities facts
+                :why (plist-get wrapped :unavailable)))
+         ((equal wrapped command)
+          ;; No confinement: the policy lets it run unconfined, which is
+          ;; a one-shot answer and not one to hold a process under.
+          (list :command nil :backend backend :capabilities facts
+                :why (format "a command in %s runs unconfined"
+                             (harness-abbreviate-file-name cwd))))
+         (t
+          (list :command wrapped :backend backend :capabilities facts))))))))
+
+(harness-defmethod sandbox/hold (cwd command &rest opts)
+  "Return how COMMAND can be held as a confined instance running in CWD.
+It is the persistent form of `sandbox/wrap': the command is not one that
+runs and ends, but the harness's own supervisor, which must stay alive
+with its standard input and standard output in the harness's hands while
+commands are started in it and their output comes back.  The answer is
+
+  (:command ARGV :backend BACKEND :capabilities PLIST :why TEXT)
+
+where ARGV is the command line that makes COMMAND that instance -- whose
+standard input and output are the harness's own pipe -- or nil, with
+`:why' naming what stands in the way: the `off' policy, another host, no
+backend, or a backend that cannot hold one.  OPS are `sandbox/wrap's,
+with `:cwd-writable' (a working directory the session may only read is
+shown read-only) and `:network'.  `:capabilities' says what the backend
+can promise of the instance's lifecycle: `:exec', `:stream', `:cancel',
+`:enumerate' and `:destroy' (see \"Holding an instance\" above); a fact
+that is nil is one the harness must not rely on, and the runtime manager
+refuses to hold an instance without them rather than pretend.
+
+This is the one place a backend is named for persistence.  Everything
+above it -- the runtime manager, the bash tool, the jobs, the access view
+-- asks this method and never tests for a backend's program."
+  (harness-sandbox--hold cwd command
+           :network (if (plist-member opts :network) (plist-get opts :network) t)
+           :writable (plist-get opts :writable)
+           :readable (plist-get opts :readable)
+           :read-only (harness-json-true-p (plist-get opts :read-only))
+           :scratch (plist-get opts :scratch)
+           :env (plist-get opts :env)
+           :hide (plist-get opts :hide)
+           :tmp (plist-get opts :tmp)
+           :cwd-writable (if (plist-member opts :cwd-writable)
+                             (harness-json-true-p (plist-get opts :cwd-writable))
+                           t)
+           :capabilities (plist-get opts :capabilities)))
 
 (harness-defmethod sandbox/status ()
   "Return (:backend BACKEND :available (BACKENDS…) :policy POLICY :limits (TEXT…)).

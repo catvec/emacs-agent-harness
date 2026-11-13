@@ -480,6 +480,34 @@ and, when OpenShell was asked for and could not be used, which backend that is a
     (should-not (string-match-p "Limit\\|cannot be used\\|Detect again\\|Test OpenShell"
                                 (harness-ui-access-test-setting 'sandbox)))))
 
+(ert-deftest harness-ui-access-sandbox-says-the-shared-sandbox-and-its-cost ()
+  "The Sandbox row says whether the session holds a runtime, and what a change costs.
+The interface text is nouns and noun phrases: no sentence, no punctuation
+of one.  A runtime is built on demand, so a session that holds none says
+that in its own words -- it is not a failure -- and one that holds one
+names the backend holding it, says what it is doing, how many of the
+session's processes run in it, how many it owns that no command of the
+harness started, and what a permission change costs, because that is the
+moment a user makes one.  A session that can hold none at all says why.
+`Harness-ui-access--shared-line' is held to these exact words."
+  (should (equal "Shared · bwrap · held · running · 2 processes · restart on permission change · processes stop"
+                 (harness-ui-access--shared-line
+                  '(:available t :held t :backend "bwrap" :state "running" :processes 2))))
+  (should (equal "Shared · bwrap · held · running · 3 processes · 1 owned · restart on permission change · processes stop"
+                 (harness-ui-access--shared-line
+                  '(:available t :held t :backend "bwrap" :state "running" :processes 3 :owned 1))))
+  (should (equal "Shared · systemd-run · held · starting"
+                 (harness-ui-access--shared-line
+                  '(:available t :held t :backend "systemd" :state "starting" :processes 0))))
+  (should (equal "Shared · no runtime"
+                 (harness-ui-access--shared-line
+                  '(:available t :held :false))))
+  (should (equal "Not shared · read-only session"
+                 (harness-ui-access--shared-line
+                  '(:available :false :problem "read-only session"))))
+  ;; No module, no line: nothing is said of a sandbox the harness has not got.
+  (should-not (harness-ui-access--shared-line nil)))
+
 (ert-deftest harness-ui-access-sandbox-buttons-detect-again-and-test-openshell ()
   "Where OpenShell is installed or was asked for, the Sandbox row has [Detect again],
 which asks the harness to look for the backends again, and [Test OpenShell], which
@@ -1732,6 +1760,123 @@ the answer made in the chat's.  The demo provider is the cheap model."
                        (sort (mapcar #'buffer-name scheduled) #'string<))))
       (should (memq 'secrets/detected harness-acp--forwarded-events))
       (should (memq 'secrets/sources-changed harness-acp--forwarded-events)))))
+
+
+;;;; Jobs
+
+(defun harness-ui-access-test-jobs-text (d)
+  "Return the Jobs section of a description D, drawn alone in a temporary buffer."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'harness-ui-access--width)
+               (lambda () harness-ui-access-test-width)))
+      (harness-ui-access--insert-jobs d)
+      (harness-ui-access-test-flat-string
+       (replace-regexp-in-string "[[:space:]]*\\[Stop\\]" ""
+                                 (buffer-substring-no-properties (point-min) (point-max)))))))
+
+(ert-deftest harness-ui-access-jobs-section-copy ()
+  "The Jobs section says, in its exact words, what each job is doing.
+The heading and its note, a running job's row and its output line, a
+stopped one's reason, the empty state, and what a harness that cannot
+hold a job says instead.  The interface text is nouns and noun phrases:
+no sentence, no punctuation of one."
+  (harness-ui-access-test-with
+    (let* ((log (expand-file-name "job.log" (harness-call 'session/tmp-dir sid)))
+           (running (list :id "job-a1b2c3" :state 'running :command "python3 -m http.server 8000"
+                          :cwd dir :started (- (float-time) 12) :deadline (+ (float-time) 120)
+                          :timeout 1200 :elapsed 12.0 :exit nil :pid 4242 :log log :reason nil :restarts 0))
+           (stopped (list :id "job-d4e5f6" :state 'stopped :command "Xvfb :99" :cwd dir
+                          :started (- (float-time) 300) :deadline (- (float-time) 200)
+                          :timeout 120 :elapsed 100.0 :exit 124 :log log
+                          :reason "it reached its timeout of 2m00s" :restarts 1))
+           (failed (list :id "job-777777" :state 'failed :command "./playtest.sh" :cwd dir
+                         :started (- (float-time) 9) :deadline (float-time)
+                         :timeout 600 :elapsed 9.0
+                         :exit 2 :log log :reason nil :restarts 0)))
+      ;; A harness that cannot hold a job says so, with its reason.
+      (should (equal "Jobs unavailable · MXC on macOS gives a command no PID namespace"
+                     (harness-ui-access-test-jobs-text
+                      (list :sandbox (list :jobs (list :available :false
+                                                       :problem "MXC on macOS gives a command no PID namespace"))))))
+      ;; No jobs at all.
+      (should (equal "Jobs No jobs"
+                     (harness-ui-access-test-jobs-text
+                      (list :sandbox (list :jobs (list :available t)) :jobs nil))))
+      ;; A job that runs, one the harness stopped, one that failed.
+      (should (equal (concat "Jobs "
+                             "job-a1b2c3 running 12.0s/20m00s python3 -m http.server 8000 "
+                             "output " (harness-abbreviate-file-name log))
+                     (harness-ui-access-test-jobs-text
+                      (list :sandbox (list :jobs (list :available t)) :jobs (list running)))))
+      (should (equal (concat "Jobs job-d4e5f6 stopped 1m40s/2m00s Xvfb :99 "
+                             "it reached its timeout of 2m00s")
+                     (harness-ui-access-test-jobs-text
+                      (list :sandbox (list :jobs (list :available t)) :jobs (list stopped)))))
+      (should (equal "Jobs job-777777 failed 9.0s/10m00s ./playtest.sh"
+                     (harness-ui-access-test-jobs-text
+                      (list :sandbox (list :jobs (list :available t)) :jobs (list failed)))))
+      ;; Only a job that runs has a [Stop]: one that ended has nothing
+      ;; left to stop, and a button that did nothing would say otherwise.
+      (cl-flet ((buttons (jobs)
+                  (with-temp-buffer
+                    (cl-letf (((symbol-function 'harness-ui-access--width)
+                               (lambda () 120)))
+                      (harness-ui-access--insert-jobs
+                       (list :sandbox (list :jobs (list :available t)) :jobs jobs))
+                      (goto-char (point-min))
+                      (how-many "\\[Stop\\]")))))
+        (should (= 1 (buttons (list running))))
+        (should (= 0 (buttons (list stopped))))
+        (should (= 0 (buttons (list failed))))
+        (should (= 1 (buttons (list stopped running)))))
+      ;; The button carries its tooltip, and nothing else does.
+      (with-temp-buffer
+        (cl-letf (((symbol-function 'harness-ui-access--width)
+                   (lambda () harness-ui-access-test-width)))
+          (harness-ui-access--insert-jobs
+           (list :sandbox (list :jobs (list :available t)) :jobs (list running)))
+          (goto-char (point-min))
+          (should (search-forward "[Stop]" nil t))
+          (should (equal "Stop the job · its sandbox ends with it"
+                         (get-text-property (match-beginning 0) 'help-echo))))))))
+
+(ert-deftest harness-ui-access-jobs-are-listed-and-stopped-through-the-harness ()
+  "The Overview asks the harness for the session's jobs, draws them, and stops one.
+The job list and the stop are the harness's methods, with the session
+the view shows, so a client of another harness sees its own."
+  (harness-ui-access-test-with
+    (let ((log (expand-file-name "job.log" (harness-call 'session/tmp-dir sid)))
+          (stopped nil)
+          (asked nil))
+      (harness-register-method
+       'sandbox/jobs
+       (lambda (session-id)
+         (push (list :jobs session-id) asked)
+         (list (list :id "job-123456" :state 'running :command "sleep 600" :cwd dir
+                     :started (float-time) :deadline (+ (float-time) 600)
+                     :timeout 600 :elapsed 1.0
+                     :pid 99 :log log :reason nil :restarts 0)))
+       :module 'tools-jobs)
+      (harness-register-method
+       'sandbox/job-stop
+       (lambda (session-id id)
+         (push (list :stop session-id id) asked)
+         (list :id id :state 'stopped :command "sleep 600" :cwd dir
+               :timeout 600 :elapsed 300.0 :log log))
+       :module 'tools-jobs)
+      (unwind-protect
+          (let ((buffer (harness-ui-access-test-open sid)))
+            (harness-ui-access-test-wait-text "job-123456")
+            (should (equal (list :jobs sid)
+                           (cl-find :jobs asked :key #'car)))
+            (with-current-buffer buffer
+              (harness-ui-access-test-push "[Stop]"))
+            (harness-test-wait (lambda () (cl-find :stop asked :key #'car)) 5 "the stop asked")
+            (let ((entry (cl-find :stop asked :key #'car)))
+              (should (equal sid (nth 1 entry)))
+              (should (equal "job-123456" (nth 2 entry)))))
+        (harness-unregister-method 'sandbox/jobs)
+        (harness-unregister-method 'sandbox/job-stop)))))
 
 (provide 'harness-ui-access-test)
 ;;; harness-ui-access-test.el ends here

@@ -11203,6 +11203,53 @@ the latest line under it (`harness-tools-shell--bash-note'; the
 counters come from the chunks, of which only the last 4000 characters
 are kept to find that line).
 
+A `bash' call and the `bash_job' calls of one session run in **one
+confined runtime** that the harness holds on demand
+(`lisp/modules/harness-sandbox-session.el`), so a process a call leaves
+running is still there for the next call, and the files a call writes
+are in the working directory and in the session's `/tmp`, which is why
+the sandbox maps the session's temporary directory there (`:tmp DIR`,
+below).
+
+The runtime is one supervisor in one confined instance, and the
+instance's standard input and standard output are the only channel
+between it and the harness: a command's output comes back as framed
+lines the supervisor writes, never as a file the harness reads, so a
+path a sandbox command can write cannot make the harness read the host's
+file.  The namespace is the runtime's, not the call's, and it is still a
+namespace: a daemon, a background `&` job and a `nohup` or `setsid` child
+all inherit the run's token, are enumerated by it in `/proc`, and end
+with the runtime.
+
+Persistence sits above the generic sandbox API, not in a backend's name.
+`sandbox/hold` returns the command line that holds an instance and the
+lifecycle facts its backend can promise -- `:exec`, `:stream`,
+`:cancel`, `:enumerate`, `:destroy` -- and the runtime manager refuses a
+backend that lacks one, with the adapter's own reason, rather than
+testing a program's name.  bwrap promises all five: its instance is a PID
+namespace, so a run's processes are in `/proc` there and ending the init
+ends them.  systemd-run holds a unit and can stop its cgroup, but it sets
+no `PrivatePIDs`, so it cannot promise `:enumerate` and is refused for
+that.  MXC has no handle to end one command of an instance; OpenShell's
+wrapper deletes its sandbox with the command that made it; no backend,
+the `off` policy, a remote directory and a read-only session hold
+nothing.  Each refusal is what this implementation can verify, not a
+claim that persistence is impossible on that backend.
+
+A runtime with nothing of its session in it -- no command in flight and
+no process it left -- is destroyed
+(`harness-sandbox-session-idle-seconds`), and the session's next call
+builds another with its files intact.  A change to what the session may
+reach ends the runtime with what it was running, and the next call builds
+one from the profile re-read at that moment, so a revoked or downgraded
+directory cannot keep the mounts an older answer gave it.
+`docs/design/tool-call-sandbox-lifetime.md` records the
+measurement of a call's lifetime, and
+`docs/design/tool-call-persistent-jobs.md` the design of a job and why
+it does not weaken the call's.  The elisp tool's background Emacs ends
+the same way, and a remote command and one run unconfined are in no
+namespace of the harness's, so nothing there ends what they leave.
+
 Fast paths run in Emacs (`insert-file-contents`, `directory-files-recursively`,
 `replace`); anything that can take long (grep, bash) runs as an
 asynchronous process started with `start-file-process` so TRAMP works.

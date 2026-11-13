@@ -426,6 +426,7 @@ here logs, emits or returns one.
 ### Events
 
 - `task/backlog-mode` — (PROJECT MODE) when a project's backlog mode changes: manual or auto.
+- `task/cancelled` — (TASK) when the user cancels a task at work: what its session left running outside its turn stops.
 - `task/changed` — (TASK) after a task is submitted or changes state or column.
 - `task/deleted` — (ID) after a task is removed.
 - `task/done` — (TASK HOW) when a task becomes done; HOW is merged, finished, verified or completed.
@@ -533,6 +534,7 @@ here logs, emits or returns one.
 ### Events it emits
 
 - `task/backlog-mode`
+- `task/cancelled`
 - `task/changed`
 - `task/deleted`
 - `task/done`

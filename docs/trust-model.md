@@ -48,6 +48,65 @@ The backends are bubblewrap, `systemd-run` and MXC
 `required`, a session whose commands cannot be confined runs no command
 at all; it never falls back to running them plainly.
 
+The sandbox `bash` builds is the command's, and it ends with the
+command: a process the call leaves running — a server, a daemon, a
+background job, `nohup` or `setsid` included — ends when the call does.
+What such a call leaves for the next is files, in the directories it
+was shown; a listener it started is gone.  That is per backend, and the
+`bash` tool's description says which:
+
+- **bubblewrap** confines the command in a PID namespace of its own that
+  lives no longer than the command does, so the kernel ends what it
+  leaves.
+- **`systemd-run`** gives the command a unit and a cgroup of its own
+  and stops the unit when the command exits, so what the command started
+  ends with it.  It sets no `PrivatePIDs`, so that is the cgroup's
+  lifetime, not a PID namespace's.
+- **MXC** has no PID namespace and no unit, so a background process
+  there is not ended with its call.
+- A command run unconfined or on another host is in no namespace of the
+  harness's at all, and nothing stops what it leaves, then or later.
+
+A process that must outlive a call is a **job**: `bash_job` starts a
+command in the session's shared runtime — one confined instance the
+harness holds, built from the same profile a `bash` call gets and
+destroyed when nothing of the session is left in it — for as long as its
+timeout, reachable from every later call of the same session and nobody
+else's, stopped at its deadline, on its stop action, when its session's
+task is done, cancelled or paused, and when its session ends.  A
+`bash` call of the same session runs in that same runtime, so what a
+call leaves is the next call's; a session that cannot hold one falls
+back to a sandbox per call, and there a process ends with its call.  What
+confines either is the call's profile — same mounts, same
+network, same capabilities, same `--unshare-pid` and `--die-with-parent`
+— so it widens nothing; what differs is who holds it.  Every spawn goes
+through the same checks: the effective policy of the job's directory (a
+project's `.dir-locals.el` can turn it off), a backend whose `sandbox/hold`
+promises the lifecycle facts a runtime needs, the directory still being
+the session's, and the built command differing from the unwrapped one.
+A directory a session lost stops its job rather than being mounted again,
+and a change to any access input — the mount lists, the read-only
+directories, the policy, the network, writing — rebuilds it in the new
+sandbox or stops it.  Which backends answer is asked of
+`harness-sandbox--hold-facts`, not of a program name, and only bwrap was
+measured: it promises every fact, because it is the process the harness
+has and ending it ends the namespace.  systemd-run's adapter declares all
+of them but `:enumerate` — its unit is given no `PrivatePIDs`, so it has
+no PID namespace of its own to list what a command left — and a job is
+refused there for the fact it lacks.  MXC and OpenShell declare neither a
+way to end one command nor a namespace to enumerate, and are refused
+likewise, as are the `off` policy, a remote directory and a read-only
+session.  A long-lived machine
+for a workflow that needs one is still a workspace computer's box
+(`docs/workspace-mode.md`), which belongs to the workspace rather than
+to a session and is not bounded by its permissions.  **A job's network is
+the machine's**: two sessions' jobs share it, an offline session's job is
+offline, and job ownership is not a network namespace — a listener is
+reachable by anything on the machine that may reach the port.  The
+measurements, and the alternatives, are
+`docs/design/tool-call-sandbox-lifetime.md` and
+`docs/design/tool-call-persistent-jobs.md`.
+
 That is a choice, and `preferred` is the default: where no backend is
 available (macOS without MXC, a Linux with neither bubblewrap nor
 `systemd-run`) or the policy is `off`, a command runs plainly, and what

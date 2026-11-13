@@ -3,6 +3,8 @@
 
 (require 'harness-test-helpers)
 
+(defvar harness-sandbox-session--sandboxes)
+
 (defun harness-tools-shell-test--allow (_decision next &rest _)
   "Permissive permission filter for tests."
   (funcall next (list :behavior 'allow)))
@@ -40,6 +42,48 @@ pieces by every command and left a line of its own for each."
                        :key (lambda (spec) (plist-get spec :name)) :test #'equal)))
     (should bash)
     (should (eq t (plist-get bash :coalescable)))))
+
+(ert-deftest harness-tools-shell-bash-description-states-the-process-lifetime ()
+  "The bash tool's description says the sandbox is shared, and how.
+That is where a model reads it before it plans: an agent that did not
+know packed a display server and a game into one command to be safe, and
+wrote the rule into its plan as folklore after finding out.  The
+description now says the session has one sandbox that every call shares,
+that a process a call leaves running is there for the next, and what the
+price is -- a permission change restarts it and stops what it ran --
+and it says which backends and sessions cannot share one.  The sentences
+are held to their exact words, not to a keyword, since a reworded
+description is what a model acts on."
+  (harness-tools-shell-test--setup)
+  (let* ((bash (cl-find "bash" (harness-call 'tools/list)
+                        :key (lambda (spec) (plist-get spec :name)) :test #'equal))
+         (description (plist-get bash :description)))
+    (should (string-search
+             (concat "The sandbox is shared and held on demand: a session may have one confined"
+                     " runtime, a call builds it when one is needed, and every call of the session"
+                     " runs in it while it lasts, so a process a call leaves running is still"
+                     " there for the next call -- a dev server, a display, an emulator, a"
+                     " playtest -- while the files it writes stay where the session works and in"
+                     " its /tmp.")
+             description))
+    (should (string-search
+             (concat "When nothing of the session is left in it, no command running and no"
+                     " process it left behind, the runtime is destroyed; a call then builds the"
+                     " next one, and the session's files are still there.")
+             description))
+    (should (string-search
+             (concat "A permission change that gives, takes or narrows a directory ends the"
+                     " runtime, stops what it was running, and the session is told so.")
+             description))
+    (should (string-search
+             (concat "Where no runtime can be held -- another host, a read-only session, the"
+                     " `off' policy, a sandbox backend that cannot promise a verifiable cancel"
+                     " and teardown -- the command runs in a sandbox of the call's own and a"
+                     " background process ends with it, as it always did.")
+             description))
+    ;; The rest of what a model knew before is still there.
+    (should (string-search "Long commands are killed at timeout seconds (default 120)" description))
+    (should (string-search "TMPDIR is /tmp" description))))
 
 (ert-deftest harness-tools-shell-bash-skips-the-login-profile ()
   "A command runs without the user's login profile.
@@ -321,6 +365,111 @@ the machine's /tmp never sees it.  TMPDIR names /tmp too."
                                                  :content))))
           (ignore-errors (harness-call 'session/delete sid))
           (delete-directory tmp-root t))))))
+
+(ert-deftest harness-tools-shell-bash-calls-share-of-the-sandbox ()
+  "Two bash calls of one session run in the same sandbox, and a third's process is not the second's.
+The session has one sandbox (the sandbox-session module), so a file one
+call writes is there for the next and a process it leaves running is
+still running; every call still has its own timeout, output and exit
+status.  This is what a model that used to pack a display, a game and a
+driver into one command was working around."
+  (harness-tools-shell-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (dolist (m '(store project config provider session sandbox)) (harness-test-load-module m))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (harness-test-load-module 'sandbox-session)
+  (harness-tools-shell-test-in-dir
+    (let* ((harness-sandbox-policy 'required)
+           (sid (plist-get (harness-call 'session/create :cwd root) :id))
+           (run (lambda (command &optional timeout)
+                  (harness-await (harness-call 'tools/execute
+                                               sid (list :id (harness-short-id) :name "bash"
+                                                         :input (list :command command
+                                                                      :timeout (or timeout 30))))
+                                 40))))
+      (unwind-protect
+          (let ((first (funcall run "echo made > shared.txt; echo pid1=$(cat /proc/1/comm)")))
+            (when (and (plist-get first :is-error) (string-search "bwrap:" (plist-get first :content)))
+              (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get first :content))))
+            (should-not (plist-get first :is-error))
+            (should (plist-get (plist-get first :meta) :shared-sandbox))
+            (should (string-search "pid1=bwrap" (plist-get first :content)))
+            ;; The next call, a sandbox of its own before, finds the file.
+            (let ((second (funcall run "cat shared.txt; echo second")))
+              (should-not (plist-get second :is-error))
+              (should (string-search "made" (plist-get second :content)))
+              (should (string-search "second" (plist-get second :content))))
+            ;; And a process one call leaves is there for the next.
+            (funcall run (format "setsid bash -c 'while :; do echo tick >> %s; sleep 0.1; done' >/dev/null 2>&1 & echo left-running"
+                                 (shell-quote-argument (expand-file-name "beats.txt" root))))
+            (harness-test-wait
+             (lambda ()
+               (string-search "kept-going"
+                              (plist-get (funcall run "sleep 0.4; cat beats.txt 2>/dev/null | tail -1; echo kept-going")
+                                         :content)))
+             20 "the next call to find what the last one left running"))
+        (ignore-errors (harness-call 'session/delete sid))
+        ;; The session's runtime ends with it; a session the test deleted
+        ;; left none behind.
+        (should-not (harness-sandbox-session-sandbox sid))))))
+
+(ert-deftest harness-tools-shell-bwrap-ends-a-calls-background-processes ()
+  "A background process a bash call leaves running does not reach the next.
+Under the real bwrap the command's sandbox is a PID namespace of its own
+that ends with the command, so a server started with `&', one that
+`nohup'ed itself and a `setsid' one are all gone by the time the next
+call runs -- while the files the call wrote, in the session's /tmp and
+in the working directory, are still there for it.  This is the rule the
+bash tool's description states; the test holds the behaviour to it."
+  (harness-tools-shell-test--setup)
+  (skip-unless (executable-find "bwrap"))
+  (dolist (m '(store project config provider session sandbox)) (harness-test-load-module m))
+  (harness-sandbox-detect)
+  (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+  (harness-tools-shell-test-in-dir
+    (let* ((harness-sandbox-policy 'required)
+           (sid (plist-get (harness-call 'session/create :cwd root) :id))
+           (tmp (harness-call 'session/tmp-dir sid))
+           (heartbeat (concat tmp "heartbeat.txt"))
+           (plain (expand-file-name "in-workdir.txt" root))
+           (loop (shell-quote-argument
+                  (format "while :; do echo tick >> %s; sleep 0.2; done" (shell-quote-argument heartbeat))))
+           (run (lambda (command)
+                  (harness-await (harness-call 'tools/execute sid (list :id (harness-short-id) :name "bash"
+                                                                        :input (list :command command)))
+                                 30)))
+           (ticks (lambda ()
+                    (with-temp-buffer
+                      (insert-file-contents heartbeat)
+                      (length (split-string (buffer-string) "\n" t))))))
+      (unwind-protect
+          (let ((first (funcall run (concat
+                                     (format "echo written > %s; echo written > %s\n"
+                                             (shell-quote-argument plain)
+                                             (shell-quote-argument heartbeat))
+                                     (format "setsid sh -c %s >/dev/null 2>&1 &\n" loop)
+                                     (format "nohup sh -c %s >/dev/null 2>&1 &\n" loop)
+                                     "sleep 1; echo ticks-done"))))
+            (when (and (plist-get first :is-error) (string-search "bwrap:" (plist-get first :content)))
+              (ert-skip (format "bwrap cannot start in this environment: %s" (plist-get first :content))))
+            (should-not (plist-get first :is-error))
+            (should (plist-get (plist-get first :meta) :sandboxed))
+            (should (string-search "ticks-done" (plist-get first :content)))
+            ;; The loops ran while the first call did.
+            (let ((at-end (funcall ticks)))
+              (should (< 1 at-end))
+              ;; The next call finds what the first wrote, and nobody wrote
+              ;; to the heartbeat since: no loop of the first call survived.
+              (sleep-for 1)
+              (let ((second (funcall run (format "cat %s; echo ticks-now %s"
+                                                 (shell-quote-argument plain)
+                                                 (funcall ticks)))))
+                (should-not (plist-get second :is-error))
+                (should (string-search "written" (plist-get second :content)))
+                (should (string-search (format "ticks-now %s" at-end) (plist-get second :content)))
+                (should (= at-end (funcall ticks))))))
+        (ignore-errors (harness-call 'session/delete sid))))))
 
 (defmacro harness-tools-shell-test-with-methods (methods &rest body)
   "Run BODY with the bus METHODS, an alist of name to function, registered.
