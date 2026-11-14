@@ -2216,5 +2216,175 @@ a speech server answers with no audio at all."
                           (lambda (event) (equal "delegate_result" (plist-get event :event)))
                           harness-ui-voice-live-test--output))))))
 
+;;;; The receipt of an accepted request
+
+(defvar harness-ui-voice-live-test--order nil
+  "What the acknowledgment tests saw happen, oldest first.")
+
+(defun harness-ui-voice-live-test--acknowledgments ()
+  "Return the acknowledge events the sidecar was sent, oldest first."
+  (cl-remove-if-not (lambda (event) (equal "acknowledge" (plist-get event :event)))
+                    (harness-ui-voice-live-test--events
+                     harness-ui-voice-live-test--inbox)))
+
+(defun harness-ui-voice-live-test--cancellations ()
+  "Return the acknowledgment-cancel events the sidecar was sent, oldest first."
+  (cl-remove-if-not (lambda (event)
+                      (equal "acknowledgment-cancel" (plist-get event :event)))
+                    (harness-ui-voice-live-test--events
+                     harness-ui-voice-live-test--inbox)))
+
+(defmacro harness-ui-voice-live-test-with-order (&rest body)
+  "Run BODY with the prompt and the receipt recorded in the order they went out."
+  (declare (indent 0))
+  `(let ((harness-ui-voice-live-test--order nil))
+     (harness-voice-live--handle (list :event "delegation" :id "d-1" :text "First."))
+     ;; The words cross the ordinary turn grace before the prompt goes
+     ;; out; the receipt follows the prompt, not the transcript.
+     (harness-test-wait (lambda () (member "acknowledge" harness-ui-voice-live-test--order))
+                        5 "the receipt")
+     ,@body))
+
+(ert-deftest harness-ui-voice-live-acknowledges-only-after-the-prompt ()
+  "The receipt leaves after the prompt went out, for that delegation."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening)) 5 "sidecar ready")
+    (let ((real-send (symbol-function 'harness-voice-live--send)))
+      (cl-letf (((symbol-function 'harness-voice-live--send)
+                 (lambda (object)
+                   (push (plist-get object :event) harness-ui-voice-live-test--order)
+                   (funcall real-send object)))
+                ((symbol-function 'harness-ui-call-turn)
+                 (lambda (id method _params _callback _on-error)
+                   (push (list 'prompt id method) harness-ui-voice-live-test--order)
+                   nil)))
+        (harness-ui-voice-live-test-with-order
+          ;; The hold the sidecar is told about travels with every event,
+          ;; so the order is read from the prompt and the receipt.
+          (should (equal '("thinking" (prompt "live-session" "session/prompt")
+                           "acknowledge")
+                         (seq-filter (lambda (event) (not (equal event "turn_hold")))
+                                     (reverse harness-ui-voice-live-test--order)))))))
+    ;; And it reached the sidecar as one object naming its delegation.
+    (let ((acknowledgment
+           (car (harness-ui-voice-live-test--wait-acknowledgment))))
+      (should (equal "d-1" (plist-get acknowledgment :delegation)))
+      (should-not (plist-get acknowledgment :text)))))
+
+(defun harness-ui-voice-live-test--wait-acknowledgment ()
+  "Wait for the acknowledge event and return it in a list."
+  (let ((found nil))
+    (harness-test-wait
+     (lambda () (setq found (harness-ui-voice-live-test--acknowledgments)))
+     5 "the acknowledge event")
+    found))
+
+(ert-deftest harness-ui-voice-live-acknowledgment-switches-off ()
+  "Either setting off, or a muted or holding session, sends no receipt."
+  (harness-ui-voice-live-test-with
+    (let ((sent nil))
+      (cl-letf (((symbol-function 'harness-ui-call-turn) (lambda (&rest _) nil))
+                ((symbol-function 'harness-voice-live--active-p) (lambda () t))
+                ((symbol-function 'harness-voice-live--send)
+                 (lambda (object) (push object sent) t)))
+        (dolist (case '((ack-off . nil) (live-off . nil) (muted . nil)
+                        (holding . nil) (produced . nil)))
+          (setq sent nil
+                harness-voice-acknowledgment t
+                harness-voice-live-acknowledgment t
+                harness-voice-live--muted nil
+                harness-voice-live--speech-active nil
+                harness-voice-live--held nil
+                harness-voice-live--nodes nil
+                harness-voice-live--delegations (list (list :id "d-1" :text "Go."))
+                harness-voice-live--delegation nil)
+          (pcase (car case)
+            ('ack-off (setq harness-voice-acknowledgment nil))
+            ('live-off (setq harness-voice-live-acknowledgment nil))
+            ('muted (setq harness-voice-live--muted t))
+            ('holding (setq harness-voice-live--speech-active t))
+            ('produced (puthash "n-1" (list :text "Working on it." :sent 0)
+                                (setq harness-voice-live--nodes
+                                      (make-hash-table :test 'equal)))))
+          (harness-voice-live--delegate-next)
+          (should-not (cl-find "acknowledge" sent :key (lambda (o) (plist-get o :event))
+                               :test #'equal)))))))
+
+(ert-deftest harness-ui-voice-live-acknowledgment-needs-its-own-turn ()
+  "A receipt for another delegation, or without one, is not sent."
+  (harness-ui-voice-live-test-with
+    (let ((sent nil))
+      (cl-letf (((symbol-function 'harness-ui-call-turn) (lambda (&rest _) nil))
+                ((symbol-function 'harness-voice-live--active-p) (lambda () t))
+                ((symbol-function 'harness-voice-live--send)
+                 (lambda (object) (push object sent) t)))
+        (setq harness-voice-live--delegation '(:id "d-2")
+              harness-voice-live--nodes (make-hash-table :test 'equal))
+        (harness-voice-live--acknowledge "d-1")
+        (should-not sent)
+        (harness-voice-live--acknowledge nil)
+        (should-not sent)
+        (harness-voice-live--acknowledge "d-2")
+        (should (equal '((:event "acknowledge" :delegation "d-2")) sent))))))
+
+(ert-deftest harness-ui-voice-live-acknowledgment-follows-a-cancelled-turn ()
+  "C-c V drops a receipt the sidecar has not started, and nothing re-sends it."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening)) 5 "sidecar ready")
+    (harness-voice-live-interrupt)
+    (should (harness-ui-voice-live-test--wait-event
+             harness-ui-voice-live-test--inbox "acknowledgment-cancel"))
+    (should-not (harness-ui-voice-live-test--acknowledgments))))
+
+(ert-deftest harness-ui-voice-live-acknowledgment-stops-with-the-session ()
+  "Ending the session, or replacing the connection, sends no later receipt."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening)) 5 "sidecar ready")
+    (harness-voice-live-stop)
+    (harness-test-wait (lambda () (null harness-voice-live--state)) 5 "sidecar closed")
+    ;; A request accepted after the end is heard nowhere.
+    (harness-voice-live--acknowledge "d-1")
+    (should-not (harness-ui-voice-live-test--acknowledgments))
+    (should-not (harness-voice-live--acknowledge-possible-p "d-1"))))
+
+(ert-deftest harness-ui-voice-live-acknowledgment-does-not-delay-the-queue ()
+  "A receipt that the sidecar drops leaves the next delegation starting at once."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (harness-voice-live-start)
+    (harness-test-wait (lambda () (eq harness-voice-live--state 'listening)) 5 "sidecar ready")
+    (let ((started (float-time)))
+      (harness-voice-live--handle (list :event "delegation" :id "d-1" :text "First."))
+      (harness-test-wait (lambda () (= 1 (length harness-ui-voice-live-test--calls)))
+                         5 "the first prompt")
+      (harness-voice-live--finish-turn "end-turn")
+      (harness-voice-live--handle (list :event "delegation" :id "d-2" :text "Second."))
+      (harness-test-wait (lambda () (= 2 (length harness-ui-voice-live-test--calls)))
+                         5 "the second prompt")
+      ;; The two turns were sent without waiting for any receipt.
+      (should (< (- (float-time) started) 1.0)))
+    (let ((delegations (mapcar (lambda (call)
+                                 (plist-get (car (plist-get (nth 2 call) :prompt)) :text))
+                               (reverse harness-ui-voice-live-test--calls))))
+      (should (equal '("First." "Second.") delegations)))
+    (harness-test-wait
+     (lambda () (>= (length (harness-ui-voice-live-test--acknowledgments)) 2))
+     5 "both receipts")))
+
+
 (provide 'harness-ui-voice-live-test)
 ;;; harness-ui-voice-live-test.el ends here

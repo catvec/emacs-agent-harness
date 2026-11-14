@@ -48,6 +48,7 @@ on completion, interruption, failure, buffer death and shutdown.
 ### Commands
 
 - `harness-voice` — Open voice controls here, or a quick voice chat from an ordinary buffer.
+- `harness-voice-acknowledge-prime` — Generate the receipt phrases this voice does not have yet.
 - `harness-voice-dictate` — Toggle dictation, or the live session, without sending anything.
 - `harness-voice-hold` — Start dictation on mouse press EVENT, interrupting speech and the turn.
 - `harness-voice-interrupt` — Stop speech, discard unfinished dictation, and cancel this voice turn.
@@ -57,6 +58,11 @@ on completion, interruption, failure, buffer death and shutdown.
 
 ### Options
 
+- `harness-voice-acknowledgment` — Whether an accepted request gets one short spoken receipt.
+- `harness-voice-acknowledgment-phrases` — Phrases the WAV capability may play as a request receipt.
+- `harness-voice-acknowledgment-timeout` — Maximum seconds one receipt plays before its player is stopped.
+- `harness-voice-acknowledgment-voice` — Voice the WAV capability generates its receipts in.
+- `harness-voice-live-acknowledgment` — Whether a live voice request gets the sidecar's short spoken receipt.
 - `harness-voice-player-command` — Command playing a WAV, with `:file` for its path.
 - `harness-voice-process-timeout` — Maximum seconds for one transcription, synthesis or playback command.
 - `harness-voice-recording-limit` — Maximum seconds of one utterance before automatic transcription.
@@ -83,6 +89,7 @@ on completion, interruption, failure, buffer death and shutdown.
 - `harness-ui-event-functions` → `harness-voice--on-event`
 - `harness-ui-media-recording-blocked-p-functions` → `harness-voice--recording-p`
 - `harness-ui-redraw-hook` → `harness-voice--redraw`
+- `harness-ui-turn-accepted-functions` → `harness-voice--acknowledge`
 - `harness-ui-update-functions` → `harness-voice--on-update`
 - `kill-buffer-hook` → `harness-voice--on-kill`
 - `kill-emacs-hook` → `harness-voice--reset`

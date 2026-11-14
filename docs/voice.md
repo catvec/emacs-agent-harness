@@ -97,6 +97,48 @@ on/off status. **Voice ready** does not mean the microphone is recording.
 **Voice failed** keeps failures visible rather than relying solely on the
 echo area. The live provider uses its own **Live · …** statuses below.
 
+### The spoken receipt of a request
+
+A request that reaches the session is answered by one short spoken receipt
+-- "On it", "Hmm, thinking", "Right" -- so the silence while the agent reads
+the request and its tools is not empty. It says only that the request
+arrived. It never names work, progress or a result, and it never repeats on
+a timer: one receipt per accepted request, and nothing else.
+
+The phrase is a WAV generated before the request, so the receipt costs a
+player start and no speech request, no model and no network:
+
+- **Live voice** (the local pipeline, the scripted fixture, a custom sidecar
+  written against `scripts/harness_voice_sidecar.py`): the sidecar
+  synthesizes the phrases in the background once, when the call starts, and
+  plays one through the same gate as a reply. ChatGPT Live is out of this
+  path: its voice model speaks its own acknowledgment.
+- **WAV dictation**: the client generates the phrases into
+  `harness-state-directory/voice/acknowledgments/`, one per voice, and
+  plays one with the ordinary player.
+
+It never competes with a person or with an answer: while the microphone
+hears speech, a transcript is held, the session is muted, a reply has
+started, or another receipt is sounding, the receipt is **dropped**, not
+queued and never replayed. `C-c V` silences it like any other playback.
+A phrase that is not generated yet is skipped rather than waited for; the
+request is heard in silence, and the phrases are generated for the next one.
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `harness-voice-acknowledgment` | on | The receipt, for both capabilities |
+| `harness-voice-live-acknowledgment` | on | The live sidecar's receipt alone |
+| `harness-voice-acknowledgment-phrases` | `("On it" "Hmm, thinking" "Right")` | The phrases, for both capabilities |
+| `harness-voice-acknowledgment-voice` | nil (the pipeline's voice) | The voice the WAV receipts are generated in |
+| `harness-voice-acknowledgment-timeout` | 5 s | The bound on one receipt's player |
+
+Mute and a stopped session outrank every setting, and the reply outranks
+the receipt: a receipt that cannot start at once is silence. Nothing in the
+chat's chrome changes -- the receipt is speech, not interface copy -- so the
+voice setup page and the controls read exactly as they did. The measured
+latency and its limits are in
+[the acknowledgment analysis](analysis/spoken-acknowledgment-2026-11-09.md).
+
 ### Where voice gets its context
 
 In an existing compose box, dictation stays in that box: a chat, task-board
@@ -544,6 +586,7 @@ without a microphone or model:
 | Emacs to sidecar | `start` | Session start, protocol version and context |
 | Emacs to sidecar | `mute` / `interrupt` / `stop` | Microphone, playback and session lifecycle |
 | Emacs to sidecar | `commentary` / `thinking` | Speakable reply or quiet progress |
+| Emacs to sidecar | `acknowledge` / `acknowledgment-cancel` | One receipt for an accepted request, or the drop of one not started |
 | Emacs to sidecar | `delegate_result` | Final text, or an error, for a delegation |
 
 [How realtime voice stays in the conversation](voice-realtime.md) has the

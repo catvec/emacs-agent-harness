@@ -613,6 +613,18 @@ request settles, whether it was answered or failed.")
 That is after a prompt was sent and after one was answered or failed,
 see `harness-ui-call-turn'.  The cache panel draws a session's chat again.")
 
+(defvar harness-ui-turn-accepted-functions nil
+  "Functions called with (SESSION-ID METHOD PARAMS) when a turn was accepted.
+That is right after the request went out, inside `harness-ui-call-turn',
+and it is the only moment a view knows the harness has the prompt: before
+its first update, and long before its first answer.  A function here runs
+after the request was sent, never instead of sending it, and a failure in
+one is logged and dropped rather than failing the turn.  Keep work here
+short and asynchronous -- a process started, a pipe written -- and never
+wait for an answer, a synthesis or a service.
+`METHOD' is `session/prompt' or `_harness/agent/send-queue'; `PARAMS' is
+what was sent, so a function can read the prompt or the queue ids.")
+
 (defun harness-ui-prompt-in-flight-p (id)
   "Non-nil while this UI has a prompt to session ID that nothing answered yet.
 The prompt is a turn that runs or is about to, whatever the session's
@@ -623,6 +635,22 @@ record says (see `harness-ui-call-turn')."
   "Tell `harness-ui-prompt-functions' that the prompts in flight to ID changed."
   (harness-ignore-errors-logged "harness-ui-prompt-functions"
     (run-hook-with-args 'harness-ui-prompt-functions id)))
+
+(defun harness-ui--turn-accepted (id method params)
+  "Tell `harness-ui-turn-accepted-functions' that session ID took METHOD.
+The request is out already: this is the moment to say a request arrived,
+never the place to wait for one.  A function that fails is logged, and the
+others still run; none can fail or delay the turn it follows."
+  (run-hook-wrapped
+   'harness-ui-turn-accepted-functions
+   (lambda (fn)
+     (condition-case err
+         (progn (funcall fn id method params) nil)
+       (error
+        (harness-log 'error "ui: %s failed on an accepted turn: %s"
+                     (if (symbolp fn) fn "a listener")
+                     (harness-error-short-message err 600))
+        nil)))))
 
 (defun harness-ui--prompt-sent (id token)
   "Note that the prompt TOKEN to session ID is in flight."
@@ -645,10 +673,12 @@ the turn ends.  Until then, or until the request fails, it is a prompt
 in flight to ID (`harness-ui-prompt-in-flight-p'), which says the
 session runs even while the record the UI holds of it still reads idle.
 CALLBACK and ON-ERROR are called as `harness-ui-call' calls them, once
-the prompt is settled."
+the prompt is settled.  `harness-ui-turn-accepted-functions' runs right
+after the request went out, before this function returns."
   (let ((request (harness-ui-request method params))
         (token (list id)))
     (harness-ui--prompt-sent id token)
+    (harness-ui--turn-accepted id method params)
     (harness-then request
                   (lambda (value)
                     (harness-ui--prompt-settled id token)

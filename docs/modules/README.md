@@ -546,6 +546,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-tasks-header-functions` | [ui-tasks](ui-tasks.md) | [ui-tasks-search](ui-tasks-search.md), [ui-version](ui-version.md) |
 | `harness-ui-tasks-panel-functions` | [ui-carry](ui-carry.md), [ui-tasks](ui-tasks.md) | [ui-carry](ui-carry.md) |
 | `harness-ui-tasks-tick-hook` | [ui-tasks](ui-tasks.md) | [ui-slots](ui-slots.md) |
+| `harness-ui-turn-accepted-functions` | [ui](ui.md) | [ui-voice](ui-voice.md) |
 | `harness-ui-update-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-watches](ui-watches.md) | [ui-access](ui-access.md), [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-tree](ui-tree.md), [ui-voice](ui-voice.md), [ui-watches](ui-watches.md), [ui-workspace](ui-workspace.md) |
 | `harness-update-hook` | [ui-version](ui-version.md), `harness.el` | [ui-version](ui-version.md) |
 | `harness-websearch-ready-functions` | [tools-web](tools-web.md) |  |

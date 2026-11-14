@@ -17,6 +17,9 @@ Protocol (both directions unless said otherwise), one object per line:
     delegation  sidecar -> Emacs  ``id``, ``text`` and optional ``final``
     delegate_result  Emacs -> sidecar  ``id``, ``text``, ``error``, ``message``
     commentary / thinking  Emacs -> sidecar  speakable reply, quiet progress
+    acknowledge  Emacs -> sidecar  one receipt for an accepted request;
+                                  ``delegation`` names it, ``cancel`` drops
+                                  any the sidecar has not started
     mute / interrupt / stop    Emacs -> sidecar
     turn_hold  Emacs -> sidecar  boolean ``active``; output only, not the mic
     interrupted / notice / error / closed  sidecar -> Emacs
@@ -1547,6 +1550,9 @@ class Sidecar:
         self.held = []
         self.held_seq = 0
         self.level_meter = LevelMeter()
+        self.pending_acknowledgment = None
+        self.delegation_id = None
+        self.finished_delegations = collections.deque(maxlen=20)
 
     # -- lifecycle ---------------------------------------------------
 
@@ -1603,6 +1609,10 @@ class Sidecar:
         elif kind == "mute":
             self.muted = bool(event.get("on"))
             self.on_mute(self.muted)
+        elif kind == "acknowledge":
+            self.on_acknowledge(event)
+        elif kind == "acknowledgment-cancel":
+            self.cancel_acknowledgments()
         elif kind == "interrupt":
             self.interrupt()
         elif kind == "stop":
@@ -1771,6 +1781,7 @@ class Sidecar:
             return
         delegation_id = delegation_id or "d-%d" % int(time.time() * 1000)
         self.working = True
+        self.delegation_id = delegation_id
         fields = {"id": delegation_id, "text": text, "final": bool(final)}
         if pending:
             fields["pending"] = list(pending)
@@ -1779,12 +1790,14 @@ class Sidecar:
         if truncated:
             fields["truncated"] = True
         fields["speech_active"] = bool(self.speech_active)
+        self.on_delegation(delegation_id)
         self.events.send("delegation", **fields)
 
     def on_delegate_result(self, event):
         """Handle the agent's answer: speak it and end the work state."""
         self.working = False
         delegation_id = event.get("id")
+        self.finished_delegations.append(delegation_id)
         text = event.get("text") or ""
         held = bool(event.get("held"))
         if event.get("error"):
@@ -1805,9 +1818,88 @@ class Sidecar:
             return
         self.on_result(delegation_id, text, None)
 
+    # -- acknowledgments ---------------------------------------------
+
+    #: Whether this sidecar plays a receipt for an accepted request.
+    #: A sidecar that speaks its own acknowledgment -- GPT-Live's voice
+    #: model, under its prompt policy -- leaves this False.
+    acknowledgements = False
+
+    def acknowledgment_allowed(self, event):
+        """Return whether a receipt for EVENT may start right now.
+
+        A receipt is never queued: a muted session, a person speaking, a
+        held transcript and a reply that has started or finished each make
+        it silence instead.  The delegation it belongs to must be the one
+        still running, so a receipt is never heard in a turn it was not
+        made for.
+        """
+        if not self.acknowledgements or self.muted:
+            return False
+        delegation = (event or {}).get("delegation")
+        if delegation is not None:
+            if delegation in self.finished_delegations:
+                return False
+            if self.delegation_id is not None and delegation != self.delegation_id:
+                return False
+        return True
+
+    def acknowledgment_pcm(self):
+        """Return the PCM of the next receipt phrase, or None."""
+        return None
+
+    def play_acknowledgment(self, event):
+        """Take one receipt for the accepted request EVENT, or drop it.
+
+        Nothing is synthesized or waited for here: the phrase was
+        generated before the call.  The receipt is played on the next
+        tick, so a reply that starts in between, or a cancellation, is
+        seen before it is heard.
+        """
+        if not self.acknowledgment_allowed(event) or self.acknowledgment_pcm() is None:
+            return False
+        self.pending_acknowledgment = event
+        return True
+
+    def drain_acknowledgment(self):
+        """Play the receipt waiting for this tick, unless it went stale."""
+        event, self.pending_acknowledgment = self.pending_acknowledgment, None
+        if event is None or not self.acknowledgment_allowed(event):
+            return False
+        if self.gate_blocked() or (self.player and self.player.busy()):
+            return False
+        pcm = self.acknowledgment_pcm()
+        if not pcm or self.player is None:
+            return False
+        self.player.play(pcm)
+        return True
+
+    def prime_acknowledgments(self):
+        """Generate the receipt phrases this sidecar does not have yet.
+
+        A receipt is only worth playing if it starts at once, so the
+        phrases are generated here, in the background, rather than when
+        a request arrives.
+        """
+        return
+
+    def cancel_acknowledgments(self):
+        """Forget a receipt that has not started playing."""
+        self.pending_acknowledgment = None
+
+    def on_acknowledge(self, event):
+        """Handle an accepted request's receipt, or its cancellation."""
+        if (event or {}).get("cancel"):
+            self.cancel_acknowledgments()
+            return
+        self.play_acknowledgment(event)
+
     # -- hooks -------------------------------------------------------
 
     provider = "sidecar"
+    def on_delegation(self, delegation_id):
+        """An accepted request is about to cross into the session."""
+        pass
     def on_start(self): pass
     def on_stop(self): pass
     def on_mute(self, muted): pass

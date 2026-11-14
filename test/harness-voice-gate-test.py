@@ -103,6 +103,10 @@ class TestPlayer(NullAudio):
         super().__init__()
         self.level_value = 0.0
         self.busy_value = False
+        self.stops = 0
+
+    def stop(self):
+        self.stops += 1
 
     def level(self):
         return self.level_value if self.busy_value else 0.0
@@ -111,13 +115,19 @@ class TestPlayer(NullAudio):
         return self.busy_value
 
 
-def args():
+def args(acknowledgment=False):
+    """Return a sidecar's parsed arguments.
+
+    Receipts are off unless a test asks for them: they are a path of
+    their own (see AcknowledgmentTest), and the reply tests count the
+    speech requests the replies make.
+    """
     return argparse.Namespace(
         stt_url="http://speech.test/transcriptions",
         tts_url="http://speech.test/speech",
         stt_model="whisper-1", tts_model="tts-1", voice="unmute",
         threshold=0.02, hangover=0.85, max_speech=120.0, api_key_env="",
-        self_test=False)
+        acknowledgment=acknowledgment, self_test=False)
 
 
 class ChunkRecorder(NullAudio):
@@ -146,6 +156,9 @@ class SidecarRig:
         self.stt_gate.set()
         self.transcript = "open the merge queue"
         self.transcript_queue = []
+        # A receipt phrase is generated like any other text unless a
+        # test says the speech server has no audio for it.
+        self.silent_phrases = False
         self.args = args()
         self.sidecar = unmute.UnmuteSidecar(
             self.args, events=self.events, player=self.player,
@@ -162,6 +175,10 @@ class SidecarRig:
 
     def _tts(self, url, payload, headers=None, timeout=60, method=None):
         self.tts_calls.append(payload.get("input"))
+        if self.silent_phrases and payload.get("input") in unmute.ACKNOWLEDGMENT_PHRASES:
+            # A speech server with no audio for the receipt phrases: they
+            # never exist, and the replies are spoken all the same.
+            return {"data": b""}
         return {"data": wav_from_pcm(b"\x00\x01" * 800, fixtures.RATE)}
 
     def feed(self, data):
@@ -1106,6 +1123,26 @@ class GptGateTest(unittest.TestCase):
         self.assertTrue(any(item.get("id") == "n1" for item in sidecar.held))
         sidecar.handle({"event": "stop"})
 
+    def test_the_gpt_sidecar_has_no_receipt_of_its_own(self):
+        # GPT-Live's voice model says its own acknowledgment under its
+        # prompt policy; a recorded phrase over it would talk over it.
+        from harness_voice_sidecar import FakeConnection
+        events = FakeEvents()
+        player = NullAudio()
+        args = argparse.Namespace(
+            url="ws://127.0.0.1:1/live", model="gpt-live-1",
+            voice="marin", instructions="be brief",
+            api_key_env="OPENAI_API_KEY")
+        sidecar = gpt.GptSidecar(args, events=events,
+                                 connection=FakeConnection(),
+                                 player=player, recorder=NullAudio())
+        sidecar.key_override = "self-test"
+        sidecar.start_session({"event": "start", "protocol": 1})
+        self.assertFalse(sidecar.play_acknowledgment({"event": "acknowledge",
+                                                      "delegation": "u-1"}))
+        self.assertEqual(player.played, b"")
+        sidecar.handle({"event": "stop"})
+
 
 class ProtocolTest(unittest.TestCase):
     def test_local_limit_metadata_tracks_the_same_utterance_through_stt(self):
@@ -1203,6 +1240,7 @@ SPEECH_END_TO_TRANSCRIPT_REQUEST_SECONDS = 1.05
 SIDECAR_FALSE_TRIGGER_RELEASE_SECONDS = 1.10
 CLIENT_FALSE_TRIGGER_RELEASE_SECONDS = 1.60
 TRANSCRIPT_TO_DELEGATION_SECONDS = 0.10
+ACKNOWLEDGMENT_START_BUDGET_MS = 300.0
 
 
 class LatencyBudgetTest(unittest.TestCase):
@@ -2380,6 +2418,314 @@ class ProbeReplayTest(unittest.TestCase):
             events = [json.loads(line) for line in handle if line.strip()]
         self.assertEqual([], [event for event in events
                               if event.get("event") == "kept"])
+
+
+class AcknowledgmentRig(SidecarRig):
+    """The local sidecar with its receipts on and a counting player."""
+
+    def __init__(self, gate_ready=True, silent_phrases=False):
+        self.events = FakeEvents()
+        self.player = AcknowledgmentPlayer()
+        self.stt_calls = []
+        self.tts_calls = []
+        self.stt_gate = threading.Event()
+        self.stt_gate.set()
+        self.transcript = "open the merge queue"
+        self.transcript_queue = []
+        self.silent_phrases = silent_phrases
+        self.sidecar = unmute.UnmuteSidecar(
+            args(acknowledgment=True), events=self.events, player=self.player,
+            recorder=NullAudio(),
+            post_multipart=self._stt, post_json=self._tts)
+        self.sidecar.start_session({"event": "start", "protocol": 1})
+        if gate_ready:
+            self.wait_primed()
+
+    def wait_primed(self, timeout=5.0):
+        """Wait until every receipt phrase is generated."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if len(self.sidecar.acknowledgments) == len(unmute.ACKNOWLEDGMENT_PHRASES):
+                return True
+            time.sleep(0.01)
+        return False
+
+    def acknowledge(self, delegation=None):
+        """Send one receipt for DELEGATION, as Emacs does after a prompt."""
+        self.sidecar.handle({"event": "acknowledge", "delegation": delegation})
+
+    def receipts(self):
+        """Return the receipts that started, counted by the sidecar.
+
+        The player also plays reply pieces, so the sidecar's own count is
+        what tells a receipt from an answer.
+        """
+        return [None] * self.sidecar.acknowledgments_played
+
+    def pump(self, until=None, timeout=4.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.sidecar.drain_transcripts()
+            self.sidecar.drain_audio()
+            self.sidecar.drain_acknowledgment()
+            self.sidecar.maybe_release()
+            if until is not None and until():
+                return True
+            time.sleep(0.01)
+        return until is None
+
+
+class AcknowledgmentPlayer(TestPlayer):
+    """A player that records what it was asked to play, and when."""
+
+    def __init__(self):
+        super().__init__()
+        self.starts = []
+
+    def play(self, pcm):
+        self.starts.append(len(pcm))
+        super().play(pcm)
+
+    def busy(self):
+        return False
+
+
+class AcknowledgmentTest(unittest.TestCase):
+    """One short receipt for an accepted request: no model, no synthesis."""
+
+    def test_the_phrases_are_generated_before_a_request_arrives(self):
+        rig = AcknowledgmentRig()
+        try:
+            self.assertEqual(sorted(unmute.ACKNOWLEDGMENT_PHRASES),
+                             sorted(rig.sidecar.acknowledgments))
+            # They were asked for once, before any request.
+            self.assertEqual(sorted(unmute.ACKNOWLEDGMENT_PHRASES),
+                             sorted(rig.tts_calls))
+        finally:
+            rig.stop()
+
+    def test_an_accepted_request_is_acknowledged_from_the_bank(self):
+        rig = AcknowledgmentRig()
+        try:
+            before = len(rig.tts_calls)
+            rig.acknowledge("u-1")
+            self.assertTrue(rig.pump(until=lambda: rig.receipts()))
+            self.assertEqual(len(rig.tts_calls), before,
+                             "a receipt was synthesized")
+            self.assertEqual(1, len(rig.receipts()))
+            self.assertIn(rig.sidecar.last_acknowledgment,
+                          unmute.ACKNOWLEDGMENT_PHRASES)
+        finally:
+            rig.stop()
+
+    def test_no_phrase_plays_twice_in_a_row(self):
+        rig = AcknowledgmentRig()
+        try:
+            heard = []
+            for index, delegation in enumerate(("u-1", "u-2", "u-3")):
+                rig.sidecar.acknowledging_until = 0.0
+                rig.sidecar.reply_started = False
+                rig.sidecar.handle({"event": "delegation", "id": delegation,
+                                    "text": "do it"})
+                rig.acknowledge(delegation)
+                rig.pump(until=lambda: len(rig.receipts()) > index)
+                heard.append(rig.sidecar.last_acknowledgment)
+            self.assertTrue(len(set(heard)) >= 2, heard)
+            self.assertEqual(len(heard), len(set(zip(heard, heard[1:]))) + 1,
+                             "a phrase played twice in a row: %s" % heard)
+            self.assertEqual(len(heard), len(rig.receipts()))
+        finally:
+            rig.stop()
+
+    def test_a_second_receipt_while_one_sounds_is_not_played(self):
+        rig = AcknowledgmentRig()
+        try:
+            rig.acknowledge("u-1")
+            rig.pump(until=lambda: rig.receipts())
+            rig.sidecar.acknowledging_until = time.monotonic() + 2.0
+            rig.acknowledge("u-1")
+            sidecar_pump(rig, 0.2)
+            self.assertEqual(1, len(rig.receipts()))
+        finally:
+            rig.stop()
+
+    def test_a_person_speaking_drops_the_receipt_and_it_is_never_replayed(self):
+        rig = AcknowledgmentRig()
+        try:
+            rig.sidecar.speech_active = True
+            rig.acknowledge("u-1")
+            sidecar_pump(rig, 0.2)
+            self.assertEqual([], rig.receipts())
+            rig.sidecar.speech_active = False
+            sidecar_pump(rig, 0.3)
+            self.assertEqual([], rig.receipts(),
+                             "a dropped receipt was played afterwards")
+        finally:
+            rig.stop()
+
+    def test_a_held_transcript_or_a_started_reply_drops_the_receipt(self):
+        rig = AcknowledgmentRig()
+        try:
+            rig.sidecar.awaiting.add(1)
+            rig.acknowledge("u-1")
+            sidecar_pump(rig, 0.2)
+            self.assertEqual([], rig.receipts())
+            rig.sidecar.awaiting.clear()
+            rig.sidecar.handle({"event": "commentary", "text": "Done.",
+                                "id": "c-1"})
+            sidecar_pump(rig, 0.2)
+            rig.acknowledge("u-1")
+            sidecar_pump(rig, 0.2)
+            self.assertEqual([], rig.receipts())
+        finally:
+            rig.stop()
+
+    def test_a_muted_session_has_no_receipt(self):
+        rig = AcknowledgmentRig()
+        try:
+            rig.sidecar.handle({"event": "mute", "on": True})
+            rig.acknowledge("u-1")
+            sidecar_pump(rig, 0.2)
+            self.assertEqual([], rig.receipts())
+        finally:
+            rig.stop()
+
+    def test_a_receipt_of_a_finished_turn_is_dropped(self):
+        rig = AcknowledgmentRig()
+        try:
+            rig.sidecar.handle({"event": "delegation", "id": "u-1",
+                                "text": "first"})
+            rig.sidecar.handle({"event": "delegate_result", "id": "u-1",
+                                "text": "Done."})
+            rig.sidecar.acknowledging_until = 0.0
+            rig.sidecar.reply_started = False
+            rig.sidecar.commentary = []
+            rig.acknowledge("u-1")
+            sidecar_pump(rig, 0.2)
+            self.assertEqual([], rig.receipts())
+            self.assertIn("u-1", rig.sidecar.finished_delegations)
+        finally:
+            rig.stop()
+
+    def test_a_cancellation_drops_a_receipt_that_has_not_started(self):
+        rig = AcknowledgmentRig()
+        try:
+            rig.acknowledge("u-1")
+            rig.sidecar.handle({"event": "acknowledgment-cancel"})
+            sidecar_pump(rig, 0.2)
+            self.assertEqual([], rig.receipts())
+        finally:
+            rig.stop()
+
+    def test_a_reply_stops_a_receipt_that_is_sounding(self):
+        rig = AcknowledgmentRig()
+        try:
+            rig.acknowledge("u-1")
+            rig.pump(until=lambda: rig.receipts())
+            self.assertTrue(rig.sidecar.acknowledging())
+            rig.sidecar.handle({"event": "commentary", "text": "Here it is.",
+                                "id": "c-1"})
+            self.assertFalse(rig.sidecar.acknowledging())
+            self.assertTrue(rig.player.stops)
+        finally:
+            rig.stop()
+
+    def test_an_interrupt_drops_the_receipt_and_the_reply_queue(self):
+        rig = AcknowledgmentRig()
+        try:
+            rig.acknowledge("u-1")
+            rig.sidecar.handle({"event": "interrupt"})
+            sidecar_pump(rig, 0.2)
+            self.assertEqual([], rig.receipts())
+            self.assertFalse(rig.sidecar.acknowledging())
+        finally:
+            rig.stop()
+
+    def test_a_request_whose_phrase_never_generated_is_silent(self):
+        rig = AcknowledgmentRig(gate_ready=False, silent_phrases=True)
+        try:
+            rig.acknowledge("u-1")
+            sidecar_pump(rig, 0.2)
+            self.assertEqual([], rig.receipts())
+            # The reply still goes out: a receipt is never the request.
+            rig.sidecar.handle({"event": "delegate_result", "id": "u-1",
+                                "text": "Done."})
+            self.assertTrue(rig.pump(until=lambda: rig.player.played))
+            self.assertEqual([], rig.receipts())
+        finally:
+            rig.stop()
+
+    def test_no_acknowledgment_argument_silences_it(self):
+        rig = SidecarRig()
+        try:
+            rig.sidecar.handle({"event": "acknowledge", "delegation": "u-1"})
+            rig.pump(timeout=0.2)
+            self.assertEqual({}, rig.sidecar.acknowledgments)
+            self.assertIsNone(rig.sidecar.pending_acknowledgment)
+        finally:
+            rig.stop()
+
+    def test_acknowledge_is_never_queued_behind_a_reply(self):
+        rig = AcknowledgmentRig()
+        try:
+            rig.sidecar.ready.append((rig.sidecar.output_generation,
+                                      "result:u-1", "The answer.",
+                                      b"\x00\x01" * 400))
+            rig.acknowledge("u-1")
+            rig.pump(until=lambda: rig.receipts())
+            # The reply piece played; the receipt was dropped, not queued.
+            self.assertEqual(1, len(rig.receipts()))
+            self.assertIsNone(rig.sidecar.pending_acknowledgment)
+        finally:
+            rig.stop()
+
+
+def sidecar_pump(rig, seconds):
+    """Run RIG's tick helpers for SECONDS, as its own loop would."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        rig.sidecar.drain_transcripts()
+        rig.sidecar.drain_audio()
+        rig.sidecar.drain_acknowledgment()
+        rig.sidecar.maybe_release()
+        time.sleep(0.01)
+
+
+class AcknowledgmentLatencyTest(unittest.TestCase):
+    """How long an accepted request takes to start a receipt, in-process.
+
+    This measures the sidecar's own path: the event handler, the bank
+    lookup, and the player call.  It is not device audio latency, and
+    nothing here claims one.
+    """
+
+    def test_receipt_start_is_within_the_budget(self):
+        rig = AcknowledgmentRig()
+        try:
+            samples = []
+            for index in range(20):
+                rig.sidecar.acknowledging_until = 0.0
+                rig.sidecar.reply_started = False
+                rig.sidecar.commentary = []
+                delegation = "u-%d" % index
+                rig.sidecar.handle({"event": "delegation", "id": delegation,
+                                    "text": "do it"})
+                rig.sidecar.pending_acknowledgment = None
+                started = time.monotonic()
+                rig.sidecar.handle({"event": "acknowledge",
+                                    "delegation": delegation})
+                rig.sidecar.drain_acknowledgment()
+                samples.append((time.monotonic() - started) * 1000.0)
+                self.assertTrue(rig.receipts())
+            samples.sort()
+            p50 = samples[len(samples) // 2]
+            p95 = samples[int(len(samples) * 0.95) - 1]
+            print("acknowledgment start · %d samples, in-process sidecar, "
+                  "p50 %.3f ms, p95 %.3f ms, budget %.0f ms"
+                  % (len(samples), p50, p95, ACKNOWLEDGMENT_START_BUDGET_MS))
+            self.assertLessEqual(p95, ACKNOWLEDGMENT_START_BUDGET_MS)
+        finally:
+            rig.stop()
 
 
 if __name__ == "__main__":

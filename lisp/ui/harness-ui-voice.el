@@ -96,6 +96,57 @@ reliably.  Commands must stay in the foreground so cancellation stops them."
   "Maximum seconds for one transcription, synthesis or playback command."
   :type 'number :group 'harness-voice)
 
+(defcustom harness-voice-acknowledgment t
+  "Whether an accepted request gets one short spoken receipt.
+With the WAV capability the receipt is a phrase from
+`harness-voice-acknowledgment-phrases', played from a WAV this client
+generated beforehand (`harness-voice-acknowledge-prime'); with the live
+capability it is the sidecar's own, sent as an `acknowledge' event when
+`harness-voice-live-acknowledgment' is non-nil.  It says only that the
+request arrived: never what the work does, how far it has got, or that
+anything is finished.
+
+The receipt needs spoken replies to be on (`harness-voice-mode' in the
+chat), a running, unmuted voice session, and no output already starting;
+a request that would need a phrase not generated yet is left in
+silence rather than waited for.  The microphone and a person speaking
+always come first: a receipt that cannot start at once is dropped, not
+queued.  nil stops receipts for this client and leaves the reply
+speech as it was."
+  :type 'boolean :group 'harness-voice)
+
+(defcustom harness-voice-live-acknowledgment t
+  "Whether a live voice request gets the sidecar's short spoken receipt.
+The sidecar plays it from phrases it generated before the call began,
+through the gate that already holds reply audio: while the microphone
+hears a person, holds a transcript, or the reply has started, the
+receipt is dropped and never replayed.  `harness-voice-acknowledgment'
+nil turns it off for both capabilities; this one turns off the live
+receipt alone, for a sidecar that speaks its own."
+  :type 'boolean :group 'harness-voice)
+
+(defcustom harness-voice-acknowledgment-phrases '("On it" "Hmm, thinking" "Right")
+  "Phrases the WAV capability may play as a request receipt.
+Short receipts only: an interjection or a noun phrase, never a sentence
+that claims work.  A phrase with no generated WAV yet is skipped, and a
+phrase never plays twice in a row while another is ready.  The live
+sidecar is started with the same list, so both capabilities sound the
+same; a sidecar already running keeps the phrases it started with."
+  :type '(repeat string) :group 'harness-voice)
+
+(defcustom harness-voice-acknowledgment-voice nil
+  "Voice the WAV capability generates its receipts in.
+Nil uses the harness's pipeline voice (`harness-speech-local-voice'), or
+whatever a `harness-voice-synthesize-command' of your own speaks.  A
+different voice needs its phrases generated again; the cache is per
+voice."
+  :type '(choice (const :tag "The current voice" nil) string)
+  :group 'harness-voice)
+
+(defcustom harness-voice-acknowledgment-timeout 5
+  "Maximum seconds one receipt plays before its player is stopped."
+  :type 'number :group 'harness-voice)
+
 (defcustom harness-voice-recording-limit 120
   "Maximum seconds of one utterance before automatic transcription."
   :type 'number :group 'harness-voice)
@@ -563,6 +614,7 @@ session/cancel path and never answers permissions automatically."
                   (and (harness-compose-live-p) (current-buffer)))))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
+        (harness-voice--acknowledgment-stop)
         (when (eq buffer harness-voice--owner) (harness-voice--abort))
         (setq harness-voice--queue nil harness-voice--turn-active nil
               harness-voice--streams (make-hash-table :test 'equal))
@@ -725,6 +777,7 @@ session/cancel path and never answers permissions automatically."
   "Discard audio on UI reload/reconnect; never replay earlier speech."
   (harness-voice-live--reset)
   (harness-voice--abort)
+  (harness-voice--acknowledgment-stop)
   (setq harness-voice--connection harness-ui-connection)
   (when (buffer-live-p harness-voice--owner)
     (with-current-buffer harness-voice--owner
@@ -732,6 +785,275 @@ session/cancel path and never answers permissions automatically."
             harness-voice--streams (make-hash-table :test 'equal))
       (harness-voice--set-state 'ready)
       (harness-voice--refresh))))
+
+;;;; The receipt of an accepted request
+
+;; A request accepted is a request heard: the person has stopped
+;; speaking, the prompt is out, and the agent has not said anything yet.
+;; That gap is the silence this plays into, once, with a phrase that
+;; says nothing but "I have it".
+;;
+;; The phrase is a WAV generated before the request (see
+;; `harness-voice-acknowledge-prime'), so the receipt costs a player
+;; start and no synthesis, no model and no network.  A phrase that was
+;; never generated is skipped: silence is the fallback, never a wait.
+
+(defvar harness-voice--acknowledgment-process nil
+  "The player of the receipt being heard, or nil.")
+(defvar harness-voice--acknowledgment-timer nil
+  "Timer bounding the receipt being heard, or nil.")
+(defvar harness-voice--acknowledgment-last nil
+  "The phrase of the last receipt, so the same one does not play twice.")
+(defvar harness-voice--acknowledgment-pending nil
+  "The receipt a zero-delay timer will play, or nil.
+It is (SESSION . BUFFER): the request's identity, so a receipt is played
+only in the conversation that asked for it, and only while that buffer
+still owns voice.")
+(defvar harness-voice--acknowledgment-priming nil
+  "Non-nil while the phrase cache is being generated.")
+
+(defun harness-voice--acknowledgment-directory ()
+  "Return the directory of the generated receipt phrases."
+  (expand-file-name "voice/acknowledgments/"
+                    (if (boundp 'harness-state-directory) harness-state-directory
+                      (locate-user-emacs-file "harness/"))))
+
+(defun harness-voice--acknowledgment-voice ()
+  "Return the voice the receipts are generated in, or nil for the current one.
+That is the harness pipeline's own voice, the one the replies are spoken
+in, so a receipt sounds like the assistant that is about to answer."
+  (or harness-voice-acknowledgment-voice
+      (and (boundp 'harness-speech-local-voice) harness-speech-local-voice)))
+
+(defun harness-voice--acknowledgment-key (value &optional length)
+  "Return a short, stable name for VALUE, LENGTH characters of its hash.
+The name is a file name, so it carries no path and no phrase: a voice or
+a phrase of any length and any characters maps to one."
+  (let ((hash (secure-hash 'sha1 (format "%s" value))))
+    (if length (substring hash 0 length) hash)))
+
+(defun harness-voice--acknowledgment-file (phrase)
+  "Return the cached WAV of PHRASE in the current voice."
+  (expand-file-name
+   (format "%s-%s.wav"
+           (harness-voice--acknowledgment-key (harness-voice--acknowledgment-voice) 12)
+           (harness-voice--acknowledgment-key phrase 16))
+   (harness-voice--acknowledgment-directory)))
+
+(defun harness-voice--acknowledgment-ready (file)
+  "Non-nil when FILE holds a playable WAV."
+  (and (file-regular-p file) (> (or (file-attribute-size (file-attributes file)) 0) 44)))
+
+(defun harness-voice--acknowledgment-playing-p ()
+  "Non-nil while a receipt is being heard."
+  (and (processp harness-voice--acknowledgment-process)
+       (process-live-p harness-voice--acknowledgment-process)))
+
+(defun harness-voice--acknowledgment-stop ()
+  "Silence the receipt now, if one is heard, and forget its timer.
+A receipt that has not started yet is dropped with it: an interruption,
+a mute or a reply never leaves one to be heard afterwards."
+  (when (timerp harness-voice--acknowledgment-timer)
+    (cancel-timer harness-voice--acknowledgment-timer))
+  (setq harness-voice--acknowledgment-timer nil
+        harness-voice--acknowledgment-pending nil)
+  (when (processp harness-voice--acknowledgment-process)
+    (let ((process harness-voice--acknowledgment-process))
+      (setq harness-voice--acknowledgment-process nil)
+      (ignore-errors (set-process-sentinel process #'ignore))
+      (when (process-live-p process) (delete-process process)))))
+
+(defun harness-voice--acknowledgment-blocked-p ()
+  "Return why a receipt must not start now, or nil.
+The reply always comes first: a receipt does not start while a
+synthesis, a reply or another receipt is heard, and it never queues
+behind one.  Recording the person is the microphone's, and a receipt
+that would compete with it is dropped too."
+  (cond
+   ((not (eq harness-voice--owner (current-buffer))) "not this box's voice")
+   ((not harness-voice--enabled) "voice disabled")
+   ((not harness-voice-mode) "spoken replies off")
+   ((not harness-voice-acknowledgment) "acknowledgment off")
+   ((harness-voice-live-p) "live provider")
+   ((harness-voice--recording-p) "microphone on")
+   ((harness-voice--acknowledgment-playing-p) "receipt already playing")
+   ((and harness-voice--job
+         (memq (harness-voice--job-phase harness-voice--job)
+               '(synthesizing speaking)))
+    "reply speaking")
+   (harness-voice--queue "reply queued")
+   ((eq harness-voice--state 'speaking) "reply speaking")))
+
+(defun harness-voice--acknowledgment-phrase ()
+  "Return the phrase to play now, or nil when none is generated.
+A phrase that is not ready is skipped rather than waited for, and the
+one just played is left for the next request."
+  (let ((ready (cl-remove-if-not
+                (lambda (phrase)
+                  (harness-voice--acknowledgment-ready
+                   (harness-voice--acknowledgment-file phrase)))
+                (cl-remove-if-not #'stringp harness-voice-acknowledgment-phrases))))
+    (or (cl-find-if (lambda (phrase) (not (equal phrase harness-voice--acknowledgment-last)))
+                    ready)
+        (car ready))))
+
+(defun harness-voice--acknowledgment-play (phrase file)
+  "Play the receipt PHRASE from FILE, once, without waiting for it."
+  (let ((default-directory (harness-voice--acknowledgment-directory)))
+    (setq harness-voice--acknowledgment-last phrase
+          harness-voice--acknowledgment-process
+          (make-process :name "harness-voice-acknowledgment"
+                        :command (harness-voice--player file)
+                        :connection-type 'pipe :noquery t :buffer nil
+                        :sentinel (lambda (process _event)
+                                    (when (eq process harness-voice--acknowledgment-process)
+                                      (harness-voice--acknowledgment-stop))))))
+  (setq harness-voice--acknowledgment-timer
+        (run-at-time harness-voice-acknowledgment-timeout nil
+                     #'harness-voice--acknowledgment-stop)))
+
+(defun harness-voice--acknowledgment-request-p (params)
+  "Non-nil when PARAMS are the prompt of a request, not a queue send.
+`harness-ui-call-turn' sends a prompt with a `:prompt' and sending the
+queue without one, so a queued message the person sent while a turn ran
+is not a new request to acknowledge: the turn it steers was."
+  (and (listp params) (plist-member params :prompt)))
+
+(defun harness-voice--acknowledge (sid _method params)
+  "Play one receipt for the request just sent to SID, whose PARAMS are its own.
+Nothing here waits and nothing starts in the request's own call: the
+cheap decisions are made now, and the player is started from a timer of
+zero delay, which runs once the request has returned.  A receipt that the
+turn's own output has made pointless by then is dropped there.  A phrase
+that is not generated yet is generated for the next request, and this one
+is heard in silence."
+  (when (and (harness-voice--acknowledgment-request-p params)
+             (buffer-live-p harness-voice--owner)
+             (equal sid (buffer-local-value 'harness-ui-session-id harness-voice--owner)))
+    (with-current-buffer harness-voice--owner
+      (cond
+       ((harness-voice--acknowledgment-blocked-p) nil)
+       ((harness-voice--acknowledgment-phrase)
+        (setq harness-voice--acknowledgment-pending
+              (cons sid (current-buffer)))
+        (run-at-time 0 nil #'harness-voice--acknowledgment-play-now))
+       (t (harness-voice-acknowledge-prime))))))
+
+(defun harness-voice--acknowledgment-play-now ()
+  "Play the receipt chosen for the last accepted request, if it still fits.
+This runs from a zero-delay timer, so it is out of the request's own
+call.  The state is read again here: a reply that started in between --
+or an interruption, a mute, another session, a replaced connection or a
+new turn -- leaves the phrase unplayed, and it is never replayed."
+  (let ((pending harness-voice--acknowledgment-pending))
+    (setq harness-voice--acknowledgment-pending nil)
+    (when (and pending
+               (buffer-live-p (cdr pending))
+               (eq (cdr pending) harness-voice--owner)
+               (equal (car pending)
+                      (buffer-local-value 'harness-ui-session-id (cdr pending)))
+               ;; The turn the receipt was made for is still running:
+               ;; one that ended first -- an immediate answer, a failed
+               ;; request, a cancellation -- is not acknowledged later.
+               (harness-ui-prompt-in-flight-p (car pending)))
+      (with-current-buffer (cdr pending)
+        (when (not (harness-voice--acknowledgment-blocked-p))
+          (when-let* ((phrase (harness-voice--acknowledgment-phrase)))
+            (condition-case err
+                (harness-voice--acknowledgment-play
+                 phrase (harness-voice--acknowledgment-file phrase))
+              (error
+               (harness-voice--acknowledgment-stop)
+               (harness-log 'warn "voice: acknowledgment: %s"
+                            (error-message-string err))))))))))
+
+(defun harness-voice--acknowledgment-synthesize (phrase file done &optional failed)
+  "Generate PHRASE into FILE, then call DONE; FAILED when it was not made.
+A command of your own writes the WAV; with none, the harness's pipeline
+speaks the phrase where it runs.  Both are asynchronous, and a failure
+leaves the phrase ungenerated rather than sounding a failure.  Exactly
+one of DONE and FAILED is called, so a pass always ends: a phrase that
+cannot be made must not keep the next one from being tried, nor keep the
+cache from being filled by a later pass."
+  (let ((dir (file-name-directory file))
+        (finished nil))
+    (unless (file-directory-p dir) (make-directory dir t))
+    (cl-labels ((ok () (unless finished (setq finished t) (funcall done file)))
+                (no (reason)
+                  (unless finished
+                    (setq finished t)
+                    (harness-log 'warn "voice: acknowledgment phrase not generated: %s · %s"
+                                 phrase reason)
+                    (when failed (funcall failed)))))
+      (if harness-voice-synthesize-command
+          (condition-case err
+              (make-process
+               :name "harness-voice-acknowledgment-prime"
+               :command (harness-voice--command harness-voice-synthesize-command file)
+               :connection-type 'pipe :noquery t :buffer nil
+               :sentinel (lambda (process _event)
+                           (when (memq (process-status process) '(exit signal))
+                             (if (and (eq (process-status process) 'exit)
+                                      (= (process-exit-status process) 0)
+                                      (harness-voice--acknowledgment-ready file))
+                                 (ok)
+                               (no "the command wrote no audio")))))
+            (error (no (error-message-string err))))
+        (condition-case err
+            (harness-voice--pipeline-call
+             "_harness/speech/synthesize" (list :text phrase)
+             (lambda (result)
+               (let ((audio (plist-get result :audio)))
+                 (if (and (stringp audio) (not (string-empty-p audio)))
+                     (condition-case err
+                         (progn
+                           (with-temp-buffer
+                             (set-buffer-multibyte nil)
+                             (insert (base64-decode-string audio))
+                             (write-region (point-min) (point-max) file nil 'silent))
+                           (ok))
+                       (error (no (error-message-string err))))
+                   (no "no audio")))))
+          (error (no (error-message-string err))))))))
+
+(defun harness-voice--acknowledgment-prime-next (rest callback)
+  "Generate the phrases in REST one after another, then CALLBACK.
+The pass ends when REST is empty, and the flag that keeps a second pass
+from starting goes with it.  A phrase that could not be made is skipped
+and the pass goes on; nothing ever leaves the flag set."
+  (if (null rest)
+      (setq harness-voice--acknowledgment-priming nil)
+    (let ((phrase (car rest))
+          (more (cdr rest)))
+      (harness-voice--acknowledgment-synthesize
+       phrase (harness-voice--acknowledgment-file phrase)
+       (lambda (file)
+         (when callback (funcall callback phrase file))
+         (harness-voice--acknowledgment-prime-next more callback))
+       (lambda ()
+         (harness-voice--acknowledgment-prime-next more callback))))))
+
+(defun harness-voice-acknowledge-prime (&optional callback)
+  "Generate the receipt phrases this voice does not have yet.
+The work happens in the background: nothing waits for it, and a call
+made while it runs starts nothing more.  CALLBACK, when given, is
+called with each phrase generated and its file."
+  (interactive)
+  (unless (or harness-voice--acknowledgment-priming (null harness-voice-acknowledgment))
+    (let* ((phrases (cl-remove-if-not
+                     (lambda (phrase)
+                       (and (stringp phrase) (not (string-empty-p phrase))))
+                     harness-voice-acknowledgment-phrases))
+           (missing (cl-remove-if
+                     (lambda (phrase)
+                       (harness-voice--acknowledgment-ready
+                        (harness-voice--acknowledgment-file phrase)))
+                     phrases)))
+      (when missing
+        (setq harness-voice--acknowledgment-priming t)
+        ;; In the order of the list: the first phrase is the one the
+        ;; next request will most likely play.
+        (harness-voice--acknowledgment-prime-next missing callback)))))
 
 ;;;; The harness's local pipeline
 
@@ -877,6 +1199,7 @@ ownership; disabling stops audio, not work."
         (if (harness-voice-live-p)
             (harness-voice--refresh)
           (harness-voice--set-state 'ready)))
+    (harness-voice--acknowledgment-stop)
     (if (harness-voice-live-p)
         (when (eq harness-voice--owner (current-buffer))
           (harness-voice-live-stop))
@@ -971,6 +1294,7 @@ bound with `define-key'."
   (add-hook 'harness-ui-update-functions #'harness-voice--on-update)
   (add-hook 'harness-ui-event-functions #'harness-voice--on-event)
   (add-hook 'harness-ui-redraw-hook #'harness-voice--redraw)
+  (add-hook 'harness-ui-turn-accepted-functions #'harness-voice--acknowledge)
   (add-hook 'delete-frame-functions #'harness-voice-live--frame-deleted)
   (add-hook 'kill-emacs-hook #'harness-voice--reset)
   (unless (member harness-voice--mode-line global-mode-string)
@@ -997,6 +1321,7 @@ bound with `define-key'."
   (remove-hook 'harness-ui-update-functions #'harness-voice--on-update)
   (remove-hook 'harness-ui-event-functions #'harness-voice--on-event)
   (remove-hook 'harness-ui-redraw-hook #'harness-voice--redraw)
+  (remove-hook 'harness-ui-turn-accepted-functions #'harness-voice--acknowledge)
   (remove-hook 'delete-frame-functions #'harness-voice-live--frame-deleted)
   (remove-hook 'kill-emacs-hook #'harness-voice--reset)
   (setq global-mode-string (delete harness-voice--mode-line global-mode-string))

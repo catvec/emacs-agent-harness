@@ -68,6 +68,10 @@
 (declare-function harness-voice-interrupt "harness-ui-voice")
 (defvar harness-voice-provider)
 (defvar harness-voice-live-startup-timeout)
+;; The receipt settings are defined in `harness-ui-voice', which requires
+;; this file; they are read here, never set.
+(defvar harness-voice-acknowledgment)
+(defvar harness-voice-live-acknowledgment)
 
 (defconst harness-voice-live--protocol 1
   "Protocol version this client speaks.")
@@ -1947,9 +1951,15 @@ them is not it."
         (harness-voice-live--stage-set 'thinking)
         (harness-voice-live--refresh)
         (condition-case err
-            (harness-voice-live--dispatch route text
-                                          (lambda (error)
-                                            (harness-voice-live--delegate-error id error)))
+            (progn
+              (harness-voice-live--dispatch route text
+                                            (lambda (error)
+                                              (harness-voice-live--delegate-error id error)))
+              ;; The prompt is out: one short receipt of its arrival now,
+              ;; beside the turn it belongs to.  This is after the request,
+              ;; never before it, and the sidecar drops it rather than
+              ;; queueing it.
+              (harness-voice-live--acknowledge id))
           (error
            (harness-voice-live--delegate-error id err)))))))
 
@@ -1982,6 +1992,40 @@ interpret the words."
                                    :prompt (list (list :type "text" :text text)))
                              #'ignore
                              on-error)))))
+
+(defun harness-voice-live--acknowledge-possible-p (delegation)
+  "Non-nil when DELEGATION's receipt could be heard now.
+The sidecar decides what it can play -- a person speaking, a held
+transcript and the reply all keep it quiet -- but a request that this
+client knows is muted, stopped, off or about to be said is not sent at
+all.  DELEGATION must be the turn in flight: a receipt for another one
+would be heard in a conversation it was not made for."
+  (and harness-voice-acknowledgment
+       harness-voice-live-acknowledgment
+       (harness-voice-live--active-p)
+       (not harness-voice-live--muted)
+       (not (harness-voice-live--holding-output-p))
+       (equal delegation (plist-get harness-voice-live--delegation :id))
+       ;; The turn has produced nothing yet: a receipt is for a request,
+       ;; not for an answer that has started to arrive.
+       (zerop (hash-table-count (or harness-voice-live--nodes (make-hash-table))))))
+
+(defun harness-voice-live--acknowledge (delegation)
+  "Send DELEGATION's spoken receipt to the sidecar, or nothing.
+The receipt is a phrase the sidecar generated before the call: it plays
+one that no speech, held reply, mute or started output stands in front
+of, and drops it otherwise.  Nothing here waits for the sidecar, and a
+failure or a missing setting is silence, never a failed turn."
+  (when (harness-voice-live--acknowledge-possible-p delegation)
+    (harness-voice-live--send
+     (list :event "acknowledge" :delegation delegation))))
+
+(defun harness-voice-live--acknowledgment-cancel ()
+  "Tell the sidecar to drop a receipt it has not started yet.
+The receipt of a request that a later request or an interruption made
+stale is silence, never heard after the fact."
+  (when (harness-voice-live--active-p)
+    (harness-voice-live--send (list :event "acknowledgment-cancel"))))
 
 (defun harness-voice-live--delegate-error (id error)
   "Report that delegation ID failed with ERROR."
@@ -2668,6 +2712,7 @@ missed an event still starts."
   (unless (harness-voice-live--active-p)
     (user-error "Live voice inactive"))
   (harness-voice-live--send (list :event "interrupt"))
+  (harness-voice-live--acknowledgment-cancel)
   (harness-voice-live--cancel-held-timer)
   (harness-voice-live--pipeline-playback 'interrupted)
   (setq harness-voice-live--held nil

@@ -66,6 +66,11 @@
 (defvar harness-voice-effort)
 (defvar harness-voice-transcribe-command)
 (defvar harness-voice-synthesize-command)
+;; The receipt settings are defined in `harness-ui-voice', which requires
+;; this file; they are read here, never set.
+(defvar harness-voice-acknowledgment)
+(defvar harness-voice-live-acknowledgment)
+(defvar harness-voice-acknowledgment-phrases)
 
 (defgroup harness-voice nil
   "Client-side dictation and spoken replies, with any coding provider."
@@ -1018,6 +1023,18 @@ reason is one line, for the setup list."
                   (harness-voice-unmute--pipeline-url :tts-url))
         (harness-voice-pipeline-reason))))
 
+(defun harness-voice-unmute--acknowledgment-arguments ()
+  "Return the sidecar arguments for this client's request receipts.
+The phrases are the ones `harness-voice-acknowledgment-phrases' names, so
+a receipt sounds the same whichever capability speaks it; the switch is
+`harness-voice-acknowledgment' and `harness-voice-live-acknowledgment'
+together."
+  (if (and harness-voice-acknowledgment harness-voice-live-acknowledgment)
+      (append (list "--acknowledgment")
+              (cl-loop for phrase in harness-voice-acknowledgment-phrases
+                       append (list "--acknowledgment-phrase" phrase)))
+    (list "--no-acknowledgment")))
+
 (defun harness-voice-unmute-command ()
   "Return the argv list running the bundled local pipeline sidecar.
 Speech to text comes from the harness server's pipeline unless
@@ -1030,7 +1047,8 @@ speech from `harness-voice-unmute-tts-url' or the same pipeline.
                 "--tts-url" (harness-voice-unmute--tts-url)
                 "--voice" harness-voice-unmute-voice
                 "--threshold" (number-to-string harness-voice-unmute-threshold))
-          (harness-voice-unmute-parameter-argv)))
+          (harness-voice-unmute-parameter-argv)
+          (harness-voice-unmute--acknowledgment-arguments)))
 
 (defun harness-voice-unmute-parameter-argv ()
   "Return the sidecar's argv pairs for the saved speech parameters."

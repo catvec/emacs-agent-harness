@@ -16,6 +16,9 @@ work, and the capture path's scripted measurements: levels, a burst the
 speech filter kept and one it dropped.  Without --demo it only answers
 the harness's lifecycle commands.
 
+The harness's ``acknowledge`` event -- one short receipt for a request
+it accepted -- is written to stderr, since this sidecar has no speaker.
+
 The demo's audio events are scripted -- no microphone measured them --
 but they carry the same fields a real sidecar's `level' and `segment'
 events do.  --hold-speaking keeps the last playback report at speaking
@@ -96,6 +99,10 @@ def main(argv):
             send("listening")
             if demo:
                 demo_delegation()
+        elif kind == "acknowledge":
+            log("acknowledged %s" % (event.get("delegation") or "-"))
+        elif kind == "acknowledgment-cancel":
+            log("acknowledgment cancelled")
         elif kind == "mute":
             log("microphone %s" % ("muted" if event.get("on") else "open"))
         elif kind == "interrupt":

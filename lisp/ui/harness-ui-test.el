@@ -4701,5 +4701,69 @@ never replaced.  Quitting leaves the main area and both slots intact."
             (should (equal layout (harness-ui-test--layout))))
         (kill-buffer buffer)))))
 
+;;;; The turn accepted hook
+
+(ert-deftest harness-ui-turn-accepted-runs-after-the-request-went-out ()
+  "The hook sees the request after it was sent, and never instead of it."
+  (let ((harness-ui--prompts (make-hash-table :test 'equal))
+        (harness-ui-turn-accepted-functions nil)
+        (seen nil)
+        (requested nil)
+        (answer (harness-make-promise)))
+    (cl-letf (((symbol-function 'harness-ui-request)
+               (lambda (method params)
+                 (setq requested (list method params))
+                 answer)))
+      (add-hook 'harness-ui-turn-accepted-functions
+                (lambda (id method params)
+                  (push (list id method params (harness-ui-prompt-in-flight-p id)) seen)))
+      (unwind-protect
+          (harness-ui-call-turn "s-ack" "session/prompt" (list :sessionId "s-ack")
+                                #'ignore)
+        (remove-hook 'harness-ui-turn-accepted-functions
+                     (car harness-ui-turn-accepted-functions))))
+    (should (equal '("session/prompt" (:sessionId "s-ack")) requested))
+    (should (equal '(("s-ack" "session/prompt" (:sessionId "s-ack") t)) seen))
+    (harness-resolve answer '(:stopReason "end_turn"))))
+
+(ert-deftest harness-ui-turn-accepted-failure-never-fails-the-turn ()
+  "A listener that signals is logged, the others run, and the request stands."
+  (let ((harness-ui--prompts (make-hash-table :test 'equal))
+        (harness-ui-turn-accepted-functions nil)
+        (seen nil)
+        (answer (harness-make-promise))
+        (harness-log-level 'error))
+    (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) answer)))
+      (add-hook 'harness-ui-turn-accepted-functions
+                (lambda (&rest _) (error "a listener that breaks")))
+      (add-hook 'harness-ui-turn-accepted-functions
+                (lambda (&rest _) (push 'second seen)))
+      (unwind-protect
+          (progn
+            (harness-ui-call-turn "s-fail" "session/prompt" nil #'ignore)
+            ;; Both ran, in order: the failing one did not stop the other.
+            (should (equal '(second) seen))
+            (should (harness-ui-prompt-in-flight-p "s-fail")))
+        (setq harness-ui-turn-accepted-functions nil)))
+    (harness-resolve answer '(:stopReason "end_turn"))))
+
+(ert-deftest harness-ui-turn-accepted-is-short ()
+  "The hook is called before the prompt is answered, whatever it does."
+  (let ((harness-ui--prompts (make-hash-table :test 'equal))
+        (harness-ui-turn-accepted-functions nil)
+        (answered nil)
+        (answer (harness-make-promise)))
+    (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) answer)))
+      (add-hook 'harness-ui-turn-accepted-functions
+                (lambda (&rest _) (should-not answered)))
+      (unwind-protect
+          (progn
+            (harness-ui-call-turn "s-fast" "session/prompt" nil (lambda (_) (setq answered t)))
+            (should-not answered))
+        (setq harness-ui-turn-accepted-functions nil)))
+    (harness-resolve answer '(:stopReason "end_turn"))
+    (should answered)))
+
+
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here

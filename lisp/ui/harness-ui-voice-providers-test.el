@@ -96,6 +96,28 @@
     (should (equal "0.004" (cadr (member "--threshold" command)))))
   (should (equal '("--demo") (last (harness-voice-fixture-command)))))
 
+(ert-deftest harness-ui-voice-providers-acknowledgment-arguments ()
+  "The sidecar gets the receipt phrases this client's settings name."
+  (let ((harness-voice-unmute-stt-url "http://127.0.0.1:9000/stt")
+        (harness-voice-unmute-tts-url "http://127.0.0.1:9000/tts")
+        (harness-voice-acknowledgment t)
+        (harness-voice-live-acknowledgment t)
+        (harness-voice-acknowledgment-phrases '("On it" "Right")))
+    (let ((command (harness-voice-unmute-command)))
+      (should (member "--acknowledgment" command))
+      (should-not (member "--no-acknowledgment" command))
+      (should (equal '("On it" "Right")
+                     (cl-loop for rest on command
+                              when (equal (car rest) "--acknowledgment-phrase")
+                              collect (cadr rest)))))
+    (let ((harness-voice-live-acknowledgment nil))
+      (should (equal '("--no-acknowledgment")
+                     (harness-voice-unmute--acknowledgment-arguments))))
+    (let ((harness-voice-live-acknowledgment t)
+          (harness-voice-acknowledgment nil))
+      (should (equal '("--no-acknowledgment")
+                     (harness-voice-unmute--acknowledgment-arguments))))))
+
 (ert-deftest harness-ui-voice-providers-live-instructions-preserve-turn-policy ()
   "Extra model instructions preserve the pause/continuation policy."
   (let* ((harness-voice-chatgpt-instructions nil)

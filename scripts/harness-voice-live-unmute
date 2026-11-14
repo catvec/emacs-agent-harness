@@ -22,6 +22,12 @@ service can replace the stack without changing Emacs:
     POST /v1/audio/speech           {"model", "voice", "input", "response_format": "wav"}
                                     -> WAV bytes
 
+A request that reaches the session is acknowledged by one short spoken
+receipt ("On it"), played from a phrase this sidecar generated before
+the call (``--acknowledgment-cache``) so nothing is synthesized when a
+request arrives.  ``--no-acknowledgment`` turns it off, and
+``--acknowledgment-phrase`` replaces the phrases.
+
 Audio is captured and played as PCM16 mono at 16 kHz through the
 machine's audio backend -- PipeWire's ``pw-record`` and ``pw-play``,
 PulseAudio's ``parec`` and ``paplay``, ALSA's ``arecord`` and ``aplay``,
@@ -56,6 +62,10 @@ from harness_voice_sidecar import (  # noqa: E402
 
 DEFAULT_STT_URL = "http://127.0.0.1:8080/inference"
 DEFAULT_TTS_URL = "http://127.0.0.1:8880/v1/audio/speech"
+
+#: The receipts a request may be answered with, in order.  They say only
+#: that the request arrived; none of them names work, progress or a result.
+ACKNOWLEDGMENT_PHRASES = ("On it", "Hmm, thinking", "Right")
 
 
 def _normal(text):
@@ -121,6 +131,13 @@ class UnmuteSidecar(Sidecar):
         self.synthesizing = None
         self.commentary = []
         self.said = []
+        # Receipt phrases generated before a call: phrase -> PCM16.
+        self.acknowledgments = {}
+        self.acknowledgments_played = 0
+        self.pending_acknowledgment = None
+        self.acknowledging_until = 0.0
+        self.last_acknowledgment = None
+        self.reply_started = False
 
     # -- lifecycle ---------------------------------------------------
 
@@ -143,16 +160,26 @@ class UnmuteSidecar(Sidecar):
         self.stopping = threading.Event()
         self.started = True
         self._start_workers()
+        # Generate the receipts now, in the background, so a request
+        # never waits for speech synthesis to say it arrived.
+        self.prime_acknowledgments()
 
     def _start_workers(self):
         if self.workers:
             return
-        for name, target in (("voice-stt", self._transcribe_loop),
-                             ("voice-tts", self._synthesize_loop)):
-            worker = threading.Thread(target=target, args=(self.stopping,),
+        targets = [("voice-stt", self._transcribe_loop, (self.stopping,)),
+                   ("voice-tts", self._synthesize_loop, (self.stopping,))]
+        if self.acknowledgment_enabled():
+            targets.append(("voice-ack", self._acknowledge_loop, ()))
+        for name, target, args in targets:
+            worker = threading.Thread(target=target, args=args,
                                       name=name, daemon=True)
             worker.start()
             self.workers.append(worker)
+
+    def acknowledgment_enabled(self):
+        """Return whether this sidecar plays receipts at all."""
+        return bool(getattr(self.args, "acknowledgment", True))
 
     def on_stop(self):
         self.output_generation += 1
@@ -171,6 +198,9 @@ class UnmuteSidecar(Sidecar):
         self.ready.clear()
         self.held = []
         self.speech_active = False
+        self.acknowledging_until = 0.0
+        self.pending_acknowledgment = None
+        self.reply_started = False
         self._clear_queues()
         self.started = False
 
@@ -225,6 +255,7 @@ class UnmuteSidecar(Sidecar):
         self.announce_speech(False, reason="muted")
         if muted and self.player:
             self.player.stop()
+        self.acknowledging_until = 0.0
         self._clear_queues()
         log("microphone %s" % ("muted" if muted else "open"))
 
@@ -232,6 +263,10 @@ class UnmuteSidecar(Sidecar):
         """Silence output, not microphone/transcription or the agent's work."""
         self.cancel_release()
         self._clear_output()
+        # A receipt is output too: one that has not started is dropped,
+        # and one that is sounding gives way with everything else.
+        self.pending_acknowledgment = None
+        self.stop_acknowledgment()
         super().interrupt()
 
     def fail(self, message):
@@ -274,6 +309,7 @@ class UnmuteSidecar(Sidecar):
                 self._consume(self.vad.feed(chunk))
         self.drain_transcripts()
         self.drain_audio()
+        self.drain_acknowledgment()
         self.maybe_release()
 
     def _consume(self, events):
@@ -499,6 +535,10 @@ class UnmuteSidecar(Sidecar):
         text = speakable((text or "").strip())
         if not text or self.muted or self.closed:
             return
+        # A reply outranks a receipt: one that is sounding now gives way,
+        # and one that has not started is dropped.
+        self.reply_started = True
+        self.stop_acknowledgment()
         if self.gate_blocked():
             self.hold(text, item_id)
             return
@@ -507,12 +547,14 @@ class UnmuteSidecar(Sidecar):
             item_id = "say-%d" % self.held_seq
         self.speech_items.put((self.output_generation, item_id, text))
 
-    def synthesize(self, text):
+    def synthesize(self, text, quiet=False):
         """Return PCM16 for TEXT, or None when this reply has no audio.
 
         A failure is one reply's: it is reported as a notice, and the
         microphone, the session and the next turn go on.  An empty body
         names the reply that went unspoken rather than ending the call.
+        QUIET is for the receipts generated before a call: a phrase that
+        cannot be generated is simply not heard, not a line on screen.
         """
         text = speakable(text)
         if not text:
@@ -525,7 +567,8 @@ class UnmuteSidecar(Sidecar):
                                   headers=self.headers(), timeout=120)
         except Exception as error:  # noqa: BLE001 - shown in Emacs
             self.failures += 1
-            self.notice("Local speech failed · %s" % error)
+            if not quiet:
+                self.notice("Local speech failed · %s" % error)
             return None
         data = body if isinstance(body, bytes) else b""
         if not data.startswith(b"RIFF") and isinstance(body, dict):
@@ -544,17 +587,20 @@ class UnmuteSidecar(Sidecar):
             # for with an empty body.  After the speakable filter that is
             # rare, so it is worth naming: the reply went unspoken.
             self.failures += 1
-            self.notice("Local speech · no audio")
+            if not quiet:
+                self.notice("Local speech · no audio")
             return None
         if not data.startswith(b"RIFF"):
             self.failures += 1
-            self.notice("Local speech · no audio")
+            if not quiet:
+                self.notice("Local speech · no audio")
             return None
         try:
             return pcm_from_wav(data)
         except (EOFError, ValueError) as error:
             self.failures += 1
-            self.notice("Local speech · bad WAV · %s" % error)
+            if not quiet:
+                self.notice("Local speech · bad WAV · %s" % error)
             return None
 
     # -- replies -----------------------------------------------------
@@ -583,6 +629,124 @@ class UnmuteSidecar(Sidecar):
         self.commentary.append(text)
         self.speak(text, (event or {}).get("id"))
 
+    def on_delegation(self, delegation_id):
+        # A new request: this turn's reply has not started yet, so its own
+        # receipt may be heard.
+        self.reply_started = False
+
+    # -- acknowledgments ---------------------------------------------
+
+    # The receipt of an accepted request: one short phrase, generated
+    # before the call so a request is answered with a file read rather
+    # than a speech request.  It goes through the same gate as a reply --
+    # a person speaking, a held transcript and a mute all silence it --
+    # and it is dropped, never queued, when it cannot start at once.
+
+    acknowledgements = True
+
+    def acknowledgment_phrases(self):
+        """Return the receipt phrases this sidecar generates, in order."""
+        configured = getattr(self.args, "acknowledgment_phrases", None)
+        phrases = [phrase for phrase in (configured or ACKNOWLEDGMENT_PHRASES)
+                   if speakable(phrase)]
+        return phrases or list(ACKNOWLEDGMENT_PHRASES)
+
+    def acknowledgment_enabled(self):
+        """Return whether this sidecar plays receipts at all."""
+        return bool(getattr(self.args, "acknowledgment", True))
+
+    def acknowledgment_allowed(self, event):
+        """Return whether a receipt for EVENT can start now, without a queue.
+
+        A muted or half-listening session, a person speaking, a held
+        reply and a reply that started or ended all make the receipt
+        silence.  The delegation the receipt belongs to must still be the
+        one running, so a receipt never speaks over a turn it was not
+        made for, and its own turn must not have produced anything yet.
+        """
+        if not self.acknowledgment_enabled() or not self.started:
+            return False
+        if self.speech_active or self.held or self.awaiting:
+            return False
+        if self.commentary or self.reply_started:
+            return False
+        return super().acknowledgment_allowed(event)
+
+    def _acknowledge_loop(self):
+        """Generate the receipt phrases, one at a time, off the loop.
+
+        This runs once, at the start of the call, and never blocks a
+        request: by the time one arrives the phrases are a memory read.
+        """
+        for phrase in self.acknowledgment_phrases():
+            if self.stopping.is_set():
+                return
+            if phrase in self.acknowledgments:
+                continue
+            pcm = self.synthesize(phrase, quiet=True)
+            if pcm and not self.stopping.is_set():
+                self.acknowledgments[phrase] = pcm
+        log("acknowledgments ready · %d" % len(self.acknowledgments))
+
+    def acknowledgment_pcm(self):
+        """Return the PCM of the next receipt phrase, or None when none is ready.
+
+        A phrase is never played twice in a row while another is ready,
+        so two requests in a breath are not answered with the same word.
+        A phrase that could not be generated is skipped: silence, not a
+        wait and not a failure.  Asking changes nothing; the phrase is
+        remembered when it is played.
+        """
+        ready = [phrase for phrase in self.acknowledgment_phrases()
+                 if phrase in self.acknowledgments]
+        if not ready:
+            return None
+        choices = [phrase for phrase in ready if phrase != self.last_acknowledgment]
+        return self.acknowledgments[(choices or ready)[0]]
+
+    def acknowledgment_phrase(self):
+        """Return the phrase `acknowledgment_pcm' would say now, or None."""
+        ready = [phrase for phrase in self.acknowledgment_phrases()
+                 if phrase in self.acknowledgments]
+        if not ready:
+            return None
+        choices = [phrase for phrase in ready if phrase != self.last_acknowledgment]
+        return (choices or ready)[0]
+
+    def acknowledging(self):
+        """Non-nil while the receipt just played is still sounding."""
+        return time.monotonic() < self.acknowledging_until
+
+    def stop_acknowledgment(self):
+        """Stop a receipt that is sounding: a reply outranks it."""
+        if self.acknowledging():
+            if self.player:
+                self.player.stop()
+            self.acknowledging_until = 0.0
+
+    def drain_acknowledgment(self):
+        """Play the receipt waiting for this tick, unless it went stale."""
+        event, self.pending_acknowledgment = self.pending_acknowledgment, None
+        if event is None or self.acknowledging():
+            return False
+        if not self.acknowledgment_allowed(event):
+            return False
+        if self.gate_blocked() or (self.player and self.player.busy()):
+            return False
+        phrase = self.acknowledgment_phrase()
+        pcm = self.acknowledgments.get(phrase) if phrase else None
+        if not pcm or self.player is None:
+            return False
+        self.last_acknowledgment = phrase
+        # Played as the receipt it is, not announced as the reply: the
+        # stage stays Working, because the agent's turn has not answered
+        # yet.  The player's own level still gates the microphone against
+        # the receipt's echo.
+        self.player.play(pcm)
+        self.acknowledgments_played += 1
+        self.acknowledging_until = time.monotonic() + len(pcm) / (2.0 * self.rate)
+        return True
+
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description="Local live-voice sidecar for the harness")
@@ -602,6 +766,15 @@ def parse_args(argv):
     parser.add_argument("--api-key-env", default="")
     parser.add_argument("--audio", default=AUDIO_AUTO, choices=audio_backend_names(),
                         help="audio backend (default: the first installed)")
+    parser.add_argument("--acknowledgment", dest="acknowledgment",
+                        action="store_true", default=True,
+                        help="play one short receipt for an accepted request")
+    parser.add_argument("--acknowledgment-phrase", dest="acknowledgment_phrases",
+                        action="append", default=None, metavar="PHRASE",
+                        help="a receipt phrase to generate (repeatable)")
+    parser.add_argument("--no-acknowledgment", dest="acknowledgment",
+                        action="store_false",
+                        help="no receipt for an accepted request")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv[1:])
     args.tts_parameter = parse_parameters(args.tts_parameter, parser)
@@ -669,11 +842,24 @@ def self_test(args):
         while time.monotonic() < deadline:
             sidecar.drain_transcripts()
             sidecar.drain_audio()
+            sidecar.drain_acknowledgment()
             sidecar.maybe_release()
             yield
             time.sleep(0.01)
 
+    def replies():
+        """Return the speech requests that were replies, not receipts."""
+        phrases = set(sidecar.acknowledgment_phrases())
+        return [call for call in calls["tts"]
+                if call["payload"].get("input") not in phrases]
+
     sidecar.start_session({"event": "start", "protocol": 1})
+    # The receipts are generated before the call needs them.
+    for _ in pump():
+        if len(sidecar.acknowledgments) == len(ACKNOWLEDGMENT_PHRASES):
+            break
+    if len(sidecar.acknowledgments) != len(ACKNOWLEDGMENT_PHRASES):
+        return self_test_failed("acknowledgments not primed")
     # One utterance: speech crosses the gate, then a pause ends it.
     speech = _self_test_tone(1.2) + b"\x00\x00" * 24000
     for result in sidecar.vad.feed(speech):
@@ -698,15 +884,26 @@ def self_test(args):
     captions = [event for event in events.sent if event.get("event") == "user_delta"]
     if not captions or captions[-1].get("final") is not True:
         return self_test_failed("user caption")
+    # The accepted request is answered by one receipt, and a second
+    # request while it sounds is not answered twice.
+    before = len(player.played)
+    sidecar.handle({"event": "acknowledge", "delegation": delegations[0]["id"]})
+    sidecar.handle({"event": "acknowledge", "delegation": delegations[0]["id"]})
+    for _ in pump(0.5):
+        pass
+    if len(player.played) <= before:
+        return self_test_failed("no acknowledgment played")
+    if not sidecar.last_acknowledgment:
+        return self_test_failed("acknowledgment phrase not chosen")
     # The agent's answer is spoken and reported as speaking.
     sidecar.handle({"event": "delegate_result", "id": delegations[0]["id"],
                     "text": "It is in place."})
     for _ in pump():
-        if calls["tts"] and player.played:
+        if replies() and player.played:
             break
-    if not calls["tts"]:
+    if not replies():
         return self_test_failed("no speech request")
-    if calls["tts"][0]["payload"].get("input") != "It is in place.":
+    if replies()[0]["payload"].get("input") != "It is in place.":
         return self_test_failed("speech text")
     if calls["tts"][0]["payload"].get("speed") != 1.5:
         return self_test_failed("speech parameter")
@@ -719,15 +916,15 @@ def self_test(args):
     # Commentary is spoken the same way, unless speech owns the floor.
     sidecar.handle({"event": "commentary", "text": "Working on it.", "id": "c-1"})
     for _ in pump():
-        if len(calls["tts"]) >= 2:
+        if len(replies()) >= 2:
             break
-    if calls["tts"][-1]["payload"].get("input") != "Working on it.":
+    if replies()[-1]["payload"].get("input") != "Working on it.":
         return self_test_failed("commentary not spoken")
     sidecar.speech_active = True
     sidecar.handle({"event": "commentary", "text": "Never mind.", "id": "c-2"})
     for _ in pump(0.2):
         pass
-    if len(calls["tts"]) != 2:
+    if len(replies()) != 2:
         return self_test_failed("held commentary was synthesized")
     if not any(item.get("id") == "c-2" for item in sidecar.held):
         return self_test_failed("held commentary not recorded")

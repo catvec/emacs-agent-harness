@@ -592,5 +592,281 @@ this machine's player, so the speaker stays local."
       (should-not harness-voice--job)
       (should (equal "Voice ready · Microphone off" (harness-voice--status))))))
 
+;;;; The receipt of an accepted request (WAV capability)
+
+;; A real player process would need a speaker, which no test machine has:
+;; these start one and read what it was asked to play, so what is checked
+;; is the path -- the phrase chosen, the file generated before the
+;; request, the cancellation -- and never that a speaker was heard.
+
+(defvar harness-ui-voice-test--played nil
+  "The files the receipt's player was started on, oldest first.")
+
+(defun harness-ui-voice-test--prime (&rest phrases)
+  "Write a playable WAV for each of PHRASES into the acknowledgment cache."
+  (dolist (phrase phrases)
+    (let ((file (harness-voice--acknowledgment-file phrase)))
+      (make-directory (file-name-directory file) t)
+      (with-temp-buffer
+        (set-buffer-multibyte nil)
+        (insert "RIFF" (make-string 120 0))
+        (write-region (point-min) (point-max) file nil 'silent)))))
+
+(defun harness-ui-voice-test--ack-now ()
+  "Run the receipt's zero-delay timer now, as redisplay would."
+  (sit-for 0.01))
+
+(defmacro harness-ui-voice-test-with-ack (&rest body)
+  "Run BODY in a compose host whose receipt player only records its start."
+  (declare (indent 0))
+  `(harness-ui-voice-test-with
+     (setq harness-voice-mode t harness-voice--owner buf
+           harness-voice-acknowledgment t
+           harness-voice-live-acknowledgment t
+           harness-ui-voice-test--played nil
+           harness-voice--acknowledgment-last nil
+           harness-voice--acknowledgment-process nil
+           harness-voice--acknowledgment-timer nil)
+     (harness-ui-voice-test--prime "On it" "Hmm, thinking" "Right")
+     (add-hook 'harness-ui-turn-accepted-functions #'harness-voice--acknowledge)
+     (cl-letf (((symbol-function 'harness-voice--player)
+                (lambda (file)
+                  (push file harness-ui-voice-test--played)
+                  ;; A player that stays up, as a real one does while it
+                  ;; sounds the phrase, so interruption can be seen.
+                  (list "sleep" "5"))))
+       ,@body
+       (remove-hook 'harness-ui-turn-accepted-functions #'harness-voice--acknowledge)
+       (harness-voice--acknowledgment-stop))))
+
+(ert-deftest harness-ui-voice-acknowledgment-plays-one-generated-phrase ()
+  "An accepted prompt starts one already-generated phrase, and asks for nothing."
+  (harness-ui-voice-test-with-ack
+    (let ((synthesized nil))
+      (cl-letf (((symbol-function 'harness-voice--acknowledgment-synthesize)
+                 (lambda (phrase _file _done &optional _failed)
+                   (push phrase synthesized))))
+        (harness-voice--acknowledge "voice-session" "session/prompt" '(:sessionId "voice-session" :prompt nil))
+        ;; The request's own call starts no player.
+        (should-not harness-ui-voice-test--played)
+        (harness-ui-voice-test--ack-now)
+        (should-not synthesized)
+        (should (= 1 (length harness-ui-voice-test--played)))
+        (should (member harness-voice--acknowledgment-last
+                        harness-voice-acknowledgment-phrases))
+        (should (file-exists-p (car harness-ui-voice-test--played)))))))
+
+(ert-deftest harness-ui-voice-acknowledgment-variety-and-repeat-suppression ()
+  "Phrases vary, and the same one never plays twice in a row."
+  (harness-ui-voice-test-with-ack
+    (let ((heard nil))
+      (dotimes (_ 6)
+        (harness-voice--acknowledgment-stop)
+        (harness-voice--acknowledge "voice-session" "session/prompt" '(:sessionId "voice-session" :prompt nil))
+        (harness-ui-voice-test--ack-now)
+        (push harness-voice--acknowledgment-last heard))
+      (setq heard (nreverse heard))
+      (should (= 6 (length heard)))
+      (should (> (length (delete-dups (copy-sequence heard))) 1))
+      (cl-loop for (a b) on heard
+               while b
+               do (should-not (equal a b))))))
+
+(ert-deftest harness-ui-voice-acknowledgment-off-muted-and-unsent ()
+  "Off, another session and a non-prompt send nothing."
+  (harness-ui-voice-test-with-ack
+    (let ((harness-voice-acknowledgment nil))
+      (should (equal "acknowledgment off"
+                     (harness-voice--acknowledgment-blocked-p)))
+      (harness-voice--acknowledge "voice-session" "session/prompt" '(:sessionId "voice-session" :prompt nil))
+      (harness-ui-voice-test--ack-now)
+      (should-not harness-voice--acknowledgment-process))
+    (let ((harness-voice-mode nil))
+      (harness-voice--acknowledge "voice-session" "session/prompt" '(:sessionId "voice-session" :prompt nil))
+      (harness-ui-voice-test--ack-now)
+      (should-not harness-voice--acknowledgment-process))
+    (setq harness-voice-mode t)
+    ;; Another session's prompt is not this box's receipt.
+    (harness-voice--acknowledge "another-session" "session/prompt" '(:sessionId "another-session" :prompt nil))
+    (harness-ui-voice-test--ack-now)
+    (should-not harness-voice--acknowledgment-process)
+    ;; Sending the queue is not a new request.
+    (harness-voice--acknowledge "voice-session" "_harness/agent/send-queue" '(:session-id "voice-session" :qids nil))
+    (harness-ui-voice-test--ack-now)
+    (should-not harness-voice--acknowledgment-process)
+    (should-not (harness-voice--acknowledgment-playing-p))
+    (should-not harness-ui-voice-test--played)))
+
+(ert-deftest harness-ui-voice-acknowledgment-yields-to-speech-and-interrupt ()
+  "A reply that is starting, a queue or an interruption drops the receipt."
+  (harness-ui-voice-test-with-ack
+    (let ((harness-voice--queue '("A reply.")))
+      (harness-voice--acknowledge "voice-session" "session/prompt" '(:sessionId "voice-session" :prompt nil))
+      (harness-ui-voice-test--ack-now)
+      (should-not harness-voice--acknowledgment-process)
+      (should-not harness-voice--acknowledgment-timer))
+    (setq harness-voice--queue nil)
+    (harness-voice--acknowledge "voice-session" "session/prompt" '(:sessionId "voice-session" :prompt nil))
+    (harness-ui-voice-test--ack-now)
+    (should (harness-voice--acknowledgment-playing-p))
+    (should harness-voice--acknowledgment-timer)
+    ;; C-c V silences it now, and nothing sends it again.
+    (harness-voice-interrupt)
+    (should-not (harness-voice--acknowledgment-playing-p))
+    (should-not harness-voice--acknowledgment-timer)))
+
+(ert-deftest harness-ui-voice-acknowledgment-drops-a-finished-turn ()
+  "A turn that ended before the receipt started is not acknowledged."
+  (harness-ui-voice-test-with-ack
+    (let ((answer (harness-make-promise)))
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) answer)))
+        (harness-ui-call-turn "voice-session" "session/prompt"
+                              '(:sessionId "voice-session" :prompt nil) #'ignore)
+        (should harness-voice--acknowledgment-pending)
+        ;; The answer came back first: nothing is left to acknowledge.
+        (harness-resolve answer '(:stopReason "end_turn"))
+        (harness-ui-voice-test--ack-now)
+        (should-not (harness-voice--acknowledgment-playing-p))
+        (should-not harness-voice--acknowledgment-pending)))
+    (harness-voice--acknowledgment-stop)))
+
+(ert-deftest harness-ui-voice-acknowledgment-drops-a-stale-one ()
+  "A receipt whose session, owner, connection or turn changed never plays."
+  (harness-ui-voice-test-with-ack
+    (let ((harness-ui-session-id "first-session"))
+      (harness-voice--acknowledge "first-session" "session/prompt" '(:sessionId "first-session" :prompt nil))
+      (should harness-voice--acknowledgment-pending)
+      ;; The box now asks another conversation: the receipt is stale.
+      (setq harness-ui-session-id "second-session")
+      (harness-ui-voice-test--ack-now)
+      (should-not (harness-voice--acknowledgment-playing-p))
+      (should-not harness-voice--acknowledgment-pending))
+    (setq harness-ui-session-id "voice-session")
+    (harness-voice--acknowledge "voice-session" "session/prompt" '(:sessionId "voice-session" :prompt nil))
+    (harness-voice--reset)
+    (harness-ui-voice-test--ack-now)
+    (should-not (harness-voice--acknowledgment-playing-p))
+    (harness-voice--acknowledge "voice-session" "session/prompt" '(:sessionId "voice-session" :prompt nil))
+    (harness-voice-interrupt)
+    (harness-ui-voice-test--ack-now)
+    (should-not (harness-voice--acknowledgment-playing-p))))
+
+(ert-deftest harness-ui-voice-acknowledgment-never-fails-the-request ()
+  "A player that cannot start leaves the prompt sent and the error silent."
+  (harness-ui-voice-test-with-ack
+    (let ((asked nil))
+      (cl-letf (((symbol-function 'harness-voice--player)
+                 (lambda (_file) (setq asked t) (error "Voice player unavailable")))
+                ((symbol-function 'harness-ui-request)
+                 (lambda (&rest _) (harness-make-promise))))
+        (harness-ui-call-turn "voice-session" "session/prompt"
+                              '(:sessionId "voice-session" :prompt nil) #'ignore)
+        (harness-ui-voice-test--ack-now)
+        (should asked)
+        (should-not harness-voice--acknowledgment-process)
+        (should-not harness-voice--acknowledgment-timer)
+        (should-not harness-voice--error)))))
+
+(ert-deftest harness-ui-voice-acknowledgment-ungenerated-phrase-is-silent ()
+  "With no phrase generated the request is heard in silence, then primed."
+  (harness-ui-voice-test-with
+    (setq harness-voice-mode t harness-voice--owner buf
+          harness-voice--acknowledgment-process nil)
+    (let ((prime nil))
+      (cl-letf (((symbol-function 'harness-voice-acknowledge-prime)
+                 (lambda (&optional _) (setq prime t)))
+                ((symbol-function 'harness-voice--player)
+                 (lambda (file) (list "true" file))))
+        (harness-voice--acknowledge "voice-session" "session/prompt" '(:sessionId "voice-session" :prompt nil))
+        (harness-ui-voice-test--ack-now)
+        (should prime)
+        (should-not harness-voice--acknowledgment-process)))))
+
+(ert-deftest harness-ui-voice-acknowledgment-prime-generates-each-phrase-once ()
+  "The bank is generated in the background, one phrase after another."
+  (harness-ui-voice-test-with
+    (let ((asked nil))
+      (cl-letf (((symbol-function 'harness-voice--acknowledgment-synthesize)
+                 (lambda (phrase file done &optional _failed)
+                   (push phrase asked)
+                   (harness-ui-voice-test--prime phrase)
+                   (funcall done file))))
+        (harness-voice-acknowledge-prime)
+        (should (equal harness-voice-acknowledgment-phrases (nreverse asked)))
+        (should-not harness-voice--acknowledgment-priming)
+        ;; Generated phrases are not asked for again.
+        (setq asked nil)
+        (harness-voice-acknowledge-prime)
+        (should-not asked)))))
+
+(ert-deftest harness-ui-voice-acknowledgment-a-failed-phrase-does-not-stop-the-pass ()
+  "One phrase that cannot be generated leaves the others generated, and no flag stuck."
+  (harness-ui-voice-test-with
+    (let ((asked nil))
+      (cl-letf (((symbol-function 'harness-voice--acknowledgment-synthesize)
+                 (lambda (phrase file done &optional failed)
+                   (push phrase asked)
+                   (if (equal phrase "Hmm, thinking")
+                       (funcall failed)
+                     (harness-ui-voice-test--prime phrase)
+                     (funcall done file)))))
+        (harness-voice-acknowledge-prime)
+        (should (equal harness-voice-acknowledgment-phrases (nreverse asked)))
+        (should-not harness-voice--acknowledgment-priming)
+        (should-not (file-exists-p (harness-voice--acknowledgment-file "Hmm, thinking")))
+        (should (file-exists-p (harness-voice--acknowledgment-file "Right")))
+        ;; A later pass tries only what is still missing.
+        (setq asked nil)
+        (harness-voice-acknowledge-prime)
+        (should (equal '("Hmm, thinking") asked))
+        (should-not harness-voice--acknowledgment-priming)))))
+
+(ert-deftest harness-ui-voice-acknowledgment-phrase-bank-copy ()
+  "The default bank is receipts, never a claim about the work."
+  (dolist (phrase harness-voice-acknowledgment-phrases)
+    (should (stringp phrase))
+    (should (<= (length phrase) 24))
+    (should-not (string-match-p "[.!?]" phrase)))
+  (should (equal '("On it" "Hmm, thinking" "Right")
+                 harness-voice-acknowledgment-phrases)))
+
+(ert-deftest harness-ui-voice-acknowledgment-setting-copy ()
+  "The switch is in the voice group, with the exact line Customize shows.
+A setting's description is the one place prose is allowed, and Customize
+shows its first sentence: these are pinned so the page cannot drift."
+  (dolist (setting '(harness-voice-acknowledgment
+                     harness-voice-live-acknowledgment
+                     harness-voice-acknowledgment-phrases
+                     harness-voice-acknowledgment-voice
+                     harness-voice-acknowledgment-timeout))
+    (should (assq setting (get 'harness-voice 'custom-group))))
+  (let ((shown (lambda (setting)
+                 (car (split-string
+                       (documentation-property setting 'variable-documentation)
+                       "\n")))))
+    (should (equal "Whether an accepted request gets one short spoken receipt."
+                   (funcall shown 'harness-voice-acknowledgment)))
+    ;; Emacs renders the docstring's quote as a curly one; the page
+    ;; shows exactly this.
+    (should (equal "Whether a live voice request gets the sidecar’s short spoken receipt."
+                   (funcall shown 'harness-voice-live-acknowledgment)))
+    (should (equal "Phrases the WAV capability may play as a request receipt."
+                   (funcall shown 'harness-voice-acknowledgment-phrases)))
+    (should (equal "Voice the WAV capability generates its receipts in."
+                   (funcall shown 'harness-voice-acknowledgment-voice)))
+    (should (equal "Maximum seconds one receipt plays before its player is stopped."
+                   (funcall shown 'harness-voice-acknowledgment-timeout)))
+    ;; One sentence each: the rest is in the docstring's body, where the
+    ;; settings page keeps its help.
+    (dolist (setting '(harness-voice-acknowledgment
+                       harness-voice-live-acknowledgment
+                       harness-voice-acknowledgment-phrases
+                       harness-voice-acknowledgment-voice
+                       harness-voice-acknowledgment-timeout))
+      (should (= 1 (length (split-string (funcall shown setting) "\\." t))))))
+  ;; On by default, and on for each capability.
+  (should (eq t (default-value 'harness-voice-acknowledgment)))
+  (should (eq t (default-value 'harness-voice-live-acknowledgment))))
+
 (provide 'harness-ui-voice-test)
 ;;; harness-ui-voice-test.el ends here

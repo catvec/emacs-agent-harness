@@ -65,6 +65,7 @@ provides:
 - `harness-ui-redraw-hook` — Hook run when every UI buffer should redraw (after a reload or reconnect).
 - `harness-ui-sessions-changed-hook` — Hook run after the session cache changes.
 - `harness-ui-set-all-functions` — Functions called with KEY and VALUE when a command sets KEY everywhere.
+- `harness-ui-turn-accepted-functions` — Functions called with (SESSION-ID METHOD PARAMS) when a turn was accepted.
 - `harness-ui-update-functions` — Functions called with (SESSION-ID UPDATE) for every `session/update`.
 
 ### Commands
