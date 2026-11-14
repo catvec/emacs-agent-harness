@@ -9,10 +9,12 @@ first slice is implemented: `workspace`, `workspace-knowledge`, the
 markdown half of `logseq`, `workspace-box` and `ui-workspace` are in
 the tree, with their tests, and the Flutter client has the `Workspace`
 tab, its responsive layout, the `Graph` page that reads the current
-thread's Logseq page and a computer that draws the real RFB stream.  The Logseq CLI and its DB graphs, the index and its persistent
-vectors, the dream's review UI, the container backend, routines and
-voice are not; who writes a note, the nightly dream and the semantic
-rerank are in [the knowledge graph note](workspace-knowledge-graph.md).  The
+thread's Logseq page and a computer that draws the real RFB stream.  The
+Logseq CLI and its DB graphs, the index and its persistent
+vectors, the container backend, routines and voice are not; who writes
+a note, the nightly dream and the semantic rerank are in [the knowledge
+graph note](workspace-knowledge-graph.md), and the dream itself in [its
+note](design/automatic-logseq-dreaming.md).  The
 computer's design and its `local` boundary are in
 [workspace computer](workspace-computer.md).  The decision that the
 workspace's knowledge is a Logseq graph and the memory module keeps
@@ -41,7 +43,7 @@ only behavioral notes is in
   - [Thread sidebar](#thread-sidebar)
   - [The header states](#the-header-states)
   - [The memory browser](#the-memory-browser)
-  - [The dream review](#the-dream-review)
+  - [The dream review](#the-dream-review) (what replaced it)
   - [The computer panel](#the-computer-panel)
   - [The workspace list and settings](#the-workspace-list-and-settings)
   - [Keys](#keys)
@@ -106,8 +108,7 @@ knowledge store.
 
 What does not exist yet: the Logseq CLI and its DB graphs (the
 markdown graph is read and written directly), the persistent embedding
-index, the curator, the dream's operation review, the box's container
-backend, routines and voice.  Those are stages 0 and 3 to 8 below.  The
+index, the curator, the box's container backend, routines and voice.  Those are stages 0 and 3 to 8 below.  The
 Flutter client draws the workspace, its threads, its `Graph` page and
 its computer from the same `workspace/*` and `knowledge/*` methods; its
 `Memory` screen reaches the graph through ACP aliases
@@ -122,15 +123,15 @@ talks ACP.
 | Module | Layer | Requires | What it is |
 |---|---|---|---|
 | `logseq` | state | `core`, `util` | The Logseq markdown graph client: pages, journals, blocks, properties, search and backlinks, read and written as files.  No workspace or memory policy.  The CLI and its DB graphs are stage 0 below. |
-| `workspace-knowledge` | state | `logseq`, `session`, `tools` | Thread pages, journal captures, retrieval, the dream's pass and schedule, the semantic rerank, the knowledge tools and the write path.  It knows pages, blocks and provenance, not threads or chats. |
+| `workspace-knowledge` | state | `logseq`, `session`, `tools`, `harness-prompts` | Thread pages, journal captures, retrieval, the dream's pass and schedule, its synthesis, its run backups, the semantic rerank, the knowledge tools and the write path.  It knows pages, blocks and provenance, not threads or chats. |
 | `workspace` | state | `workspace-knowledge`, `session`, `agent`, `project`; uses `tasks`, `supervisor` and `seed` when loaded | Workspaces, threads, episodes, the timeline, routing and the brief.  It is the mode. |
-| `workspace-dream` | state | `workspace-knowledge`, `workspace` | The dream scheduler, phases, reports and review state.  The pass and its nightly schedule are in `workspace-knowledge`; the phases, risk classes and review state are not. |
+| ~~`workspace-dream`~~ | state | — | Not a module: the pass, its schedule and its report are in `workspace-knowledge`, so there is no separate scheduler or review state. |
 | `workspace-box` | state | `store` | The computer's lifecycle, private X display, browser profile, input, control lock and VNC endpoint.  Optional: without it the workspace has no computer.  The first backend is `local`, not the container in the design. |
 | `workspace-routines` | state | `workspace`, `notifications` | Triggers, runs and delivery.  Optional; a workspace without it has no scheduled work. |
 | `ui-workspace-voice` | UI | `ui-workspace`, `ui-voice` (when present) | The call control on a thread; the delegation path is `workspace/prompt` with `:channel 'voice`, which marks the turns. |
 | `ui-workspace` | UI | `ui`, `ui-chat`, `ui-compose`, `ui-pending` | The workspace chat buffer, thread sidebar, header, dividers and settings line. |
 | `ui-workspace-memory` | UI | `ui-workspace` | The memory browser, recall card and provenance view. |
-| `ui-workspace-dream` | UI | `ui-workspace` | The dream report and review UI. |
+| ~~`ui-workspace-dream`~~ | UI | — | Not a module: a run's diff and undo are methods, and the report is a page in the graph the user already reads. |
 | `ui-workspace-box` | UI | `ui-workspace`, `ui-media` | The computer panel, screenshot, takeover and login form. |
 | `ui-workspace-routines` | UI | `ui-workspace` | Routine list and editor. |
 
@@ -140,25 +141,31 @@ the design expects all of them.
 
 **Background work.**  The workspace keeps model calls the user did not
 send to a minimum, and a turn makes none of its own.  What is left is
-consolidation, and it asks no model: the nightly dream reads pages and
-rewrites their state.  The shape a background job would take is here
-for the stages that add one (the librarian, the curator).  They are of
-two kinds.  A **one-shot** job (the recall query expansion) is an
-internal session: one `provider/complete` with a JSON answer, recorded
-and costed like the harness's other internal calls.  A **tool-using**
-job (the librarian, the curator, the dream) is a background session
-with its own kind (`workspace-librarian`, `workspace-curator`,
-`workspace-dream`): an ordinary agent loop with a narrow tool
-allowlist, a short context, the same permission chain and tool slots,
-and a transcript the user can open.  Those kinds are added to
-`harness-ui-sessions-hidden-kinds`, so the session list stays clean;
-`I` shows them.  A background session is non-interactive and never
-prompts: its tool list is narrowed to the knowledge (or task-reading)
-tools, and a call that would need the user -- a login, a mount, a
-permission it cannot decide -- is refused and reported rather than left
-waiting.  It never messages the user directly; the workspace turns its
-result into a timeline card, a knowledge write or a notification, and
-anything that needs a person goes to review.
+consolidation, and the nightly dream is the one job that asks a model:
+it reads the captures no pass has read and has a judge make sourced
+knowledge of them, in bounded batches, with one `harness-judge-ask` per
+batch ([the dream](design/automatic-logseq-dreaming.md)).  A judge is
+one `provider/complete` with an ephemeral session, recorded and costed
+like the harness's other internal calls; the dream writes the graph
+itself, so it has no tool loop and no transcript.
+
+The shape a background job would take is here for the stages that add
+one (the librarian, the curator).  They are of two kinds.  A
+**one-shot** job (the recall query expansion) is an internal session:
+one `provider/complete` with a JSON answer, recorded and costed like the
+harness's other internal calls.  A **tool-using** job (the librarian,
+the curator) is a background session with its own kind
+(`workspace-librarian`, `workspace-curator`): an ordinary agent loop
+with a narrow tool allowlist, a short context, the same permission chain
+and tool slots, and a transcript the user can open.  Those kinds are
+added to `harness-ui-sessions-hidden-kinds`, so the session list stays
+clean; `I` shows them.  A background session is non-interactive and
+never prompts: its tool list is narrowed to the knowledge (or
+task-reading) tools, and a call that would need the user -- a login, a
+mount, a permission it cannot decide -- is refused and reported rather
+than left waiting.  It never messages the user directly; the workspace
+turns its result into a timeline card, a knowledge write or a
+notification, and anything that needs a person goes to review.
 
 **A finished turn is not read again.**  The agent writes what the turn
 settled with `knowledge_write` while it still has the conversation, so
@@ -218,8 +225,9 @@ except the graph and the workspace root:
 ├── workspaces/
 │   ├── w-…json                  workspace record, threads, routines, box config
 │   ├── w-….timeline.jsonl       ordered entries (append-only)
-│   ├── w-….dreams.json          dream records, operations, review state
 │   └── w-….box.json             box state (id, ports, mounts, snapshots)
+├── workspace-dreams.eld          each workspace's dream state: the captures
+│                                 it read, its position, its last pass
 ├── workspace-knowledge/
 │   └── w-….db                   the index (SQLite, FTS5, vectors)
 ├── sessions/…                   episodes, exactly as any session
@@ -331,6 +339,18 @@ The readings are in the state layer so the Emacs buffer, the app and a
 call see the same graph; [the routing
 note](workspace-topic-routing.md#the-explorer) is their design.
 
+**The dream**
+
+| Method | Arguments | Returns |
+|---|---|---|
+| `knowledge/dream` | `workspace &optional opts` (`:dry-run :report :force`) | the result, or a promise of it: status, pages, captures, refused |
+| `knowledge/dream-status` | `workspace &optional opts` | the graph's type and adapter, the last pass, what waits, what is kept out, and what recovery the graph has |
+| `knowledge/dream-exclude` | `workspace text &optional why` | the text kept out of later passes |
+| `knowledge/index` | `workspace &optional opts` | the navigation index as text, or nil |
+
+The dream's design, and why each of these is shaped as it is, is [its
+own note](design/automatic-logseq-dreaming.md).
+
 **Memory**
 
 | Method | Arguments | Returns |
@@ -348,15 +368,13 @@ note](workspace-topic-routing.md#the-explorer) is their design.
 
 **Dream**
 
-| Method | Arguments | Returns |
-|---|---|---|
-| `workspace/dream/run` | `workspace &optional opts` (`:scope :dry-run :model`) | a promise of the report |
-| `workspace/dream/status` | `workspace` | running, last, next, counts |
-| `workspace/dream/cancel` | `workspace` | stops the running dream |
-| `workspace/dream/review` | `workspace &optional dream` | the proposed operations and diffs |
-| `workspace/dream/apply` | `workspace dream ops` | applies the chosen operations |
-| `workspace/dream/skip` | `workspace dream ops &optional reason` | records the decision |
-| `workspace/dream/undo` | `workspace dream` | undoes the last low-risk batch, if within the window |
+The stage-4 sketch named a `workspace/dream/run`, `…/status`, `…/cancel`,
+`…/review`, `…/apply`, `…/skip` and `…/undo` under `workspace/`, with a
+separate `workspace-dream` module and an operation review between a
+dream's plan and its writes.  None of that is here.  The dream is
+`knowledge/dream` and the methods beside it, above, in
+`workspace-knowledge`; it writes the graph it maintains, the report
+page says what a night did, and the pages are what a person reviews.
 
 **Box**
 
@@ -443,10 +461,7 @@ a UI should use `memory/…` instead.
 | `workspace/episode-changed` | `id thread episode` | an episode started, ended or changed state |
 | `workspace/context-built` | `id thread brief` | a brief was built (tokens, cards, why) |
 | `workspace/memory-changed` | `workspace op` | a memory write or forget applied |
-| `workspace/dream-started` | `workspace dream` | a dream began |
-| `workspace/dream-progress` | `workspace dream phase done total` | a phase finished |
-| `workspace/dream-finished` | `workspace dream report` | a dream finished, applied or failed |
-| `workspace/dream-review` | `workspace dream count` | review is waiting |
+| `workspace/dream-finished` | `workspace result` | a dream completed, partly completed or found nothing |
 | `workspace/box-status` | `workspace status` | the box changed state |
 | `workspace/box-frame` | `workspace frame` | a new screenshot is available (throttled) |
 | `workspace/box-login` | `workspace request` | a login form is waiting |
@@ -497,16 +512,27 @@ All options are `defcustom`s in `harness` and are described by
 **Dream**
 
 Implemented, in `workspace-knowledge`: `harness-workspace-knowledge-dream`
-(`auto`), `…-dream-hour` (3) and `…-dream-report` (t).  The pass asks no
-model.
+(`auto`), `…-dream-hour` (3) and `…-dream-report` (t), with the
+pass's own bounds: `…-dream-batch` (12) captures a request,
+`…-dream-batches` (2) requests a pass, `…-dream-captures` (120)
+considered, `…-dream-recovery-days` (7), `…-dream-pages` (12),
+`…-dream-page-blocks` (16), `…-dream-capture-chars` (2000),
+`…-dream-full-chars` (8000), `…-dream-prompt-chars` (30000),
+`…-dream-index` (12), `…-dream-index-chars` (1200),
+`…-dream-sources` (t), `…-dream-timeout` (180),
+`…-dream-catch-up` (t), `…-dream-catch-up-limit` (3),
+`…-dream-model` (nil: the workspace's own) and
+`…-dream-exclusions` (nil).  The pass asks a model once per
+batch, and writes only the pages it maintains.
 
-Staged with stage 4's phases and review: `harness-workspace-dream` (t),
-`…-dream-catch-up` (t), `…-dream-catch-up-hours` (36),
-`…-dream-idle-minutes` (45), `…-dream-min-turns` (12),
-`…-dream-model` (nil: medium tier), `…-dream-thinking` (nil),
-`…-dream-candidates` (40), `…-dream-ops` (60),
-`…-dream-min-score` (2.0), `…-dream-min-confidence` (0.6),
-`…-dream-budget`, `…-dream-undo-hours` (72).
+The earlier stage 4 sketch named a separate `workspace-dream` module, an
+idle- and turn-threshold trigger and an operation review, with
+`harness-workspace-dream`, `…-dream-idle-minutes`, `…-dream-ops`,
+`…-dream-budget` and the rest.  None of those is here: the pass lives in
+`workspace-knowledge`, runs at an hour with one bounded catch-up, and
+has no operation review, so [the design](design/automatic-logseq-dreaming.md)
+replaces that sketch.  `…-dream-model` is the workspace's own model
+unless it names another.
 
 **Box**
 
@@ -630,11 +656,12 @@ an IDF over the workspace's own words and, when an embedding model is
 configured, reranked by the cosine of the message and the thread's
 digest ([the routing note](workspace-topic-routing.md#the-ranker)).
 There is no internal session for it and no model tier to choose.  The
-librarian**, **curator** and **dream** prompts (the last two staged,
-and the dream's own pass today asks no model at all) are JSON-only and
-capped, but those jobs use tools; they run as background sessions with
-their own kinds, so each step and its result is in a transcript that
-can be read back.  A turn's own note needs no prompt: it is the agent's
+librarian** and **curator** prompts (both staged) are JSON-only and
+capped, and those jobs use tools, so they run as background sessions
+with their own kinds, each step and its result in a transcript that can
+be read back.  The dream is not one of them: it asks its model once per
+batch through `harness-judge-ask` and writes the graph itself, so it has
+no transcript ([the dream](design/automatic-logseq-dreaming.md)).  A turn's own note needs no prompt: it is the agent's
 `knowledge_write` in the turn.
 
 The model tiers:
@@ -644,7 +671,7 @@ The model tiers:
 | `knowledge/nearest` (the routing blend) | the embedding model | one small text per thread, cached |
 | librarian | simple | retrieval selection |
 | curator | simple or medium | a page of state |
-| dream | medium | the quality that matters |
+| dream | the workspace's own (`…-dream-model`) | the quality that matters, and the workspace already names its model |
 | chat episode | the user's choice | this is the conversation |
 
 ### Cache and cost
@@ -664,11 +691,12 @@ The model tiers:
   single thread.  It is the model's context guard, not the mode's
   topic policy; when it happens, the existing compaction UI still
   works, and the next episode does not depend on it.
-- **Costs are recorded** on the episode, the
-  curator/librarian/dream background sessions (where they exist), and
-  the workspace; `workspace/status` and the
-  header show the day's total.  `harness-workspace-knowledge-budget` and
-  `…-dream-budget` pause the background writers, never the chat.
+- **Costs are recorded** on the episode, the dream's requests and the
+  curator/librarian background sessions (where they exist), and the
+  workspace; `workspace/status` and the header show the day's total.
+  `harness-workspace-knowledge-budget` pauses the background writers,
+  never the chat.  A pass's own bound is its batch and prompt caps, not
+  a separate dream budget.
 
 ### Permissions and access
 
@@ -733,7 +761,7 @@ tab.
 ### Observability
 
 - The header: graph (`Memory · ready|indexing|keyword|unavailable`),
-  dream (`Dream · 2h ago`/`3 to review`), box (`Box · running`), and
+  dream (`Dream · 2h ago`/`nothing new`), box (`Box · running`), and
   the current episode's context and cost.
 - `workspace/status`: the write queue, the index's last sync, the
   dream's next run, the box's health, the routine's next run.
@@ -828,7 +856,7 @@ header line, a thread sidebar, the timeline and the compose box.
 | event card | an icon, the event title, a state, and the actions the event has | task, routine, dream, box or routine event |
 | task card | `Task · <title>`, the column and age, `[Open] [Steer] [Pause]` | acts on the task through the existing task methods |
 | routine card | `Routine · Morning brief`, the summary, `[Open] [Run again] [Pause]` | opens the run; runs it again |
-| dream card | `Dream · 12 notes updated` / `Dream · 3 to review`, `[Review]` | opens the dream review |
+| dream card | `Dream · 12 notes updated` / `Dream · nothing new`, `[Diff]` | shows what the last run changed |
 | box card | `Box · Login needed`, `[Open computer]` | opens the computer panel |
 | call card | `Call · 4m 12s`, the summary, `[Open transcript]` | the voice call's record |
 | error card | `Dream stopped`, `Memory unavailable`, the reason, `[Retry]` | a failure the user can act on |
@@ -860,13 +888,13 @@ A thread waiting on the user shows `?` and `Waiting`.
 | thread | `Thread · <name>`; a click opens the thread list; `All threads` when none |
 | project | `Project · <name>`; a click opens the project's board |
 | box | `Box · running`, `Box · starting`, `Box · stopped`, `Box · failed`, `Box · unavailable` |
-| memory | `Memory · ready`, `Memory · indexing`, `Memory · keyword`, `Memory · unavailable`, `Memory · synced`, `Memory · 3 to review`, `Memory · disk full` |
-| dream | `Dream · <age>`, `Dream · now`, `Dream · 3 to review`, `Dream · failed` |
+| memory | `Memory · ready`, `Memory · indexing`, `Memory · keyword`, `Memory · unavailable`, `Memory · synced`, `Memory · disk full` |
+| dream | `Dream · <age>`, `Dream · now`, `Dream · nothing new`, `Dream · failed` |
 | buttons | `Tasks`, `Computer`, `Memory`, `Dream`, `Call`, `Menu` |
 
 The header is a status line, not a dashboard.  A state that needs the
 user is the one that stays in a narrow window: `Box · Login needed`,
-`Memory · disk full`, `Dream · 3 to review`.  The rest folds into the
+`Memory · disk full`, `Dream · failed`.  The rest folds into the
 overflow.
 
 ### The memory browser
@@ -891,21 +919,14 @@ editing belongs in the editor.
 
 ### The dream review
 
-A popout with a list of proposals on the left and a diff on the right:
-
-```
-Dreams/2026-11-06          Changes · 12 applied · 3 review
-──────────────────────────────────────────────────────────
-Merge pages                People/Stone Co + People/StoneCo
-Update thread              Threads/Kitchen renovation · next action
-Supersede decision         Decisions/Countertop · 2026-10-02
-```
-
-Each proposal shows its sources, the old and the new text, the risk,
-and `Apply` / `Skip`.  `Apply all` is one button.  `Undo` is
-at the top while the window is open.  A conflict card shows the two
-claims side by side, the dates and the sources, with `Keep A`,
-`Keep B`, `Both` and `Later`.
+**Not built, and not the plan.**  A pass writes the graph it maintains,
+so there are no proposals to accept: what a person reviews is what it
+wrote.  The `Dreams/<date>` report page says what a night did,
+and `knowledge/dream-status` says what recovery the graph itself has
+([the design](design/automatic-logseq-dreaming.md)).  A
+review popout with `Apply` / `Skip` was the stage-4 sketch; it would
+have put a gate between the user and every night's knowledge, which is
+the workflow the dream exists to remove.
 
 ### The computer panel
 
@@ -1226,8 +1247,8 @@ against the rendered buffer and the final diff.
 | `All threads` | header when no thread |
 | `Project · Home` | header |
 | `Box · running` / `Box · starting` / `Box · stopped` / `Box · failed` / `Box · unavailable` | header, computer panel |
-| `Memory · ready` / `Memory · indexing` / `Memory · keyword` / `Memory · unavailable` / `Memory · synced` / `Memory · 3 to review` / `Memory · disk full` | header, memory panel |
-| `Dream · 2h ago` / `Dream · now` / `Dream · 3 to review` / `Dream · failed` | header, dream panel |
+| `Memory · ready` / `Memory · indexing` / `Memory · keyword` / `Memory · unavailable` / `Memory · synced` / `Memory · disk full` | header, memory panel |
+| `Dream · 2h ago` / `Dream · now` / `Dream · nothing new` / `Dream · failed` | header, dream panel |
 | `Tasks` / `Computer` / `Memory` / `Dream` / `Call` / `Menu` | header buttons |
 | `Episode` | header and thread action |
 | `live` / `parked` / `done` / `waiting` | thread states |
@@ -1259,7 +1280,7 @@ against the rendered buffer and the final diff.
 |---|---|
 | `Task · Get quartz quote` / `Review ready · Log slow requests` / `Task done · Log slow requests` | task event cards |
 | `Call · 4m 12s` / `Open transcript` | call card |
-| `Dream · 12 notes updated` / `Dream · 3 to review` | dream card |
+| `Dream · 12 notes updated` / `Dream · nothing new` | dream card |
 | `Routine · Morning brief` / `Call-back · quote request ready` | routine and call cards |
 | `Box · Login needed` / `Box · stopped` | box card |
 
@@ -1292,7 +1313,7 @@ against the rendered buffer and the final diff.
 |---|---|
 | `Memory` / `Pages` / `Search` / `Index` | browser |
 | `Threads` / `Projects` / `People` / `Decisions` / `Journal` / `Dreams` / `Inbox` / `Sources` / `Routines` | page tree |
-| `Model` / `Coverage` / `Last sync` / `Last dream` / `Pending review` | index line |
+| `Model` / `Coverage` / `Last sync` / `Last dream` | index line |
 | `Provenance` / `Source session` / `Learned` / `Confidence` / `Backlinks` | detail |
 | `Reindex` / `Recall test` | index actions |
 | `Correct` / `Forget` / `Remember` / `Open in Logseq` | actions |
@@ -1304,7 +1325,7 @@ against the rendered buffer and the final diff.
 | String | Where |
 |---|---|
 | `Dream` / `Last dream` / `Next dream` / `Running` | panel |
-| `Review` / `Changes` / `Applied` / `Skipped` / `Failed` | review |
+| `Changes` / `Applied` / `Skipped` / `Failed` | a staged review |
 | `Apply` / `Skip` / `Apply all` / `Undo` / `Later` | review actions |
 | `Dream now` / `Scope` / `Today` / `Since last dream` / `Page` / `Thread` / `Dry run` | run form |
 | `Sources` / `Reason` / `Risk` | proposal detail |
@@ -1362,7 +1383,7 @@ the test in the same commit.
 - The workspace is a chat, not a dashboard.  The header has states, not
   charts; details are in panels and tooltips.
 - Every status that needs the user is a word and an action, not a
-  colour alone: `Waiting`, `3 to review`, `Login needed`.
+  colour alone: `Waiting`, `Dream · failed`, `Login needed`.
 - The timeline is read-only prose; actions are on cards and in the
   header; a click on a message opens the episode.
 - The thread divider is quiet: one muted rule and a name.  It never
@@ -1399,14 +1420,14 @@ are the tests the later stages add.
 | `lisp/modules/harness-logseq-test.el` | page names, journal paths, bullets and properties, search ranking and filtering, snippets, backlinks, page properties, the missing graph |
 | `lisp/modules/harness-workspace-test.el` | thread pages, journal captures, knowledge search and recall, the knowledge tools and their filter, the generic memory tools left alone, the ACP aliases |
 | `lisp/modules/harness-workspace-test.el` | workspace/thread/episode records, the timeline, routing (hard, similarity, model), brief budgets, continuation and re-entry, a restart, a deleted episode, a moved project, settings |
-| `lisp/modules/harness-workspace-test.el` | a turn costs one model call and leaves no note of its own; the notes the agent writes are on the thread's page with provenance; the dream removes a duplicate and refreshes a page |
-| `test/harness-workspace-dream-test.el` | phases, candidate scoring, duplicate/update/contradiction, risk classification, idempotent apply, user-edit guard, review/apply/skip, undo, budget stop, backup failure, a crash resumed |
+| `lisp/modules/harness-workspace-test.el` | a turn costs one model call and leaves no note of its own; the notes the agent writes are on the thread's page with provenance; the dream removes a duplicate parent and keeps its children |
+| `lisp/modules/harness-workspace-test.el` | the dream: a sourced synthesis over captures from two threads, the pages it refuses, a batch kept unread until every page saved, undo and what it keeps out, the index, the overlap guard, the graph type, a plan out of a fenced answer, a clipped capture followed to its session |
 | `lisp/modules/harness-workspace-box-test.el` | the `local` box: the off state and its missing tools, a running record's VNC URL and socket, the control lock and input refusal, the window parser, browser metadata with no values, and every method the clients call |
 | `test/harness-workspace-routines-test.el` | schedule computation, timezone, missed runs, catch-up, read-only tools, delivery, pause/resume, event triggers |
 | `lisp/ui/harness-ui-workspace-test.el` | exact rendered copy (the inventory), header states, empty/loading/error states, dividers, brief cards, event cards, compose routing, keys, overflow, mouse buttons |
 | `lisp/ui/harness-ui-workspace-test.el` | header knowledge state, `_harness/knowledge/status`, `workspace/knowledge-changed`, exact copy, the graph explorer's views, tooltips, keys and refusals |
 | `test/harness-ui-workspace-box-test.el` | computer panel states, screenshot, takeover, login form, exact copy |
-| `test/harness-ui-workspace-dream-test.el` | review list, diff, apply/skip/undo, exact copy |
+
 | `test/harness-workspace-voice-test.el` | a call attaches to the thread, delegation goes to `workspace/prompt`, voice nodes, interruption, a call while a turn runs |
 
 The UI suites use the same rendering harness as
@@ -1544,7 +1565,7 @@ riskiest contracts are settled before the UI that depends on them.
 | 1 | Memory index and tools | 0 | `workspace-knowledge`: SQLite schema, FTS, vectors, sync, hybrid retrieval, `knowledge_search/get/write/status`, private pages, redaction | knowledge is useful from an ordinary session, before any workspace UI exists |
 | 2 | Workspace and the one chat (Emacs) | 1 | `workspace` records, threads, episodes, timeline, routing, brief, `workspace/prompt`, `ui-workspace` chat, thread sidebar, dividers, settings line, copy tests | the user can chat across threads and the context clears without compaction |
 | 3 | Scribe, curator, task linker and memory browser | 2 | the three writers, batching, hash checks, `ui-workspace-memory`, provenance, correct/forget | memory stays current from real turns, and the user can see why it thinks something |
-| 4 | Dreaming | 3 | `workspace-dream`: scheduler, phases, scoring, review/apply/skip/undo, report page, `ui-workspace-dream` | the graph is consolidated, reviewed and improved without silent rewrites |
+| 4 | Dreaming | 3 | `workspace-knowledge`: the pass over pending captures, its synthesis, the schedule and catch-up, run backups with diff and undo, the report page | the graph holds sourced knowledge made from what the workspace generated |
 | 5 | The box (computer) and its resources | 2 | `workspace-box`: lifecycle, image, mounts, exec, screenshot, input, browser/CDP and its data, login, VNC, snapshots, the wallet broker, `ui-workspace-box`; the client Resources page is already in the tree against the blocked contract | the agent has a real computer, the user can take over and bound a purchase, and the host is out of reach |
 | 6 | Routines, briefs and notifications | 2, 3 | `workspace-routines`, triggers, catch-up, delivery, morning brief/weekly review, notification deep links, `ui-workspace-routines` | the workspace is always-on and the user is reached where they are |
 | 7 | Voice, Flutter and remote | 2, 5, 6 | `ui-workspace-voice`, the rest of the Flutter `Workspace` surface (memory browser, Work panel, open desktop), screenshot/input over ACP, voice call attach, remote docs | the same workspace is reachable from a phone and a call |
@@ -1574,13 +1595,15 @@ memory contract also gains `memory/get`, `memory/forget`,
 `workspace/thread/merge` is implemented.  Note-writing is the agent's,
 with `knowledge_write` in the turn that settled a note: there is no
 per-turn extraction pass.  The dream's pass and nightly schedule (the
-core of stage 4) rewrite every thread page, remove a note written twice
-and leave a `Dreams/` report, with a dry run and a report page, and it
-asks no model; `knowledge/search` reranks by meaning when an embedding
-model is set.  It does not include the Logseq
-CLI and its DB graphs, the persistent index and its vectors, the
-curator, the dream's operation review, the container backend, routines
-or voice; those keep their stage below.
+core of stage 4) read the captures no pass has read and have a judge
+make sourced project, person, topic, decision, lesson and question
+pages of them, keep an index the brief carries, rewrite every thread
+page, remove a note written twice and leave a `Dreams/` report, with a
+dry run, a report page, a diff and an undo; `knowledge/search` reranks
+by meaning when an embedding model is set.  It does not include the
+Logseq CLI and its DB graphs, the persistent index and its vectors, the
+curator, the container backend, routines or voice; those keep their
+stage below.
 
 ### Stage 0: embeddings and the Logseq client
 
@@ -1724,32 +1747,47 @@ curator, the task linker and the browser's correct/forget are not.
 
 ### Stage 4: dreaming
 
-**Status.**  The pass, its nightly schedule with the per-day record,
-its dry run and its `Dreams/<date>` report page are implemented:
-`knowledge/dream` rewrites each thread page's identity and state,
-removes a note this workspace wrote more than once, and records one
-bullet per thread.  The phases below (collect, extract, reconcile,
-plan), the risk classes, the review/apply/skip/undo and the backup are
-not.
+**Status.**  The pass is implemented: `knowledge/dream` reads the
+captures no pass has read, across threads, and has a judge make sourced
+knowledge of them in bounded batches; it also rewrites each thread
+page's identity and state and removes a note this workspace wrote more
+than once.  Its nightly schedule with the per-day record and the startup
+catch-up, the page digest that makes a concurrent edit recompute,
+`knowledge/dream-status` with what recovery the graph itself has, and
+its `Dreams/<date>` report page are here
+([the design](design/automatic-logseq-dreaming.md)).
+The review/apply/skip UI of the operations before they apply, and the
+risk classes it needs, are not; `:dry-run` stays as it was and is not
+the review path.
 
 **Work**
 
-1. The scheduler, catch-up, idle and manual runs.
-2. `collect`, `extract`, `reconcile`, `plan`, `apply`, `reindex`,
-   `review`, `diary`; the dream record and resume.
-3. Risk classes, review/apply/skip/undo, backup, idempotence, budget.
-4. The report page and the review UI.
-5. Tests: duplicates, contradictions, user edits, crash, failed
-   backup, undo, a second dream that sees its own changes.
+1. ~~The scheduler, catch-up and manual runs.~~  Done, with a per-day
+   record and one bounded startup catch-up.
+2. ~~`collect`, `extract`, `plan`, `apply`; the dream record and
+   resume.~~  Done, as the pass over pending captures and its intent.
+   `reindex` and `diary` have no separate step: the graph is read
+   directly and the report is a page.
+3. Review/apply/skip before the operations apply, and the risk classes
+   that need.  Not done, and not the plan: the dream writes the graph,
+   the report page says what it did, and the pages are its review.
+4. The report page.  Done.  The review UI is not, for the same reason.
+5. Tests: duplicates, user edits corrected in place, a batch kept unread
+   until every page saved, the intent reconciled after a run that stopped
+   before its bookkeeping, the pass keeping no copy, a second pass that
+   writes nothing, a concurrent edit recomputed.  Done.
 
 **Acceptance**
 
-- a dream on a fixture graph produces the expected report and
-  operations;
-- no user-written block is changed without review;
-- a failed operation does not lose the batch;
-- a crash resumes at the next phase;
-- the undo restores the graph and the index;
+- a dream on a fixture graph produces the expected pages and
+  statements;
+- a user-edited page is rewritten like any other, and what the user
+  rejects stays out of later passes;
+- a failed page save leaves its batch unread;
+- a run that stopped between its saves and its bookkeeping is
+  reconciled, not replayed;
+- the undo restores the graph, and keeps what it took out of later
+  passes;
 - a second dream does not re-apply the same operation.
 
 ### Stage 5: the box
@@ -1976,9 +2014,12 @@ comes after the timeline and memory are stable.
 
 ### No review gates on memory
 
-*Rejected.*  An agent that can rewrite its own knowledge and
-instructions without review will drift.  The agent appends its notes and
-never rewrites a block; the dream updates and merges behind a review;
+*Accepted, for the dream.*  An agent that can rewrite its own knowledge
+and instructions without review will drift, so the fence is where the
+writing happens rather than a queue in front of it: the agent appends
+its notes and never rewrites a block; the dream writes only the pages it
+maintains and this workspace owns, cites a source for every statement,
+and lets the user mark a page `no-dream:: true` or exclude a statement;
 skills are proposed, not installed.
 
 ## Open questions
@@ -2029,7 +2070,7 @@ should confirm before the relevant stage starts.
 | Logseq's CLI or graph version changes under us | a version check at startup, a fake CLI in the suite, the HTTP fallback, and a graph export before a migration | a new Logseq release can still change a JSON key; the client reports the command and the shape instead of guessing |
 | A graph is corrupted by a write | no direct `db.sqlite` access, one writer, `graph backup create` before dreams, hashes on updates | a crash during a Logseq write is Logseq's to recover; the backup is the fallback |
 | Notes fill the graph with noise | the agent writes only what a turn settled, the tool deduplicates a statement, the explorer shows every block with its source, and correction is the user's | a model can still write a plausible wrong note; the user can see and correct it |
-| The dream overwrites a decision | user edits outrank, hash checks, risk classes, review for merges/deletes/supersessions, 72-hour undo | a low-risk update can still surprise the user; the report shows every change |
+| The dream overwrites a decision | a page digest recomputes a write against the page as it is, `no-dream:: true` and `knowledge/dream-exclude` fence a page or a statement, and a statement the judge names by id is rewritten in place rather than duplicated | a statement the user wanted can be rewritten; the page in Logseq, and whatever history the graph has (git, or `logseq/bak`, which `knowledge/dream-status` reports), is the repair path |
 | Recall misses the one note that mattered | hybrid words + meaning + links, one-hop expansion, a librarian, an explicit `knowledge_search`, citations | a badly linked page is hard to find; the dream's link health and the recall test are the repair path |
 | The ranker splits the wrong thread | default continue, a clear divider, `Keep in this thread`, forced `New thread` | a split costs a click and a little extra context |
 | Context and background jobs cost too much | no judge for routing, no per-turn extraction, cheap tiers where a job uses one, dream caps, per-workspace budgets | a very active workspace can still exceed a soft budget; the chat keeps working |
@@ -2053,7 +2094,7 @@ are starting points for the first release, not promises.
 | Route decision | under 400 ms, local; the embedding rerank, when one is configured, bounded at 2 s | `workspace/prompt` |
 | New episode first token | the brief plus the model's first token; no extra round trip | the session's usage |
 | Memory corrections | fewer than 1 in 10 agent-written blocks corrected or forgotten in the first week | the memory browser's events |
-| Dream review acceptance | more than 4 in 5 proposed medium/high-risk operations accepted | dream records |
+| Dream statements kept | most of what a pass writes is still on its page a week later, and a corrected statement stays corrected | the pages, and the `Dreams/<date>` report page |
 | Task delegation | the workspace submits rather than does work that needs review | task records linked from threads |
 | Context per turn | within the brief budget; a thread revival cheaper than a compacted long session | usage |
 | Cost per workspace per day | under the user's budget, and visible | `workspace/status`, the usage page |

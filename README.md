@@ -301,10 +301,11 @@ A non-comprehensive list of all the different functionality offered by modules s
   - A local computer of its own: a private Xvfb display, a window manager, x11vnc, a noVNC page and a Firefox profile, started and handed over from the desk or `C-c w c` ([the computer](docs/workspace-computer.md))
   - A `Memory` screen in the Flutter client for the graph's notes and recall search, and a smaller `Resources` page for browser data, wallet and bounded authorizations ([the model](docs/workspace-resources.md))
   - A `Graph` page in the Flutter client and a `*Workspace Graph*` buffer in Emacs show the current thread's Logseq page, its nodes with their tags, links and properties, and the pages that link back to it
-  - The agent writes what a turn settled with `knowledge_write`, in that turn: a decision, a fact, a commitment or an open loop, on the thread's page with its provenance, and nothing on a turn that settled nothing; a nightly dream maintains every page, removes duplicate notes and writes a `Dreams/<date>` report, and `knowledge/dream` runs it now, as a dry run or with a report page
+  - The agent writes what a turn settled with `knowledge_write`, in that turn: a decision, a fact, a commitment or an open loop, on the thread's page with its provenance, and nothing on a turn that settled nothing
+  - A nightly dream reads the captures no pass has read, across threads, and has a judge make sourced knowledge of them: project, person, topic, decision, lesson and question pages, each statement with its kind, its confidence and the captures it came from, a navigation index the brief carries, and a `Dreams/<date>` report; it keeps no copy of what it changed, and `knowledge/dream-status` reports what history the graph itself has, and `knowledge/dream` runs one now ([the dream](docs/design/automatic-logseq-dreaming.md))
   - `knowledge_search` ranks by the words matched and by recency, and by meaning when `harness-workspace-knowledge-embedding-model` names an embedding model (`mode: semantic`)
   - Enable with `(harness-enable-modules :features workspace :ui ui-workspace)`; open with `M-x harness-workspace` or `C-c h V Y`
-  - The Logseq CLI and its DB graphs, the persistent index and its vectors, the dream's review UI, the container backend, routines and voice are the staged design: [the design](docs/workspace-mode.md), [the implementation contract](docs/workspace-mode-implementation.md)
+  - The Logseq CLI and its DB graphs, the persistent index and its vectors, the container backend, routines and voice are the staged design: [the design](docs/workspace-mode.md), [the implementation contract](docs/workspace-mode-implementation.md)
 
 # Workspace mode (first slice)
 
@@ -330,9 +331,9 @@ the computer's decision and its `local` boundary are in
 [docs/workspace-computer.md](docs/workspace-computer.md).
 
 The Logseq CLI and its DB graphs, the persistent embedding index, the
-dream's review UI, the container backend, the wallet broker behind the
-client's `Resources` page, routines and voice are not implemented yet;
-they are the staged remainder of the design.
+container backend, the wallet broker behind the client's `Resources`
+page, routines and voice are not implemented yet; they are the staged
+remainder of the design.
 
 # Private commit attribution
 

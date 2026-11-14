@@ -27,6 +27,9 @@
 (defvar harness-workspace-knowledge-dream)
 (defvar harness-workspace-knowledge-dream-report)
 (defvar harness-workspace-knowledge--dream-timer)
+(defvar harness-workspace-knowledge--catch-up-timer)
+(defvar harness-workspace-knowledge--running)
+(defvar harness-workspace-knowledge-dream-catch-up)
 
 (declare-function harness-session--load-all "harness-session" ())
 
@@ -59,6 +62,7 @@
            (harness-workspace-episode-turns 120)
            (harness-workspace-knowledge-dream nil)
            (harness-workspace-knowledge-dream-report nil)
+           (harness-workspace-knowledge-dream-catch-up nil)
            (harness-logseq-directory (expand-file-name "graph/" dir))
            (default-directory dir))
        ;; The module subscribes only while this is nil, and the bus is
@@ -1465,3 +1469,418 @@ captures link the page and are its backlinks."
       (let ((page (harness-call 'knowledge/graph/page id "Anywhere")))
         (should (equal "unavailable" (plist-get page :status)))
         (should (null (plist-get page :blocks)))))))
+
+;;;; The dream
+
+(defun harness-workspace-test-graph-page (name)
+  "Return the file content of page NAME in the test graph."
+  (harness-read-file (harness-logseq-page-file name harness-logseq-directory)))
+
+(defun harness-workspace-test-dream (id &optional opts)
+  "Dream workspace ID and return what the pass answered.
+A pass that asks a model answers with a promise, which is waited for."
+  (let ((answer (harness-call 'knowledge/dream id opts)))
+    (if (harness-promise-p answer) (harness-test-await answer) answer)))
+
+(defmacro harness-workspace-test-with-dream (plan &rest body)
+  "Run BODY with the dreaming judge answering PLAN.
+The judge is the module's own `harness-judge-ask', which a pass asks for
+a synthesis; answering it here keeps the pass itself under test."
+  (declare (indent 1))
+  `(progn
+     (require 'harness-judge)
+     (cl-letf (((symbol-function 'harness-judge-ask)
+                (lambda (&rest _)
+                  (harness-resolved (list :value ,plan :text "" :lookups 0)))))
+       ,@body)))
+
+(ert-deftest harness-workspace-dream-synthesizes-sourced-knowledge ()
+  "A pass turns unread captures into sourced knowledge, and reads them once."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (asked 0)
+           (plan (list :pages
+                       (list (list :page "Projects/Kitchen"
+                                   :about "The kitchen renovation."
+                                   :blocks
+                                   (list (list :text "The grout is warm grey."
+                                               :kind "fact"
+                                               :confidence "confirmed"
+                                               :sources (list "c-1"))))))))
+      (harness-call 'workspace/prompt id "The grout is warm grey.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      ;; A dry run says what a pass would read and writes nothing.
+      (let ((dry (harness-call 'knowledge/dream id (list :dry-run t))))
+        (should (equal "completed" (plist-get dry :status)))
+        (should (plist-get dry :dry-run))
+        (should (> (plist-get dry :would-synthesize) 0))
+        (should (cl-find-if (lambda (line) (string-match-p "would read" line))
+                            (plist-get dry :changes))))
+      (should-not (file-exists-p
+                   (harness-logseq-page-file "Projects/Kitchen" harness-logseq-directory)))
+      (require 'harness-judge)
+      (cl-letf (((symbol-function 'harness-judge-ask)
+                 (lambda (&rest _)
+                   (cl-incf asked)
+                   (harness-resolved (list :value plan :text "" :lookups 0)))))
+        (let ((report (harness-workspace-test-dream id)))
+          (should (equal "completed" (plist-get report :status)))
+          (should (= 1 asked))
+          (should (>= (plist-get report :sources) 1)))
+        (let ((content (harness-workspace-test-graph-page "Projects/Kitchen")))
+          (should (string-match-p "The grout is warm grey." content))
+          (should (string-match-p "dream-kind:: fact" content))
+          (should (string-match-p "dream-confidence:: confirmed" content))
+          (should (string-match-p "sources:: ((" content))
+          (should (string-match-p "dream-about:: The kitchen renovation." content)))
+        ;; The captures were read: a second pass asks no model.
+        (let ((report (harness-workspace-test-dream id)))
+          (should (equal "no-change" (plist-get report :status)))
+          (should (= 1 asked)))))))
+
+(ert-deftest harness-workspace-dream-writes-only-what-it-may ()
+  "A pass refuses a page it does not maintain, another workspace's page,
+a statement with no source and one the user rejected, and writes the rest."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (thread-page nil)
+           (plan nil))
+      (harness-call 'workspace/prompt id "The grout is warm grey.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (setq thread-page
+            (plist-get (car (plist-get (harness-call 'workspace/get id) :threads)) :page))
+      (harness-call 'logseq/page-add "Projects/Shared" "Another workspace's note."
+                    (list :root harness-logseq-directory
+                          :properties '(("workspace-id" . "other-workspace"))))
+      (harness-call 'knowledge/dream-exclude id "A rejected statement.")
+      (setq plan
+            (list :pages
+                  (list (list :page thread-page
+                              :blocks (list (list :text "Not knowledge."
+                                                  :sources (list "c-1"))))
+                        (list :page "Projects/Shared"
+                              :blocks (list (list :text "Not mine."
+                                                  :sources (list "c-1"))))
+                        (list :page "Projects/Kitchen"
+                              :blocks (list (list :text "No source.")
+                                            (list :text "A rejected statement."
+                                                  :sources (list "c-1"))
+                                            (list :text "Kept."
+                                                  :sources (list "c-1")))))))
+      (harness-workspace-test-with-dream plan
+        (let ((report (harness-workspace-test-dream id)))
+          (should (equal "completed" (plist-get report :status)))
+          ;; The thread's page, the other workspace's page, the unsourced
+          ;; statement and the rejected one.
+          (should (= 4 (plist-get report :refused)))))
+      (let ((kitchen (harness-workspace-test-graph-page "Projects/Kitchen")))
+        (should (string-match-p "Kept." kitchen))
+        (should-not (string-match-p "No source" kitchen))
+        (should-not (string-match-p "rejected statement" kitchen)))
+      (should-not (string-match-p
+                   "Not knowledge"
+                   (harness-workspace-test-graph-page thread-page)))
+      (should-not (string-match-p
+                   "Not mine"
+                   (harness-workspace-test-graph-page "Projects/Shared"))))))
+
+(ert-deftest harness-workspace-dream-keeps-a-batch-unread-until-every-page-is-saved ()
+  "A page that cannot be written leaves its batch unread, and the pass says so."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (asked 0)
+           (plan (list :pages
+                       (list (list :page "Projects/Kitchen"
+                                   :blocks (list (list :text "The grout is warm grey."
+                                                       :sources (list "c-1"))))
+                             (list :page "Projects/Broken"
+                                   :blocks (list (list :text "The tile is matte."
+                                                       :sources (list "c-1"))))))))
+      (harness-call 'workspace/prompt id "The grout is warm grey.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (require 'harness-judge)
+      (cl-letf (((symbol-function 'harness-judge-ask)
+                 (lambda (&rest _)
+                   (cl-incf asked)
+                   (harness-resolved (list :value plan :text "" :lookups 0)))))
+        ;; A page that cannot be saved: the method itself is replaced,
+        ;; since the bus calls the function it registered, not the symbol.
+        (let* ((real (symbol-function 'harness-method/logseq/page-edit))
+               (report
+                (unwind-protect
+                    (progn
+                      (harness-register-method
+                       'logseq/page-edit
+                       (lambda (name &optional opts)
+                         (if (equal name "Projects/Broken")
+                             (signal 'harness-error (list "the page is locked"))
+                           (funcall real name opts))))
+                      (harness-workspace-test-dream id))
+                  (harness-register-method 'logseq/page-edit real))))
+          (should (equal "partial" (plist-get report :status)))
+          (should (= 0 (plist-get report :sources))))
+        ;; The batch was not marked read: the next pass asks again.
+        (should (> (plist-get (harness-call 'knowledge/dream-status id) :remaining) 0))
+        (let ((report (harness-workspace-test-dream id)))
+          (should (equal "completed" (plist-get report :status)))
+          (should (= 2 asked)))))))
+
+(ert-deftest harness-workspace-dream-corrects-a-page-the-user-edited ()
+  "A page the user edited is read and corrected in place, not replaced."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (page "Projects/Kitchen")
+           (file (harness-logseq-page-file page harness-logseq-directory))
+           (plan (list :pages
+                       (list (list :page page
+                                   :about "The kitchen renovation."
+                                   :blocks (list (list :id "d1"
+                                                       :text "The grout is warm grey."
+                                                       :kind "fact"
+                                                       :confidence "confirmed"
+                                                       :sources (list "c-1"))))))))
+      (harness-call 'workspace/prompt id "The grout is warm grey.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      ;; The user wrote the page by hand: their own block, their own words.
+      (harness-ensure-directory (file-name-directory file))
+      (harness-write-file-atomically
+       file
+       (concat "- The tile is matte.
+"
+               "  workspace-id:: " id "
+"
+               "  role:: note
+"
+               "- The grout is a cold grey.
+"
+               "  id:: d1
+"
+               "  workspace-id:: " id "
+"
+               "  role:: note
+"
+               "  - Ask Stone Co about the sample.
+"
+               "    id:: c1
+"))
+      (harness-workspace-test-with-dream plan
+        (should (equal "completed"
+                       (plist-get (harness-workspace-test-dream id) :status))))
+      (let* ((content (harness-workspace-test-graph-page page))
+             (blocks (harness-logseq-parse-blocks content)))
+        ;; The statement the sources contradict is corrected in place,
+        ;; with the id and the child it had.
+        (should-not (string-match-p "cold grey" content))
+        (should (string-match-p "The grout is warm grey." content))
+        (should (cl-find-if (lambda (block)
+                              (equal "d1" (harness-logseq-block-property block "id")))
+                            blocks))
+        (should (cl-find-if (lambda (block)
+                              (string-match-p "Stone Co" (plist-get block :title)))
+                            blocks))
+        ;; The user's other block is the pass's to keep, not its to drop.
+        (should (string-match-p "The tile is matte." content)))
+      ;; Nothing the pass changed is kept beside it: no run directory, no
+      ;; before or after copy, no manifest.
+      (let ((runs (expand-file-name
+                   (format "workspace-dreams/%s" id) harness-state-directory)))
+        (should-not (file-exists-p runs)))
+      (should-not (harness-method-exists-p 'knowledge/dream-diff))
+      (should-not (harness-method-exists-p 'knowledge/dream-undo)))))
+
+(ert-deftest harness-workspace-dream-keeps-no-copy-of-what-it-wrote ()
+  "The pass leaves the page as its only record, and says so in its status."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (plan (list :pages
+                       (list (list :page "Projects/Kitchen"
+                                   :blocks (list (list :text "The grout is warm grey."
+                                                       :sources (list "c-1"))))))))
+      (harness-call 'workspace/prompt id "The grout is warm grey.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (harness-workspace-test-with-dream plan
+        (harness-workspace-test-dream id))
+      (should (string-match-p
+               "warm grey"
+               (harness-workspace-test-graph-page "Projects/Kitchen")))
+      ;; The whole of the state the pass keeps is its bookkeeping, and the
+      ;; page itself.  A run directory would be the copy it does not keep.
+      (should-not (file-exists-p
+                   (expand-file-name "workspace-dreams" harness-state-directory)))
+      ;; The status says what the graph itself offers, not what the pass
+      ;; keeps: this fixture graph has no git checkout and no logseq/bak.
+      (let ((status (harness-call 'knowledge/dream-status id)))
+        (should-not (plist-get (plist-get status :recovery) :git))
+        (should (zerop (plist-get (plist-get status :recovery) :backups)))
+        (should-not (plist-get (plist-get status :recovery) :kept))
+        (should (member "the graph is not in a git checkout"
+                        (plist-get status :limitations)))
+        (should (member "the graph has no logseq/bak history"
+                        (plist-get status :limitations)))))))
+
+(ert-deftest harness-workspace-dream-keeps-one-note-and-its-children ()
+  "A duplicate note goes, and the blocks under it are lifted, not dropped."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (file (harness-logseq-page-file "Projects/Kitchen" harness-logseq-directory)))
+      (harness-ensure-directory (file-name-directory file))
+      (harness-write-file-atomically
+       file
+       (concat "- The grout is warm grey.\n"
+               "  id:: d1\n"
+               "  workspace-id:: " id "\n"
+               "  role:: note\n"
+               "  - Ask Stone Co about the sample.\n"
+               "    id:: c1\n"
+               "- The grout is warm grey.\n"
+               "  id:: d2\n"
+               "  workspace-id:: " id "\n"
+               "  role:: note\n"
+               "  - The sample arrives on Friday.\n"
+               "    id:: c2\n"))
+      (let ((report (harness-workspace-test-dream id)))
+        (should (equal "completed" (plist-get report :status)))
+        (should (= 1 (plist-get report :removed))))
+      (let* ((content (harness-workspace-test-graph-page "Projects/Kitchen"))
+             (blocks (harness-logseq-parse-blocks content)))
+        (should (= 1 (cl-count-if (lambda (block)
+                                    (string-match-p "warm grey" (plist-get block :title)))
+                                  blocks)))
+        (should (cl-find-if (lambda (block)
+                              (string-match-p "Stone Co" (plist-get block :title)))
+                            blocks))
+        ;; The second copy's child is knowledge of its own: it stays, one
+        ;; level up, with its properties.
+        (let ((kept (cl-find-if (lambda (block)
+                                  (string-match-p "Friday" (plist-get block :title)))
+                                blocks)))
+          (should kept)
+          (should (equal "c2" (harness-logseq-block-property kept "id")))
+          (should (equal 0 (plist-get kept :indent))))))))
+
+(ert-deftest harness-workspace-dream-keeps-an-index-of-what-it-knows ()
+  "The index names the pages a pass maintains, and the brief can read it."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (plan (list :pages
+                       (list (list :page "Projects/Kitchen"
+                                   :about "The kitchen renovation."
+                                   :blocks (list (list :text "The grout is warm grey."
+                                                       :sources (list "c-1"))))))))
+      (harness-call 'workspace/prompt id "The grout is warm grey.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (harness-workspace-test-with-dream plan
+        (harness-workspace-test-dream id))
+      (let ((content (harness-workspace-test-graph-page "Index/Home")))
+        (should content)
+        (should (string-match-p
+                 (regexp-quote "[[Projects/Kitchen]] -- The kitchen renovation.")
+                 content)))
+      (let ((index (harness-call 'knowledge/index id)))
+        (should (string-match-p "Projects/Kitchen" index))
+        (should (equal index (harness-workspace--knowledge-index workspace)))))))
+
+(ert-deftest harness-workspace-dream-does-not-overlap ()
+  "A workspace whose pass is running is not dreamed again, and says so."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The grout is warm grey.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (puthash id t harness-workspace-knowledge--running)
+      (unwind-protect
+          (progn
+            (let ((report (harness-call 'knowledge/dream id)))
+              (should (equal "busy" (plist-get report :status))))
+            (should (plist-get (harness-call 'knowledge/dream-status id) :running)))
+        (remhash id harness-workspace-knowledge--running))
+      (should-not (plist-get (harness-call 'knowledge/dream-status id) :running)))))
+
+(ert-deftest harness-workspace-dream-status-says-what-the-graph-is ()
+  "The status names the graph's type and what the pass could not read."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The grout is warm grey.")
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      (let ((status (harness-call 'knowledge/dream-status id)))
+        (should (equal 'file (plist-get status :graph-type)))
+        (should (equal 'markdown (plist-get status :adapter)))
+        (should (plist-get status :remaining))
+        ;; The fixture graph is neither a checkout nor a Logseq-backed
+        ;; graph: the status names what it would need to recover a page.
+        (should (member "the graph is not in a git checkout"
+                        (plist-get status :limitations)))
+        (should (member "the graph has no logseq/bak history"
+                        (plist-get status :limitations))))
+      ;; A database graph is named as one, and no pass writes to it.
+      (let ((db (expand-file-name "database/" harness-state-directory)))
+        (harness-ensure-directory db)
+        (harness-write-file-atomically (expand-file-name "db.sqlite" db) "")
+        (harness-call 'workspace/update id :graph db)
+        (let ((status (harness-call 'knowledge/dream-status id)))
+          (should (equal 'database (plist-get status :graph-type)))
+          (should (member "a database graph is not read"
+                          (plist-get status :limitations))))
+        (let ((report (harness-workspace-test-dream id)))
+          (should (equal "failed" (plist-get report :status)))
+          (should (equal "unsupported-database-graph" (plist-get report :reason))))))))
+
+(ert-deftest harness-workspace-dream-reads-a-plan-out-of-a-fenced-answer ()
+  "A model's JSON is read from a code fence or a sentence around it."
+  (should (equal '(:pages nil)
+                 (harness-workspace-knowledge--parse-plan
+                  "```json\n{\"pages\": []}\n```")))
+  (should (harness-workspace-knowledge--parse-plan
+           "Here it is: {\"pages\": [{\"page\": \"Projects/Kitchen\"}]} -- done."))
+  (should-not (harness-workspace-knowledge--parse-plan "no answer at all"))
+  (should-not (harness-workspace-knowledge--parse-plan nil)))
+
+
+(ert-deftest harness-workspace-dream-follows-a-clipped-capture ()
+  "A capture the journal clipped is read whole from its own session."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (long (concat "The specification says: " (make-string 4000 ?x))))
+      (harness-call 'workspace/prompt id long)
+      (harness-workspace-test-wait-for
+       (lambda () (harness-workspace-test-assistant-messages id)))
+      ;; The journal keeps the first part of the message, not all of it.
+      (let* ((captures (harness-workspace-knowledge--pending-captures workspace))
+             (capture (car captures)))
+        (should capture)
+        (should (plist-get capture :clipped))
+        (should (plist-get capture :session))
+        (should (plist-get capture :node))
+        ;; The fuller text is what the session holds, cut to the
+        ;; pass's own bound rather than the journal's.
+        (let ((full (harness-workspace-knowledge--capture-full workspace capture)))
+          (should full)
+          (should (> (length full) (length (plist-get capture :text))))
+          (should (<= (length full) harness-workspace-knowledge-dream-full-chars)))
+        (let ((entry (harness-workspace-knowledge--capture-entry
+                      capture "c-1"
+                      (harness-workspace-knowledge--capture-full workspace capture))))
+          (should (string-match-p "the journal holds the first" entry)))
+        ;; Another workspace's transcript is not this one's to read.
+        (should-not (harness-workspace-knowledge--capture-full
+                     (list :id "w-other" :name "Other") capture))))))
+
+(provide 'harness-workspace-test)
+;;; harness-workspace-test.el ends here

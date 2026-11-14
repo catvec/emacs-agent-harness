@@ -619,6 +619,19 @@ rest of a streamed answer is written to the node."
        (harness-log 'warn "workspace: recall failed: %s" (error-message-string err))
        nil))))
 
+(defun harness-workspace--knowledge-index (workspace)
+  "Return the navigation index of WORKSPACE's graph, or nil.
+That is the small list the dream keeps of the pages it maintains, which
+a brief carries so that the search and the curated graph work together."
+  (when (harness-method-exists-p 'knowledge/index)
+    (condition-case err
+        (let ((index (harness-call 'knowledge/index (plist-get workspace :id))))
+          (and (stringp index) (not (string-blank-p index)) index))
+      (error
+       (harness-log 'warn "workspace: the knowledge index failed: %s"
+                    (error-message-string err))
+       nil))))
+
 (defun harness-workspace--task-lines (workspace thread)
   "Return a short task digest for WORKSPACE's THREAD."
   (when (harness-method-exists-p 'task/list)
@@ -680,6 +693,11 @@ rest of a streamed answer is written to the node."
                                          (or (plist-get card :page) "graph")
                                          (plist-get card :text)))
                                recall "\n")))
+                 ;; The curated graph's own list of what it knows, so a
+                 ;; brief carries the index the dream keeps beside the
+                 ;; blocks a search recalled.
+                 (let ((index (harness-workspace--knowledge-index workspace)))
+                   (and index (format "Index:\n%s" index)))
                  (format "Knowledge graph: %s" (harness-workspace--graph workspace))
                  "Answer the user's message.  Use knowledge_search for anything not in this brief and knowledge_write for what is worth keeping in the graph; do not invent knowledge.  memory_save is only for small behavioral notes about how the user wants work done.")))
          (brief (string-trim (mapconcat #'identity parts "\n\n"))))
@@ -1793,7 +1811,8 @@ Only an episode gets them; a normal session is unchanged."
   (when (boundp 'harness-acp-extra-events)
     (dolist (event '(workspace/changed workspace/deleted workspace/timeline-appended
                      workspace/thread-changed workspace/episode-changed
-                     workspace/context-built workspace/knowledge-changed))
+                     workspace/context-built workspace/knowledge-changed
+                     workspace/dream-finished))
       (add-to-list 'harness-acp-extra-events event))))
 
 (defun harness-workspace--init ()
@@ -1839,6 +1858,7 @@ Only an episode gets them; a normal session is unchanged."
 (harness-declare-event 'workspace/episode-changed "(ID THREAD SESSION DIVIDER) when an episode started or ended.")
 (harness-declare-event 'workspace/context-built "(ID THREAD BRIEF) when a brief was built.")
 (harness-declare-event 'workspace/knowledge-changed "(WORKSPACE OP) when a block was written to the workspace's Logseq graph.")
+(harness-declare-event 'workspace/dream-finished "(WORKSPACE RESULT) when a dream changed the workspace's Logseq graph.")
 
 (harness-define-module 'workspace
   :doc "Persistent workspace chat: one timeline over topic threads and episodes."

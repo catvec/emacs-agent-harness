@@ -46,6 +46,7 @@
 (define-error 'harness-error "Harness error")
 (define-error 'harness-no-such-method "No such harness method" 'harness-error)
 (define-error 'harness-module-error "Harness module error" 'harness-error)
+(define-error 'harness-conflict "Content changed since it was read" 'harness-error)
 
 ;;;; Logging
 

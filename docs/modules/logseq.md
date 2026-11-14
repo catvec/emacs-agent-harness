@@ -36,8 +36,11 @@ is the name reported back.
 Writes are read, changed and renamed into place
 (`harness-write-file-atomically`), one at a time in this process.
 The user's own Logseq editor is the only other writer, and Logseq's
-own lock is the boundary; this module never parses or touches
-`logseq/` inside a graph, and never deletes a page or a block.
+own lock is the boundary; this module never parses or writes
+`logseq/` inside a graph, and never deletes a page or a block.  It
+reads the names and times under `logseq/bak` only to say what history
+a graph has (`logseq/recovery`), never to restore from it: the
+module keeps no copy of a page it wrote.
 
 There is no index here.  A search reads the graph's pages and
 returns the blocks that match, the best first.  The graph is the
@@ -53,8 +56,10 @@ without changing this contract.
 - `logseq/block-remove` (page id &optional opts) — Remove block ID from PAGE in the graph at OPTS' `:root`.
 - `logseq/page` (name &optional opts) — Return page NAME of the graph at OPTS' `:root`, or nil.
 - `logseq/page-add` (page text &optional opts) — Add TEXT as a block of PAGE, creating the page with OPTS' properties.
+- `logseq/page-edit` (name &optional opts) — Change page NAME of the graph at OPTS' `:root` in one read and write.
 - `logseq/page-list` (&optional opts) — Return the pages of the graph at OPTS' `:root`, newest first.
 - `logseq/property-set` (page key value &optional opts) — Set property KEY of PAGE to VALUE, in the page's identity block.
+- `logseq/recovery` (&optional root) — Return what would bring a page of the graph at ROOT back, as a plist.
 - `logseq/root` (&optional graph) — Return the graph GRAPH as a directory, or the configured one.
 - `logseq/search` (query &optional opts) — Return the blocks of the graph at OPTS' `:root` that match QUERY.
 - `logseq/status` (&optional root) — Return what the graph at ROOT says about itself.
@@ -62,7 +67,8 @@ without changing this contract.
 ### Options
 
 - `harness-logseq-directory` — Root of the Logseq graph, or nil to find it.
-- `harness-logseq-journal-format` — Format of a journal page's name, as `format-time-string` reads it.
+- `harness-logseq-journal-format` — Format of a journal page's name this client writes.
+- `harness-logseq-journal-formats` — Journal name formats a graph may already hold, this client's own first.
 - `harness-logseq-journal-pages` — Most journal files one search reads, the newest.
 - `harness-logseq-journals-directory` — Directory of a graph's journal pages, relative to its root.
 - `harness-logseq-page-name-chars` — Most characters of a page name the client writes.

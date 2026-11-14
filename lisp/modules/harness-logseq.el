@@ -26,8 +26,11 @@
 ;; Writes are read, changed and renamed into place
 ;; (`harness-write-file-atomically'), one at a time in this process.
 ;; The user's own Logseq editor is the only other writer, and Logseq's
-;; own lock is the boundary; this module never parses or touches
-;; `logseq/' inside a graph, and never deletes a page or a block.
+;; own lock is the boundary; this module never parses or writes
+;; `logseq/' inside a graph, and never deletes a page or a block.  It
+;; reads the names and times under `logseq/bak' only to say what history
+;; a graph has (`logseq/recovery'), never to restore from it: the
+;; module keeps no copy of a page it wrote.
 ;;
 ;; There is no index here.  A search reads the graph's pages and
 ;; returns the blocks that match, the best first.  The graph is the
@@ -65,8 +68,19 @@ Nil means the directory `LOGSEQ_HOME' names when it is set, else
   :group 'harness-logseq)
 
 (defcustom harness-logseq-journal-format "%Y-%m-%d"
-  "Format of a journal page's name, as `format-time-string' reads it."
+  "Format of a journal page's name this client writes.
+It is read as `format-time-string' reads it: `%Y-%m-%d' by default."
   :type 'string
+  :group 'harness-logseq)
+
+(defcustom harness-logseq-journal-formats '("%Y-%m-%d" "%Y_%m_%d" "%Y.%m.%d")
+  "Journal name formats a graph may already hold, this client's own first.
+A day is read from the file that exists, whatever separator the graph
+uses: Logseq's own journals are `%Y_%m_%d', while this client writes
+`harness-logseq-journal-format'.  A search that sorted journal file
+names would push one convention past its bound, so a day is parsed and
+ordered by date instead."
+  :type '(repeat string)
   :group 'harness-logseq)
 
 (defcustom harness-logseq-page-name-chars 120
@@ -145,9 +159,14 @@ Nil and blank become `Untitled'."
                     (harness-logseq-pages-root root)))
 
 (defun harness-logseq-journal-file (name &optional root)
-  "Return the file of journal page NAME in the graph at ROOT."
-  (expand-file-name (concat (harness-logseq-page-name name) ".md")
-                    (harness-logseq-journals-root root)))
+  "Return the file of journal page NAME in the graph at ROOT.
+A NAME that is a day resolves to the file the graph already holds for
+that day, whatever separator its journals use, else to this client's
+own name for it."
+  (if-let* ((day (harness-logseq-journal-day name)))
+      (harness-logseq-journal-file-for-day day root)
+    (expand-file-name (concat (harness-logseq-page-name name) ".md")
+                      (harness-logseq-journals-root root))))
 
 (defun harness-logseq-page-name-of (file root)
   "Return the page name FILE has in the graph at ROOT, or nil."
@@ -161,6 +180,94 @@ Nil and blank become `Untitled'."
 (defun harness-logseq-journal-name (&optional date)
   "Return the journal page name of DATE, a time value or nil for today."
   (format-time-string harness-logseq-journal-format (or date (current-time))))
+
+(defun harness-logseq-journal-name-formats ()
+  "Return the journal name formats a graph may hold, this one first.
+That is `harness-logseq-journal-formats' with `harness-logseq-journal-format'
+at its front, each format once."
+  (delete-dups
+   (cons harness-logseq-journal-format
+         (append harness-logseq-journal-formats nil))))
+
+(defun harness-logseq--date-pattern (format)
+  "Return a regexp reading the date FORMAT writes, year-month-day in order.
+`%Y' reads four digits, `%m' and `%d' two, and everything else in FORMAT
+is literal.  Only formats with those three placeholders count."
+  (when (and (string-match-p "%Y" format)
+             (string-match-p "%m" format)
+             (string-match-p "%d" format))
+    (let ((pattern "\\`")
+          (index 0)
+          (length (length format)))
+      (while (< index length)
+        (let ((char (aref format index)))
+          (if (and (eq char ?%) (< (1+ index) length))
+              (let ((code (aref format (1+ index))))
+                (setq pattern (concat pattern
+                                      (cl-case code
+                                        (?Y "\\([0-9]\\{4\\}\\)")
+                                        (?m "\\([0-9]\\{2\\}\\)")
+                                        (?d "\\([0-9]\\{2\\}\\)")
+                                        (t (regexp-quote (substring format index (1+ index)
+                                                                    ))))))
+                (setq index (+ index 2)))
+            (setq pattern (concat pattern (regexp-quote (char-to-string char)))
+                  index (1+ index)))))
+      (concat pattern "\\'"))))
+
+(defun harness-logseq-journal-date (name)
+  "Return NAME read as a journal date, as (YEAR MONTH DAY), or nil.
+NAME is a page or file name, with or without its directory and `.md'.
+Only the formats in `harness-logseq-journal-name-formats' count, so a
+page that happens to start with digits is not taken for a day."
+  ;; Only a `.md' suffix goes: `2026.11.08' is a day whose separator is
+  ;; a dot, not a file called `2026.11' with an extension.
+  (let* ((name (file-name-nondirectory (or name "")))
+         (name (if (string-suffix-p ".md" name) (string-remove-suffix ".md" name) name))
+         (found nil))
+    (cl-loop for format in (harness-logseq-journal-name-formats)
+             for regexp = (harness-logseq--date-pattern format)
+             until found
+             do (when (and regexp (string-match regexp name))
+                  (let ((parts (list (match-string 1 name)
+                                     (match-string 2 name)
+                                     (match-string 3 name))))
+                    (when (cl-every #'stringp parts)
+                      (setq found (mapcar #'string-to-number parts))))))
+    found))
+
+(defun harness-logseq-journal-day (name)
+  "Return NAME as a `%Y-%m-%d' day, or nil when it is not a journal name.
+A name with a namespace -- `Dreams/2026-11-08' -- is a page in that
+namespace, not the day's journal, so only a name of the day itself
+answers."
+  (when (and (stringp name) (not (string-match-p "/" name)))
+    (when-let* ((date (harness-logseq-journal-date name)))
+      (format "%04d-%02d-%02d" (nth 0 date) (nth 1 date) (nth 2 date)))))
+
+(defun harness-logseq-journal-file-for-day (day &optional root)
+  "Return the file of the journal page of DAY, a `%Y-%m-%d' string.
+That is the file the graph already holds for the day when it has one,
+whatever separator it uses, else the file this client writes."
+  (let ((dir (harness-logseq-journals-root root)))
+    (or (cl-loop
+         for format in (harness-logseq-journal-name-formats)
+         for name = (format-time-string
+                     format (date-to-time (concat day " 12:00:00")))
+         for file = (expand-file-name (concat name ".md") dir)
+         when (file-readable-p file)
+         return file)
+        (expand-file-name (concat (format-time-string harness-logseq-journal-format
+                                                      (date-to-time (concat day " 12:00:00")))
+                                  ".md")
+                          dir))))
+
+(defun harness-logseq-journal-day-file (name root)
+  "Return (DAY . FILE) of journal page NAME in the graph at ROOT.
+FILE is the one the graph holds, else the one this client would write;
+DAY is nil when NAME is not a journal name."
+  (cons (harness-logseq-journal-day name)
+        (harness-logseq-journal-file name root)))
 
 (defun harness-logseq--ensure-graph (root)
   "Create ROOT's pages and journals directories and return ROOT."
@@ -404,14 +511,30 @@ page's identity properties) and `:blocks', as
        (max 0 harness-logseq-search-pages)))))
 
 (defun harness-logseq--journals (root)
-  "Return the journal files of ROOT, newest first."
+  "Return the journal files of ROOT, newest day first.
+The order is by the day the file's name parses to, not by its name's
+text: a graph with both `2026-11-08.md' and `2026_11_07.md' keeps the
+newer day ahead however the separators sort.  A file whose name is no
+day sorts after every day, by its modification time.  At most
+`harness-logseq-journal-pages' are returned."
   (let ((dir (harness-logseq-journals-root root)))
     (when (file-directory-p dir)
-      (seq-take
-       (sort (directory-files dir t "\\.md\\'")
-             (lambda (a b) (string> (file-name-nondirectory a)
-                                    (file-name-nondirectory b))))
-       (max 0 harness-logseq-journal-pages)))))
+      (let ((entries
+             (mapcar (lambda (file)
+                       (let ((day (harness-logseq-journal-day
+                                   (file-name-nondirectory file))))
+                         (cons file (if day
+                                        (float-time
+                                         (date-to-time (concat day " 12:00:00")))
+                                      (or (ignore-errors
+                                            (float-time
+                                             (file-attribute-modification-time
+                                              (file-attributes file))))
+                                          0)))))
+                     (directory-files dir t "\\.md\\'"))))
+        (mapcar #'car
+                (seq-take (sort entries (lambda (a b) (> (cdr a) (cdr b))))
+                          (max 0 harness-logseq-journal-pages)))))))
 
 ;;;; Writing
 
@@ -433,7 +556,7 @@ when missing.  Return the block with `:id', `:page' and `:file'."
   (let* ((root (harness-logseq-root (plist-get opts :root)))
          (name (harness-logseq-page-name page))
          (journal (or (plist-get opts :journal)
-                      (string-match-p "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\'" name)))
+                      (harness-logseq-journal-day name)))
          (file (if journal
                    (harness-logseq-journal-file name root)
                  (harness-logseq-page-file name root)))
@@ -487,7 +610,7 @@ page with no bullet answers nil."
 The page and a block are created when missing.  Return the page."
   (let* ((root (harness-logseq-root (plist-get opts :root)))
          (name (harness-logseq-page-name page))
-         (file (if (string-match-p "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\'" name)
+         (file (if (harness-logseq-journal-day name)
                    (harness-logseq-journal-file name root)
                  (harness-logseq-page-file name root)))
          (content (harness-read-file file)))
@@ -704,19 +827,81 @@ never a result."
   "Return the graph GRAPH as a directory, or the configured one."
   (harness-logseq-root graph))
 
+(defun harness-logseq--bak-files (root)
+  "Return the files under ROOT's `logseq/bak', a list of (PATH . TIME)."
+  (let ((dir (expand-file-name "logseq/bak" root)))
+    (when (file-directory-p dir)
+      (delq nil
+            (mapcar (lambda (file)
+                      (let ((attrs (file-attributes file)))
+                        (and attrs (not (file-directory-p file))
+                             (cons file (float-time (file-attribute-modification-time attrs))))))
+                    (directory-files-recursively dir "" nil))))))
+
+(defun harness-logseq--git-repository (root)
+  "Return ROOT's git top level when it is in a working tree, else nil.
+Only a directory that git itself names is reported: a `.git' file or
+directory somewhere above the graph is not evidence on its own."
+  (when (and (file-directory-p root) (executable-find "git"))
+    (condition-case nil
+        (let ((default-directory (file-name-as-directory (expand-file-name root))))
+          (with-temp-buffer
+            (when (and (eq 0 (call-process "git" nil t nil
+                                           "-C" default-directory
+                                           "rev-parse" "--show-toplevel"))
+                       (not (string-blank-p (buffer-string))))
+              (string-trim (buffer-string)))))
+      (error nil))))
+
+(harness-defmethod logseq/recovery (&optional root)
+  "Return what would bring a page of the graph at ROOT back, as a plist.
+`:git' is the working tree's top level when the graph is in a git
+checkout, `:backups' how many files Logseq's own `logseq/bak' holds, and
+`:backup-latest' when the newest of them was written.  The module keeps
+no copy of a page it wrote, so this is the whole of what recovery a
+graph has: a directory with neither is a graph whose changes cannot be
+taken back by the harness."
+  (let* ((root (harness-logseq-root root))
+         (bak (harness-logseq--bak-files root))
+         (latest (and bak (apply #'max (mapcar #'cdr bak)))))
+    (list :git (harness-logseq--git-repository root)
+          :backups (length bak)
+          :backup-latest (and latest (format-time-string "%Y-%m-%dT%H:%M:%SZ"
+                                                         (seconds-to-time latest)
+                                                         t))
+          :kept nil)))
+
 (harness-defmethod logseq/status (&optional root)
   "Return what the graph at ROOT says about itself.
 `:available' is non-nil when its `pages' directory is there, and
-`:reason' says why when it is not.  Nothing is created."
+`:reason' says why when it is not.  Nothing is created.
+
+`:graph-type' says what the client found: `file' for a markdown file
+graph it can read and write, `database' for a Logseq database graph,
+whose records live in a database this client does not open, and
+`unknown' for a directory with neither layout.  `:adapter' names the
+adapter in use, `markdown' when one is, and `:reason' is
+`unsupported-database-graph' for a database graph: a database graph's
+exported Markdown is not a live database API."
   (let* ((root (harness-logseq-root root))
          (pages (harness-logseq-pages-root root))
          (journals (harness-logseq-journals-root root))
+         (file-graph (or (file-directory-p pages) (file-directory-p journals)))
+         (database-graph (and (not file-graph)
+                              (or (file-exists-p (expand-file-name "db.sqlite" root))
+                                  (file-directory-p (expand-file-name "logseq/db" root)))))
+         (graph-type (cond (file-graph 'file)
+                           (database-graph 'database)
+                           (t 'unknown)))
          (available (file-directory-p pages)))
     (list :root root
           :pages pages
           :journals journals
           :available available
-          :reason (unless available "no-page-directory")
+          :reason (unless available
+                    (if database-graph "unsupported-database-graph" "no-page-directory"))
+          :graph-type graph-type
+          :adapter (and (eq graph-type 'file) 'markdown)
           :pages-directory (file-directory-p pages)
           :journals-directory (file-directory-p journals)
           :writable (and (file-directory-p root) (file-writable-p root)))))
@@ -729,7 +914,7 @@ go with it.  Return the block removed, or nil when PAGE or ID is not
 there; nothing is written then."
   (let* ((root (harness-logseq-root (plist-get opts :root)))
          (name (harness-logseq-page-name page))
-         (file (if (string-match-p "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\'" name)
+         (file (if (harness-logseq-journal-day name)
                    (harness-logseq-journal-file name root)
                  (harness-logseq-page-file name root)))
          (content (harness-read-file file)))
@@ -755,6 +940,251 @@ there; nothing is written then."
   "Return page NAME of the graph at OPTS' `:root', or nil.
 See `harness-logseq-read-page' for the shape."
   (harness-logseq-read-page name (plist-get opts :root)))
+
+(defun harness-logseq-digest (text)
+  "Return a short digest of TEXT, to tell a page as it was from as it is.
+Nil and an empty string digest alike: both are a page that is not there."
+  (secure-hash 'sha1 (or text "")))
+
+(defun harness-logseq-page-digest (name &optional root)
+  "Return the digest of page NAME in the graph at ROOT, or nil.
+A page that is not there has no digest; `logseq/page-edit's `:expect'
+matches that with `absent'."
+  (let* ((file (if (harness-logseq-journal-day name)
+                   (harness-logseq-journal-file name root)
+                 (harness-logseq-page-file name root)))
+         (content (harness-read-file file)))
+    (and content (harness-logseq-digest content))))
+
+(defun harness-logseq--journal-p (name root)
+  "Non-nil when page NAME is a journal page of the graph at ROOT."
+  (or (harness-logseq-journal-day name)
+      (file-exists-p (harness-logseq-journal-file name root))))
+
+(defun harness-logseq--dedent (line amount)
+  "Return LINE with at most AMOUNT leading spaces taken off."
+  (let ((n 0))
+    (while (and (< n amount) (< n (length line)) (eq (aref line n) ?\s))
+      (setq n (1+ n)))
+    (substring line n)))
+
+(defun harness-logseq--block-parts (lines block)
+  "Return (OWN . CHILDREN) of BLOCK in LINES, both lists of lines.
+OWN is BLOCK's bullet, its continuation lines and its properties;
+CHILDREN are the lines of the blocks indented under it.  A Logseq block
+keeps its own text and properties before its first child bullet, so
+everything from that bullet on is the child's."
+  (let* ((from (max 0 (1- (plist-get block :line))))
+         (to (min (length lines) (plist-get block :end-line)))
+         (subset (cl-subseq lines from to))
+         (own (list (car subset)))
+         (rest (cdr subset))
+         (children nil))
+    (while (and rest (not (harness-logseq--bullet (car rest))))
+      (push (car rest) own)
+      (setq rest (cdr rest)))
+    (setq children rest)
+    (cons (nreverse own) children)))
+
+(defun harness-logseq--children-lifted (children indent)
+  "Return CHILDREN, lines under a block at INDENT, lifted one level.
+Each child keeps its own bullet, text, properties and children; only
+its indentation loses one level, measured from where its own bullet
+sits, so a graph indented by two spaces or by four lifts alike."
+  (let* ((first-bullet (cl-find-if #'harness-logseq--bullet children))
+         (shift (max 1 (- (harness-logseq--indent first-bullet) indent))))
+    (mapcar (lambda (line)
+              (if (string-blank-p line) line (harness-logseq--dedent line shift)))
+            children)))
+
+(defun harness-logseq--remove-chunks (lines text level)
+  "Return LINES without a block at LEVEL that says TEXT, and its children.
+A lifted child that only repeats the block that was removed is the same
+repetition, not knowledge of its own; one that adds words stays."
+  (let* ((wanted (downcase (harness-logseq--one-line (or text ""))))
+         (blocks (harness-logseq-parse-blocks (mapconcat #'identity lines "\n")))
+         (ranges nil))
+    (dolist (block blocks)
+      (when (and (equal level (plist-get block :indent))
+                 (equal wanted
+                        (downcase (harness-logseq--one-line
+                                   (or (plist-get block :title) "")))))
+        (push (cons (1- (plist-get block :line)) (plist-get block :end-line))
+              ranges)))
+    (dolist (range (nreverse ranges))
+      (setq lines (append (cl-subseq lines 0 (car range))
+                          (cl-subseq lines (cdr range)))))
+    lines))
+
+(defun harness-logseq--edit-remove (lines block)
+  "Return LINES without BLOCK's own lines, its children lifted in its place.
+Nothing under BLOCK is dropped with it: a child keeps its text, its
+properties and its own children, one level up.  A lifted child that only
+repeats BLOCK goes too, since it is the same repetition."
+  (let* ((from (max 0 (1- (plist-get block :line))))
+         (to (min (length lines) (plist-get block :end-line)))
+         (parts (harness-logseq--block-parts lines block))
+         (text (harness-logseq--one-line (or (plist-get block :title) "")))
+         (indent (max 0 (plist-get block :indent)))
+         (children (cdr parts))
+         (lifted (harness-logseq--remove-chunks
+                  (harness-logseq--children-lifted children indent) text indent)))
+    (append (cl-subseq lines 0 from)
+            lifted
+            (cl-subseq lines to))))
+
+(defun harness-logseq--own-end (lines block)
+  "Return the index after BLOCK's own lines in LINES, 0-based.
+That is its bullet, its continuation lines and its properties, not the
+blocks indented under it."
+  (let* ((parts (harness-logseq--block-parts lines block))
+         (from (max 0 (1- (plist-get block :line)))))
+    (+ from (length (car parts)))))
+
+(defun harness-logseq--set-properties (lines opts)
+  "Return LINES with OPTS' `:set' properties on the page's identity block.
+A page whose first block carries no properties gets one at its top."
+  (let ((out (copy-sequence lines)))
+    (dolist (pair (plist-get opts :set))
+      (let* ((key (car pair))
+             (line (format "  %s:: %s" key (harness-logseq--one-line (cdr pair))))
+             (pattern (format "\\`[ \t]*%s::" (regexp-quote key)))
+             (replaced nil)
+             (made nil))
+        (setq out (cl-loop for text in out
+                           collect (if (and (not replaced) (string-match-p pattern text))
+                                       (progn (setq replaced t) line)
+                                     text)))
+        (unless replaced
+          (let ((at (harness-logseq--first-block-end out)))
+            (cond
+             (at (setq out (append (cl-subseq out 0 at) (list line)
+                                   (cl-subseq out at))))
+             (made (setq out (append (cl-subseq out 0 1) (list line)
+                                     (cl-subseq out 1))))
+             (t
+              (setq out (append (list "-" line) out)
+                    made t)))))))
+    out))
+
+(harness-defmethod logseq/page-edit (name &optional opts)
+  "Change page NAME of the graph at OPTS' `:root' in one read and write.
+OPTS names what to do, and all of it happens in one atomic write:
+
+`:remove' ids to remove, as `logseq/block-remove' takes them.  A block's
+own lines go and the blocks indented under it are lifted in its place,
+so a duplicate parent never takes distinct knowledge with it.
+
+`:replace' an alist of (ID . TEXT): the block's text becomes TEXT and
+its id, properties and children stay.
+
+`:append' a list of plists, each `(:text TEXT :properties ALIST
+:id ID)', appended as new blocks in the order given.
+
+`:set' an alist of (KEY . VALUE) on the page's identity block, made
+when the page has none.
+
+`:expect' is a digest as `logseq/page-digest' gives one, or `absent' for
+a page that must not exist.  A page whose digest is not the one expected
+signals `harness-conflict': it changed since it was read, and the caller
+works its change out again rather than saving a stale draft over it.
+
+Return (:page :file :journal :digest :removed :replaced :appended),
+or nil when the page is not there and `:create' is nil.  With `:create'
+non-nil the page and the graph are made when missing.  The page as it was
+is not in the answer: a caller that needs it reads it first, and nothing
+here keeps a copy."
+  (let* ((root (harness-logseq-root (plist-get opts :root)))
+         (name (harness-logseq-page-name name))
+         (journal (harness-logseq--journal-p name root))
+         (file (if journal
+                   (harness-logseq-journal-file name root)
+                 (harness-logseq-page-file name root)))
+         (before (harness-read-file file))
+         (expect (if (eq (plist-get opts :expect) 'absent)
+                     nil
+                   (plist-get opts :expect)))
+         (create (or (plist-get opts :create)
+                     (plist-get opts :remove) (plist-get opts :replace)
+                     (plist-get opts :append) (plist-get opts :set))))
+    (when (and (plist-member opts :expect)
+               (not (equal expect (and before (harness-logseq-digest before)))))
+      (signal 'harness-conflict
+              (list (format "Page %s changed since it was read" name))))
+    (when (or before create)
+      (harness-logseq--ensure-graph root)
+      (let* ((content (or before ""))
+             (lines (split-string content "\n"))
+             (removed nil) (replaced nil) (appended 0))
+        (dolist (id (plist-get opts :remove))
+          (when-let* ((block (harness-logseq--find-block id lines name)))
+            (let ((after (harness-logseq--edit-remove lines block)))
+              (setq lines after)
+              (push (harness-logseq--block-id block name) removed))))
+        (dolist (pair (plist-get opts :replace))
+          (let ((id (car pair))
+                (text (cdr pair)))
+            (when (stringp text)
+              (when-let* ((block (harness-logseq--find-block id lines name)))
+                (setq lines (harness-logseq--replace-block lines block text))
+                (push (harness-logseq--block-id block name) replaced)))))
+        (when (plist-get opts :set)
+          (setq lines (harness-logseq--set-properties lines opts)))
+        (let ((out (mapconcat #'identity lines "\n")))
+          (dolist (item (plist-get opts :append))
+            (let ((block (harness-logseq-render-block
+                          (plist-get item :text)
+                          (append (list (cons "id" (or (plist-get item :id)
+                                                       (harness-logseq-uuid))))
+                                  (plist-get item :properties)
+                                  (list (cons "learned-at"
+                                              (format-time-string
+                                               "%Y-%m-%d %H:%M"
+                                               (or (plist-get item :date)
+                                                   (current-time)))))))))
+              (setq out (concat out
+                                (cond ((string-empty-p out) "")
+                                      ((string-suffix-p "\n" out) "\n")
+                                      (t "\n\n"))
+                                block))
+              (cl-incf appended)))
+          (let ((digest (harness-logseq-digest out)))
+            (unless (equal out content)
+              (harness-write-file-atomically file out))
+            (list :page name :file file :journal (and journal t) :digest digest
+                  :removed (nreverse removed) :replaced (nreverse replaced)
+                  :appended appended)))))))
+
+(defun harness-logseq--find-block (id lines name)
+  "Return the block of LINES whose id or line number is ID."
+  (cl-find-if (lambda (candidate)
+                (or (equal (harness-logseq--block-id candidate name) id)
+                    (equal (format "%s" (plist-get candidate :line))
+                           (format "%s" id))))
+              (harness-logseq-parse-blocks (mapconcat #'identity lines "\n"))))
+
+(defun harness-logseq--replace-block (lines block text)
+  "Return LINES with BLOCK's own text replaced by TEXT, the rest kept.
+That is the block's bullet and its continuation lines: its properties
+stay under it, and so do the blocks indented under it, so a rewritten
+statement keeps its id, its sources and its children."
+  (let* ((from (max 0 (1- (plist-get block :line))))
+         (own-end (harness-logseq--own-end lines block))
+         (indent (max 0 (plist-get block :indent)))
+         (own (cl-subseq lines from own-end))
+         (properties (cl-loop for line in (cdr own)
+                              when (harness-logseq--property line)
+                              collect line))
+         (new (harness-logseq--block-lines text))
+         (pad (make-string indent ?\s))
+         (head (concat pad "- " (car new)))
+         (rest (mapcar (lambda (line) (concat pad "  " line)) (cdr new))))
+    (append (cl-subseq lines 0 from)
+            (cons head rest)
+            ;; The property lines keep the indentation they had: the
+            ;; block's own indent does not change, so they stay under it.
+            properties
+            (cl-subseq lines own-end))))
 
 (harness-defmethod logseq/page-list (&optional opts)
   "Return the pages of the graph at OPTS' `:root', newest first.

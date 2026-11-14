@@ -39,22 +39,27 @@ What is written when:
 - `knowledge/thread-touch`: the thread page's status, last-touched,
   summary and next-action properties, so the page reads current in
   Logseq;
-- the nightly dream: `knowledge/dream` runs over every workspace once a
-  day at `harness-workspace-knowledge-dream-hour`;
-- `knowledge/dream`: the graph's maintenance pass.  A thread page gets
-  its current identity and state again, a note this workspace wrote
-  twice is kept once, and the changes go on a `Dreams/<date>` report
-  page.  `:dry-run` reports without writing, and no block the user
-  wrote is touched.
+- the dream: `knowledge/dream` runs over every workspace once a day
+  at `harness-workspace-knowledge-dream-hour`, and catches up once on
+  a start that missed it;
+- `knowledge/dream`: the graph's maintenance and synthesis pass.  A
+  thread page gets its current identity and state again, a note this
+  workspace wrote twice is kept once (the children of the copy it
+  removes are lifted, not dropped), and the captures no pass has read
+  yet are synthesized across threads into sourced project, person,
+  topic and decision knowledge, a repaired index and a `Dreams/<date>`
+  report page.  `:dry-run` reports without writing.
 
 Who writes a note, and when: the agent, in its turn, through
 `knowledge_write` -- it knows what the turn settled and writes what
-is worth keeping while it still has the conversation in context.
-Nothing here reads a finished turn with a model of its own: a second
-pass over every turn repeats the work the agent had already done,
-costs a call per turn, and tends to accumulate trivia.  The dream
-below is the only automatic writer, it asks no model, and it touches
-nothing but the state of pages this workspace made.
+is worth keeping while it still has the conversation in context.  The
+dream is the second writer, and the only automatic one: once a day it
+reads the captures no pass has read and asks a model to make durable,
+sourced knowledge of them.  It writes only pages of the maintained
+namespaces that this workspace owns, and marks a capture read only
+once every page of its batch was written.  It keeps no copy of what it
+wrote: the page is the record, and `logseq/status` says what recovery
+the graph itself has.
 
 A block keeps its shape: a line of a message or a note becomes an
 indented continuation, so code, quotes and paragraphs stay whole, and
@@ -87,10 +92,13 @@ are dropped when the cache is full; the graph is not changed.
 
 ### Methods
 
-- `knowledge/dream` (workspace &optional opts) — Consolidate WORKSPACE's Logseq graph and return what it did.
+- `knowledge/dream` (workspace &optional opts) — Dream over WORKSPACE: consolidate its graph and synthesize what it learned.
+- `knowledge/dream-exclude` (workspace text &optional why) — Keep TEXT out of WORKSPACE's later dreams, for WHY.
+- `knowledge/dream-status` (workspace &optional opts) — Return what WORKSPACE's dreaming is and did.
 - `knowledge/graph` (workspace &optional opts) — Return the page of WORKSPACE's thread with its blocks and backlinks.
 - `knowledge/graph/node` (workspace node &optional opts) — Return NODE of WORKSPACE's thread's page, with its children.
 - `knowledge/graph/page` (workspace name &optional opts) — Return page NAME of WORKSPACE's graph with its blocks and backlinks.
+- `knowledge/index` (workspace &optional opts) — Return WORKSPACE's navigation index as text, or nil.
 - `knowledge/nearest` (query texts &optional timeout) — Return how near QUERY is to each of TEXTS in meaning, or nil.
 - `knowledge/notes` (workspace &optional opts) — Return the newest blocks of WORKSPACE's knowledge, newest first.
 - `knowledge/page` (workspace page &optional opts) — Return PAGE of WORKSPACE's graph with its blocks.
@@ -112,14 +120,32 @@ are dropped when the cache is full; the graph is not changed.
 
 ### Events
 
+- `workspace/dream-finished` — (WORKSPACE RESULT) when a dream changed the workspace's graph.
 - `workspace/knowledge-changed` — (WORKSPACE OP) when a block was written to the workspace's graph.
 
 ### Options
 
 - `harness-workspace-knowledge-capture-chars` — Most characters of one message the journal capture keeps.
 - `harness-workspace-knowledge-dream` — Whether the graph maintains itself once a day.
+- `harness-workspace-knowledge-dream-batch` — Most captures one dreaming synthesis reads.
+- `harness-workspace-knowledge-dream-batches` — Most synthesis requests one pass makes.
+- `harness-workspace-knowledge-dream-capture-chars` — Most characters of one capture a synthesis request carries.
+- `harness-workspace-knowledge-dream-captures` — Most captures one pass considers, however much is waiting.
+- `harness-workspace-knowledge-dream-catch-up` — Whether a start catches up on a dream it missed while the harness was off.
+- `harness-workspace-knowledge-dream-catch-up-limit` — Most workspaces one startup catch-up dreams.
+- `harness-workspace-knowledge-dream-exclusions` — Statements the user rejected; no pass writes one again.
+- `harness-workspace-knowledge-dream-full-chars` — Most characters of a fuller transcript a pass follows a clipped capture to.
 - `harness-workspace-knowledge-dream-hour` — Hour of the local day the nightly dream runs, 0 to 23.
+- `harness-workspace-knowledge-dream-index` — Most pages the navigation index names.
+- `harness-workspace-knowledge-dream-index-chars` — Most characters of the navigation index a brief carries.
+- `harness-workspace-knowledge-dream-model` — Model the dreaming synthesis is asked of, or nil for the workspace's own.
+- `harness-workspace-knowledge-dream-page-blocks` — Most blocks of a maintained page one synthesis request reads.
+- `harness-workspace-knowledge-dream-pages` — Most maintained pages one synthesis request reads.
+- `harness-workspace-knowledge-dream-prompt-chars` — Most characters of captures and pages one synthesis request carries.
+- `harness-workspace-knowledge-dream-recovery-days` — Days before the last processed capture a pass still reads.
 - `harness-workspace-knowledge-dream-report` — Whether `knowledge/dream` writes a report page in the graph.
+- `harness-workspace-knowledge-dream-sources` — Whether a synthesized statement must name a source to be written.
+- `harness-workspace-knowledge-dream-timeout` — Seconds one synthesis request may take before it gives no answer.
 - `harness-workspace-knowledge-embedding-batch` — Most blocks one embedding request carries.
 - `harness-workspace-knowledge-embedding-cache` — Most block vectors kept in memory before the cache is cleared.
 - `harness-workspace-knowledge-embedding-dimensions` — Length of the vectors to ask for, or nil for the model's own.
@@ -135,11 +161,12 @@ are dropped when the cache is full; the graph is not changed.
 
 - `logseq/backlinks` ([logseq](logseq.md))
 - `logseq/block-add` ([logseq](logseq.md))
-- `logseq/block-remove` ([logseq](logseq.md))
 - `logseq/page` ([logseq](logseq.md))
 - `logseq/page-add` ([logseq](logseq.md))
+- `logseq/page-edit` ([logseq](logseq.md))
 - `logseq/page-list` ([logseq](logseq.md))
 - `logseq/property-set` ([logseq](logseq.md))
+- `logseq/recovery` ([logseq](logseq.md))
 - `logseq/search` ([logseq](logseq.md))
 - `logseq/status` ([logseq](logseq.md))
 - `provider/embed` ([provider](provider.md)), when it is loaded
@@ -159,6 +186,7 @@ are dropped when the cache is full; the graph is not changed.
 
 ### Events it emits
 
+- `workspace/dream-finished`
 - `workspace/knowledge-changed`
 
 ### Filter chains it joins

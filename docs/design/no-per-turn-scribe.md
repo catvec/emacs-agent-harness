@@ -100,26 +100,17 @@ judgement — so they cost a map over one page:
 A model over a whole thread is the one place a model could add
 something the agent did not: merge two threads that turned out to be
 one, retire a note a later decision superseded, write the paragraph a
-person would want to read.  That is not in this change, and no
-replacement mechanism is.  What is in the tree is the nightly **dream**,
-which asks no model: it rewrites each thread page's identity and state,
-keeps one copy of a note written twice, and writes a `Dreams/<date>`
-report.
+person would want to read.  That was not in this change, and this
+change left no replacement mechanism.
 
-The bound a later, model-backed dream would have to respect is written
-down, because the per-turn version broke it:
-
-- **Once a night, not once a turn.**  Per workspace per day, whatever
-  the number of turns.
-- **Per thread page, not the whole graph at once.**  A page is what one
-  topic said; the pass reads a page, so its work does not grow with the
-  workspace.
-- **Switchable, dry-runnable, and reported.**  `…-knowledge-dream` is
-  `nil` or `auto`, `:dry-run` reports without writing, and the result is
-  a page in the graph the user already reads.
-
-If a model is added there, it belongs inside those bounds and is a
-change of its own.  It does not bring back a pass over every turn.
+A later change added one, and it is the nightly **dream** described in
+[automatic dreaming](automatic-logseq-dreaming.md): it reads the
+captures no pass has read -- the journal lines this module writes,
+across threads -- and has a judge make sourced project, person, topic,
+decision, lesson and question knowledge of them.  The per-turn scribe
+stays gone.  The dream's model reads the turn once, in a bounded
+batch, the night after, and what it writes is knowledge, not a
+restatement of the turn.
 
 ## Alternatives considered
 
@@ -127,7 +118,7 @@ change of its own.  It does not bring back a pass over every turn.
 |---|---|
 | **Keep the scribe and gate it** (only after a "remember" cue, every fourth turn, when a thread parks) | A gate answers *when* to duplicate the work.  The work is still duplicated: the agent wrote the note in the turn, or chose not to.  A "remember" cue reaches the agent long before it reaches a gate, and the turn worth keeping is often the one no rule predicted. |
 | **Keep the scribe, tune the prompt and cap the notes** | The caps already existed (`…-scribe-max-notes`, a 300-token answer).  The problem was never the size of one note; it was a call on every turn and a page that grew by reading itself. |
-| **Let the dream's model write the notes instead** | The same call with less context: by the next night the turn is a capture in a journal the dream does not read.  There is nothing to consolidate on a page the agent did not write. |
+| **Let the dream's model write the notes instead** | The same call with less context, and the wrong time: the turn is a capture by the next night, and what the dream makes of captures is knowledge across threads, not a thread's own next action.  The agent writes what its turn settled; the dream reads what it did not. |
 | **No memory writes at all; the captures are the memory** | Then a decision is a line in a journal among hundreds, and nothing states it as the thread's state.  The graph is meant to be read, and a note is what makes it readable. |
 | **Have the agent write on every turn** | It writes when it decided something, not on a schedule.  Telling it "always write something" is how a page fills with restatements again. |
 

@@ -162,8 +162,8 @@ Hermes leaves it to the person, Claude Code to a context threshold,
 OpenClaw and dots to a background consolidation pass.  The shape here
 is two of those: the **threshold** (an episode's context share, as in
 Claude Code) and the **person** (`/new`, a named thread, a selected
-thread, as in Hermes).  Consolidation is the nightly dream, and it asks
-no model.  What is added is the **ranker**, for the one case those
+thread, as in Hermes).  Consolidation is the nightly dream, which asks a
+model once per bounded batch.  What is added is the **ranker**, for the one case those
 leave to a person: a message that starts on its own with no cue and no
 thread named, where somebody has to notice the subject changed.  It is
 a search over the conversation's own words, so it costs nothing and its

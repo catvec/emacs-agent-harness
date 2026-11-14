@@ -329,3 +329,10 @@ that does not use it gains no hooks, options or timers from it.
 |---|---|---|---|
 | `memory-consolidate-system` | Tells a judge how to merge and tidy the memories of one scope. | none | harness-memory--consolidate |
 | `memory-consolidate-request` | Lists the memories a consolidation judge is to merge. | `{{memories}}` The memories of the scope, one line each: [id] kind: text. | harness-memory--consolidate |
+
+### workspace-knowledge
+
+| Prompt | Purpose | Variables | Used by |
+|---|---|---|---|
+| `workspace-dream-system` | Tells a judge how to synthesize one workspace's captured knowledge into sourced pages. | none | harness-workspace-knowledge--synthesize |
+| `workspace-dream-request` | Lists the captures, pages and index a dreaming judge synthesizes. | `{{workspace}}` The workspace the knowledge belongs to.<br>`{{window}}` The day or days the captures were made on.<br>`{{captures}}` The new captures, one entry each: id, role, thread, day and text.<br>`{{pages}}` The pages this workspace maintains, with their blocks: id, kind, confidence, sources and text.<br>`{{index}}` The navigation index as it stands, one page a line.<br>`{{excluded}}` Statements the user has rejected; they are not written again. | harness-workspace-knowledge--synthesize |

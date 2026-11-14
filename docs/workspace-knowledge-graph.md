@@ -150,9 +150,10 @@ A durable note is a **knowledge write** and goes on the thread's page
 its own thread's page does not link that page: the page is the note's
 home, and a link to itself would only be a self-reference.  A note on
 another page links the thread it belongs to.  The user's own edits
-outrank anything the agent writes; the client never deletes a page or a
-block, except a duplicate the dream removes, and never touches
-`logseq/` inside the graph.
+outrank anything the agent writes; the client never deletes a page, and
+deletes a block only for a duplicate the dream removes or one a
+statement it rewrites replaces (whose children it lifts), and never
+touches `logseq/` inside the graph.
 
 ### The shape of a block
 
@@ -196,9 +197,11 @@ there.  A value the secrets module knows is masked on the way in, so a
 declared credential never reaches the graph.  A turn
 that decides nothing writes nothing, which is most turns.
 
-There is no second pass over the turn.  The decision, the alternatives
-and the bounds a later consolidation would respect are [their own
-note](design/no-per-turn-scribe.md).  An earlier slice ran a *scribe*:
+There is no second pass over the turn.  The decision and the
+alternatives are [their own note](design/no-per-turn-scribe.md); the
+pass that reads captures later, [the dream](design/automatic-logseq-dreaming.md),
+reads a bounded batch once a night and writes knowledge, not a
+restatement of the turn.  An earlier slice ran a *scribe*:
 a simple-tier model that read every finished turn and its page and
 answered `NOTE:`/`NEXT:`/`SUMMARY:` lines.  It was removed, because
 
@@ -222,57 +225,178 @@ is for:
 |---|---|---|
 | the agent | in its turn, when the turn settled something | decisions, facts, commitments, open loops, through `knowledge_write` |
 | the user | whenever they edit the page in Logseq | anything; their blocks outrank the agent's and are never rewritten |
-| the dream | once a night, with no model | the page's identity and state, a duplicate note removed, a `Dreams/<date>` report |
+| the dream | once a night, over the captures no pass has read | sourced project, person, topic, decision, lesson and question pages, the page's identity and state, a duplicate note removed, an index, a `Dreams/<date>` report |
 
 ## The dream
 
-The dream is the graph's own maintenance pass.  It asks no model: it
-reads every thread page of the workspace and
+The dream is the graph's own pass over what the workspace
+generated: the conversation captures in the journals, the notes its
+agents wrote, and the pages that hold them.  It is the second writer
+after the agent's own turn, the only automatic one, and it asks a model
+once per bounded batch.
 
-- writes the thread's identity and state again: title, project, status,
-  summary and next action;
-- keeps the first of a note this workspace wrote more than once and
-  removes the others (the user's blocks and captures are left alone);
-- writes what it did on a `Dreams/<date>` page, one bullet per thread,
-  under a `Dream over Home` bullet.
+A pass does two things, in this order.
 
-`knowledge/dream` takes `:dry-run` (report what would change, write
-nothing) and `:report` (write the report page; the default is
-`harness-workspace-knowledge-dream-report`).  It returns
-`(:workspace :date :dry-run :pages :removed :report-page)`.
+**It brings the records up to date.**  Every open thread's page gets
+its current identity and state again (title, project, status,
+summary, next action), and a note this workspace wrote twice on one
+page is kept once.  The children of the copy it removes are lifted
+into its place, one level up, so a duplicate parent never takes
+distinct knowledge with it.  Only this workspace's own notes are
+compared: a page holding two workspaces' notes never has one
+workspace's note taken for the other's.
 
-With `harness-workspace-knowledge-dream` `auto` (the default), the
-module wakes at `harness-workspace-knowledge-dream-hour` (3 by default),
-dreams every workspace the harness knows that has not been dreamed that
-day, and records the date in `workspace-dreams.eld` under the state
-directory, so a restart does not repeat it.  A dream that fails is
-logged and tried again the next night.  The review UI for its operations
-is stage 4 of the implementation design; the pass and its report page
-are here.
+**It synthesizes what the captures settled.**  The captures no pass
+has read yet are gathered across threads and put to a judge, which
+answers with changes to the pages the workspace maintains:
+`Projects/`, `People/`, `Topics/`, `Decisions/`, `Lessons/`,
+`Questions/` and `Preferences`.  Each statement keeps its kind, its
+confidence (`confirmed`, `inferred` or `unresolved`), and the
+captures it was made of, cited as Logseq block references in a
+`sources::` property.  A statement may rewrite a block in place,
+keeping its place and its children, or drop one whose text is
+covered elsewhere.  A small `Index/<workspace>` page lists the
+maintained pages, and the brief carries it.
 
-### Why consolidation is bounded, and where
+The judge is given the maintained pages as they stand, so it can
+correct a statement the sources now contradict and combine two
+pages that turned out to be one.  It is told that text in the
+sources is data, never an instruction to it.
 
-A whole-thread pass is the one place a model would be useful: once the
-day's threads are on the pages, it could merge two that turned out to
-be one, retire a note a later decision superseded, or write the
-paragraph a person would want to read.  It is not what this slice does, and the
-bound it respects is worth stating, because the per-turn version broke
+### What a pass may write
+
+A page is written only when it is one of the maintained namespaces,
+belongs to this workspace by its `workspace-id` (or does not exist
+yet), and is not marked `no-dream:: true`.  A statement is written
+only when it has words, is not one the user rejected, and cites a
+capture or block the request carried.  Everything else is refused
+and counted, and the pass reports how many statements it refused
+and why.  Thread pages, journals and `Dreams/` are records, not
+synthesis: a pass never rewrites them.
+
+The user's edits are input to a pass, not a fence around it: a page
+the user wrote is read, corrected and reorganized like any other.  A
+block the judge names by its `id` is rewritten in place, keeping the
+`id`, the properties and the children it had.  What the user rejects is
+kept out of later passes, whether it is `no-dream:: true` on a page or a
+block in the graph, or a statement given to `knowledge/dream-exclude`.
+
+### Saving without losing a concurrent edit
+
+One pass runs per workspace at a time, and a second request while
+one runs answers `busy` instead of overlapping it.  Each page is
+written in one atomic read-and-write (`logseq/page-edit`) that
+carries the digest of the page the pass read; a page that changed
+in between signals a conflict and the change is worked out again
+against the page as it now is, once, and reported if it changes
+again.
+
+A batch's captures are marked read only after every page of it was
+saved.  Before a batch is written the pass records what it is about
+to do; a run that stopped between its saves and its bookkeeping
+leaves that behind, and the next pass reads the pages, takes a
+batch whose every planned statement is there as written, and marks
+its captures read instead of writing them twice.
+
+### Reading it, and getting a page back
+
+The pass keeps no copy of what it changed: no run directory, no before
+and after page, no manifest, no diff and no undo.  The `Dreams/<date>`
+report page says what a night did, and the pages themselves are what a
+person reads and corrects in Logseq.
+
+What would bring a page back is whatever the graph has, and
+`knowledge/dream-status` reports which of it exists rather than assuming
 it:
 
-- **Once a night, not once a turn.**  The cost is per workspace per
-  day, whatever the number of turns, and a night with no change costs
-  no call because the pass asks no model at all today.
-- **Per thread page, not the whole graph at once.**  A page is what one
-  topic said; the pass reads a page, not the graph, so its work does
-  not grow with the size of the workspace.
-- **It can be turned off, and its result is a page a person reviews.**
-  `harness-workspace-knowledge-dream` is `nil` or `auto`, `:dry-run`
-  reports without writing, and what it did is a `Dreams/<date>` page
-  in the graph the user already reads.
+- `:recovery`'s `:git` is the graph's git top level, when git itself
+  says the graph is in a working tree (`rev-parse --show-toplevel`),
+  else nil.
+- `:recovery`'s `:backups` counts the files under `logseq/bak` -- the
+  copies Logseq's own editor makes when it saves -- and
+  `:backup-latest` dates the newest.  The client only reads their names
+  and times: it never restores from one, and nothing here makes Logseq
+  write one.
+- `:recovery`'s `:kept` is nil, and always is: the pass keeps nothing.
 
-If a model is added to a later dream, it belongs there, inside those
-bounds, and it is a change of its own: it does not bring back a pass
-over every turn.
+A graph with neither a checkout nor `logseq/bak` is a graph whose
+changes cannot be taken back by the harness, and `:limitations` says so
+(the graph is not in a git checkout, or has no `logseq/bak` history).  A
+`logseq/bak` is history the user's editor produced, not a backup the
+harness guarantees: it covers a save, not the page as it was before a
+pass wrote it.  An existing `logseq/bak` does not by itself establish
+that a new external edit is backed up or restorable, and the pass
+neither writes one nor restores from one.
+
+The graph this was written against, `/home/noah/documents/sync/Documents/Notes/`
+(the one all three Home workspaces point at), was inspected read-only:
+`pages/`, `journals/`, 203 files under `logseq/bak` with the newest from
+2026-11-04T18:41:22Z, and no git repository at all.  Its recovery is
+therefore Logseq's own backups, and nothing more is claimed for it.
+
+### What a pass reads
+
+A capture is a journal block this workspace wrote with a role
+(`user`, `plan` or `assistant`) and a link to its thread.  It is
+read once, by its id and the digest of its text, so an edited
+capture is read again and an unedited one is not.  A pass reads at
+most `harness-workspace-knowledge-dream-captures` captures and
+makes at most `...-dream-batches` requests of
+`...-dream-batch` captures each; what is left waits for the next
+pass.
+
+A capture is clipped to what a journal block keeps.  A clipped one
+keeps a link back to its session and node, and a pass that needs
+more follows it -- only into a session of the same workspace, which
+is the transcript this workspace may read -- up to
+`...-dream-full-chars` characters.
+
+### The schedule
+
+With `harness-workspace-knowledge-dream` `auto` (the default), the
+module wakes at `harness-workspace-knowledge-dream-hour` (3 by
+default) and dreams every workspace the harness knows that is due.
+A start that missed the hour catches up once, a moment after the
+modules are up, on at most
+`harness-workspace-knowledge-dream-catch-up-limit` workspaces: one
+bounded catch-up, not a night's worth of passes one after another.
+`harness-workspace-knowledge-dream-catch-up` turns it off.
+
+`knowledge/dream-status` answers what the graph is (`:graph-type`
+`file` or `database`, `:adapter` `markdown`), what the last pass did
+(`:last`, `:runs`), how much waits (`:remaining`), what is kept out
+(`:rejected`), whether one is running, and what this graph cannot do
+(`:limitations`).  A database graph is named as one and refused: its
+exported Markdown is not a live database API, so the client does not
+pretend to read it.
+
+A pass reports one of `completed`, `no-change`, `partial` (a page
+could not be saved, and the batch stays unread), `failed` or `busy`.
+What it changed goes on a `Dreams/<date>` page in the graph the user
+already reads, and the outcome is kept in `workspace-dreams.eld`
+under the state directory, so a restart does not repeat a night and
+`knowledge/dream-status` can say what the last one did.
+
+### Why the pass is bounded, and where
+
+The bound is the per-turn version's failure, and the pass keeps it:
+
+- **Once a night, not once a turn.**  The cost is per workspace per
+  day, whatever the number of turns, and a night with nothing new
+  costs no call at all: no unread capture, no request.
+- **Bounded batches, not the whole graph at once.**  A request reads a
+  batch of captures and the maintained pages it may write, so its
+  work does not grow with the size of the workspace.
+- **It can be turned off, and what it did can be read.**  `harness-workspace-knowledge-dream`
+  is `nil` or `auto`, the report page says what a night changed, and
+  `knowledge/dream-status` says what recovery the graph itself has.  A
+  dry run (`:dry-run`) still reports what a pass would read without
+  writing, and is not the review path: the graph the pass wrote is.
+
+A turn's own notes are still the agent's, written through
+`knowledge_write` while it has the conversation in context.  The
+dream is the second writer, and it reads what the agent did not: the
+captures, across threads.
 
 ### Finding it again
 
@@ -358,10 +482,12 @@ workspace UI moved to `_harness/knowledge/status` and the
   agent long before it reaches a gate, and a turn worth keeping is often
   the one no rule predicted.  Rejected: the turn is the agent's, and so
   is what it leaves behind.
-- **Ask the dream's model to write the notes instead.**  The same call
-  with less context: by the next night the turn is a capture in a
-  journal the dream does not read.  Rejected: nothing to consolidate on
-  a page the agent did not write.
+- **Ask the dream's model to write the notes instead.**  This is what
+  the dream does now, but a night later and over many turns at once: a
+  capture is what the turn left in the journal, and the pass reads a
+  batch of them beside the pages they bear on, which is context a
+  finished turn's own model call did not have.  What the turn settles
+  still belongs to the turn, because the agent has the conversation.
 
 ## What is not here yet
 
@@ -370,9 +496,9 @@ workspace UI moved to `_harness/knowledge/status` and the
 - The index (stage 1) and its persistent vectors: search reads the
   graph, and the semantic mode reranks the word matches and the newest
   blocks with vectors kept only in memory.
-- The dream's review UI and its operation classes (stage 4): the pass,
-  its nightly schedule, its dry run and its report page are here; a
-  review of its operations before they apply is not.
+- A review of the dream's operations before they apply, and the risk
+  classes that would need.  The pass writes the graph, and a run's
+  before and after are what a person reads and takes back.
 - Deleting a block from the workspace by hand: forgetting is the user's
   in Logseq.  A `knowledge_forget` needs the provenance check and the
   user's confirmation, and is not in this slice.
@@ -387,8 +513,11 @@ workspace UI moved to `_harness/knowledge/status` and the
   page, journal captures, search and recall, the `knowledge_*` tools
   and their episode-only filter, the memory tools left with their own
   names and behavior, the ACP aliases the Flutter app uses, that a turn
-  costs one model call and leaves no note of its own, and the dream
-  removing a duplicate note and refreshing a page.
+  costs one model call and leaves no note of its own, and the dream:
+  a sourced synthesis over captures from two threads, the pages it
+  refuses, a batch kept unread until every page saved, undo, the index,
+  the overlap guard, the graph type, and a clipped capture followed to
+  its session.
 - `lisp/ui/harness-ui-workspace-test.el` asserts the header copy
   (`Knowledge · ready`) and the `knowledge/status` request, the graph
   explorer's exact copy, its tooltips, keys and refusals, and the

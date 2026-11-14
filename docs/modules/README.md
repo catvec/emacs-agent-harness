@@ -418,6 +418,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `workspace/changed` | [workspace](workspace.md) | [workspace](workspace.md), [workspace-box](workspace-box.md) | [ui-workspace](ui-workspace.md) | yes |
 | `workspace/context-built` | [workspace](workspace.md) |  |  | yes |
 | `workspace/deleted` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md), [workspace-box](workspace-box.md) | yes |
+| `workspace/dream-finished` | [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md) | [workspace-knowledge](workspace-knowledge.md) |  | yes |
 | `workspace/episode-changed` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md) | yes |
 | `workspace/knowledge-changed` | [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md) | [workspace-knowledge](workspace-knowledge.md) | [ui-workspace](ui-workspace.md) | yes |
 | `workspace/thread-changed` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md) | yes |

@@ -37,6 +37,35 @@
       (should (equal "no-page-directory" (plist-get status :reason))))
     (should-not (file-directory-p (expand-file-name "pages" harness-logseq-directory)))))
 
+(ert-deftest harness-logseq-reports-what-recovery-the-graph-has ()
+  "The recovery report names the history the graph holds, and the
+client keeps no copy of a page it wrote."
+  (harness-logseq-test-with
+    (let* ((root harness-logseq-directory)
+           (bak (expand-file-name "logseq/bak/pages" root)))
+      (harness-call 'logseq/block-add "Projects/harness" "The tile is matte.")
+      ;; A graph with neither a checkout nor Logseq's own backups says so.
+      (let ((recovery (harness-call 'logseq/recovery root)))
+        (should-not (plist-get recovery :git))
+        (should (zerop (plist-get recovery :backups)))
+        (should-not (plist-get recovery :backup-latest))
+        (should-not (plist-get recovery :kept)))
+      ;; Logseq's own backups are counted and dated, never read or written.
+      (harness-ensure-directory bak)
+      (harness-write-file-atomically (expand-file-name "Projects.harness.md" bak)
+                                     "- An older copy.\n")
+      (let ((recovery (harness-call 'logseq/recovery root)))
+        (should (= 1 (plist-get recovery :backups)))
+        (should (string-match-p "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T"
+                                (plist-get recovery :backup-latest)))
+        (should-not (plist-get recovery :kept)))
+      (should (equal "- An older copy.\n"
+                     (harness-read-file (expand-file-name
+                                         "Projects.harness.md" bak))))
+      ;; The graph's own status does not spawn git: recovery is asked
+      ;; for where it is reported, not on every read of the graph.
+      (should-not (plist-member (harness-call 'logseq/status) :recovery)))))
+
 (ert-deftest harness-logseq-writes-a-bullet-with-properties ()
   "A block is one `- ' bullet, its properties indented under it."
   (harness-logseq-test-with
@@ -272,6 +301,151 @@ a line in the fence that looks like a bullet or a property is text."
       (let ((before (harness-read-file file)))
         (should-not (harness-call 'logseq/block-remove "Projects/harness" "gone"))
         (should (equal before (harness-read-file file)))))))
+
+(provide 'harness-logseq-test)
+;;; harness-logseq-test.el ends here
+
+(ert-deftest harness-logseq-reads-a-journal-of-either-separator ()
+  "A day's journal is found by the day it names, not its spelling."
+  (harness-logseq-test-with
+    (let ((file (expand-file-name "journals/2026_11_08.md" harness-logseq-directory)))
+      (harness-ensure-directory (file-name-directory file))
+      (harness-write-file-atomically
+       file "- The grout is warm grey.\n  id:: j1\n  role:: user\n")
+      ;; The day parses whatever separator the graph writes, and the file
+      ;; the graph already holds for it is the one read and written.
+      (should (equal '(2026 11 8) (harness-logseq-journal-date "2026_11_08")))
+      (should (equal "2026-11-08" (harness-logseq-journal-day "2026_11_08")))
+      (should (equal "2026-11-08" (harness-logseq-journal-day "2026.11.08")))
+      (should (equal "2026-11-08" (harness-logseq-journal-day "2026-11-08")))
+      (should (equal file (harness-logseq-journal-file "2026-11-08" harness-logseq-directory)))
+      (should (equal file (harness-logseq-journal-file "2026_11_08" harness-logseq-directory)))
+      (let ((page (harness-call 'logseq/page "2026-11-08")))
+        (should (plist-get page :journal))
+        (should (equal "The grout is warm grey."
+                       (plist-get (car (plist-get page :blocks)) :text))))
+      ;; A new block of that day goes to the file the graph uses.
+      (harness-call 'logseq/block-add "2026-11-08" "The tile is matte."
+                    (list :journal t))
+      (should (string-match-p "matte" (harness-read-file file)))
+      (should-not (file-exists-p (expand-file-name "journals/2026-11-08.md"
+                                                   harness-logseq-directory)))
+      ;; A namespaced page that looks like a day is a page, not the journal.
+      (should-not (harness-logseq-journal-day "Dreams/2026-11-08"))
+      (should-not (harness-logseq-journal-day "Projects/2026-11-08")))))
+
+(ert-deftest harness-logseq-journals-sort-by-day-not-by-name ()
+  "A bounded scan keeps the newest day, whichever separator it writes."
+  (harness-logseq-test-with
+    (let ((hyphen (expand-file-name "journals/2026-11-08.md" harness-logseq-directory))
+          (underscore (expand-file-name "journals/2026_11_09.md" harness-logseq-directory))
+          (harness-logseq-journal-pages 1))
+      (harness-ensure-directory (file-name-directory hyphen))
+      (harness-write-file-atomically hyphen "- Older.\n")
+      (harness-write-file-atomically underscore "- Newer.\n")
+      ;; `_' sorts before `-' as text, so a scan that ordered the file
+      ;; names would keep the older day; by date it keeps the newer.
+      (should (equal "2026_11_09"
+                     (plist-get (car (harness-call 'logseq/page-list (list :limit 1)))
+                                :name)))
+      (let ((harness-logseq-journal-pages 10))
+        (should (equal '("2026_11_09" "2026-11-08")
+                       (mapcar (lambda (page) (plist-get page :name))
+                               (harness-call 'logseq/page-list (list :limit 2)))))))))
+
+(ert-deftest harness-logseq-page-edit-replaces-a-block-and-keeps-the-rest ()
+  "A block rewritten in place keeps its id, its properties and its children."
+  (harness-logseq-test-with
+    (let ((file (harness-logseq-page-file "Projects/harness" harness-logseq-directory)))
+      (harness-write-file-atomically
+       file
+       (concat "- The grout is a cold grey.\n"
+               "  id:: d1\n"
+               "  workspace-id:: w-1\n"
+               "  role:: note\n"
+               "  - Ask Stone Co.\n"
+               "    id:: c1\n"
+               "- The tile is matte.\n"
+               "  id:: d2\n"))
+      (let ((result (harness-call 'logseq/page-edit "Projects/harness"
+                                  (list :replace (list (cons "d1"
+                                                             "The grout is warm grey."))))))
+        (should (equal (list "d1") (plist-get result :replaced))))
+      (let* ((content (harness-read-file file))
+             (blocks (harness-logseq-parse-blocks content))
+             (first (car blocks)))
+        (should (equal "The grout is warm grey." (plist-get first :title)))
+        ;; The properties stay indented under the bullet they belong to:
+        ;; one at the left margin would be read as a page property.
+        (should (string-match-p "^- The grout is warm grey\\.$" content))
+        (should (string-match-p "^  id:: d1$" content))
+        (should (string-match-p "^  role:: note$" content))
+        (should (equal "d1" (harness-logseq-block-property first "id")))
+        (should (equal "note" (harness-logseq-block-property first "role")))
+        (should (equal "w-1" (harness-logseq-block-property first "workspace-id")))
+        (should (= 3 (length blocks)))
+        (should (equal "Ask Stone Co." (plist-get (nth 1 blocks) :title)))
+        (should (equal "c1" (harness-logseq-block-property (nth 1 blocks) "id")))))))
+
+(ert-deftest harness-logseq-page-edit-lifts-the-children-it-removes ()
+  "Removing a block keeps the blocks under it, one level up."
+  (harness-logseq-test-with
+    (let ((file (harness-logseq-page-file "Projects/harness" harness-logseq-directory)))
+      (harness-write-file-atomically
+       file
+       (concat "- The grout is warm grey.\n"
+               "  id:: d1\n"
+               "  - Ask Stone Co.\n"
+               "    id:: c1\n"
+               "    - The sample is late.\n"
+               "      id:: g1\n"
+               "- The tile is matte.\n"
+               "  id:: d2\n"))
+      (let ((result (harness-call 'logseq/page-edit "Projects/harness"
+                                  (list :remove (list "d1")))))
+        (should (equal (list "d1") (plist-get result :removed))))
+      (let* ((content (harness-read-file file))
+             (blocks (harness-logseq-parse-blocks content)))
+        (should-not (string-match-p "grout" content))
+        (should (= 3 (length blocks)))
+        (should (equal "Ask Stone Co." (plist-get (nth 0 blocks) :title)))
+        (should (equal 0 (plist-get (nth 0 blocks) :indent)))
+        (should (equal "c1" (harness-logseq-block-property (nth 0 blocks) "id")))
+        (should (equal "The sample is late." (plist-get (nth 1 blocks) :title)))
+        (should (equal 2 (plist-get (nth 1 blocks) :indent)))))))
+
+(ert-deftest harness-logseq-page-edit-refuses-a-stale-write ()
+  "A page that changed since it was read is not written over."
+  (harness-logseq-test-with
+    (let ((file (harness-logseq-page-file "Projects/harness" harness-logseq-directory)))
+      (harness-write-file-atomically file "- The grout is warm grey.\n  id:: d1\n")
+      (let ((digest (harness-logseq-page-digest "Projects/harness" harness-logseq-directory)))
+        (should digest)
+        ;; The same page as it was read is written.
+        (harness-call 'logseq/page-edit "Projects/harness"
+                      (list :expect digest
+                            :append (list (list :text "The tile is matte."))))
+        (should (string-match-p "matte" (harness-read-file file)))
+        ;; The digest of the page as it now is no longer the one read.
+        (should-error (harness-call 'logseq/page-edit "Projects/harness"
+                                    (list :expect digest
+                                          :append (list (list :text "A stale line."))))
+                      :type 'harness-conflict)
+        (should-not (string-match-p "stale" (harness-read-file file)))
+        ;; A page that is not there is made only when that is what was read.
+        (should-error (harness-call 'logseq/page-edit "Projects/new"
+                                    (list :expect (harness-logseq-digest "something")
+                                          :append (list (list :text "x"))))
+                      :type 'harness-conflict)
+        (should-not (file-exists-p (harness-logseq-page-file "Projects/new"
+                                                             harness-logseq-directory)))
+        (harness-call 'logseq/page-edit "Projects/new"
+                      (list :create t :expect 'absent
+                            :append (list (list :text "Made."))))
+        (should (string-match-p "Made"
+                                (harness-read-file
+                                 (harness-logseq-page-file "Projects/new"
+                                                           harness-logseq-directory))))))))
 
 (provide 'harness-logseq-test)
 ;;; harness-logseq-test.el ends here

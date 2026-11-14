@@ -8,8 +8,8 @@ explorer, the Flutter client's `Graph` page and the local computer with
 a real VNC screen are implemented in `workspace`,
 `workspace-knowledge`, `logseq`, `workspace-box`, `ui-workspace` and
 `harness_client`.  The Logseq CLI and its DB graphs, the persistent
-index and its vectors, the dream's review UI, the container backend,
-routines and voice are still the staged design below.  This page is
+index and its vectors, the container backend, routines and voice are
+still the staged design below.  This page is
 the design for the whole mode: a persistent workspace chat with a
 long-term memory, a computer of its own, and the whole harness
 underneath it.  The module contracts, UI copy, tests and staged plan
@@ -79,7 +79,7 @@ the chat, so the same mode can run a life and run a task board.
 | How does it work on non-code work? | The workspace root is an ordinary project; task mode already works outside git.  Daily-life tasks, routines, notes, decisions, people and projects all live in the graph; the box is where the results are used. |
 | How does voice fit? | A call attaches to a thread.  Live voice delegates each utterance to `workspace/prompt`; replies stream back to speech.  Voice turns are ordinary chat turns marked `voice`. |
 | Where does it run? | In the harness process, with the UI in Emacs and the ACP client (Flutter) as a remote front end.  The box is a separate sandbox; the memory graph is local. |
-| What is the implementation status? | The core chat, threads, episodes, the Logseq markdown knowledge graph and its tools, the agent's notes and the nightly dream, semantic recall, the Emacs UI with its graph explorer, the Flutter client's `Graph` page, a workspace computer and its VNC screen are implemented; the Logseq CLI and DB graphs, the persistent index and its vectors, the dream's review UI, the container backend, routines and voice are staged.  See the [implementation page](workspace-mode-implementation.md) and [the computer](workspace-computer.md). |
+| What is the implementation status? | The core chat, threads, episodes, the Logseq markdown knowledge graph and its tools, the agent's notes and the nightly dream, semantic recall, the Emacs UI with its graph explorer, the Flutter client's `Graph` page, a workspace computer and its VNC screen are implemented; the Logseq CLI and DB graphs, the persistent index and its vectors, the container backend, routines and voice are staged.  See the [implementation page](workspace-mode-implementation.md) and [the computer](workspace-computer.md). |
 
 ## Why this mode
 
@@ -817,7 +817,7 @@ comes from the task event that wrote it.
 | `open-loops` | text (multi-line children) | thread, person | what is still owed |
 | `deliver-to` | text | routine | `chat`, `notification`, `voice` |
 | `trigger` | text | routine | when it runs |
-| `review` | text | dream operation | `needed`, `applied`, `rejected` |
+| `review` | text | a staged dream operation | `needed`, `applied`, `rejected` (the implemented pass writes no operations) |
 
 Logseq's own editor decides how these look; the harness only requires
 that they exist and are queryable.  A property the graph does not have
@@ -1286,7 +1286,7 @@ The graph is personal.  The design's defaults follow that:
   under the policy's allowed models and the corporate-mode rule;
 - the agent writes the graph from its own session, so what reached the
   graph is in a transcript the user can read; the dream reads the
-  graph's pages and asks no model;
+  graph's pages and sends the captures to the model the workspace chose;
 - the box never mounts the graph's SQLite file directly; it reads
   memory through the workspace tools, so a compromised command in the
   box cannot rewrite the graph behind the index's back.
@@ -1332,10 +1332,18 @@ half-decisions, stale open loops and pages nobody linked.  A month
 later the recall is technically full of the past and practically
 useless, because the current answer is buried under three older ones.
 
-**Dreaming** is the maintenance pass that prevents this.  It is not a
-summary of the day and it is not a compaction of the chat.  It is a
-set of edits to the graph, proposed against the graph's current state,
-applied when they are safe and shown to the user when they are not.
+**Dreaming** is the pass that prevents this.  It is not a summary of
+the day and it is not a compaction of the chat.  It is a set of edits to
+the graph, worked out against the graph's current state and written to
+it: the captures no pass has read are synthesized into sourced project,
+person, topic, decision, lesson and question pages, a stale claim is
+corrected, and a duplicate is kept once.
+
+The section below is the design as first written, with an operation
+review between a dream's plan and its writes.  The implemented pass has
+no such gate: it writes the graph, says what it did on a `Dreams/<date>`
+report page, keeps no copy of what it changed, and reports what recovery
+the graph itself has ([the dream](design/automatic-logseq-dreaming.md)).
 
 OpenClaw's dreaming is the closest prior art: a scheduled consolidation
 that collects short-term recall signals, scores candidates, promotes
@@ -1346,39 +1354,33 @@ and task board as the day's evidence.
 
 ### When it runs
 
-- **Nightly**, at `harness-workspace-dream-hour` (3 by default) in the
-  workspace's timezone, when the harness is running and the user is
-  not around.  If the harness is off at that hour, the dream runs on
-  the next start if `harness-workspace-dream-catch-up` is on (the
-  default) and the missed window is within
-  `harness-workspace-dream-catch-up-hours` (36).
-- **After a burst of work**, when the workspace has been idle for
-  `harness-workspace-dream-idle-minutes` (45) and at least
-  `harness-workspace-dream-min-turns` (12) turns or 4 task completions
-  have accumulated since the last dream, a **light dream** runs: only
-  the journal and thread pages are consolidated, no schema changes and
-  no page merges.
-- **On demand**, from the header's `Dream` button or
-  `M-x harness-workspace-dream`, with a scope (`today`, `since last dream`,
-  `a page`, `a thread`).  A dry run is the default in the UI; `Apply`
-  commits.
-- **Before a risky change** -- a graph migration, a schema change or a
-  workspace export -- a **checkpoint dream** runs with the same rules
-  and writes a report, so the graph is coherent before it is copied.
+**What is implemented** is the nightly hour
+(`harness-workspace-knowledge-dream-hour`, 3 by default), one bounded
+startup catch-up (`…-dream-catch-up`, `…-dream-catch-up-limit`), and a
+manual `knowledge/dream`.  If the harness is off at the hour, the next
+start catches up on at most three workspaces, once.  A second request
+while a pass runs answers `busy` instead of joining it.  The pass is not
+a session: it asks the model once per batch through
+`harness-judge-ask` (one `provider/complete` request) and writes the
+graph itself, so it has a cost and a log line but no transcript to open
+([the dream](design/automatic-logseq-dreaming.md)).
 
-Whether the user is around is the cache module's `cache/presence` when
-it is loaded; without it, the workspace's own idle time says so.
-Dreams are serialized per workspace.  A dream that is already running
-is joined, not started twice.  A dream is an ordinary session of kind
-`workspace-dream`, hidden with the other background kinds by default;
-it has a model, a cost and a transcript, and it can be stopped.  The
-curator and the librarian (both staged) are **background sessions**, not
-one-call internal records: they use tools, so they would run the
-ordinary agent loop with a narrow tool allowlist and a short context.  The router is not a job: it
-ranks the threads' own words locally, and the meaning blend calls
-`knowledge/nearest`, whose vectors are cached by text.
+The rest of this section is the design as first written: an idle
+trigger and a light dream, a scoped on-demand run, a checkpoint dream,
+and a dream as a stoppable session.  None of those is implemented, and
+the first two are not the plan, since a pass that reads what no earlier
+pass read does not need a second, smaller trigger.
 
 ### The phases
+
+**The implemented pass has no phases.**  It reads the pending captures,
+puts them to the judge in bounded batches, checks the answer against the
+graph, writes page by page, and marks a batch read only after every page
+of it was saved; a run that stopped between its saves and its
+bookkeeping leaves an intent the next pass reconciles
+([the dream](design/automatic-logseq-dreaming.md)).  The pipeline below
+is the design as first written, and a phase is where a piece of it
+would live, not a step the code takes.
 
 A dream is a pipeline.  Each phase writes its working state to the
 dream record, so a crash resumes at the next phase rather than starting
@@ -1528,14 +1530,18 @@ The dream writes `Dreams/<date>` with:
 - pages it could not resolve, and why;
 - the cost, the model, the duration and the next scheduled dream.
 
-The workspace header shows `Dream · 3 to review`; the notification says
-the same.  The review UI is a popout: a list on the left, the diff and
-sources on the right, `Apply`, `Skip`, `Apply all`, and an
-`Undo` for the applied low-risk batch (the backup and the inverse
-operations are kept for `harness-workspace-dream-undo-hours`, 72).
+The review UI sketched here is not built and is not the plan: a pass
+writes the graph it maintains, so there is nothing to accept before it
+applies.  What a person reviews is what it wrote: the `Dreams/<date>`
+report page says what the night did, and the pages are the graph the
+user already reads.  Nothing is kept beside them to diff or undo, so
+getting a page back is whatever history the graph itself has -- a git
+checkout, or Logseq's own `logseq/bak` -- which `knowledge/dream-status`
+reports ([the dream](design/automatic-logseq-dreaming.md)).
 
-A review decision is feedback: a skipped merge is remembered so the
-next dream does not propose it again without new evidence.
+A correction or an exclusion is feedback: a statement given to
+`knowledge/dream-exclude` and a page or block marked `no-dream:: true`
+are kept out of later passes.
 
 #### 8. Diary
 
@@ -1547,28 +1553,28 @@ do last night?" gets the diary and the concrete changes, not a guess.
 
 ### What dreaming is allowed to decide
 
-The dream can apply, without asking:
+**Implemented.**  A pass may write a page in `Projects/`, `People/`,
+`Topics/`, `Decisions/`, `Lessons/`, `Questions/` or `Preferences` that
+this workspace owns (or that does not exist yet), and a thread page's
+identity and state.  It may rewrite a statement, including one the user
+wrote, and drop a block whose text is covered elsewhere, lifting its
+children.  It may not write a page another workspace owns, a page marked
+`no-dream:: true`, a statement the user rejected or one that cites no
+source it was given, a journal, a `Dreams/` page or a thread page's
+prose.  A statement carries its kind and its confidence, so an
+inference is not written as a fact.
 
-- journal entries;
-- new decision, project, person, thread or routine pages when no page
-  exists;
-- updates to agent-written blocks whose source is older than the
-  candidate and whose hash is unchanged;
-- links and properties on agent-written blocks;
-- thread status and next action when the evidence is a task event or
-  an explicit user statement;
-- the index and the link-health fixes that only add links.
-
-It must ask for:
-
-- anything that changes a user-written block;
-- page merges and deletions;
-- a preference change that contradicts an explicit earlier preference;
-- a decision that supersedes another decision;
-- a skill promotion;
-- anything it cannot source.
+The lists below are the staged sketch, with a review for anything that
+changes a user-written block.  That review does not exist: the user's
+edits are input to a pass, which is what "user-edited pages remain
+eligible" means.  What fences a page or a statement is `no-dream:: true`
+and `knowledge/dream-exclude`.
 
 ### Scoring
+
+**Not implemented.**  A pass puts the pending captures to the judge and
+checks its answer against the graph; nothing ranks a candidate before
+that.  The score below is the design as first written.
 
 Candidates are ranked by a small, explainable score before the planner:
 
@@ -1589,6 +1595,11 @@ The thresholds are settings, not magic numbers hidden in a prompt:
 score of anything near the line, so tuning is possible.
 
 ### Self-improvement: playbook and skills
+
+**Not implemented.**  Nothing here is in the pass: it writes knowledge
+pages, not a playbook, a skill draft or a change to the workspace's
+instructions.  The sketch is kept because it is the next thing the
+graph would be good for.
 
 The user asked for a knowledge base that improves itself.  The dream's
 last job is to turn repeated work into reusable procedure:
@@ -1618,6 +1629,11 @@ system that can drift.
 
 ### An example dream
 
+**This is the staged report**, from the design as first written.  What a
+pass writes now is a `Dreams/<date>` page with one line per page it
+changed and one per refusal, and the pages themselves carry the
+sourced statements ([the dream](design/automatic-logseq-dreaming.md)).
+
 ```markdown
 Dreams/2026-11-06
   workspace-status:: review
@@ -1643,36 +1659,47 @@ The applied operations are below the diary; the merge is a review card.
 
 ### Guardrails
 
-- **Back up first.**  `graph backup create` before every apply.  The
-  backup covers the graph database; the workspace's artifacts have
-  their own backup path.
-- **One writer.**  The dream uses the graph's write queue; no other
-  memory write runs during an apply batch.
-- **Hashes, not hope.**  Every update names the block's expected hash.
-- **Idempotent.**  An operation id is written with the block, so a
-  retry cannot duplicate it.
-- **No silent contradiction.**  A conflict is a card, not a rewrite.
-- **No secrets.**  The redaction filter runs on the dream's output and
-  on every write.
-- **Private pages are out of scope.**  Not read, not embedded, not
-  edited.
-- **Budget and cap.**  A dream that hits its token, cost or operation
-  cap stops cleanly and says where it stopped.
-- **Undo.**  The applied low-risk batch keeps inverse operations and
-  the backup for 72 hours; `Undo` is in the report.
+**Implemented:**
+
+- **One writer.**  One pass per workspace; a second request answers
+  `busy`.
+- **The page as it is.**  A page is written in one atomic read and
+  write that names the digest of the page the pass read; a page that
+  changed in between is recomputed against the page as it now is, once.
+- **The batch after its pages.**  A batch's captures are marked read
+  only after every page of it was saved, and an intent recorded before
+  the writes lets the next pass reconcile a run that stopped between
+  them.
+- **Bounded.**  A pass reads at most `…-dream-captures` captures, in at
+  most `…-dream-batches` requests of `…-dream-batch` each, and prompts
+  are capped by `…-dream-prompt-chars`.
+- **Nothing kept beside the page.**  The pass writes no run directory, no
+  before and after copy and no manifest.  The report page says what a
+  night changed, and `knowledge/dream-status` reports what history the
+  graph itself has: its git top level, and how many `logseq/bak` files
+  and how new the newest is.  It never assumes either.
+- **No secrets.**  A capture's text is masked on the way in, as any
+  other graph write is.
 - **A dream cannot change the workspace's model, permissions or box
   mounts.**  Those are settings, not memory.
 
+**Not implemented, and not the plan:** a graph backup before every
+apply (the graph's own history is what there is, and the status says
+which), a diff or an undo of a pass, an operation id written with a
+block, a conflict card, a token or cost cap, and the 72-hour undo
+window.
+
 ### Failure
 
-A dream that fails in `collect` or `extract` writes a short report
-saying so and schedules a retry; it does not touch the graph.  A
-failure in `apply` leaves the applied operations recorded, and the
-report says which failed.  A crash in `review` keeps the proposals;
-they are read again from the dream record.  A graph backup failure
-stops the dream before any write.  The user is notified only when the
-dream needs a decision or failed; a clean dream is a line in the
-workspace header, not a notification.
+A pass reports `failed` with the reason when it cannot read the graph
+or its request failed, `partial` when a page could not be saved (and its
+batch stays unread), `no-change` when nothing was due, and `busy` when
+another pass holds the workspace.  A failure writes no report page and
+touches nothing; the outcome is in `workspace-dreams.eld`, in the log,
+and in `knowledge/dream-status`.  The next night tries again.  The user
+is notified only when a dream changed the graph
+(`workspace/dream-finished`); a night with nothing new is a line in the
+status, not a notification.
 
 ## The computer: a workspace box
 
@@ -2146,7 +2173,7 @@ notifying events:
 - a task waits for review, needs input, or is done (task mode already
   does these; the workspace adds the thread name);
 - a routine's brief is ready or a routine failed;
-- a dream has changes to review, or failed;
+- a dream changed the graph, or failed;
 - the box needs a person (`Login needed`, `Box stopped`);
 - a long job the user asked to be told about finishes (the agent's
   `notify` tool);
@@ -2265,7 +2292,7 @@ A new `Workspace` tab:
   [voice buddy](design/workspace-voice-buddy.md) in the shell's corner;
 - `Computer`: a screenshot view with tap/keyboard input over ACP, and
   an `Open desktop` WebView for noVNC when reachable;
-- `Memory`: search, cards, pages, provenance and the dream review;
+- `Memory`: search, cards, pages and provenance;
 - `Work`: the task board, reusing the existing task screens with a
   workspace filter;
 - `Resources`: the browser profile, its sites and saved logins, the

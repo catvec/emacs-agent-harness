@@ -74,6 +74,7 @@ No model is asked to place a message.
 - `workspace/changed` — (ID WORKSPACE) when a workspace record changed.
 - `workspace/context-built` — (ID THREAD BRIEF) when a brief was built.
 - `workspace/deleted` — (ID) when a workspace was deleted.
+- `workspace/dream-finished` — (WORKSPACE RESULT) when a dream changed the workspace's Logseq graph.
 - `workspace/episode-changed` — (ID THREAD SESSION DIVIDER) when an episode started or ended.
 - `workspace/knowledge-changed` — (WORKSPACE OP) when a block was written to the workspace's Logseq graph.
 - `workspace/thread-changed` — (ID THREAD) when a thread changed.
@@ -107,6 +108,7 @@ No model is asked to place a message.
 - `agent/cancel` ([agent](agent.md))
 - `agent/prompt` ([agent](agent.md))
 - `agent/running` ([agent](agent.md))
+- `knowledge/index` ([workspace-knowledge](workspace-knowledge.md))
 - `knowledge/nearest` ([workspace-knowledge](workspace-knowledge.md))
 - `knowledge/recall` ([workspace-knowledge](workspace-knowledge.md))
 - `knowledge/status` ([workspace-knowledge](workspace-knowledge.md))
