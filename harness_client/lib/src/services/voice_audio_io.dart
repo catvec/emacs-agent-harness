@@ -6,19 +6,29 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:record/record.dart';
 
 import '../voice/voice_backend.dart';
+import '../voice/voice_android_audio.dart';
 import '../voice/voice_output.dart';
 import '../voice/voice_settings.dart';
 
 import 'voice_output_io.dart';
+import 'voice_android_audio_io.dart';
 
 /// The platform microphone, as 16 kHz mono PCM16.  The clip backend's voice
 /// activity detector wants small, regular frames; the recorder's own stream
 /// buffer is set to 50 ms so that a pause is noticed quickly.
 class RecordVoiceMicrophone implements VoiceMicrophone {
-  RecordVoiceMicrophone({this.sampleRate = 16000});
+  RecordVoiceMicrophone({
+    this.sampleRate = 16000,
+    this.routing = AndroidVoiceRouting.standard,
+  });
 
   @override
   final int sampleRate;
+
+  /// How the microphone is opened around the reply's own output.  It is the
+  /// same on every platform: only Android has the Bluetooth choice, and there
+  /// [AndroidVoiceRouting.standard] keeps the reply on the media stream.
+  final AndroidVoiceRouting routing;
 
   final AudioRecorder _recorder = AudioRecorder();
   final _frames = StreamController<Uint8List>.broadcast();
@@ -31,24 +41,29 @@ class RecordVoiceMicrophone implements VoiceMicrophone {
   @override
   Stream<Uint8List> get frames => _frames.stream;
 
+  /// The recorder's configuration, as the platform is given it.  The
+  /// Android part is [routing]'s: a reply that plays on the media stream
+  /// must not be moved to call audio by a Bluetooth SCO link.
+  @visibleForTesting
+  RecordConfig recordConfig() => RecordConfig(
+    encoder: AudioEncoder.pcm16bits,
+    sampleRate: sampleRate,
+    numChannels: 1,
+    bitRate: sampleRate * 16,
+    autoGain: true,
+    echoCancel: true,
+    noiseSuppress: true,
+    streamBufferSize: 1600,
+    androidConfig: AndroidRecordConfig(manageBluetooth: routing.captureSco),
+  );
+
   @override
   Future<void> start() async {
     if (_open) return;
     if (!await _recorder.hasPermission()) {
       throw StateError('Microphone permission denied');
     }
-    final stream = await _recorder.startStream(
-      RecordConfig(
-        encoder: AudioEncoder.pcm16bits,
-        sampleRate: sampleRate,
-        numChannels: 1,
-        bitRate: sampleRate * 16,
-        autoGain: true,
-        echoCancel: true,
-        noiseSuppress: true,
-        streamBufferSize: 1600,
-      ),
-    );
+    final stream = await _recorder.startStream(recordConfig());
     _open = true;
     _subscription = stream.listen(
       _onData,
@@ -125,11 +140,17 @@ class FlutterTtsVoiceSpeech implements VoiceSpeech {
     this.language = '',
     this.params = const VoiceOutputParams(),
     FlutterTts? tts,
-  }) : _tts = tts ?? FlutterTts();
+    VoiceAndroidAudio? androidAudio,
+  }) : _tts = tts ?? FlutterTts(),
+       _androidAudio = androidAudio ?? defaultVoiceAndroidAudio();
 
   final String language;
   final VoiceOutputParams params;
   final FlutterTts _tts;
+
+  /// The Android output a reply is played on.  On other platforms every call
+  /// is a no-op, and the iOS category below is what configures the session.
+  final VoiceAndroidAudio _androidAudio;
   bool _configured = false;
 
   /// The platform's start callback of the words being spoken, when a caller
@@ -158,6 +179,10 @@ class FlutterTtsVoiceSpeech implements VoiceSpeech {
           IosTextToSpeechAudioMode.voicePrompt,
         );
       }
+      // The engine's own default attributes decide which stream its audio
+      // lands on; the seam puts it on the one media volume controls (see
+      // AndroidVoiceOutput), before the first utterance.
+      await _androidAudio.speechAttributes(_tts);
     } catch (_) {
       // A platform without one of these knobs still speaks with its defaults.
     }

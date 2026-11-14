@@ -20,6 +20,7 @@ import io.flutter.plugin.common.MethodChannel
  */
 class MainActivity : FlutterActivity() {
     private var channel: MethodChannel? = null
+    private var voiceAudio: MethodChannel? = null
     private var mediaSession: MediaSession? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -42,6 +43,12 @@ class MainActivity : FlutterActivity() {
             }
         }
         channel = methodChannel
+        // The volume control the keys follow, and the audio state a call holds.
+        voiceAudio = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            VoiceAudioChannel.CHANNEL,
+        )
+        voiceAudio?.setMethodCallHandler(VoiceAudioChannel(this))
     }
 
     private fun startMediaButtons() {
@@ -91,6 +98,8 @@ class MainActivity : FlutterActivity() {
         stopMediaButtons()
         channel?.setMethodCallHandler(null)
         channel = null
+        voiceAudio?.setMethodCallHandler(null)
+        voiceAudio = null
         super.onDestroy()
     }
 }

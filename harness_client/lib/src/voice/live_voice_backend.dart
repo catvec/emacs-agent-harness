@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'voice_backend.dart';
+import 'voice_android_audio.dart';
 import 'voice_models.dart';
 import 'live_protocol.dart';
 
@@ -17,11 +18,19 @@ class LiveVoiceBackend
     required this.connection,
     required this.protocol,
     required this.config,
+    this.androidAudio = const SilentVoiceAndroidAudio(),
   });
 
   final LiveVoiceConnection connection;
   final LiveProtocol protocol;
   final LiveVoiceConfig config;
+
+  /// The Android audio session this call plays through: the provider's voice
+  /// is played by WebRTC itself, so the session it plays on is what has to be
+  /// put on the media stream (see [AndroidVoiceOutput]).  It is held for the
+  /// life of the call and given back on [stop]; on a platform that is not
+  /// Android every call is a no-op.
+  final VoiceAndroidAudio androidAudio;
 
   final _events = StreamController<VoiceBackendEvent>.broadcast();
   final List<String> _pendingCalls = <String>[];
@@ -58,6 +67,10 @@ class LiveVoiceBackend
     if (_started || _closed) return;
     _started = true;
     _emit(const VoicePhaseEvent(VoicePhase.connecting));
+    // The provider's voice is played by the platform's realtime stack, so the
+    // session it plays on is configured before the connection exists: the
+    // playout attributes are read once, when that stack initializes.
+    await androidAudio.beginLive();
     try {
       await connection.connect(config);
       _messages = connection.messages.listen(
@@ -649,6 +662,9 @@ class LiveVoiceBackend
     } catch (_) {
       // A peer connection that is already gone is still stopped.
     }
+    // The call is over: give the mode, the focus and the volume keys back, so
+    // the next thing the phone plays is not treated as call audio.
+    await androidAudio.endLive();
     await _events.close();
   }
 

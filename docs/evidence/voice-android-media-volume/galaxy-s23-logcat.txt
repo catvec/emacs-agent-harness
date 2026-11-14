@@ -1,0 +1,37 @@
+# The probe's own account, from a real Samsung Galaxy S23 (SM-S918U1),
+# Android 17 (API 37), speaker route, run 2026-11-14 by
+# harness_client/tool/voice_audio_probe.sh --device <its wireless debugging
+# serial>.  Copied verbatim from `adb logcat -s HarnessVoiceProbe flutter`.
+#
+# `volumeControlStream` is the activity's, `stream` is the stream the output
+# names, `mediaVolume` is STREAM_MUSIC's level, and `playing=` is the platform's
+# own report of each active player: its usage, content type, the legacy stream
+# the usage maps to, and that stream's volume at the moment it was read.
+
+HarnessVoiceProbe output usage=media contentType=speech streamType=music mode=normal focus=gain forceAudioRouting=false
+HarnessVoiceProbe begin mode=0 volumeControlStream=3 stream=3 volume=7 maxVolume=15 mediaVolume=7 mediaMaxVolume=15 musicActive=false speakerphoneOn=false bluetoothScoOn=false hasFocus=true routes=earpiece,speaker,device-18 playingCount=0 playing=
+HarnessVoiceProbe round 1 before mode=0 volumeControlStream=3 stream=3 volume=7 maxVolume=15 mediaVolume=7 mediaMaxVolume=15 musicActive=false speakerphoneOn=false bluetoothScoOn=false hasFocus=true routes=earpiece,speaker,device-18 playingCount=0 playing=
+HarnessVoiceProbe round 1 playing mode=0 volumeControlStream=3 stream=3 volume=7 maxVolume=15 mediaVolume=7 mediaMaxVolume=15 musicActive=true speakerphoneOn=false bluetoothScoOn=false hasFocus=true routes=earpiece,speaker,device-18 playingCount=1 playing=usage=12/navigation/contentType=1/stream=3/volume=7
+HarnessVoiceProbe round 1 after mode=0 volumeControlStream=3 stream=3 volume=2 maxVolume=15 mediaVolume=2 mediaMaxVolume=15 musicActive=true speakerphoneOn=false bluetoothScoOn=false hasFocus=true routes=earpiece,speaker,device-18 playingCount=0 playing=
+HarnessVoiceProbe round 2 before mode=0 volumeControlStream=3 stream=3 volume=2 maxVolume=15 mediaVolume=2 mediaMaxVolume=15 musicActive=true speakerphoneOn=false bluetoothScoOn=false hasFocus=true routes=earpiece,speaker,device-18 playingCount=0 playing=
+HarnessVoiceProbe round 2 playing mode=0 volumeControlStream=3 stream=3 volume=2 maxVolume=15 mediaVolume=2 mediaMaxVolume=15 musicActive=true speakerphoneOn=false bluetoothScoOn=false hasFocus=true routes=earpiece,speaker,device-18 playingCount=1 playing=usage=12/navigation/contentType=1/stream=3/volume=2
+HarnessVoiceProbe round 2 after mode=0 volumeControlStream=3 stream=3 volume=12 maxVolume=15 mediaVolume=12 mediaMaxVolume=15 musicActive=true speakerphoneOn=false bluetoothScoOn=false hasFocus=true routes=earpiece,speaker,device-18 playingCount=0 playing=
+HarnessVoiceProbe round 3 before mode=0 volumeControlStream=3 stream=3 volume=12 maxVolume=15 mediaVolume=12 mediaMaxVolume=15 musicActive=true speakerphoneOn=false bluetoothScoOn=false hasFocus=true routes=earpiece,speaker,device-18 playingCount=0 playing=
+HarnessVoiceProbe round 3 playing mode=0 volumeControlStream=3 stream=3 volume=12 maxVolume=15 mediaVolume=12 mediaMaxVolume=15 musicActive=true speakerphoneOn=false bluetoothScoOn=false hasFocus=true routes=earpiece,speaker,device-18 playingCount=1 playing=usage=12/navigation/contentType=1/stream=3/volume=12
+HarnessVoiceProbe round 3 after mode=0 volumeControlStream=3 stream=3 volume=5 maxVolume=15 mediaVolume=5 mediaMaxVolume=15 musicActive=true speakerphoneOn=false bluetoothScoOn=false hasFocus=true routes=earpiece,speaker,device-18 playingCount=0 playing=
+HarnessVoiceProbe end mode=0 volumeControlStream=-2147483648 stream=3 volume=5 maxVolume=15 mediaVolume=5 mediaMaxVolume=15 musicActive=true speakerphoneOn=false bluetoothScoOn=false hasFocus=false routes=earpiece,speaker,device-18 playingCount=0 playing=
+
+# The platform's own record of the TTS player, from `adb shell dumpsys audio`
+# during the same run.  This is the line that names the stream the reply was
+# played on, independently of anything this app says:
+#
+#   new player piid:9599 uid/pid:10274/9418 package:com.google.android.tts
+#     type:android.media.AudioTrack
+#     attr:AudioAttributes: usage=USAGE_ASSISTANCE_NAVIGATION_GUIDANCE
+#     content=CONTENT_TYPE_SPEECH flags=0x800(FLAG_MUTE_HAPTIC)
+#     session:26433 mutedState:streamVolume
+#
+# `USAGE_ASSISTANCE_NAVIGATION_GUIDANCE` is the usage `speechAttributes` sets,
+# and `AudioAttributes.toVolumeStreamType` maps it to STREAM_MUSIC.  The
+# platform's `mutedState:streamVolume` is it saying the player follows the
+# stream's volume, which is the media slider and the hardware keys.

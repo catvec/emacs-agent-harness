@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'voice_audio.dart';
+import 'voice_android_audio.dart';
 import 'voice_backend.dart';
 import 'voice_models.dart';
 import 'voice_settings.dart';
@@ -19,6 +20,7 @@ class ClipVoiceBackend implements VoiceBackend {
     required this.transcriber,
     required this.speech,
     required this.delivery,
+    this.androidAudio = const SilentVoiceAndroidAudio(),
     required this.endpoint,
     required this.model,
     required this.token,
@@ -32,6 +34,13 @@ class ClipVoiceBackend implements VoiceBackend {
   final VoiceTranscriber transcriber;
   final VoiceSpeech speech;
   final ClipDelivery delivery;
+
+  /// The Android audio session this call plays through: the media stream the
+  /// person adjusts (see [AndroidVoiceOutput]).  It claims the volume keys
+  /// while the call is open and gives them back when it ends; on a platform
+  /// that is not Android every call is a no-op.
+  final VoiceAndroidAudio androidAudio;
+
   final String endpoint;
   final String model;
   final String token;
@@ -69,6 +78,10 @@ class ClipVoiceBackend implements VoiceBackend {
     if (_started || _closed) return;
     _started = true;
     _emit(const VoicePhaseEvent(VoicePhase.connecting));
+    // The keys and the route belong to the call, not to one utterance: the
+    // reply is heard on the stream they adjust for as long as the screen is
+    // open (see AndroidVoiceOutput).
+    await androidAudio.beginSpeech();
     try {
       await microphone.start();
       await microphone.setMuted(false);
@@ -93,6 +106,8 @@ class ClipVoiceBackend implements VoiceBackend {
           recoverable: false,
         ),
       );
+      // The call never opened: the keys are not this screen's to hold.
+      await androidAudio.endSpeech();
     }
   }
 
@@ -497,6 +512,7 @@ class ClipVoiceBackend implements VoiceBackend {
     } catch (_) {
       // Likewise the platform's speech engine.
     }
+    await androidAudio.endSpeech();
     _vad.reset();
     _queue.clear();
     _heldReplies.clear();

@@ -15,8 +15,16 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "app.harness.client"
+        // The voice audio probe (tool/voice_audio_probe.dart) is a build of
+        // this app with no screen of it, installed beside the app rather than
+        // over it: a probe must never replace the app a person has paired
+        // with their harness, and a debug-signed probe could not anyway.
+        // tool/voice_audio_probe.sh passes -PvoiceProbe=true.
+        applicationId = if (project.hasProperty("voiceProbe")) {
+            "app.harness.client.probe"
+        } else {
+            "app.harness.client"
+        }
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion

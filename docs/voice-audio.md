@@ -160,3 +160,12 @@ has the measurements, the alternatives and the tests.
 A task sandbox has no audio device and no working PipeWire graph, so the live
 microphone and speaker are the one thing these tests do not claim; the user's
 desktop is where that is checked.
+
+## Android: the stream a reply plays on
+
+Which volume control a voice reply follows on Android is decided by the audio
+attributes it plays with and the audio mode the phone is in, not by the app.
+[Voice on Android: which stream plays](voice-android-audio.md) has the
+measurements, the one output both providers now play through, and
+`harness_client/tool/voice_audio_probe.sh`, which reads a device's own account
+of the audio state.

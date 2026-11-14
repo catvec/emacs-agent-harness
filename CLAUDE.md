@@ -23,6 +23,21 @@
   its agents' system prompts too; it is not dependent on a provider
   automatically loading this file.
 
+## Devices: an emulator is the default, a person's phone is opt-in
+
+- Never install, launch, tap, speak, record or change a volume on a
+  physical phone because it is attached.  Attached is not permission, and
+  a script that takes the first `adb devices` entry takes somebody's own
+  phone -- that is how a probe ran on its owner's Galaxy S23 overnight.
+- Emulator first: a device test selects `emulator-*` by name, and refuses
+  to fall back to a phone when there is none.
+- A physical phone needs its owner to ask for that run, at that time: name
+  it explicitly (`--real-device SERIAL --owner-permission`), and keep the
+  run's volume at or below the level the phone already had.  The
+  permission is for one run; it is not inherited by the next.
+- Say in the evidence which of the three a result came from: a real
+  device, an emulator, or a mock.
+
 ## Finishing work
 
 - Work on this repo runs as emacs-agent-harness tasks, each in its own git

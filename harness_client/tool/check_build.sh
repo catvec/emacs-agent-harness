@@ -70,7 +70,7 @@ inputs=(lib test android assets pubspec.yaml pubspec.lock analysis_options.yaml 
 # of the Android build can leave behind in build/.
 upgrade_inputs=(pubspec.yaml pubspec.lock .flutter-version android)
 # The tests of the tools in tool/, run when tool/ differs from BASE's.
-tool_tests=(test_qr_tools.py test_check_build.py)
+tool_tests=(test_qr_tools.py test_check_build.py test_voice_audio_probe.py)
 
 usage() {
   sed -n '2,/^set -uo/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'
