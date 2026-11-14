@@ -1,0 +1,24 @@
+== engine
+server=6.2.0
+== up
+ Image busybox:latest Pulling 
+ 37bb94b0940b Pulling fs layer 0B
+ 37bb94b0940b Download complete 0B
+ aaef90e06523 Pulling fs layer 0B
+ aaef90e06523 Download complete 0B
+ aaef90e06523 Download complete 0B
+ Image busybox:latest Pulled 
+ Container work-web-1 Creating 
+ Container work-web-1 Created 
+ Container work-web-1 Starting 
+ Container work-web-1 Started 
+== readiness
+answered after 1s
+== teardown
+ Container work-web-1 Stopping 
+ Container work-web-1 Stopped 
+ Container work-web-1 Removing 
+ Container work-web-1 Removed 
+== cleanup
+E2E-OK
+

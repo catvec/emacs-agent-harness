@@ -400,10 +400,12 @@ says the bounds cut the list."
       (let* ((pair (pop stack))
              (current (car pair))
              (depth (cdr pair)))
-        ;; Sort before applying the bounds: sorting only OUT would keep
-        ;; a different subset for different filesystem enumeration orders.
+        ;; Sorted before the bounds apply, so they cut the same files on
+        ;; every machine: sorting only OUT would keep a different subset
+        ;; for different filesystem enumeration orders, and two copies
+        ;; of a skill would then list and fingerprint different files.
         (dolist (entry (sort (ignore-errors
-                               (directory-files current t "\\`[^.]"))
+                              (directory-files current t "\\`[^.]" t))
                              #'string<))
           (unless truncated
             (cond

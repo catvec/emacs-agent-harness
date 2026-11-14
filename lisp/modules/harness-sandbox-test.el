@@ -2642,5 +2642,207 @@ and nothing else."
       (delete-directory cwd t)
       (delete-directory mounted t))))
 
+
+;;;; Containers
+
+(ert-deftest harness-sandbox-containers-show-run-and-sys-only ()
+  "A container command gets a private /run and /sys read-only, and no more.
+It gets no capability, no writable socket and no privileged anything:
+the mounts are the whole of what `:containers' adds."
+  (harness-sandbox-test--setup)
+  (harness-sandbox-test-with-home home
+    (let* ((cwd (harness-test-temp-dir))
+           (socket (expand-file-name "docker.sock" cwd))
+           (default-directory cwd))
+      (unwind-protect
+          (progn
+            (with-temp-file socket (insert ""))
+            (cl-letf (((symbol-function 'harness-sandbox--container-socket)
+                       (lambda () socket)))
+              (let ((cmd (harness-sandbox--bwrap-command
+                          "/usr/bin/bwrap" cwd '("docker" "version") :containers t)))
+                ;; A /run of its own, writable and private, not the host's.
+                (should (harness-sandbox-test--subseq-p '("--tmpfs" "/run") cmd))
+                (should (harness-sandbox-test--subseq-p '("--dir" "/run/user") cmd))
+                ;; The engine's socket, read-only, at the path it has.
+                (should (member (list "--ro-bind" socket socket)
+                                (harness-sandbox-test--binds cmd)))
+                ;; Nothing wider: the socket is never bind (writable),
+                ;; /run is never shown whole, and no capability is added.
+                (should-not (member (list "--bind" "/run" "/run")
+                                    (harness-sandbox-test--binds cmd)))
+                (should-not (cl-find "--cap-add" cmd :test #'equal))
+                (should-not (member (list "--bind" socket socket)
+                                    (harness-sandbox-test--binds cmd))))))
+        (delete-directory cwd t)))))
+
+(ert-deftest harness-sandbox-containers-without-a-socket ()
+  "With no engine socket there is no socket bind, and the rest still holds.
+The private /run is what a runtime directory needs; a container command
+that reaches no engine still gets nothing of the host's."
+  (harness-sandbox-test--setup)
+  (harness-sandbox-test-with-home home
+    (let* ((cwd (harness-test-temp-dir))
+           (default-directory cwd))
+      (unwind-protect
+          (cl-letf (((symbol-function 'harness-sandbox--container-socket)
+                     (lambda () nil)))
+            (let ((cmd (harness-sandbox--bwrap-command
+                        "/usr/bin/bwrap" cwd '("docker" "version") :containers t)))
+              (should (harness-sandbox-test--subseq-p '("--tmpfs" "/run") cmd))
+              (should-not (cl-some (lambda (bind) (string-match-p "docker.sock" (nth 1 bind)))
+                                   (harness-sandbox-test--binds cmd)))))
+        (delete-directory cwd t)))))
+
+(ert-deftest harness-sandbox-containers-refused-where-not-given ()
+  "A backend that cannot show an engine refuses, rather than run unconfined.
+A `:read-only' command and the `locked' profile ask for no container at
+all, so neither is refused for one."
+  (harness-sandbox-test--setup)
+  (harness-sandbox-test-with-home home
+    (let ((cwd (harness-test-temp-dir)))
+      (unwind-protect
+          (dolist (backend '(systemd mxc openshell))
+            (cl-letf (((symbol-function 'harness-sandbox--policy) (lambda (&optional _) 'preferred))
+                      ((symbol-function 'harness-sandbox--backend) (lambda (&optional _) backend))
+                      ((symbol-function 'harness-sandbox--programs)
+                       (lambda () '((bwrap . "/usr/bin/bwrap")
+                                    (systemd . "/usr/bin/systemd-run")
+                                    (mxc . "/usr/bin/mxc-exec-mac")
+                                    (openshell . "/usr/bin/openshell")))))
+              (should-error (harness-sandbox--refuse-containers
+                             '("docker" "ps")
+                             "that backend has no socket of its own to show")
+                            :type 'harness-sandbox-unavailable)))
+        (delete-directory cwd t)))))
+
+(ert-deftest harness-sandbox-container-socket-state ()
+  "The four states of an engine socket are told apart, not guessed.
+A live socket connects, a path this user may not use is a permission,
+a path with no file is missing, and a socket nobody listens on is
+stale.  A stale one is made the way one really is: the socket's name is
+moved away from its listener, so the inode is there and nothing answers
+\(closing a server in Emacs unlinks its file, which reads as missing)."
+  (harness-sandbox-test--setup)
+  (let* ((dir (harness-test-temp-dir))
+         (live (expand-file-name "live.sock" dir))
+         (denied (expand-file-name "denied.sock" dir))
+         (stale (expand-file-name "stale.sock" dir))
+         (missing (expand-file-name "missing.sock" dir))
+         (server (make-network-process :name "harness-test-live" :server t
+                                       :family 'local :service live :noquery t))
+         (blocked (make-network-process :name "harness-test-denied" :server t
+                                        :family 'local :service denied :noquery t)))
+    (unwind-protect
+        (progn
+          (set-file-modes denied #o000)
+          (should (eq 'connected (harness-sandbox--container-socket-state live)))
+          (should (eq 'permission-denied
+                      (harness-sandbox--container-socket-state denied)))
+          (should (eq 'missing (harness-sandbox--container-socket-state missing)))
+          (let ((s (make-network-process :name "harness-test-stale" :server t
+                                         :family 'local :service stale :noquery t))
+                (held (expand-file-name "held.sock" dir)))
+            (rename-file stale held)
+            (delete-process s)
+            (rename-file held stale))
+          (should (eq 'stale (harness-sandbox--container-socket-state stale))))
+      (ignore-errors (delete-process blocked))
+      (ignore-errors (delete-process server))
+      (delete-directory dir t))))
+
+(ert-deftest harness-sandbox-container-probe-stages ()
+  "The probe names the first stage that fails, and what to do about it.
+It separates a missing CLI, a missing `/sys', a missing cgroup file
+system, an unseen socket and a socket this user may not use."
+  (harness-sandbox-test--setup)
+  (let ((try (lambda (doc)
+               (let ((probe (harness-sandbox--container-probe)))
+                 (list doc (plist-get probe :stage)
+                       (plist-get probe :why) (plist-get probe :ok))))))
+    ;; The stage is one of the known ones, and `:ok' agrees with it.
+    (let* ((probe (harness-sandbox--container-probe)))
+      (should (memq (plist-get probe :stage)
+                    '(nil policy backend binary sysfs cgroup socket permission)))
+      (should (equal (and (null (plist-get probe :stage)) t)
+                     (and (plist-get probe :ok) t))))
+    ;; With no CLI, the binary is the stage, whatever the rest says.
+    (cl-letf (((symbol-function 'executable-find) (lambda (&rest _) nil))
+              ((symbol-function 'harness-sandbox--policy) (lambda (&optional _) 'preferred))
+              ((symbol-function 'harness-sandbox--backend) (lambda (&optional _) 'bwrap))
+              ((symbol-function 'file-exists-p) (lambda (&rest _) t)))
+      (should (equal 'binary (nth 1 (funcall try "no CLI"))))
+      (should (equal "Container CLI missing · docker, podman"
+                     (nth 2 (funcall try "no CLI")))))
+    ;; With the CLI but no `/sys', the sysfs is the stage.
+    (cl-letf (((symbol-function 'executable-find) (lambda (name &rest _) (and (equal name "docker") "/usr/bin/docker")))
+              ((symbol-function 'harness-sandbox--policy) (lambda (&optional _) 'preferred))
+              ((symbol-function 'harness-sandbox--backend) (lambda (&optional _) 'bwrap))
+              ((symbol-function 'file-exists-p) (lambda (&rest _) nil)))
+      (should (equal 'sysfs (nth 1 (funcall try "no sys"))))
+      (should (equal "Sysfs unavailable · /sys" (nth 2 (funcall try "no sys")))))
+    ;; The policy off is reported before the backend is asked about it.
+    (cl-letf (((symbol-function 'harness-sandbox--policy) (lambda (&optional _) 'off))
+              ((symbol-function 'harness-sandbox--backend) (lambda (&optional _) 'bwrap)))
+      (should (equal 'policy (nth 1 (funcall try "off")))))))
+
+
+(ert-deftest harness-sandbox-wrap-containers-option ()
+  "`sandbox/wrap' shows a container command the engine's socket, and no more.
+The option is what a caller passes; the answer holds a private /run,
+`/sys' read-only and the socket read-only, and the socket bind comes
+after the tmpfs that would otherwise cover it."
+  (harness-sandbox-test--setup)
+  (harness-sandbox-test-with-home home
+    (let* ((cwd (harness-test-temp-dir))
+           (socket (expand-file-name "docker.sock" cwd))
+           (harness-sandbox-policy 'preferred)
+           (harness-sandbox-backend 'auto)
+           (command '("docker" "version")))
+      (unwind-protect
+          (progn
+            (with-temp-file socket (insert ""))
+            (harness-sandbox-test-with-executables '(("bwrap" . "/usr/bin/bwrap"))
+              (cl-letf (((symbol-function 'harness-sandbox--container-socket)
+                         (lambda () socket)))
+                (let ((cmd (harness-call 'sandbox/wrap cwd command :containers t)))
+                  (should (harness-sandbox-test--subseq-p '("--tmpfs" "/run") cmd))
+                  (should (equal t (and (member (list "--ro-bind" socket socket)
+                                                (harness-sandbox-test--binds cmd))
+                                        t)))
+                  ;; The socket is shown after the private /run, not under it.
+                  (should (< (cl-position "--tmpfs" cmd :test #'equal)
+                             (cl-position socket cmd :test #'equal)))
+                  ;; The option adds the socket's bind and nothing else, and
+                  ;; that one is read-only.  The path asserted is the one
+                  ;; the sandbox reports, which a host whose /var/run is a
+                  ;; symbolic link may spell differently from the temp path.
+                  (let ((with (harness-sandbox-test--binds cmd))
+                        (without (harness-sandbox-test--binds
+                                  (harness-call 'sandbox/wrap cwd command)))
+                        (shown (nth 1 (car (harness-sandbox--container-mounts)))))
+                    (should shown)
+                    ;; The wraps differ by the socket's bind and by the
+                    ;; system file systems the option shows, which a host
+                    ;; that has a cgroup file system shows one more of.
+                    (should (= (+ 1 (length without)
+                                  (if (file-exists-p "/sys/fs/cgroup") 1 0))
+                               (length with)))
+                    (should (member (list "--ro-bind" shown shown) with))
+                    (should (equal (length with) (length (delete-dups with))))
+                    (dolist (bind without) (should (member bind with)))
+                    ;; The socket is never bound writable.
+                    (should-not (cl-some (lambda (b) (and (equal "--bind" (car b))
+                                                          (equal shown (cadr b))))
+                                         with)))
+                  (should-not (member "--cap-add" cmd))
+                  ;; A read-only command is shown nothing to reach an engine with.
+                  (let ((ro (harness-call 'sandbox/wrap cwd command
+                                          :containers t :read-only t)))
+                    (should-not (harness-sandbox-test--subseq-p '("--tmpfs" "/run") ro))
+                    (should-not (cl-some (lambda (bind) (string-match-p "docker.sock" (nth 1 bind)))
+                                         (harness-sandbox-test--binds ro))))))))
+        (delete-directory cwd t)))))
+
 (provide 'harness-sandbox-test)
 ;;; harness-sandbox-test.el ends here

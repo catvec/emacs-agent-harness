@@ -193,6 +193,33 @@ environment says."
     (unless (file-exists-p (cadr need))
       (format "Socket unavailable · %s" (cadr need))))))
 
+(defun harness-container-runtime-sandbox-probe ()
+  "Return what a container command would find in a sandbox here, as a plist.
+That is the sandbox module's `sandbox/containers' for the harness's
+own directory, or nil where the sandbox module is not loaded: a
+runtime outside a sandbox has no sandbox stage to report.  The answer
+is `harness-sandbox--container-probe's: `:ok', `:stage', `:why' and
+what it found of each stage."
+  (when (harness-method-exists-p 'sandbox/containers)
+    (condition-case err
+        (harness-call 'sandbox/containers default-directory)
+      (error
+       (harness-log 'debug "container-runtime: the sandbox probe failed: %S" err)
+       nil))))
+
+(defun harness-container-runtime--sandbox-need ()
+  "Return why no container engine can be reached in this sandbox, or nil.
+A runtime is asked for only when the sandbox can show what it needs:
+the engine's socket, `/sys', the cgroup file system.  The reason is
+the sandbox's own stage -- `Engine socket permission · PATH', `Sysfs
+unavailable · /sys' -- so a missing binary and a socket the sandbox
+does not show are told apart."
+  (let ((probe (harness-container-runtime-sandbox-probe)))
+    (when probe
+      (let ((stage (plist-get probe :stage)))
+        (when (memq stage '(sysfs cgroup socket permission))
+          (plist-get probe :why))))))
+
 (defun harness-container-runtime-need-reason (&optional id)
   "Return why container runtime ID cannot run, or nil.
 The reason is one line, for a status column, never a sentence."
@@ -206,7 +233,11 @@ The reason is one line, for a status column, never a sentence."
                               (plist-get record :needs)))
           (let ((socket (harness-container-runtime-socket-path id)))
             (when (and socket (not (file-exists-p socket)))
-              (format "Socket unavailable · %s" socket))))))))
+              (format "Socket unavailable · %s" socket)))
+          ;; The sandbox says what it will not show the runtime, which a
+          ;; runtime that answers outside one would not.
+          (and (memq id '(docker podman))
+               (harness-container-runtime--sandbox-need)))))))
 
 (defun harness-container-runtime--env (&optional id)
   "Return the environment backend ID needs for its commands.

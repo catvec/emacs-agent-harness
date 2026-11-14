@@ -250,7 +250,20 @@
 ;;
 ;; Methods: `sandbox/wrap', `sandbox/status', `sandbox/profiles',
 ;; `sandbox/confined-p', `sandbox/capabilities',
-;; `sandbox/capability-name'.
+;; `sandbox/capability-name', `sandbox/containers'.
+;;
+;; A container command is the one thing a sandbox cannot reach by
+;; default, and "Docker unavailable" is five different facts: no CLI,
+;; no engine socket, a socket this user may not use, a policy that
+;; runs nothing confined, or a host that shows the jail no /sys and no
+;; cgroup file system.  `:containers' on `sandbox/wrap' shows a
+;; command what an engine needs and no more -- a private /run of its
+;; own, /sys read-only, and the engine's socket read-only at the path
+;; it has -- and `sandbox/containers' answers which of the five it is,
+;; with one line of what to do about it.  Neither adds a capability,
+;; binds a socket writable, binds /run whole nor makes a container
+;; privileged: what a command reaches is the authority its user
+;; already had.
 
 ;;; Code:
 
@@ -815,6 +828,16 @@ the command does not run without what was asked for."
           (list (format "this command was to run with the Linux capabilities %s, which the sandbox cannot give it: %s. Give them up with drop_access (attribute capability, value all) to run commands without them"
                         (string-join (mapcar (lambda (c) (format "%s" c)) capabilities) ", ") why))))
 
+(defun harness-sandbox--refuse-containers (command why)
+  "Signal `harness-sandbox-unavailable': COMMAND cannot reach a container engine.
+WHY says what stands in the way.  A command that asked for a container
+does not run without the mounts it needs: a container reached through
+a sandbox that shows none would be a container of the host's, run
+outside the jail."
+  (harness-log 'error "sandbox: %S asked for containers, but %s" (car command) why)
+  (signal 'harness-sandbox-unavailable
+          (list (format "this command was to run with container access, which %s" why))))
+
 (defun harness-sandbox--bwrap-capabilities (command requested program)
   "Return the names among REQUESTED that bwrap's PROGRAM may add to COMMAND.
 They are canonical names.  Each must be a capability of the registry
@@ -1338,6 +1361,53 @@ there."
        (cl-loop for (var . value) in (harness-sandbox--git-env (plist-get git :common))
                 collect (format "--setenv=%s=%s" var value))))))
 
+;;;; Containers
+
+;; A container CLI inside the jail needs three things the sandbox does
+;; not show by default: an endpoint to reach its engine at, the cgroup
+;; file system, and somewhere of its own for a runtime directory.  The
+;; harness shows the first two as they are -- the socket file at the
+;; path it has, read-only, and /sys read-only -- and a private /run for
+;; the third, so a container CLI can start nothing that outlives the
+;; command.  Nothing here adds a capability, binds a socket writable,
+;; binds /run whole or makes a container privileged: what a command
+;; reaches is the authority its user already had.
+
+(defconst harness-sandbox--container-socket-paths
+  '("/var/run/docker.sock" "/run/docker.sock" "/run/podman/podman.sock")
+  "The sockets a container engine is found at, in the order to try.
+The first that exists is the one a container command is shown.")
+
+(defun harness-sandbox--container-socket ()
+  "Return the container socket path a command may be shown, or nil.
+`DOCKER_HOST' wins when it names a Unix socket, so a user who moved
+the engine's endpoint is followed rather than overruled."
+  (let ((host (getenv "DOCKER_HOST")))
+    (cond
+     ((and host (string-prefix-p "unix://" host))
+      (let ((path (string-remove-prefix "unix://" host)))
+        (and (file-exists-p path) path)))
+     ((cl-find-if #'file-exists-p harness-sandbox--container-socket-paths)))))
+
+(defun harness-sandbox--container-sysfs-mounts ()
+  "Return bwrap arguments showing the system file systems a runtime reads, or nil.
+`/sys' read-only is what an engine asks for when it accounts for the
+processes it starts, and it brings `/sys/fs/cgroup' with it.  It is
+read-only always, so that no command can move a process of the host
+into another cgroup or change a device's state."
+  (when (file-exists-p "/sys")
+    (list "--ro-bind" "/sys" "/sys")))
+
+(defun harness-sandbox--container-mounts ()
+  "Return the mounts a container command needs, as (MODE SOURCE DESTINATION).
+That is the engine's socket, read-only at the path it has, or none
+when there is no socket to show.  The private /run and /sys are not
+here: they are not mounts of a host path but a tmpfs and the system's
+own file system, and `harness-sandbox--bwrap-command' orders them
+itself."
+  (when-let* ((socket (harness-sandbox--container-socket)))
+    (list (list 'ro socket socket))))
+
 (defconst harness-sandbox--private-home "/tmp"
   "The home a locked command gets.
 It is the sandbox's own private /tmp, the only place a locked command
@@ -1375,7 +1445,8 @@ would break the sandbox itself."
                     (list "--ro-bind" "/dev/null" path))))
 
 (cl-defun harness-sandbox--bwrap-command (program cwd command &key (network t) writable readable read-only
-                                                   scratch capabilities env profile hide tmp (cwd-writable t))
+                                                   scratch capabilities env profile hide tmp (cwd-writable t)
+                                                   containers)
   "Build the bwrap command line running COMMAND in CWD.
 PROGRAM is the bwrap executable.  NETWORK nil unshares the network
 namespace; WRITABLE and READABLE list extra directories or files to
@@ -1413,7 +1484,16 @@ $HOME keeps its path: an empty tmpfs covers the home directory, so
 mounted there.  A home directory inside CWD is shown as it is; one no
 tmpfs may cover (see `harness-sandbox--real-home') gives way to
 `harness-sandbox--home', with the directories under the real one shown
-under it too."
+under it too.
+
+CONTAINERS shows what a container CLI needs and the sandbox otherwise
+does not: a private `/run` of its own, `/sys` read-only, and the
+engine's socket read-only at the path it has (`sandbox/wrap' does not
+pass it for a `:read-only' command, and refuses it for the `locked'
+profile).  The socket goes after the private `/run', which would
+otherwise cover it.  None of this adds a capability or makes a
+container privileged: what the command reaches is the authority its
+user already had."
   (let* ((cwd (directory-file-name (expand-file-name cwd)))
          (inside (harness-sandbox--home-inside-p cwd))
          (real-home (and (not inside) (harness-sandbox--real-home)))
@@ -1441,6 +1521,17 @@ under it too."
      (harness-sandbox--system-dir-args)
      (list "--proc" "/proc"
            "--dev" "/dev")
+     ;; What a container CLI needs: /sys read-only for the runtimes that
+     ;; account for processes by it, and a /run of the command's own,
+     ;; writable and private, so that a runtime directory or a service
+     ;; socket the CLI makes is gone with the command.  The engine's
+     ;; socket is bound after it, since the tmpfs would otherwise cover
+     ;; the bind.
+     (when containers
+       (append (harness-sandbox--container-sysfs-mounts)
+               (list "--tmpfs" "/run" "--dir" "/run/user")
+               (cl-loop for (mode source dest) in (harness-sandbox--container-mounts)
+                        append (list (if (eq mode 'rw) "--bind" "--ro-bind") source dest))))
      (if tmp
          (list "--bind" tmp harness-sandbox--tmp)
        (list "--tmpfs" harness-sandbox--tmp))
@@ -2523,7 +2614,17 @@ bwrap does when `--cap-add' would be no capability of the sandbox's own
 user namespace (setuid, or run by root).  Where COMMAND runs
 unconfined anyway -- the `off' policy, a remote CWD, no backend -- it
 has its user's own rights, and is returned as it is, with a line in
-the debug log."
+the debug log.
+
+`:containers' non-nil shows COMMAND what a container engine needs and
+the sandbox otherwise does not: a private writable `/run` of its
+own, `/sys` read-only (which brings `/sys/fs/cgroup` with it), and
+the engine's socket read-only at the path it already has.  A
+`:read-only' command and the `locked' profile get none of it.
+systemd-run, MXC and OpenShell signal `harness-sandbox-unavailable'
+rather than let a command reach an engine outside the jail.
+`sandbox/containers' says what such a command would find here,
+stage by stage."
   (let* ((policy (harness-sandbox--policy cwd))
          (network (if (plist-member opts :network) (plist-get opts :network) t))
          (profile (or (plist-get opts :profile) 'default))
@@ -2542,7 +2643,12 @@ the debug log."
          (env (plist-get opts :env))
          (locked (eq profile 'locked))
          ;; A command that changes nothing is given no capability.
-         (capabilities (and (not read-only) (plist-get opts :capabilities))))
+         (capabilities (and (not read-only) (plist-get opts :capabilities)))
+         ;; A read-only command is shown nothing to reach an engine with:
+         ;; a container it asked for would write, and the request is for a
+         ;; command that changes nothing.
+         (containers (and (not read-only) (not locked)
+                          (harness-json-true-p (plist-get opts :containers)))))
     (unless (memq profile '(default locked))
       (error "Sandbox profile %S is neither `default' nor `locked'" profile))
     (when (and locked (or (plist-get opts :writable) (plist-get opts :scratch) tmp
@@ -2596,6 +2702,7 @@ the debug log."
                                         :read-only read-only :scratch scratch
                                         :env env :profile profile :hide hide :tmp tmp
                                         :cwd-writable cwd-writable
+                                        :containers containers
                                         :capabilities (and capabilities
                                                            (harness-sandbox--bwrap-capabilities
                                                             command capabilities program)))))
@@ -2604,6 +2711,9 @@ the debug log."
         (harness-sandbox--refuse-capabilities
          command capabilities
          "systemd-run --user cannot give a unit a capability, it can only lower its own"))
+      (when containers
+        (harness-sandbox--refuse-containers
+         command "systemd-run --user has no mount of its own to show an engine's socket at, and a unit that reached one would be the host's"))
       (harness-sandbox--systemd-command (alist-get 'systemd harness-sandbox--programs) cwd command
                                         :network network :writable writable :readable readable
                                         :read-only read-only :scratch scratch :env env :hide hide
@@ -2613,6 +2723,9 @@ the debug log."
         (harness-sandbox--refuse-capabilities
          command capabilities
          "OpenShell runs commands as a non-root user with no Linux capability, and has no way to give one"))
+      (when containers
+        (harness-sandbox--refuse-containers
+         command "OpenShell's sandbox is the container: it has no socket of the gateway's to show, and a nested engine there would need the namespaces it does not give"))
       (when tmp
         (harness-log 'debug "sandbox: OpenShell's sandbox has a /tmp of the image; %s shows at its own path" tmp))
       (harness-sandbox--openshell-command (alist-get 'openshell harness-sandbox--programs) cwd command
@@ -2622,6 +2735,9 @@ the debug log."
       (when capabilities
         (harness-sandbox--refuse-capabilities
          command capabilities "MXC confines with macOS's Seatbelt, which has no Linux capabilities"))
+      (when containers
+        (harness-sandbox--refuse-containers
+         command "MXC confines with Seatbelt, which has no mount namespace and no Linux socket to show an engine at"))
       ;; The command's own $TMPDIR, private as bwrap's /tmp is: MXC
       ;; shows no shared temporary directory.
       (when tmp
@@ -2809,6 +2925,111 @@ above it -- the runtime manager, the bash tool, the jobs, the access view
                              (harness-json-true-p (plist-get opts :cwd-writable))
                            t)
            :capabilities (plist-get opts :capabilities)))
+
+;;;; Containers: what a container command would find
+
+;; "Docker unavailable" is five different facts.  A container command
+;; needs a binary, an endpoint to reach it at, the right to use that
+;; endpoint, a sandbox policy that lets it run, and a kernel that lets
+;; the engine account for the processes it starts.  The probe answers
+;; each in turn and stops at the first that fails, so the reason says
+;; which of them it was, and what would fix it, rather than the one word
+;; the engine's own error carries.
+
+(defun harness-sandbox--container-socket-state (path)
+  "Return the state of the Unix socket at PATH, as a symbol.
+`connected' when a process could use it, `permission-denied' when the
+path is there but this user may not, `missing' when there is no path,
+`stale' when the path is a socket no process listens on, and `unknown'
+when the path is something else.  A Unix socket is no regular file, so
+`file-attributes' describes it as nil and the connection is what says
+whether it is one."
+  (cond
+   ((not (file-exists-p path)) 'missing)
+   ((file-directory-p path) 'unknown)
+   (t
+    (condition-case err
+        (let ((process (make-network-process :name "harness-container-probe"
+                                             :family 'local :service path
+                                             :noquery t :nowait nil)))
+          (when (process-live-p process) (delete-process process))
+          'connected)
+      (file-error
+       (let ((text (error-message-string err)))
+         (cond
+          ((string-match-p "Permission denied" text) 'permission-denied)
+          ((string-match-p "Connection refused" text) 'stale)
+          ((string-match-p "No such file" text) 'missing)
+          (t 'unknown))))
+      (error 'unknown)))))
+
+(defun harness-sandbox--container-nesting-p ()
+  "Non-nil when the sandbox can nest what a rootless engine needs.
+A user namespace is what a rootless engine makes for each container; a
+sandbox that refuses one nests nothing, whatever its socket."
+  (and (eq system-type 'gnu/linux)
+       (ignore-errors
+         (with-temp-buffer
+           (eql 0 (call-process "unshare" nil t nil "--user" "--map-root-user" "--" "true"))))))
+
+(defun harness-sandbox--container-probe ()
+  "Return what a container command would find in a sandbox here, as a plist.
+The plist holds `:ok', `:stage' and `:why' -- the first stage that
+fails, and one line saying so -- and, whatever the answer, what was
+found of each stage: `:binary', `:socket', `:socket-state',
+`:policy', `:sysfs', `:cgroup' and `:nesting'.  It reads state and
+starts no container."
+  (let* ((policy (harness-sandbox--policy nil))
+         (backend harness-sandbox--backend)
+         (binary (cl-find-if #'executable-find '("docker" "podman")))
+         (socket (harness-sandbox--container-socket))
+         (state (and socket (harness-sandbox--container-socket-state socket)))
+         (sysfs (file-exists-p "/sys"))
+         (cgroup (file-exists-p "/sys/fs/cgroup"))
+         (nesting (harness-sandbox--container-nesting-p))
+         (stage
+          (cond
+           ((eq policy 'off) 'policy)
+           ((not (memq backend '(bwrap))) 'backend)
+           ((null binary) 'binary)
+           ((null sysfs) 'sysfs)
+           ((null cgroup) 'cgroup)
+           ((eq state 'missing) 'socket)
+           ((eq state 'permission-denied) 'permission)
+           ((eq state 'stale) 'socket)))
+         (why
+          (pcase stage
+            ('policy "Sandbox policy off · no confinement")
+            ('backend (format "Sandbox backend unavailable · %s" (or backend 'none)))
+            ('binary "Container CLI missing · docker, podman")
+            ('sysfs "Sysfs unavailable · /sys")
+            ('cgroup "Cgroup filesystem absent · /sys/fs/cgroup")
+            ('socket (format "Engine socket unavailable · %s"
+                             (or socket (car harness-sandbox--container-socket-paths))))
+            ('permission (format "Engine socket permission · %s" socket))
+            (_ nil))))
+    (list :ok (and (null stage) t)
+          :stage stage
+          :why why
+          :backend (or backend 'none)
+          :binary binary
+          :socket socket
+          :socket-state state
+          :policy policy
+          :sysfs sysfs
+          :cgroup cgroup
+          :nesting nesting)))
+
+(harness-defmethod sandbox/containers (&optional cwd)
+  "Return what a container command would find in a sandbox for CWD, as a plist.
+The answer is `harness-sandbox--container-probe's, with `:cwd'.  It
+says which of the things a container needs the sandbox does not have --
+the CLI, the engine's socket, the right to use it, the sandbox policy,
+`/sys', the cgroup file system -- and `:why', one line, what to do
+about it.  `:ok' is true only when every stage answered, and no
+container is started to find out: the probe reads state."
+  (append (list :cwd (or cwd default-directory))
+          (harness-sandbox--container-probe)))
 
 (harness-defmethod sandbox/status ()
   "Return (:backend BACKEND :available (BACKENDS…) :policy POLICY :limits (TEXT…)).

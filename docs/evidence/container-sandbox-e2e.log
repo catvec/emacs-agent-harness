@@ -1,0 +1,36 @@
+sandbox: /usr/bin/bwrap --ro-bind /usr /usr --ro-bind /etc /etc --symlink usr/lib /lib --symlink usr/lib /lib64 --symlink usr/bin /bin --symlink usr/bin /sbin --proc /proc --dev /dev --ro-bind /sys /sys --tmpfs /run --dir /run/user --ro-bind /var/run/docker.sock /var/run/docker.sock --tmpfs /tmp --tmpfs /home/noah --bind /tmp/harness-container-e2e.svSXON /tmp/harness-container-e2e.svSXON --unshare-pid --unshare-ipc --unshare-uts --die-with-parent --new-session --chdir /tmp/harness-container-e2e.svSXON --setenv HARNESS_SANDBOX bwrap --setenv TMPDIR /tmp -- /usr/bin/sh -c sh run.sh
+
+
+== engine
+server=29.8.1 driver=overlayfs
+
+== up
+ Network harness-e2e_default Creating 
+ Network harness-e2e_default Creating 
+ Network harness-e2e_default Created 
+ Network harness-e2e_default Created 
+ Container harness-e2e-web-1 Creating 
+ Container harness-e2e-web-1 Created 
+ Container harness-e2e-web-1 Starting 
+ Container harness-e2e-web-1 Started 
+
+== readiness
+answered after 1s
+
+== reachability from another container
+ Container harness-e2e-client-run-56a42e60d0f1 Creating 
+ Container harness-e2e-client-run-56a42e60d0f1 Created 
+READY
+
+== teardown
+ Container harness-e2e-web-1 Stopping 
+ Container harness-e2e-web-1 Stopped 
+ Container harness-e2e-web-1 Removing 
+ Container harness-e2e-web-1 Removed 
+ Network harness-e2e_default Removing 
+ Network harness-e2e_default Removed 
+
+== cleanup
+containers=0 networks=0
+
+E2E-OK

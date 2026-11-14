@@ -59,3 +59,9 @@ backend needs, so adding a backend changes no stack.
 
 - `harness-container-runtime` — The container runtime the stacks run on.
 
+## Uses
+
+### Methods it calls
+
+- `sandbox/containers` ([sandbox](sandbox.md)), when it is loaded
+

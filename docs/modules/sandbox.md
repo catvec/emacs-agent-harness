@@ -260,7 +260,21 @@ network at all; no option opens it.
 
 Methods: `sandbox/wrap`, `sandbox/status`, `sandbox/profiles`,
 `sandbox/confined-p`, `sandbox/capabilities`,
-`sandbox/capability-name`.
+`sandbox/capability-name`, `sandbox/containers`.
+
+A container command is the one thing a sandbox cannot reach by
+default, and "Docker unavailable" is five different facts: no CLI,
+no engine socket, a socket this user may not use, a policy that
+runs nothing confined, or a host that shows the jail no /sys and no
+cgroup file system.  `:containers` on `sandbox/wrap` shows a
+command what an engine needs and no more -- a private /run of its
+own, /sys read-only (which carries /sys/fs/cgroup), and the
+engine's socket read-only at the path it has -- and
+`sandbox/containers` answers which of the five it is, with one
+line of what to do about it.  Neither adds a capability,
+binds a socket writable, binds /run whole nor makes a container
+privileged: what a command reaches is the authority its user
+already had.
 
 ## Provides
 
@@ -270,6 +284,7 @@ Methods: `sandbox/wrap`, `sandbox/status`, `sandbox/profiles`,
 - `sandbox/capability-name` (value) — Return the canonical name of the Linux capability VALUE names, or nil.
 - `sandbox/check` — Start a throwaway OpenShell sandbox, run a command in it, say how it went.
 - `sandbox/confined-p` (cwd) — Non-nil when commands run in CWD are confined by a sandbox backend.
+- `sandbox/containers` (&optional cwd) — Return what a container command would find in a sandbox for CWD, as a plist.
 - `sandbox/detect` — Look for the backends again, choose one, and return `sandbox/status`.
 - `sandbox/hold` (cwd command &rest opts) — Return how COMMAND can be held as a confined instance running in CWD.
 - `sandbox/profiles` (&optional cwd) — Say which sandbox profiles `sandbox/wrap` can enforce for CWD, and how.

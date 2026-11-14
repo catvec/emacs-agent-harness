@@ -402,5 +402,55 @@ in whichever buffer the command was typed in."
                                      (buffer-string))))
           (kill-buffer "*harness runtimes*"))))))
 
+
+;;;; The sandbox's own stages
+
+(ert-deftest harness-container-runtime-sandbox-stages-are-told-apart ()
+  "The runtime's reason is the sandbox's stage, not one word for all of them.
+A missing `/sys', an unseen socket, a socket this user may not use and a
+missing CLI each read differently, so a caller can act on the reason."
+  (harness-container-runtime-test--runtimes
+    (harness-define-container-runtime 'docker
+      :label "Docker" :command '("docker") :compose '("docker" "compose")
+      :socket "/var/run/docker.sock" :needs '((executable "docker")))
+    (setq harness-container-runtime 'docker)
+    (dolist (case '((sysfs "Sysfs unavailable · /sys")
+                    (cgroup "Cgroup filesystem absent · /sys/fs/cgroup")
+                    (socket "Engine socket unavailable · /var/run/docker.sock")
+                    (permission "Engine socket permission · /var/run/docker.sock")))
+      (cl-letf (((symbol-function 'executable-find)
+                 (lambda (name &rest _) (and (equal name "docker") "/usr/bin/docker")))
+                ((symbol-function 'harness-container-runtime-socket-path)
+                 (lambda (&optional _) "/var/run/docker.sock"))
+                ((symbol-function 'file-exists-p) (lambda (&rest _) t))
+                ((symbol-function 'harness-container-runtime-sandbox-probe)
+                 (lambda () (list :ok nil :stage (car case) :why (cadr case)))))
+        (should (equal (cadr case)
+                       (harness-container-runtime-need-reason 'docker)))))))
+
+(ert-deftest harness-container-runtime-without-a-sandbox-probe ()
+  "Outside a sandbox there is no sandbox stage, and the runtime is asked as before.
+A CLI that is present and a socket that exists is no reason at all,
+whatever the sandbox module would say."
+  (harness-container-runtime-test--runtimes
+    (harness-define-container-runtime 'docker
+      :label "Docker" :command '("docker") :compose '("docker" "compose")
+      :socket "/var/run/docker.sock" :needs '((executable "docker")))
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (name &rest _) (and (equal name "docker") "/usr/bin/docker")))
+              ((symbol-function 'harness-container-runtime-socket-path)
+               (lambda (&optional _) "/var/run/docker.sock"))
+              ((symbol-function 'file-exists-p) (lambda (&rest _) t))
+              ((symbol-function 'harness-container-runtime-sandbox-probe) #'ignore))
+      (should-not (harness-container-runtime-need-reason 'docker)))))
+
+(ert-deftest harness-container-runtime-probe-without-the-sandbox-module ()
+  "With no sandbox module the probe answers nil rather than signal.
+A runtime outside a sandbox has no sandbox stage, and a missing module
+must not break the runtimes page."
+  (harness-container-runtime-test--runtimes
+    (cl-letf (((symbol-function 'harness-method-exists-p) (lambda (&rest _) nil)))
+      (should-not (harness-container-runtime-sandbox-probe)))))
+
 (provide 'harness-container-runtime-test)
 ;;; harness-container-runtime-test.el ends here

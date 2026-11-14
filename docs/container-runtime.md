@@ -51,7 +51,61 @@ Nothing here grants the socket: seeing and connecting to it is the user's
 sandbox, group or daemon permission. Podman is the backend that needs no socket
 at all.
 
+## Container workflows inside a sandbox
+
+A Harness sandbox does not show a container command what it needs by default,
+and "Docker unavailable" is not one fact but five. The sandbox module's
+`sandbox/containers` probe reports which stage fails, and its reason is what
+the runtimes page shows instead of a generic socket line:
+
+| Stage | Reason | What to do |
+| --- | --- | --- |
+| `binary` | `Container CLI missing · docker, podman` | install the CLI in the sandbox's image, or use a backend that has it |
+| `sysfs` | `Sysfs unavailable · /sys` | the sandbox must show `/sys` read-only (an older harness build did not) |
+| `cgroup` | `Cgroup filesystem absent · /sys/fs/cgroup` | the host must delegate the cgroup file system; a jail with a private `/` cannot make one |
+| `socket` | `Engine socket unavailable · PATH` | start the daemon, or tell the harness where its socket is with `DOCKER_HOST` |
+| `permission` | `Engine socket permission · PATH` | the user needs to be in the socket's group; the harness grants nothing itself |
+| `policy` | `Sandbox policy off · no confinement` | the sandbox policy has to confine commands before a socket can be shown |
+
+A request for containers is made with `:containers` on `sandbox/wrap`. What it
+adds is deliberately small: a private `/run` of the command's own, `/sys`
+read-only (which carries `/sys/fs/cgroup` with it), and the engine's socket
+read-only at the path it already has. It never binds `/run` whole, never binds
+a socket writable, never adds a Linux capability and never makes a container
+privileged. A backend that cannot give it — systemd-run, MXC, OpenShell, the
+`off` policy, a remote directory — signals `harness-sandbox-unavailable`
+rather than let the command reach an engine outside the jail.
+
+### What is supported, and what is not
+
+| Path | Supported | Requirements |
+| --- | --- | --- |
+| Docker over the host's socket | yes, measured end to end | a daemon; `docker` and a compose provider in the sandbox; the user in the socket's group |
+| Rootless Podman, no daemon | yes, measured end to end | a static podman bundle; `storage-opt ignore_chown_errors=true`; `netns = "host"`; the helper binaries on `helper_binaries_dir` |
+| A nested engine with its own cgroups and subuid ranges | no | the jail's `/` is a parent-owned tmpfs: it cannot mount `/sys`, and bwrap maps one uid, so `newuidmap` cannot get a range |
+| A bridge network inside the jail | no | netavark needs the network and cgroup authority the jail does not have; use the Docker path, or `netns=host` with one service |
+
+The two supported paths were run through the harness's own `sandbox/wrap`, with
+a real compose stack (service readiness, a second container reaching the
+service by name, teardown, and no container or network left). The exact
+commands are `scripts/container-sandbox-e2e.sh`, and its output is kept in
+`docs/evidence/`. A host without a daemon reports `Engine socket unavailable ·
+/var/run/docker.sock`, and the podman path needs the bundle; the harness does
+not download one itself.
+
+### The security boundary
+
+Binding the host's Docker socket into a sandbox does not widen what anyone can
+do: a process that can reach that socket can manage every container on the
+machine, and on this host that is membership of the `docker` group, which the
+user already has. Rootless Podman's socket is the *user's*, so a sandbox that
+reaches it reaches containers its user could start anyway, not the host
+daemon. Nothing in this module enables a privileged container, adds a
+capability, or changes a host setting; the probe reads state and starts
+nothing.
+
 ## Adding a backend
+
 
 ```elisp
 (harness-define-container-runtime 'my-runtime
