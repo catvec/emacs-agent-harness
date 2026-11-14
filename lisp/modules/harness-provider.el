@@ -41,6 +41,12 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-policy)
+;; Whether provider requests are let in through their provider's pool
+;; (see harness-admission.el).  Declared here because `provider/complete'
+;; is the funnel every request passes, and it asks before it sends; the
+;; module that owns the pool sets it, and a harness without that module
+;; sends exactly what it always sent.
+(defvar harness-admission)
 
 ;;;; Customize types of model plists
 ;;
@@ -1324,9 +1330,8 @@ the call asked and answered."
         (list :cancel #'ignore)))
      (t
       (condition-case err
-          (let ((handle (or (funcall (harness-provider-complete-fn provider) request)
+          (let ((handle (or (harness-provider--send provider pid request)
                             (list :cancel #'ignore))))
-            (harness-emit 'provider/request-started pid request)
             ;; A recorded call says which internal session holds it, so a
             ;; caller can show the prompt, the reply and any error.
             (if job-id
@@ -1338,6 +1343,26 @@ the call asked and answered."
              (list :cancel #'ignore :session job-id)
            (list :cancel #'ignore))))))))
 
+
+(defun harness-provider--send (provider pid request)
+  "Send REQUEST to PROVIDER, PID its id, through its provider pool.
+Every request of the harness passes here -- a turn's step, the retry of
+one, a one-off call and a cache warmer -- so this is where a provider
+account's work is let in a piece at a time (see harness-admission.el).
+A request whose pool is open is sent at once, as it always was; one that
+waits out a rate limit is sent when the pool lets it in, and the handle
+returned meanwhile stops it before it is sent.  A module that admits
+nothing (`provider/admit') answers the request itself, so a harness
+without harness-admission.el sends exactly what it always sent."
+  (let ((send (lambda (request)
+                (let ((handle (or (funcall (harness-provider-complete-fn provider) request)
+                                  (list :cancel #'ignore))))
+                  (harness-emit 'provider/request-started pid request)
+                  handle))))
+    (if (or (not (harness-method-exists-p 'provider/admit))
+            (not (bound-and-true-p harness-admission)))
+        (funcall send request)
+      (harness-call 'provider/admit request send))))
 (harness-defmethod provider/warm (request)
   "Have REQUEST's provider get ready for a request like it; non-nil if it did.
 REQUEST is shaped like `provider/complete''s, without messages or

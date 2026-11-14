@@ -885,6 +885,18 @@ the answer and hands it back to the hooks that read it."
     (when-let* ((fn (plist-get dialect :stream-state)))
       (funcall fn request))))
 
+(defun harness-openai--transport-gate (request)
+  "Return the gate this transport asks before it replays REQUEST, or nil.
+A request that came through the provider pool carries one
+\(`harness-admission'): the replay the HTTP layer decides on its own is
+a send like any other, and must not go into a cooldown another request
+established meanwhile.  A request that did not -- the module off, an
+endpoint sent directly -- has none, and the transport keeps its retries
+exactly as it did.  A value that is not a function is no gate either, so
+nothing here can stop the transport from finishing a request."
+  (let ((gate (plist-get request :transport-gate)))
+    (and (functionp gate) gate)))
+
 (defun harness-openai--transport-retry (endpoint request)
   "Return the lower-layer retry policy for ENDPOINT and REQUEST.
 This is what `harness-http-request' is given as `:retry': how many
@@ -1118,6 +1130,25 @@ refine a failure but never stop the harness from classifying it."
                          nil))))
       (and kind (intern (format "%s" kind))))))
 
+(defun harness-openai--dialect-limit-scope (stream error)
+  "Return how far STREAM's dialect says ERROR's rate limit reaches, or nil.
+A dialect's `:limit-scope' hook is given STREAM and ERROR and answers
+`pool' for one upstream endpoint's limit or `account' for one the whole
+account shares.  It is asked only for a rate limit
+\(`harness-openai--failure-kind'), so a provider that cannot tell the
+two apart answers nothing, and the pool it is admitted by is the one
+that rests.  A hook that fails is logged and treated as silent: a
+provider's own reading can refine where a limit reaches, never stop the
+harness from classifying the failure."
+  (when-let* ((dialect (harness-openai--dialect (harness-openai--stream-endpoint stream)))
+              (fn (plist-get dialect :limit-scope)))
+    (let ((scope (condition-case err
+                     (funcall fn stream error)
+                   (error (harness-log 'error "openai: the :limit-scope hook of %s failed: %S"
+                                       (plist-get (harness-openai--stream-endpoint stream) :id) err)
+                          nil))))
+      (and (memq scope '(pool account)) scope))))
+
 (defun harness-openai--failure-kind (stream error)
   "Return the kind of failure STREAM ended with ERROR, or nil.
 A dialect's own reading comes first (`harness-openai--dialect-failure-kind'):
@@ -1197,7 +1228,14 @@ reply from an endpoint it did not choose."
                                     (when-let* ((kind (harness-openai--failure-kind stream error)))
                                       (list :error-kind kind))
                                     (when-let* ((after (harness-openai--stream-retry-after stream)))
-                                      (list :retry-after after)))
+                                      (list :retry-after after))
+                                    ;; How far the limit reaches, when the
+                                    ;; provider's own fields say: a pool
+                                    ;; above the provider rests on it.
+                                    (when-let* ((scope (and (eq (harness-openai--failure-kind stream error)
+                                                                'rate-limit)
+                                                            (harness-openai--dialect-limit-scope stream error))))
+                                      (list :limit-scope scope)))
                           (list :type 'done :stop-reason reason))))))
 
 (defun harness-openai--stream-complete (stream)
@@ -1258,10 +1296,16 @@ An ordinary request carries none, and its events are unchanged."
                  ;; `harness-retry').  A dialect whose caller bounds the
                  ;; attempts itself asks for no lower-layer replay here.
                  :retry (harness-openai--transport-retry endpoint request)
+                 :gate (harness-openai--transport-gate request)
                  :on-headers (lambda (s headers)
                                (setq status s)
                                (setf (harness-openai--stream-status stream) s)
-                               (when-let* ((after (harness-http-retry-after headers)))
+                               ;; Both forms of Retry-After are read,
+                               ;; a number of seconds and an HTTP-date: a
+                               ;; provider that names a time is asking for
+                               ;; exactly that wait, and the pool above the
+                               ;; provider rests for it as it asks.
+                               (when-let* ((after (harness-http-retry-after-seconds headers)))
                                  (setf (harness-openai--stream-retry-after stream) after))
                                ;; A refused answer carries the plan's windows
                                ;; too, which is how a turn learns when the

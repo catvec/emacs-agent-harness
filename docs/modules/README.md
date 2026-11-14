@@ -114,6 +114,7 @@ and supervisor load only when they are named.
 | [access](access.md) | by default | [perms](perms.md), [session](session.md), [tools](tools.md), [readonly](readonly.md) | What a session may reach, in one place: its access profile (network, writing, tools, read-only and given-up directories, the Linux capabilities of its commands), request_escalation, which only the user answers, drop_access, which never asks, and the record of every permission judgement. |
 | [acp](acp.md) | by default |  | Agent Client Protocol: local and TCP transports, server and client. |
 | [acp-remote](acp-remote.md) |  | [acp](acp.md) | ACP for phones and other devices on the network: WebSocket, sign-in by approval in Emacs or OpenID Connect, session secrets. |
+| [admission](admission.md) | by default | [provider](provider.md) | Let one provider account's work in a piece at a time: a pool per provider, resting when the provider is rate limiting and recovering gradually. |
 | [agent](agent.md) | by default | [session](session.md), [provider](provider.md), [tools](tools.md) | The turn loop: prompt, stream, run tools, steer, queue. |
 | [cache](cache.md) |  | [session](session.md) | Watches the sessions' prompt caches: says when one is about to lapse (cache/pre-expire), whether the user is around, and alerts when a request reads too little of the last prompt (cache/poor-hit). |
 | [cache-compact](cache-compact.md) |  | [session](session.md), [compaction](compaction.md), [cache](cache.md), [cowboy](cowboy.md) | Compacts a conversation just before its prompt cache lapses, when the compaction request's own prefix is cached, as the user saved for a cold cache and where they would not be asked. |
@@ -284,6 +285,8 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `access/changed` | [access](access.md) | [access](access.md) | [sandbox-session](sandbox-session.md), [tools-jobs](tools-jobs.md) | yes |
 | `access/judged` | [access](access.md) | [access](access.md) |  | yes |
 | `acp/remote-changed` | [acp-remote](acp-remote.md) | [acp-remote](acp-remote.md) | [ui-acp-remote](ui-acp-remote.md) | yes |
+| `admission/cooldown` | [admission](admission.md) | [admission](admission.md) |  | yes |
+| `admission/waiting` | [admission](admission.md) | [admission](admission.md) |  | yes |
 | `agent/activity-changed` | [agent](agent.md) | [agent](agent.md) | [acp](acp.md), [cache-warm](cache-warm.md), [resilience](resilience.md), [tools](tools.md), [usage](usage.md) |  |
 | `agent/call-usage` | [agent](agent.md) | [agent](agent.md) | [usage](usage.md) |  |
 | `agent/cancelling` | [agent](agent.md) | [agent](agent.md) | [compaction](compaction.md), [cowboy](cowboy.md), [resilience](resilience.md) |  |
@@ -476,6 +479,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-acp-initialize-extras-functions` | [acp](acp.md) | [acp-remote](acp-remote.md) |
 | `harness-acp-initialized-functions` | [acp](acp.md) | [acp](acp.md), [computers](computers.md) |
 | `harness-acp-received-hook` | [acp](acp.md) | [ui-chat](ui-chat.md) |
+| `harness-admission-pool-functions` | [admission](admission.md) |  |
 | `harness-chat-hand-in-fold-functions` | [ui-chat](ui-chat.md) | [ui-review](ui-review.md) |
 | `harness-chat-header-end-functions` | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md) | [ui-cache-warm](ui-cache-warm.md), [ui-version](ui-version.md) |
 | `harness-chat-header-functions` | [ui-btw](ui-btw.md), [ui-chat](ui-chat.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) | [ui-btw](ui-btw.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) |

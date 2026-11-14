@@ -983,7 +983,10 @@ the dialect is this module's whatever that entry says."
         ;; are read as (`harness-retry-failure-kind').  Whether a governed
         ;; request may be replayed by the transport is not a dialect
         ;; question: the shared retry layer answers it for the session.
-        :failure-kind #'harness-openrouter--failure-kind))
+        :failure-kind #'harness-openrouter--failure-kind
+        ;; Where a rate limit reaches: one pinned endpoint's, or the
+        ;; account's own.  Read from the failure's fields, never assumed.
+        :limit-scope #'harness-openrouter--limit-scope))
 
 (defun harness-openrouter--authorising-policy (request)
   "Return the policy a routed REQUEST was authorised with, or nil.
@@ -1151,6 +1154,18 @@ so the audit describes the request that was actually sent."
          (type (and (listp metadata) (plist-get metadata :error_type))))
     (and (stringp type) type)))
 
+(defun harness-openrouter--declined-provider-of (json)
+  "Return the upstream provider JSON says declined the request, or nil.
+OpenRouter names it in `error.metadata.provider_name' when an endpoint
+of its own answered the request with a failure; a limit OpenRouter
+itself imposed names none.  The two are told apart here, never assumed:
+one endpoint's bad minute is not the whole account's, and the account's
+own limit is not one endpoint's."
+  (let* ((error (plist-get json :error))
+         (metadata (and (listp error) (plist-get error :metadata)))
+         (name (and (listp metadata) (plist-get metadata :provider_name))))
+    (and (stringp name) (not (string-empty-p name)) name)))
+
 (defun harness-openrouter--served-provider (json)
   "Return the provider JSON says served the request, or nil.
 The name an answer reports for itself is preferred; the routing summary
@@ -1194,6 +1209,8 @@ metadata chunk, which carries no choices for the model to read."
       (harness-openrouter--note stream :served-provider provider))
     (when-let* ((type (harness-openrouter--error-type json)))
       (harness-openrouter--note stream :error-type type))
+    (when-let* ((declined (harness-openrouter--declined-provider-of json)))
+      (harness-openrouter--note stream :declined-provider declined))
     (let ((metadata (plist-get json :openrouter_metadata)))
       (when (listp metadata)
         (harness-openrouter--note stream :metadata metadata)
@@ -1486,6 +1503,42 @@ turns \"Upstream returned HTTP 400\" into something to act on."
         (when (and (stringp id) (not (string-empty-p id)))
           (push (format "generation=%s" (harness-truncate-end id 80)) parts))
         (when parts (concat " (" (string-join (nreverse parts) "; ") ")"))))))
+
+;;;; Which pool a request belongs to
+
+(defun harness-openrouter--route-for-identity (request)
+  "Return the route REQUEST is bound for, or nil.
+A repeat carries the route that authorised it (`harness-retry-authority-of'),
+so it is identified by the endpoint it will actually be sent to, never
+by a session's pin of the moment; a fresh request has its session's pin.
+A request with no policy and no pin is OpenRouter's as a whole, and has
+no endpoint to name."
+  (let* ((authority (harness-retry-authority-of request))
+         (route (or (plist-get authority :route)
+                    (plist-get request :openrouter-route)
+                    (harness-openrouter--route-of (plist-get request :session)))))
+    (and (listp route) route)))
+
+(harness-defmethod provider/admission-identity (request)
+  "Return the pool REQUEST of OpenRouter belongs to, or nil.
+The account is OpenRouter itself: its own key, and its own limits, are
+one account's whatever endpoint serves a request.  The pool is the
+upstream endpoint the request is bound for -- the exact tag the session
+is pinned to, or, for a request that is not pinned, the account's own
+pool (`openrouter').  So a rate limit DeepInfra answers holds the work
+bound for DeepInfra and not the work bound for Cohere, while a limit
+OpenRouter itself imposed rests every pool of the account (see
+`harness-openrouter--limit-scope').
+
+Every part of it is a name OpenRouter publishes: the provider id, the
+catalogue's endpoint tag.  No key, token or other credential is ever
+part of a pool, so nothing here can be read out of a hint or an event."
+  (when (harness-openrouter-routing-enabled-p harness-openrouter-routing)
+    (let ((slug (plist-get (harness-openrouter--route-for-identity request) :slug)))
+      (list :account "openrouter"
+            :pool (if (and (stringp slug) (not (string-empty-p slug)))
+                      (format "openrouter/%s" slug)
+                    "openrouter")))))
 
 ;;;; Dispatch: the pin, checked before every request
 
@@ -2074,6 +2127,42 @@ module appended to the message it built (`harness-openrouter--error-detail')."
       (when (and (stringp error)
                  (string-match "error_type=\\([a-z0-9_]+\\)" error))
         (match-string 1 error))))
+
+(defun harness-openrouter--declined-provider (stream error)
+  "Return the upstream provider STREAM's ERROR names as having declined, or nil.
+A streamed failure keeps it in its chunk (`harness-openrouter--chunk');
+an HTTP failure's body is not a chunk, so the code is read from the
+`provider=' this module appended to the message it built
+\(`harness-openrouter--error-detail')."
+  (or (plist-get (harness-openai--stream-dialect-state stream) :declined-provider)
+      (when (and (stringp error)
+                 (string-match "provider=\\([^;)]+\\)" error))
+        (string-trim (match-string 1 error)))))
+
+(defun harness-openrouter--limit-scope (stream error)
+  "Return how far STREAM's failure says a rate limit reaches, or nil.
+The failure's own fields decide it, never an assumption:
+
+- `pool' when the answer names the upstream endpoint that declined
+  (`error.metadata.provider_name'), which is that endpoint's bad minute
+  and not Cohere's;
+- `account' when nothing names an upstream -- a limit OpenRouter itself
+  imposed on the key that sent the request applies to every endpoint of
+  the account, and resting only the pinned one would keep sending into
+  a limit that is not about it;
+- `account' too when the named upstream is OpenRouter itself.
+
+Only a governed request's rate limit is answered at all: a request this
+module did not route keeps the generic reading and answers nil, so an
+ordinary provider's pool is never rested on this module's say-so."
+  (when (and (plist-get (harness-openai--stream-dialect-state stream) :route)
+             (eq (harness-openrouter--failure-kind stream error) 'rate-limit))
+    (let ((declined (harness-openrouter--declined-provider stream error)))
+      (if (and (stringp declined)
+               (not (string-empty-p declined))
+               (not (harness-openrouter--same-provider-p "OpenRouter" declined)))
+          'pool
+        'account))))
 
 (defun harness-openrouter--failure-kind (stream error)
   "Return the shared kind of STREAM's failure, from its typed code, or nil.

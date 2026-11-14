@@ -1475,8 +1475,20 @@ the efforts the answer names."
                  ;; connection failed before any of the answer arrived; the
                  ;; HTTP layer never repeats one that delivered bytes.
                  :retry t
+                 ;; A replay this layer decides on its own is a send
+                 ;; like any other: it asks the pool that admitted the
+                 ;; request before it goes (see `harness-admission').
+                 :gate (let ((gate (plist-get request :transport-gate)))
+                         (and (functionp gate) gate))
                  :on-headers (lambda (status headers)
                                (setf (harness-responses--stream-status stream) status)
+                               ;; Both forms of Retry-After are read, a number
+                               ;; of seconds and an HTTP-date, so the wait a
+                               ;; rate limit names reaches the provider pool
+                               ;; (`harness-admission') and the retry layer as
+                               ;; the wait it is.
+                               (when-let* ((after (harness-http-retry-after-seconds headers)))
+                                 (setf (harness-responses--stream-retry-after stream) after))
                                ;; The plan's windows come with every answer, so
                                ;; the quota is kept current without a request
                                ;; of its own; a 429 carries them too, and they

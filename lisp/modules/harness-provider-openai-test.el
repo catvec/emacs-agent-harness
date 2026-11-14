@@ -1000,6 +1000,27 @@ the step layer can then retry one that had already streamed something."
       (should (eq 'rate-limit (plist-get (car (last events)) :error-kind)))
       (should (equal 7 (plist-get (car (last events)) :retry-after))))))
 
+;; A Retry-After given as an HTTP-date reaches the caller as the wait it
+;; names: the provider pool above the transport rests for it, so the form
+;; must not be dropped on the way there.
+(ert-deftest harness-provider-openai-a-retry-after-date-reaches-the-caller ()
+  (harness-openai-test-with-fake
+      `(("chat/completions" . (:status 429
+                                :headers (("Retry-After"
+                                           . ,(format-time-string
+                                               "%a, %d %b %Y %H:%M:%S GMT"
+                                               (time-add nil 600) t)))
+                                :body "{\"error\":{\"message\":\"Rate limit exceeded\"}}")))
+    (let* ((events (car (harness-openai-test--complete
+                         harness-openai-test-endpoint
+                         '(:model "testrouter:m"
+                           :messages ((:role user :content ((:type "text" :text "hi"))))))))
+           (done (car (last events)))
+           (after (plist-get done :retry-after)))
+      (should (eq 'rate-limit (plist-get done :error-kind)))
+      (should (> after 550))
+      (should (<= after 601)))))
+
 (defun harness-provider-openai-test--fail-with (err)
   "Complete a request whose HTTP layer fails with ERR; return the `done' event."
   (let ((events nil))

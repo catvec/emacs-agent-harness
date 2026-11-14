@@ -115,7 +115,8 @@ caller is tried again: see `harness-http--retry-delay'.")
   (headers-done nil) (body "")
   callback on-chunk on-headers
   (cancelled nil) (done nil) started
-  args binary (retry 0) (retries 0) retry-timer chunk-delivered)
+  args binary (retry 0) (retries 0) retry-timer chunk-delivered
+  gate)                 ; asked before every replay; see `harness-http-request'
 
 (defvar harness-http--active nil "List of live handles.")
 
@@ -164,12 +165,29 @@ and is spread by up to `harness-http-retry-jitter' of itself."
          (jitter (max 0 (* base (or harness-http-retry-jitter 0) (/ (random 1000) 1000.0)))))
     (min harness-http-retry-max-delay (+ base jitter))))
 
+(defun harness-http-retry-after-seconds (headers)
+  "Return the seconds a Retry-After header among HEADERS asks to wait, or nil.
+Both forms HTTP allows are read: a number of seconds, and an HTTP-date,
+which is how long from now it names, 0 when it has already passed.  A
+value that is neither is nil, as is a header that is absent.  The name
+is matched whatever its case: a parsed response downcases it, a caller's
+own list need not."
+  (let ((value (cdr (assoc-string "retry-after" headers t))))
+    (cond
+     ((not (stringp value)) nil)
+     ((string-match-p "\\`[ \t]*[0-9]+[ \t]*\\'" value)
+      (string-to-number value))
+     (t
+      (let ((time (ignore-errors (float-time (encode-time (parse-time-string value))))))
+        (and time (max 0 (- time (float-time)))))))))
+
 (defun harness-http-retry-after (headers)
   "Return the seconds a Retry-After header among HEADERS asks to wait.
-Only the delay-seconds form is read; an HTTP-date is ignored, since a
-wait the harness would have to compute is better left to the caller.
-The name is matched whatever its case: a parsed response downcases it,
-a caller's own list need not."
+Only the delay-seconds form is read here: a request the transport
+replays on its own is bounded by `harness-http-retry-max-delay', and a
+date computed against a clock that moves is better left to the caller
+that knows what the wait is for.  `harness-http-retry-after-seconds'
+reads both forms."
   (let ((value (cdr (assoc-string "retry-after" headers t))))
     (when (and (stringp value) (string-match-p "\\`[ \t]*[0-9]+[ \t]*\\'" value))
       (string-to-number value))))
@@ -214,20 +232,66 @@ rather than a lost connection, is not retried."
       (max (harness-http--backoff attempt) (or asked 0) 0))))
 
 (defun harness-http--retry-now (handle)
-  "Start another attempt of HANDLE, unless it settled meanwhile."
+  "Start another attempt of HANDLE, unless it settled meanwhile.
+Every replay comes through here -- the one a retry timer scheduled and
+the one a gate's wait led to -- so the gate is asked each time, at the
+moment the replay would go: a cooldown another request established
+during a wait is honoured, and no attempt is started into a closed pool."
   (setf (harness-http-handle-retry-timer handle) nil)
   (unless (or (harness-http-handle-done handle) (harness-http-handle-cancelled handle))
+    (let ((gate (harness-http--gate-wait handle)))
+      (cond
+       ((and (listp gate) (eq (car gate) :refuse))
+        (harness-log 'info "http: %s is not replayed: %s"
+                     (harness-http-handle-url handle) (nth 1 gate))
+        (harness-http--finish handle
+                              (list 'rate-limit (nth 1 gate)
+                                    :kind 'rate-limit
+                                    :retry t)))
+       ((and (listp gate) (eq (car gate) :wait) (< 0 (nth 1 gate)))
+        (harness-log 'info "http: %s waits %.1fs for its pool"
+                     (harness-http-handle-url handle) (nth 1 gate))
+        (setf (harness-http-handle-retry-timer handle)
+              (run-at-time (nth 1 gate) nil (lambda () (harness-http--retry-now handle)))))
+       (t
+        (condition-case err
+            (harness-http--attempt handle)
+          (error (harness-http--finish
+                  handle (list 'curl (format "trying the request again failed: %s"
+                                             (error-message-string err)))))))))))
+
+(defun harness-http--gate-wait (handle)
+  "Return the seconds HANDLE's gate asks it to wait before a replay, or nil.
+A request that carries a gate (`harness-http-request'\='s `:gate') is
+one a layer above the transport admitted, and that layer may know the
+provider is closed to it.  The gate is asked here, immediately before
+the replay would be started, and answers nil to go, (:wait SECONDS) to
+wait that long, or (:refuse TEXT) to end the request instead.  A gate
+that fails is logged and treated as no gate: a layer's own accounting
+can delay a replay, never stop the transport from finishing a request."
+  (when-let* ((gate (harness-http-handle-gate handle)))
     (condition-case err
-        (harness-http--attempt handle)
-      (error (harness-http--finish
-              handle (list 'curl (format "trying the request again failed: %s"
-                                         (error-message-string err))))))))
+        (let ((answer (funcall gate)))
+          (cond
+           ((null answer) nil)
+           ((and (listp answer) (eq (car answer) :refuse))
+            (list :refuse (or (nth 1 answer) "rate limited")))
+           ((and (listp answer) (eq (car answer) :wait))
+            (list :wait (max 0 (float (or (nth 1 answer) 0)))))
+           (t nil)))
+      (error (harness-log 'error "http: the gate of %s failed: %S"
+                          (harness-http-handle-url handle) err)
+             nil))))
 
 (defun harness-http--retry (handle delay reason)
   "Try HANDLE again in DELAY seconds, because REASON; nil when scheduled.
 The attempt count is bounded by the request's `:retry', so nothing
 loops for ever.  The watchdog of the attempt that failed is stopped, so
-it cannot end the request while the retry waits."
+it cannot end the request while the retry waits.  The attempt is counted
+here, once, and the gate (`harness-http--retry-now') is asked when the
+replay is about to go: a pool that keeps a request waiting spends no
+attempt on the waiting, and a gate that refuses ends the request with a
+rate limit rather than sending into a closed pool."
   (when-let* ((timer (harness-http-handle-timer handle)))
     (cancel-timer timer)
     (setf (harness-http-handle-timer handle) nil))
@@ -428,7 +492,7 @@ which counts from this attempt on."
     handle))
 
 (cl-defun harness-http-request (url &key (method "GET") headers body json binary
-                                    callback on-chunk on-headers timeout retry)
+                                    callback on-chunk on-headers timeout retry gate)
   "Start an asynchronous HTTP request to URL.
 METHOD, HEADERS (alist) and BODY (string) describe it; JSON, when
 given, is encoded with `harness-json-encode' and sent as the body
@@ -450,7 +514,16 @@ idempotent request, a GET or a HEAD, and no other; t retries any method
 as often as the default; a number is that many tries and 0 none.  A
 request of which some body already reached ON-CHUNK, one that was
 cancelled, and one whose own timeout fired are never retried: the
-caller has seen what a retry would repeat."
+caller has seen what a retry would repeat.
+
+GATE, when given, is called with no arguments immediately before each
+replay this layer decides on its own -- never before the first attempt,
+which is the caller's -- and answers nil to send now, (:wait SECONDS)
+to hold the replay that long (which costs no attempt), or (:refuse
+TEXT) to end the request with a rate-limit failure instead of sending
+it.  It is how a layer that admitted the request
+\(`harness-admission') keeps a replay out of a cooldown another request
+established meanwhile."
   (unless harness-http--curl-program
     (error "The curl program harness-http needs is not available"))
   (when json
@@ -472,6 +545,7 @@ caller has seen what a retry would repeat."
                                            :on-chunk on-chunk :on-headers on-headers
                                            :config-file config :body-file body-file
                                            :binary binary :args args
+                                           :gate gate
                                            :retry (harness-http--retries method retry)
                                            :timeout seconds :started (float-time))))
     (harness-http--attempt handle)))

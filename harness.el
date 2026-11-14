@@ -138,7 +138,7 @@ after changing it run \\[harness-restart]."
   :type '(repeat directory) :group 'harness)
 
 (defconst harness-core-modules
-  '(access acp agent compaction config images linking mcp naming perms priority project provider provider-check provider-claude
+  '(access acp admission agent compaction config images linking mcp naming perms priority project provider provider-check provider-claude
     replay resilience retry sandbox session store usage worktree
     tools tools-agent tools-emacs tools-fs tools-plan tools-question tools-session-info
     tools-shell tools-todo tools-jobs sandbox-session
@@ -146,7 +146,9 @@ after changing it run \\[harness-restart]."
     ui ui-chat ui-compose ui-notify ui-pending ui-server ui-sessions ui-computers)
   "The modules that load whatever `harness-enabled-modules' says.
 They make a harness to work with: sessions and the turn loop, Claude
-Code for the default model, compaction and retries, carrying sessions
+Code for the default model, compaction, retries and the one pool per
+provider account that lets a rate-limited provider's work back in
+gradually, carrying sessions
 on after a restart and reporting the ones that stall, session names,
 the links agents put in their messages to sessions, messages, tool
 calls and threads,

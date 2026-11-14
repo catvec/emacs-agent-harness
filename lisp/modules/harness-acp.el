@@ -256,6 +256,7 @@ it can answer for another one.")
     decision/changed access/changed access/judged patch-review/changed tool-slots/changed
     patch-review/last-close
     cache/warm-changed event-watch/changed chatgpt-plan/accounts-changed memory/changed
+    admission/waiting admission/cooldown
     speech/changed)
   "Bus events forwarded verbatim as `_harness/event' notifications.")
 

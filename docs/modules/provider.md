@@ -8,7 +8,7 @@ Provider contract, registry and model catalogue.
 - **Source:** [lisp/modules/harness-provider.el](../../lisp/modules/harness-provider.el)
 - **Loaded:** by default
 - **Requires:** nothing
-- **Required by:** [agent](agent.md), [cache-warm](cache-warm.md), [compaction](compaction.md), [cost-compare](cost-compare.md), [fallback](fallback.md), [handoff](handoff.md), [model-complexity](model-complexity.md), [naming](naming.md), [pet](pet.md), [provider-bedrock](provider-bedrock.md), [provider-check](provider-check.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md), [provider-deepseek](provider-deepseek.md), [provider-demo](provider-demo.md), [provider-gremlin](provider-gremlin.md), [provider-openai](provider-openai.md), [provider-openrouter](provider-openrouter.md), [provider-responses](provider-responses.md), [recap](recap.md), [tasks-search](tasks-search.md), [todo-sync](todo-sync.md), [usage](usage.md)
+- **Required by:** [admission](admission.md), [agent](agent.md), [cache-warm](cache-warm.md), [compaction](compaction.md), [cost-compare](cost-compare.md), [fallback](fallback.md), [handoff](handoff.md), [model-complexity](model-complexity.md), [naming](naming.md), [pet](pet.md), [provider-bedrock](provider-bedrock.md), [provider-check](provider-check.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md), [provider-deepseek](provider-deepseek.md), [provider-demo](provider-demo.md), [provider-gremlin](provider-gremlin.md), [provider-openai](provider-openai.md), [provider-openrouter](provider-openrouter.md), [provider-responses](provider-responses.md), [recap](recap.md), [tasks-search](tasks-search.md), [todo-sync](todo-sync.md), [usage](usage.md)
 
 ## About
 
@@ -87,6 +87,7 @@ only the models allowed, and a tier's model is chosen among them.
 
 ### Methods it calls
 
+- `provider/admit` ([admission](admission.md)), when it is loaded
 - `session/internal-finish` ([session](session.md))
 - `session/internal-start` ([session](session.md)), when it is loaded
 - `session/usage-add` ([session](session.md))

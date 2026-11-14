@@ -2501,6 +2501,11 @@ at all (`:no-tools')."
                  ;; the harness's own calls alike.  A throttled or failed
                  ;; response is `harness-bedrock--maybe-retry''s.
                  :retry t
+                 ;; A replay this layer decides on its own asks the pool
+                 ;; that admitted the request first (see `harness-admission').
+                 :gate (let ((gate (plist-get (harness-bedrock--stream-request stream)
+                                                :transport-gate)))
+                         (and (functionp gate) gate))
                  :on-headers (lambda (status response-headers)
                                (setf (harness-bedrock--stream-status stream) status
                                      (harness-bedrock--stream-content-type stream)

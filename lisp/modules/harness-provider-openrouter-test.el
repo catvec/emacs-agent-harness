@@ -2623,5 +2623,152 @@ and sent, and cancelling the first sent nothing for it."
             (should (= 1 (length (harness-openrouter-test--sent-completions)))
                     )))))))
 
+;;;; Which pool a pinned request belongs to
+
+(ert-deftest harness-provider-openrouter-each-pinned-endpoint-has-its-own-pool ()
+  "Two sessions pinned to two upstream endpoints are two pools of one account.
+The pool is the exact endpoint the session is pinned to, so a limit
+DeepInfra answers holds the work bound for DeepInfra and not the work
+bound for Cohere; the account is OpenRouter itself, which is what a limit
+OpenRouter imposed is about.  Every part of the key is a name OpenRouter
+publishes, and no credential is in it."
+  (let* ((policy (harness-openrouter-test-policy))
+         (deepinfra (harness-openrouter-test--session
+                     "s-deepinfra"
+                     (list :openrouter-route
+                           (harness-openrouter-test--route
+                            '(:slug "deepinfra/fp8" :provider "DeepInfra")))))
+         (cohere (harness-openrouter-test--session
+                  "s-cohere"
+                  (list :openrouter-route
+                        (harness-openrouter-test--route
+                         '(:slug "cohere/fp8" :provider "Cohere"
+                           :prompt 0.15 :completion 0.5 :cache-read 0.003
+                           :discount 0))))))
+    (harness-openrouter-test-with-policy policy
+      (let* ((first (harness-method/provider/admission-identity
+                     (harness-openrouter-test--request deepinfra)))
+             (second (harness-method/provider/admission-identity
+                      (harness-openrouter-test--request cohere))))
+        (should (equal "openrouter" (plist-get first :account)))
+        (should (equal "openrouter/deepinfra/fp8" (plist-get first :pool)))
+        (should (equal "openrouter" (plist-get second :account)))
+        (should (equal "openrouter/cohere/fp8" (plist-get second :pool)))
+        ;; Two pools of one account: a limit on one is not the other's.
+        (should-not (equal (plist-get first :pool) (plist-get second :pool)))
+        ;; No credential, and no request's body, is in a key.
+        (dolist (identity (list first second))
+          (let ((pool (plist-get identity :pool)))
+            (should-not (string-match-p "sk-\\|Bearer\\|api.key" pool))
+            (should-not (string-match-p "hi" pool))))))))
+
+(ert-deftest harness-provider-openrouter-a-repeat-keeps-the-pool-it-was-sent-to ()
+  "A request being retried belongs to the endpoint it was authorised for.
+The session may have been switched since; the repeat is the request it
+repeats, so it waits for the pool of the endpoint it will actually be
+sent to, not for the pool of a pin chosen afterwards."
+  (let* ((policy (harness-openrouter-test-policy))
+         (session (harness-openrouter-test--session "s-1"))
+         (repeat (harness-openrouter-test--request session)))
+    (harness-openrouter-test-with-policy policy
+      ;; What `harness-openrouter--dispatch' records on a request it sent:
+      ;; the authority travels on the request's retry state, which is the
+      ;; request's own and is read back from it.
+      (let ((state (make-harness-retry--request)))
+        (setf (harness-retry--request-count state) 1
+              (harness-retry--request-since state) (float-time))
+        (setq repeat (harness-retry-authorise
+                      (harness-retry-attach repeat state)
+                      (list :policy policy
+                            :route (harness-openrouter-test--route
+                                    '(:slug "cohere/fp8" :provider "Cohere"))))))
+      (should (equal "openrouter/cohere/fp8"
+                     (plist-get (harness-method/provider/admission-identity repeat) :pool)))
+      ;; The same request without the record is unpinned, and belongs to
+      ;; the account until a pin is chosen for it.
+      (should (equal "openrouter"
+                     (plist-get (harness-method/provider/admission-identity
+                                 (harness-openrouter-test--request session))
+                                :pool))))))
+
+(ert-deftest harness-provider-openrouter-a-pinned-limit-is-that-endpoints ()
+  "A 429 that names the upstream endpoint is that endpoint's limit.
+The failure's own fields say which endpoint declined, so the pool that
+rests is the pinned one; the other endpoint of the same account keeps
+sending."
+  (let* ((policy (harness-openrouter-test-policy))
+         (session (harness-openrouter-test--session
+                   "s-1" (list :openrouter-route
+                                 (harness-openrouter-test--route)))))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-session session
+        (harness-openrouter-test-with-fake
+            (list (cons "chat/completions"
+                        (harness-openrouter-test--chain-http
+                         429 (harness-json-encode
+                              (list :error
+                                    (list :code 429 :message "rate limited"
+                                          :metadata (list :error_type "rate_limit_exceeded"
+                                                          :provider_name "DeepInfra")))))))
+          (let* ((request (harness-openrouter-test--request session))
+                 (events nil))
+            (harness-call 'provider/complete
+                          (plist-put request :on-event (lambda (e) (push e events))))
+            (harness-test-wait (lambda () (harness-openrouter-test--done-events events))
+                               5 "the refusal")
+            (let ((done (harness-openrouter-test--newest-done events)))
+              (should (eq 'rate-limit (plist-get done :error-kind)))
+              ;; The endpoint that declined is named, so the pool is it.
+              (should (eq 'pool (plist-get done :limit-scope))))))))))
+
+(ert-deftest harness-provider-openrouter-a-limit-with-no-upstream-is-the-accounts ()
+  "A 429 that names no upstream endpoint is the account's limit.
+OpenRouter's own limit applies to the key that sent the request, and
+every endpoint of that account is held by it; resting only the pinned
+one would keep sending into a limit that is not about it."
+  (let* ((policy (harness-openrouter-test-policy))
+         (session (harness-openrouter-test--session
+                   "s-1" (list :openrouter-route
+                                 (harness-openrouter-test--route)))))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-session session
+        (harness-openrouter-test-with-fake
+            (list (cons "chat/completions"
+                        (harness-openrouter-test--chain-http
+                         429 (harness-json-encode
+                              (list :error (list :code 429 :message "Rate limit exceeded"))))))
+          (let* ((request (harness-openrouter-test--request session))
+                 (events nil))
+            (harness-call 'provider/complete
+                          (plist-put request :on-event (lambda (e) (push e events))))
+            (harness-test-wait (lambda () (harness-openrouter-test--done-events events))
+                               5 "the refusal")
+            (let ((done (harness-openrouter-test--newest-done events)))
+              (should (eq 'rate-limit (plist-get done :error-kind)))
+              (should (eq 'account (plist-get done :limit-scope))))))))))
+
+(ert-deftest harness-provider-openrouter-an-ordinary-request-is-not-given-a-scope ()
+  "A request this module did not route keeps the generic reading.
+Without a policy there is no pin and nothing to split, so no limit scope
+is claimed on its failure: an ordinary provider's pool rests on its own
+provider's answer alone."
+  (let* ((session (harness-openrouter-test--session "s-1")))
+    (harness-openrouter-test-with-policy nil
+      (harness-openrouter-test-with-session session
+        (harness-openrouter-test-with-fake
+            (list (cons "chat/completions"
+                        (harness-openrouter-test--chain-http
+                         429 (harness-json-encode
+                              (list :error (list :code 429 :message "rate limited"))))))
+          (let ((request (harness-openrouter-test--request session))
+                (events nil))
+            (harness-call 'provider/complete
+                          (plist-put request :on-event (lambda (e) (push e events))))
+            (harness-test-wait (lambda () (harness-openrouter-test--done-events events))
+                               5 "the refusal")
+            (let ((done (harness-openrouter-test--newest-done events)))
+              (should (eq 'rate-limit (plist-get done :error-kind)))
+              (should-not (plist-get done :limit-scope)))))))))
+
 (provide 'harness-provider-openrouter-test)
 ;;; harness-provider-openrouter-test.el ends here

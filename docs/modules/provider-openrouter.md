@@ -123,6 +123,7 @@ behaviour of filter-then-cheapest, not a special case.
 ### Methods
 
 - `openrouter/route` (session-id) — Return SESSION-ID's pinned OpenRouter route, or nil.
+- `provider/admission-identity` (request) — Return the pool REQUEST of OpenRouter belongs to, or nil.
 
 ### Events
 

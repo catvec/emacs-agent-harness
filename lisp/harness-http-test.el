@@ -426,6 +426,27 @@ while an ordinary POST is not retried by default (below)."
   (should-not (harness-http--retryable-status-p 404))
   (should-not (harness-http--retryable-status-p nil)))
 
+(ert-deftest harness-http-a-retry-after-date-is-read-as-the-wait-it-names ()
+  "Both forms of Retry-After are read where a wait is what is wanted.
+A number of seconds is that many; an HTTP-date is how long from now it
+names, and 0 once it has passed.  A request the transport replays on its
+own still reads only the seconds form (`harness-http-retry-after'), so
+that this reading is the caller's choice and not a new bound inside the
+transport."
+  (should (= 3 (harness-http-retry-after-seconds '(("retry-after" . " 3 ")))))
+  (should (= 3 (harness-http-retry-after-seconds '(("Retry-After" . "3")))))
+  (let ((ten (harness-http-retry-after-seconds
+              (list (cons "Retry-After" (format-time-string
+                                          "%a, %d %b %Y %H:%M:%S GMT"
+                                          (time-add nil 600) t))))))
+    (should (> ten 550))
+    (should (<= ten 601)))
+  ;; A date in the past is no wait at all, not a negative one.
+  (should (equal 0 (harness-http-retry-after-seconds
+                    '(("retry-after" . "Wed, 21 Oct 2015 07:28:00 GMT")))))
+  (should-not (harness-http-retry-after-seconds '(("retry-after" . "soon"))))
+  (should-not (harness-http-retry-after-seconds nil)))
+
 (ert-deftest harness-http-cancelling-while-it-waits-to-retry-stops-it ()
   "A cancelled request is never tried again, not even from the retry it waited for."
   (skip-unless (executable-find "curl"))

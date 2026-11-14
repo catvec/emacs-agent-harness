@@ -45,8 +45,10 @@
   "Start a server for the catalogue and completions; return its wire.
 SCRIPT is a function of a completion's number (1 the first) returning
 what the server does with it: `reset' (cut the connection with a reset),
-`slow-reset' (the same after a second), `answer' (a streamed answer), or
-a plist (:status N :headers ALIST :body TEXT) answered as it says."
+`slow-reset' (the same after a second), `answer' (a streamed answer
+naming DeepInfra, as the fixture's chunks do), `(:answer-from NAME)'
+(a streamed answer naming NAME as served it), or a plist (:status N
+:headers ALIST :body TEXT) answered as it says."
   (let ((wire (make-harness-openrouter-test--wire :script script)))
     (setf (harness-openrouter-test--wire-server wire)
           (make-network-process
@@ -121,6 +123,19 @@ arriving is not answered before curl sent it."
                (append (harness-openrouter-test--answer-chunks)
                        (list '(:choices () :usage (:prompt_tokens 10 :completion_tokens 2))
                              "[DONE]")))))
+      ((pred (lambda (w) (and (consp w) (eq (car w) :answer-from))))
+       (let* ((provider (nth 1 what))
+              (chunks (mapcar (lambda (chunk)
+                                (if (plist-member chunk :provider)
+                                    (plist-put (copy-sequence chunk) :provider provider)
+                                  chunk))
+                              (harness-openrouter-test--answer-chunks))))
+         (harness-openrouter-test--wire-send
+          proc 200 '(("Content-Type" . "text/event-stream"))
+          (apply #'harness-openrouter-test--sse
+                 (append chunks
+                         (list '(:choices () :usage (:prompt_tokens 10 :completion_tokens 2))
+                               "[DONE]"))))))
       (_ (harness-openrouter-test--wire-send
           proc (or (plist-get what :status) 200)
           (plist-get what :headers) (or (plist-get what :body) ""))))))
@@ -593,6 +608,135 @@ second attempt answers."
       (let ((body (harness-json-parse (car (harness-openrouter-test--wire-bodies wire)))))
         (should-not (plist-get body :provider))
         (should-not (plist-get body :service_tier))))))
+
+;;;; Two pinned sessions, one account, two pools
+
+(ert-deftest harness-provider-openrouter-transport-a-limit-on-one-endpoint-holds-it ()
+  "A 429 the pinned endpoint answers holds that endpoint's work, not the account's.
+Two sessions are pinned to the two upstream endpoints the catalogue
+lists.  The first meets a 429 naming DeepInfra, so its pool rests; the
+second, pinned to Cohere, is sent at once -- a different endpoint of one
+account is not held by another endpoint's bad minute.  Both went through
+the real provider bus and the real pin, over a real wire, and each POST
+carries its own endpoint's restriction."
+  (skip-unless (executable-find "curl"))
+  (harness-openrouter-test-with-wire
+      (lambda (n)
+        (pcase n
+          ;; The first completion: the pinned DeepInfra endpoint is
+          ;; rate limiting, and the answer names it.
+          (1 (list :status 429
+                   :headers '(("Content-Type" . "application/json"))
+                   :body (harness-json-encode
+                          (list :error (list :code 429 :message "rate limited"
+                                             :metadata (list :error_type "rate_limit_exceeded"
+                                                             :provider_name "DeepInfra"))))))
+          ;; The second: Cohere answers.
+          (_ '(:answer-from "Cohere"))))
+    ;; The pool is a module of its own, loaded before anything binds
+    ;; its options: the harness's core modules include it.
+    (harness-test-load-module 'admission)
+    (harness-admission-reset)
+    (let ((harness-admission t)
+          (harness-admission-release-spacing 0.02)
+          (harness-admission-max-wait 5.0)
+          (harness-retry-max-attempts 0))
+      (setq harness-openrouter-routing (harness-openrouter-test-policy))
+      (let* ((deepinfra (harness-openrouter-test--wire-pinned-session))
+             (cohere (harness-openrouter-test--wire-pinned-session
+                      (harness-openrouter-test--route
+                       '(:slug "cohere/fp8" :provider "Cohere"
+                         :prompt 0.15 :completion 0.5 :cache-read 0.003
+                         :discount 0)))))
+        (unwind-protect
+            (progn
+              ;; The DeepInfra session's step meets the limit.
+              (should (eq 'error (plist-get (harness-test-await
+                                             (harness-call 'agent/prompt deepinfra "go") 30)
+                                            :stop-reason)))
+              (should (= 1 (harness-openrouter-test--wire-posts wire)))
+              ;; The DeepInfra pool rests; the Cohere pool is open.
+              (let ((deepinfra-pool (cl-find "openrouter/deepinfra/fp8"
+                                             (harness-call 'admission/state)
+                                             :key (lambda (p) (plist-get p :key))
+                                             :test #'equal)))
+                (should deepinfra-pool)
+                (should (> (plist-get deepinfra-pool :until) (float-time)))
+                (should (equal "openrouter" (plist-get deepinfra-pool :account)))
+                ;; Only the endpoint that declined has a pool so far, and
+                ;; the Cohere endpoint's is not resting with it.
+                (should (= 1 (length (harness-call 'admission/state)))))
+              ;; The Cohere session's step is sent at once, and answers.
+              (should (eq 'end-turn (plist-get (harness-test-await
+                                                (harness-call 'agent/prompt cohere "go") 30)
+                                               :stop-reason)))
+              (should (= 2 (harness-openrouter-test--wire-posts wire)))
+              ;; Each POST was restricted to its own endpoint.
+              (let ((onlys (mapcar (lambda (body)
+                                     (plist-get (plist-get (harness-json-parse body) :provider)
+                                                :only))
+                                   (reverse (harness-openrouter-test--wire-bodies wire)))))
+                (should (equal '(("deepinfra/fp8") ("cohere/fp8"))
+                               (mapcar (lambda (only) (append only nil)) onlys)))))
+          (harness-admission-reset))))))
+
+(ert-deftest harness-provider-openrouter-transport-an-account-limit-holds-both-endpoints ()
+  "A 429 that names no upstream endpoint holds every pinned endpoint.
+OpenRouter's own limit is about the key that sent the request, not about
+one upstream endpoint, so the second session -- pinned to Cohere -- waits
+it out rather than being sent into it, and goes when the account's rest
+is over."
+  (skip-unless (executable-find "curl"))
+  (harness-openrouter-test-with-wire
+      (lambda (n)
+        (pcase n
+          ;; The first completion: a limit OpenRouter itself imposed, with
+          ;; no upstream endpoint named and a wait it asks for.
+          (1 (list :status 429
+                   :headers '(("Content-Type" . "application/json")
+                              ("Retry-After" . "0.4"))
+                   :body (harness-json-encode
+                          (list :error (list :code 429 :message "Rate limit exceeded")))))
+          (_ '(:answer-from "Cohere"))))
+    (harness-test-load-module 'admission)
+    (harness-admission-reset)
+    (let ((harness-admission t)
+          (harness-admission-release-spacing 0.02)
+          (harness-admission-max-wait 5.0)
+          (harness-retry-max-attempts 0))
+      (setq harness-openrouter-routing (harness-openrouter-test-policy))
+      (let* ((deepinfra (harness-openrouter-test--wire-pinned-session))
+             (cohere (harness-openrouter-test--wire-pinned-session
+                      (harness-openrouter-test--route
+                       '(:slug "cohere/fp8" :provider "Cohere"
+                         :prompt 0.15 :completion 0.5 :cache-read 0.003
+                         :discount 0)))))
+        (unwind-protect
+            (progn
+              (should (eq 'error (plist-get (harness-test-await
+                                             (harness-call 'agent/prompt deepinfra "go") 30)
+                                            :stop-reason)))
+              (should (= 1 (harness-openrouter-test--wire-posts wire)))
+              ;; The account is resting: the Cohere pool, though it has
+              ;; never been used, inherits the account's rest.
+              (let ((account-pool (cl-find "openrouter/cohere/fp8"
+                                           (harness-call 'admission/state)
+                                           :key (lambda (p) (plist-get p :key))
+                                           :test #'equal)))
+                (should-not account-pool))
+              (let ((done nil))
+                (harness-call 'agent/prompt cohere "go")
+                ;; Nothing goes while the account rests.
+                (let ((deadline (+ (float-time) 0.2)))
+                  (while (< (float-time) deadline)
+                    (accept-process-output nil 0.02)
+                    (sit-for 0.005)))
+                (should (= 1 (harness-openrouter-test--wire-posts wire)))
+                ;; And it goes once the rest is over.
+                (harness-test-wait
+                 (lambda () (= 2 (harness-openrouter-test--wire-posts wire)))
+                 10 "the Cohere step after the account's rest")))
+          (harness-admission-reset))))))
 
 ;;;; A request's restrictions and its budget belong to the request
 
