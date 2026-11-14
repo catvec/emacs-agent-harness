@@ -183,7 +183,7 @@ it run \\[harness-restart]."
                  (repeat :tag "These, besides the core" symbol))
   :group 'harness)
 
-(defcustom harness-off-by-default-modules '(demo supervisor)
+(defcustom harness-off-by-default-modules '(demo supervisor otel)
   "Modules `harness-enabled-modules' t leaves out: they load only when named.
 A module here does not load merely because every module is asked for.
 It loads when `harness-enabled-modules' names it, when a module that
@@ -195,8 +195,11 @@ module it names.
 The `demo' module runs a hand-in's demo on its workspace computer and
 opens the presenter that walks the reviewer through it, and
 `supervisor' makes sessions plan and delegate.  Neither is what a
-harness should do unasked, so both ship here.  Set this to nil for t to
-load them too.  `harness-disabled-modules' keeps a module out
+harness should do unasked, so both ship here.  `otel' exports what
+sessions do to an OpenTelemetry collector of the user's; it is off
+unless its own switch and endpoint both say otherwise, but loading it
+at all is something to ask for, so it ships here too.  Set this to nil
+for t to load them.  `harness-disabled-modules' keeps a module out
 altogether, whatever this says.  The harness process reads this when it
 starts, so after changing it run \\[harness-restart]."
   :type '(repeat symbol) :group 'harness)

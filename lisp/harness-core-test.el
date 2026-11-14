@@ -1486,7 +1486,7 @@ with its UI half, and taking its two modules out leaves readonly in."
          (harness-module-directories '("lisp/modules" "lisp/ui"))
          (files (harness--module-files)))
     (should-not harness-disabled-modules)
-    (should (equal '(demo supervisor) harness-off-by-default-modules))
+    (should (equal '(demo supervisor otel) harness-off-by-default-modules))
     (dolist (file '("lisp/modules/harness-demo.el"
                     "lisp/modules/harness-supervisor.el" "lisp/ui/harness-ui-supervisor.el"))
       (should-not (member (harness--path file) files)))
@@ -1997,7 +1997,7 @@ loads it, with what it requires and its UI half."
   (let* ((sources (harness--module-sources))
          (harness-enabled-modules t)
          (harness-disabled-modules nil))
-    (should (equal '(demo supervisor) harness-off-by-default-modules))
+    (should (equal '(demo supervisor otel) harness-off-by-default-modules))
     (should (harness-module-off-by-default-p 'demo))
     (should (harness-module-off-by-default-p 'supervisor))
     (should (harness-module-off-by-default-p 'ui-supervisor))

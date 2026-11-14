@@ -263,6 +263,26 @@ Kept beside the turn records, so a reload keeps the turns working.")
 (defvar harness-agent--retries (make-hash-table :test 'equal)
   "Session id -> how many failed steps its running turn ran again.")
 
+(defvar harness-agent--step-usage (make-hash-table :test 'equal)
+  "Session id -> what the running turn's open step has used so far.
+The usage events its provider reported for it, added up across the
+attempts of one logical step (`harness-agent--add-step-usage'), or nil
+when no attempt reported any: a step whose provider said nothing of its
+tokens has none, which is no zero.  Emptied when a step starts.")
+
+(defvar harness-agent--step-open (make-hash-table :test 'equal)
+  "Session id -> t while its running turn has a step not reported yet.
+See `harness-agent--report-step'.")
+
+(defvar harness-agent--step-started-at (make-hash-table :test 'equal)
+  "Session id -> when the running turn's open step was first sent.")
+
+(defvar harness-agent--step-attempts (make-hash-table :test 'equal)
+  "Session id -> how many attempts the running turn's open step has made.
+A step tried again after a transient failure is the same logical step:
+the first attempt is 1, the retry 2, and the step is reported once, when
+it is over for good, saying how many attempts it took.")
+
 (defvar harness-agent--stop-continues (make-hash-table :test 'equal)
   "Session id -> how many times its running turn was sent on past a stop.
 Counted against `harness-agent--max-stop-continues'.  Kept beside the
@@ -1455,6 +1475,11 @@ FROM, when non-nil, is who sent the message (see `agent/prompt')."
     (remhash session-id harness-agent--failures)
     (remhash session-id harness-agent--retries)
     (remhash session-id harness-agent--stop-continues)
+    ;; A turn's step state starts empty, whatever a turn that ended left.
+    (remhash session-id harness-agent--step-open)
+    (remhash session-id harness-agent--step-usage)
+    (remhash session-id harness-agent--step-started-at)
+    (remhash session-id harness-agent--step-attempts)
     ;; The provider conversation follows the head first, then the gate
     ;; runs, so that an automatic compaction lands before the user's new
     ;; message, never after it.  The gate's value carries the message
@@ -1613,9 +1638,82 @@ the payload)."
         (puthash sid (harness-plist-remove request :on-event harness-retry--request-key)
                 harness-agent--last-requests)
         (setf (harness-agent-turn-retry turn) nil)
+        ;; A step not reported yet starts here, with its own counts; one
+        ;; that is open is a retry of the same logical step, which keeps
+        ;; the counts of its first attempt and is reported once, at its end.
+        (unless (gethash sid harness-agent--step-open)
+          (remhash sid harness-agent--step-usage)
+          (puthash sid t harness-agent--step-open)
+          (puthash sid (float-time) harness-agent--step-started-at)
+          (puthash sid 0 harness-agent--step-attempts))
+        (puthash sid (1+ (or (gethash sid harness-agent--step-attempts) 0))
+                 harness-agent--step-attempts)
         (harness-emit 'agent/step-started sid (harness-agent-turn-steps turn))
         (harness-agent--update-activity sid '(:phase waiting))
         (setf (harness-agent-turn-handle turn) (harness-call 'provider/complete request)))))))
+
+(defun harness-agent--add-step-usage (sid ev)
+  "Add EV, the usage of an attempt at the open step of SID, to that step's own.
+The counts add up across the attempts of one logical step, which is
+reported once: a retry is not another operation.  Each count the
+provider gave is added; one it left out stays unknown, never a zero."
+  (let ((sum (gethash sid harness-agent--step-usage)))
+    (dolist (key '(:input :output :cache-read :cache-write))
+      (when (numberp (plist-get ev key))
+        (setq sum (plist-put sum key (+ (or (plist-get sum key) 0) (plist-get ev key))))))
+    (when (plist-member ev :cache-read)
+      (setq sum (plist-put sum :cache-read-known t)))
+    (puthash sid sum harness-agent--step-usage)))
+
+(defun harness-agent--report-step (turn reason &optional kind)
+  "Announce the end of TURN's open step, which stopped with REASON.
+One `agent/step-ended' is emitted for every logical step of a turn,
+whatever became of it: one the provider finished, one a cancellation cut
+short, and one that failed for good.  Its value is the step's own account
+-- the model it was sent to, how long it took, what its provider reported
+for it across its attempts, its failure's KIND and whether it ended -- and
+never any of its text: the transcript has that, and a subscriber that
+exports telemetry must not.  A step whose provider said nothing of its
+usage has none in the value, which is not a zero; `:cache-read-known' says
+whether the prompt cache reading is a count at all.  Nothing here is
+cumulative: each report is one step's own counts.
+
+A step tried again after a transient failure is the same logical step:
+it stays open across the retry, `:attempt' says how many attempts it
+took, and it is reported once, when it is over.  A step that ended with
+`error' and is about to be tried again is not reported here (see
+`harness-agent--step-failed'), so a retry is never an operation of its
+own."
+  (let ((sid (harness-agent-turn-session-id turn)))
+    (when (gethash sid harness-agent--step-open)
+      (remhash sid harness-agent--step-open)
+      (let ((usage (gethash sid harness-agent--step-usage))
+            (started (gethash sid harness-agent--step-started-at))
+            ;; A session closed under the turn still ends its step: the
+            ;; report says what it knows and asks the session nothing more.
+            (model (or (gethash sid harness-agent--step-models)
+                       (plist-get (ignore-errors (harness-call 'session/get sid))
+                                  :model))))
+        (harness-emit
+         'agent/step-ended sid
+         (append
+          (list :model model
+                :reason reason
+                :attempt (or (gethash sid harness-agent--step-attempts) 1)
+                :step (harness-agent-turn-steps turn)
+                :duration (and started (max 0 (- (float-time) started)))
+                :cancelled (and (eq reason 'cancelled) t))
+          ;; The provider's own reading of this step's tokens, cache counts
+          ;; included: never a session total, and never a made-up zero.
+          (when usage
+            (list :input (plist-get usage :input)
+                  :output (plist-get usage :output)
+                  :cache-read (plist-get usage :cache-read)
+                  :cache-write (plist-get usage :cache-write)
+                  :cache-read-known (and (plist-get usage :cache-read-known) t)))
+          ;; The failure's kind, never its text: the error a provider gives
+          ;; back can hold the whole prompt.
+          (when kind (list :error-kind kind))))))))
 
 (defun harness-agent--take-pending (turn)
   "Deliver the pending steering of TURN: record it and return its entries.
@@ -1799,6 +1897,8 @@ provider to report (`harness-agent--late-event')."
         ('tool-result (harness-agent--builtin-result turn ev))
         ('usage
          (setf (harness-agent-turn-last-usage turn) ev)
+         ;; This step's own reading, for `agent/step-ended'.
+         (harness-agent--add-step-usage sid ev)
          (harness-agent--add-usage sid ev model))
         ;; A request of a hosted loop's turn, which read or wrote the
         ;; prompt cache as it started: the session's cache is as of
@@ -1836,6 +1936,14 @@ provider to report (`harness-agent--late-event')."
                                       :step (harness-agent-turn-steps turn)))
                     harness-agent--failures)
            (harness-call 'session/hint sid (format "Error: %s" (or (plist-get ev :error) "unknown"))))
+         ;; The step is over, whatever it says: one report per logical step.
+         ;; One that failed is left open, as it may be tried again, and is
+         ;; reported once its fate is known (`harness-agent--step-failed').
+         ;; A turn a tool is ending reports it when it ends, with the reason
+         ;; the turn ended for, not the cancel it sent its provider.
+         (unless (or (eq (plist-get ev :stop-reason) 'error)
+                     (harness-agent-turn-ending turn))
+           (harness-agent--report-step turn (plist-get ev :stop-reason)))
          (harness-agent--maybe-continue turn))
         (other (harness-log 'debug "agent: unknown provider event %S" other))))))
 
@@ -2591,12 +2699,13 @@ Otherwise, and once the turn was cancelled, it ends with `error'."
   (let* ((sid (harness-agent-turn-session-id turn))
          (error (harness-agent-turn-error turn))
          (failure (or (gethash sid harness-agent--failures) (list :error error)))
+         (kind (or (plist-get failure :error-kind) 'error))
          (count (gethash sid harness-agent--retries 0)))
     (remhash sid harness-agent--failures)
     (if (or (harness-agent-turn-cancelled turn)
             (>= count harness-agent--max-error-retries)
             (not (harness-call 'session/exists-p sid)))
-        (harness-agent--end turn 'error error)
+        (harness-agent--end turn 'error error kind)
       (harness-then
        (harness-run-filter-async 'agent/step-error (list :retry nil)
                                  (harness-call 'session/get sid) failure)
@@ -2608,30 +2717,47 @@ Otherwise, and once the turn was cancelled, it ends with `error'."
                (progn (harness-agent--rewind-step turn)
                       (puthash sid (1+ count) harness-agent--retries)
                       ;; The step that follows repeats the request that
+                      ;; The same logical step, tried again: it stays open,
+                      ;; and its next attempt adds to its counts.
                       ;; failed, with what it spent and what authorised it.
                       (setf (harness-agent-turn-retry turn)
                             (plist-get decision :state))
                       (harness-agent--step turn))
-             (harness-agent--end turn 'error error))))
+             ;; Its fate is known: it ends the turn, and is reported once.
+             (harness-agent--end turn 'error error kind))))
        (lambda (err)
          (harness-log 'error "agent: agent/step-error for %s failed: %S" sid err)
          (when (harness-agent--current-p turn)
-           (harness-agent--end turn 'error error)))))))
+           (harness-agent--end turn 'error error kind)))))))
 
-(defun harness-agent--end (turn reason &optional error)
-  "End TURN with stop REASON, and ERROR when it failed.
+(defun harness-agent--end (turn reason &optional error kind)
+  "End TURN with stop REASON, and ERROR when it failed, of KIND.
 Only the session's current turn ends: the built-in calls still running
 get a result, an open session goes idle, or blocked when something
 waits on the user, `agent/turn-ended' is emitted and the turn's promise
 resolves.  A turn that ends with `end-turn' sends the session's queued
-messages next."
+messages next.  KIND is the failure's kind, for the report of a step the
+turn ends with (`agent/step-ended'); it is read from the failure when
+not given."
   (let ((sid (harness-agent-turn-session-id turn)))
     (when (eq (gethash sid harness-agent--turns) turn)
       ;; A turn cancelled before its provider was done.
       (when (harness-call 'session/exists-p sid)
         (harness-agent--close-builtins turn reason))
+      ;; A step still open ended with the turn: a cancellation, or a failure
+      ;; that is not tried again.  It is reported before `agent/turn-ended',
+      ;; so a subscriber sees the step end before the turn does.
+      (harness-agent--report-step
+       turn reason
+       (and (eq reason 'error)
+            (or kind
+                (plist-get (gethash sid harness-agent--failures) :error-kind)
+                'error)))
       (remhash sid harness-agent--turns)
       (remhash sid harness-agent--step-models)
+      (remhash sid harness-agent--step-usage)
+      (remhash sid harness-agent--step-started-at)
+      (remhash sid harness-agent--step-attempts)
       (remhash sid harness-agent--last-requests)
       (remhash sid harness-agent--failures)
       (remhash sid harness-agent--retries)
@@ -2841,6 +2967,8 @@ stopped work sends reach an idle session."
               (agent/cancelling
                . "(SESSION-ID) when the running turn is cancelled, before it ends: a gate holding the turn up lets it go")
               (agent/step-started . "(SESSION-ID STEP)")
+              (agent/step-ended
+               . "(SESSION-ID INFO) when a logical step of a turn is over, once per step however many attempts it took: INFO has `:model', `:reason' (the provider's stop reason, `cancelled' or `error'), `:attempt', `:step', `:duration', `:cancelled', and, when the provider reported them, `:input' `:output' `:cache-read' `:cache-write' and `:cache-read-known', the step's own counts and no session total; `:error-kind' says what kind of failure it was, and its text is never included")
               (agent/stream . "(SESSION-ID NODE-ID KIND DELTA)")
               (agent/tool-call . "(SESSION-ID NODE)") (agent/tool-result . "(SESSION-ID NODE)")
               (agent/steered . "(SESSION-ID)") (agent/quota . "(SESSION-ID WINDOWS)")

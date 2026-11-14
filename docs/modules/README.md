@@ -44,6 +44,7 @@ and supervisor load only when they are named.
  ;;merge              ; Merge queue: worktree branches merged into the session they were built…
  ;;model-complexity   ; Plain-language estimates of model task complexity, ordered from simple…
  ;;notifications      ; Notifications for the user through pluggable providers: desktop…
+ ;;otel               ; Opt-in OpenTelemetry export of turns, model requests and tool calls,…
  ;;patch-review       ; The threads of a task's review: kept in the state directory, delivered…
  ;;pet                ; A companion pet: hatched with random bones, named and voiced by a…
  ;;plugins            ; Projects' plugins: what a project's trusted .dir-locals.el loads, and…
@@ -145,6 +146,7 @@ and supervisor load only when they are named.
 | [model-complexity](model-complexity.md) |  | [provider](provider.md) | Plain-language estimates of model task complexity, ordered from simple to very complex. |
 | [naming](naming.md) | by default | [session](session.md), [provider](provider.md), [agent](agent.md) | Name nameless sessions with a cheap model as soon as their first message is sent. |
 | [notifications](notifications.md) |  |  | Notifications for the user through pluggable providers: desktop (system) and Gotify. |
+| [otel](otel.md) | when named | [agent](agent.md), [tools](tools.md) | Opt-in OpenTelemetry export of turns, model requests and tool calls, over OTLP/HTTP. |
 | [patch-review](patch-review.md) |  | [store](store.md), [tasks](tasks.md), [tools-review](tools-review.md), [thread-reply](thread-reply.md) | The threads of a task's review: kept in the state directory, delivered with the feedback, answered by the agent. |
 | [perms](perms.md) | by default | [config](config.md), [tools](tools.md) | Directory jail, directory requests, permission modes, auto judge, user prompts with a cheap model's summary of the call, and the user's approval of denied calls. |
 | [pet](pet.md) |  | [store](store.md), [provider](provider.md) | A companion pet: hatched with random bones, named and voiced by a cheap model, growing with use. |
@@ -298,12 +300,13 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/quota` | [agent](agent.md) | [agent](agent.md) |  | yes |
 | `agent/spawned` | [tools-agent](tools-agent.md) | [tools-agent](tools-agent.md) |  |  |
 | `agent/steered` | [agent](agent.md) | [agent](agent.md) | [resilience](resilience.md) |  |
-| `agent/step-started` | [agent](agent.md) | [agent](agent.md) | [resilience](resilience.md), [tools](tools.md) |  |
+| `agent/step-ended` | [agent](agent.md) | [agent](agent.md) | [otel](otel.md) |  |
+| `agent/step-started` | [agent](agent.md) | [agent](agent.md) | [otel](otel.md), [resilience](resilience.md), [tools](tools.md) |  |
 | `agent/stream` | [agent](agent.md) | [agent](agent.md) | [acp](acp.md), [resilience](resilience.md), [usage](usage.md) |  |
 | `agent/tool-call` | [agent](agent.md) | [agent](agent.md) | [resilience](resilience.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools](tools.md) |  |
 | `agent/tool-result` | [agent](agent.md) | [agent](agent.md) | [perms](perms.md), [recap](recap.md), [resilience](resilience.md), [tools](tools.md) |  |
-| `agent/turn-ended` | [agent](agent.md) | [agent](agent.md) | [compaction](compaction.md), [cowboy](cowboy.md), [handoff](handoff.md), [merge](merge.md), [perms](perms.md), [pet](pet.md), [recap](recap.md), [redact](redact.md), [resilience](resilience.md), [retry](retry.md), [session](session.md), [supervisor](supervisor.md), [tasks](tasks.md), [thread-reply](thread-reply.md), [todo-sync](todo-sync.md), [tools](tools.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-usage](ui-usage.md), [ui-usage-history](ui-usage-history.md), [ui-workspace](ui-workspace.md), [usage](usage.md), [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md) | yes |
-| `agent/turn-started` | [agent](agent.md) | [agent](agent.md) | [merge](merge.md), [naming](naming.md), [perms](perms.md), [recap](recap.md), [resilience](resilience.md), [retry](retry.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-pet](ui-pet.md), [ui-workspace](ui-workspace.md), [usage](usage.md), [workspace](workspace.md) | yes |
+| `agent/turn-ended` | [agent](agent.md) | [agent](agent.md) | [compaction](compaction.md), [cowboy](cowboy.md), [handoff](handoff.md), [merge](merge.md), [otel](otel.md), [perms](perms.md), [pet](pet.md), [recap](recap.md), [redact](redact.md), [resilience](resilience.md), [retry](retry.md), [session](session.md), [supervisor](supervisor.md), [tasks](tasks.md), [thread-reply](thread-reply.md), [todo-sync](todo-sync.md), [tools](tools.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-usage](ui-usage.md), [ui-usage-history](ui-usage-history.md), [ui-workspace](ui-workspace.md), [usage](usage.md), [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md) | yes |
+| `agent/turn-started` | [agent](agent.md) | [agent](agent.md) | [merge](merge.md), [naming](naming.md), [otel](otel.md), [perms](perms.md), [recap](recap.md), [resilience](resilience.md), [retry](retry.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-pet](ui-pet.md), [ui-workspace](ui-workspace.md), [usage](usage.md), [workspace](workspace.md) | yes |
 | `cache/compacted` | [cache-compact](cache-compact.md) | [cache-compact](cache-compact.md) |  |  |
 | `cache/poor-hit` | [cache](cache.md) | [cache](cache.md) |  |  |
 | `cache/pre-expire` | [cache](cache.md) | [cache](cache.md) | [cache-compact](cache-compact.md), [cache-warm](cache-warm.md) |  |
@@ -405,10 +408,10 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `tool-slots/changed` | [tool-slots-load](tool-slots-load.md) | [tool-slots-load](tool-slots-load.md) | [ui-slots](ui-slots.md), [ui-tool-slots-load](ui-tool-slots-load.md) | yes |
 | `tool-slots/holders-changed` | [tool-slots](tool-slots.md) | [tool-slots](tool-slots.md) | [tool-slots-load](tool-slots-load.md) |  |
 | `tools/file-written` | [tools](tools.md) | [tools-fs](tools-fs.md) |  | yes |
-| `tools/finished` | [tools](tools.md) | [tools](tools.md) | [perms](perms.md), [supervisor](supervisor.md) |  |
+| `tools/finished` | [tools](tools.md) | [tools](tools.md) | [otel](otel.md), [perms](perms.md), [supervisor](supervisor.md) |  |
 | `tools/note` | [tools](tools.md) | [tools](tools.md) | [agent](agent.md) |  |
 | `tools/progress` | [tools](tools.md) | [tools](tools.md) | [agent](agent.md), [resilience](resilience.md) |  |
-| `tools/started` | [tools](tools.md) | [tools](tools.md) |  |  |
+| `tools/started` | [tools](tools.md) | [tools](tools.md) | [otel](otel.md) |  |
 | `usage/budget-warning` | [usage](usage.md) | [usage](usage.md) | [ui-usage](ui-usage.md) | yes |
 | `usage/budgets-changed` | [usage](usage.md) | [usage](usage.md) | [tasks](tasks.md), [ui-usage](ui-usage.md), [usage](usage.md) | yes |
 | `usage/live-updated` | [usage](usage.md) | [usage](usage.md) |  | yes |

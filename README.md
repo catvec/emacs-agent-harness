@@ -170,7 +170,7 @@ The `(harness-enable-modules ...)` function helps enable and load modules of you
 
 See [`docs/modules/README.md`](./docs/modules/README.md) for a full list of modules by category.
 
-You can set the `harness-enabled-modules` variable to `t` in order to load all modules distributed with the harness, except the modules off by default: `demo`, which runs a hand-in's demo and opens the walkthrough presenter, and `supervisor`. They load when `harness-enable-modules` names them, or when you take them off `harness-off-by-default-modules`.
+You can set the `harness-enabled-modules` variable to `t` in order to load all modules distributed with the harness, except the modules off by default: `demo`, which runs a hand-in's demo and opens the walkthrough presenter, `supervisor`, and `otel`, which exports turns, model requests and tool calls to an OpenTelemetry collector. They load when `harness-enable-modules` names them, or when you take them off `harness-off-by-default-modules`.
 
 A non-comprehensive list of all the different functionality offered by modules shipped with the harness:
 
@@ -291,6 +291,14 @@ A non-comprehensive list of all the different functionality offered by modules s
 - Configuration via customize
   - Global overridden by per-project (via `.dir-locals.el`)
   - Corporate policy profiles
+- [OpenTelemetry export](docs/otel.md) (`otel`, optional and off by default)
+  - Turns, model requests and tool calls as spans in one trace per turn, plus inference duration and input/output token metrics
+  - GenAI semantic conventions pinned to a commit, with the revision and its caveats named; the older v1.x names are deliberately not emitted
+  - No prompt, answer, tool argument or output, path, credential or error text leaves the process; content export has no switch in this version
+  - A bounded asynchronous queue over the harness's own HTTP layer: a slow or broken collector never makes a turn wait
+  - Try it with the collector and turn in `demo/otel-export/`, which needs no collector installed
+
+![A turn exported to a local collector: eight spans in one trace and six metric records](docs/media/otel-export.png)
 - Workspace mode (first slice)
   - One persistent chat over topic threads, with fresh episodes instead of a compacted transcript
   - A Logseq knowledge graph for the workspace: a page per thread with its decisions and open loops, and the turns captured in the day's journal, with `knowledge_search` and `knowledge_write` recall into the next brief

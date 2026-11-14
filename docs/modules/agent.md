@@ -8,7 +8,7 @@ The turn loop: prompt, stream, run tools, steer, queue.
 - **Source:** [lisp/modules/harness-agent.el](../../lisp/modules/harness-agent.el)
 - **Loaded:** by default
 - **Requires:** [session](session.md), [provider](provider.md), [tools](tools.md)
-- **Required by:** [cache-warm](cache-warm.md), [commit-attribution](commit-attribution.md), [compaction](compaction.md), [cowboy](cowboy.md), [demo](demo.md), [handoff](handoff.md), [merge](merge.md), [naming](naming.md), [recap](recap.md), [resilience](resilience.md), [retry](retry.md), [supervisor](supervisor.md), [tasks](tasks.md), [thread-reply](thread-reply.md), [todo-sync](todo-sync.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [workspace](workspace.md)
+- **Required by:** [cache-warm](cache-warm.md), [commit-attribution](commit-attribution.md), [compaction](compaction.md), [cowboy](cowboy.md), [demo](demo.md), [handoff](handoff.md), [merge](merge.md), [naming](naming.md), [otel](otel.md), [recap](recap.md), [resilience](resilience.md), [retry](retry.md), [supervisor](supervisor.md), [tasks](tasks.md), [thread-reply](thread-reply.md), [todo-sync](todo-sync.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [workspace](workspace.md)
 - **Brings along:** [retry](retry.md) (its file requires it)
 
 ## About
@@ -103,6 +103,7 @@ The loop is entirely event driven: nothing here waits.
 - `agent/cancelling` — (SESSION-ID) when the running turn is cancelled, before it ends: a gate holding the turn up lets it go
 - `agent/quota` — (SESSION-ID WINDOWS)
 - `agent/steered` — (SESSION-ID)
+- `agent/step-ended` — (SESSION-ID INFO) when a logical step of a turn is over, once per step however many attempts it took: INFO has `:model`, `:reason` (the provider's stop reason, `cancelled` or `error`), `:attempt`, `:step`, `:duration`, `:cancelled`, and, when the provider reported them, `:input` `:output` `:cache-read` `:cache-write` and `:cache-read-known`, the step's own counts and no session total; `:error-kind` says what kind of failure it was, and its text is never included
 - `agent/step-started` — (SESSION-ID STEP)
 - `agent/stream` — (SESSION-ID NODE-ID KIND DELTA)
 - `agent/tool-call` — (SESSION-ID NODE)
@@ -183,6 +184,7 @@ The loop is entirely event driven: nothing here waits.
 - `agent/cancelling`
 - `agent/quota`
 - `agent/steered`
+- `agent/step-ended`
 - `agent/step-started`
 - `agent/stream`
 - `agent/tool-call`
