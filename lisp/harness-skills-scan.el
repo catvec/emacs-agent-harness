@@ -398,7 +398,9 @@ says the bounds cut the list."
       (let* ((pair (pop stack))
              (current (car pair))
              (depth (cdr pair)))
-        (dolist (entry (ignore-errors (directory-files current t "\\`[^.]" t)))
+        ;; Sort before applying the bounds: sorting only OUT would keep
+        ;; a different subset for different filesystem enumeration orders.
+        (dolist (entry (ignore-errors (directory-files current t "\\`[^.]")))
           (unless truncated
             (cond
              ((member entry seen) nil)

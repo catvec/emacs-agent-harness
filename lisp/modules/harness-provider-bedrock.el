@@ -2274,7 +2274,19 @@ which is no zero."
      (and cache-write (list :cache-write cache-write))
      (list :cost nil
            :billing 'api
-           :context (+ input (or cache-read 0) (or cache-write 0))))))
+           :context (+ input (or cache-read 0) (or cache-write 0)))
+     (list :usage
+           (cl-loop for (key value) on
+                    (list :input (plist-get usage :inputTokens)
+                          :output (plist-get usage :outputTokens)
+                          :cache-read cache-read :cache-write cache-write
+                          :context (and (harness-token-count-p (plist-get usage :inputTokens))
+                                        cache-read cache-write
+                                        (+ input cache-read cache-write)))
+                    by #'cddr
+                    when (harness-token-count-p value) append (list key value))
+           :input-semantics "exclusive"
+           :cache-write-status (if cache-write "reported" "not-reported")))))
 
 (defun harness-bedrock--finish (stream reason &optional error)
   "End STREAM with stop REASON and optional ERROR text, emitting once.

@@ -8,7 +8,7 @@ Provider contract, registry and model catalogue.
 - **Source:** [lisp/modules/harness-provider.el](../../lisp/modules/harness-provider.el)
 - **Loaded:** by default
 - **Requires:** nothing
-- **Required by:** [admission](admission.md), [agent](agent.md), [cache-warm](cache-warm.md), [compaction](compaction.md), [cost-compare](cost-compare.md), [fallback](fallback.md), [handoff](handoff.md), [model-complexity](model-complexity.md), [naming](naming.md), [pet](pet.md), [provider-bedrock](provider-bedrock.md), [provider-check](provider-check.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md), [provider-deepseek](provider-deepseek.md), [provider-demo](provider-demo.md), [provider-gremlin](provider-gremlin.md), [provider-openai](provider-openai.md), [provider-openrouter](provider-openrouter.md), [provider-responses](provider-responses.md), [recap](recap.md), [tasks-search](tasks-search.md), [todo-sync](todo-sync.md), [usage](usage.md)
+- **Required by:** [admission](admission.md), [agent](agent.md), [cache-warm](cache-warm.md), [compaction](compaction.md), [cost-compare](cost-compare.md), [fallback](fallback.md), [handoff](handoff.md), [model-complexity](model-complexity.md), [naming](naming.md), [pet](pet.md), [provider-bedrock](provider-bedrock.md), [provider-check](provider-check.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md), [provider-deepseek](provider-deepseek.md), [provider-demo](provider-demo.md), [provider-gremlin](provider-gremlin.md), [provider-openai](provider-openai.md), [provider-openrouter](provider-openrouter.md), [provider-responses](provider-responses.md), [recap](recap.md), [tasks-search](tasks-search.md), [todo-sync](todo-sync.md), [usage](usage.md), [usage-history](usage-history.md)
 
 ## About
 
@@ -60,6 +60,7 @@ only the models allowed, and a tier's model is chosen among them.
 - `provider/fork` (model-id state &optional checkpoint) — Ask MODEL-ID's provider to fork provider STATE.
 - `provider/list` — Return registered providers as (:id :label :doc :capabilities :tiers) plists.
 - `provider/model` (model-id) — Return the model plist for MODEL-ID from the catalogue, or one made for it.
+- `provider/model-cached` (model-id) — Return cached metadata for MODEL-ID, or nil without any provider work.
 - `provider/model-tier` (model-id) — Return the tier of MODEL-ID within its provider.
 - `provider/models` (&optional refresh) — Return a promise of every model from every provider.
 - `provider/quota` (provider-id &optional refresh) — Return a promise of PROVIDER-ID's billing and quota information, or of nil.

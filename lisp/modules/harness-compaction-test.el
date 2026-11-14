@@ -184,6 +184,27 @@ one-off request of its own says so in its system prompt."
                  (plist-get (plist-get (harness-call 'session/get id) :usage) :context)))
       (should (zerop (hash-table-count harness-compaction--running))))))
 
+(ert-deftest harness-compaction-preserves-usage-provenance-and-plan-billing ()
+  (harness-compaction-test-with
+    (harness-test-load-module 'usage)
+    (dolist (event '((:input 100 :output 10 :cache-read 0 :cache-write 0 :cost 0.5
+                            :usage (:input 100 :output 10) :input-semantics "inclusive"
+                            :cache-write-status "not-reported" :cost-source "estimated" :billing extra-usage)
+                     (:input 20 :output 0 :cache-read 0 :cache-write 0 :cost 0.0
+                             :usage (:input 20 :output 0 :cache-read 0) :input-semantics "inclusive"
+                             :cache-write-status "not-reported" :cost-source "subscription" :billing subscription :plan "Plan")))
+      (let* ((id (harness-compaction-test-session))
+             (head (plist-get (harness-call 'session/get id) :head)))
+        (harness-compaction--finish id "Summary" head "demo:scripted" event 100 nil 'full)
+        (let* ((row (car (harness-call 'usage/rows :session id))) (details (plist-get row :details)))
+          (should (equal (plist-get event :usage) (plist-get details :usage)))
+          (should (equal (plist-get event :cost-source) (plist-get details :cost-source)))
+          (should (equal (symbol-name (plist-get event :billing)) (plist-get row :billing)))
+          (should (equal "inclusive" (plist-get details :input-semantics)))
+          (should (equal "not-reported" (plist-get details :cache-write-status)))
+          (should-not (plist-member (plist-get details :usage) :cache-write))
+          (should-not (plist-get details :observed-cost)))))))
+
 (ert-deftest harness-compaction-starts-the-cache-over ()
   "A compaction leaves nothing cached: the conversation goes on from its summary.
 What the summariser's request read from the cache is counted, but it

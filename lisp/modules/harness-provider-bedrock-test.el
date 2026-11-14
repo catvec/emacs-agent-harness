@@ -745,7 +745,9 @@ for the level as it is."
         (should (equal "Let me think" (mapconcat (lambda (e) (or (and (eq (plist-get e :type) 'thinking) (plist-get e :delta)) ""))
                                                  events "")))
         (should (equal "Hello world" (harness-bedrock-test--text events)))
-        (should (equal '(:type usage :input 100 :output 20 :cache-read 50 :cache-write 10 :cost nil :billing api :context 160)
+        (should (equal '(:type usage :input 100 :output 20 :cache-read 50 :cache-write 10 :cost nil :billing api :context 160
+                         :usage (:input 100 :output 20 :cache-read 50 :cache-write 10 :context 160)
+                         :input-semantics "exclusive" :cache-write-status "reported")
                        (nth 5 events)))
         (should (equal '(:type tool-call :id "tooluse_abc" :name "read_file" :input (:path "/tmp/x") :respond nil)
                        (nth 6 events)))
@@ -820,7 +822,9 @@ at most every `harness-bedrock--progress-interval' seconds."
                                                          (harness-bedrock-test--request "hi")))))
         (should (equal '(start text text text text text usage done) (harness-bedrock-test--types events)))
         (should (equal "Hi there, how are you?" (harness-bedrock-test--text events)))
-        (should (equal '(:type usage :input 12 :output 7 :cache-read 0 :cache-write 0 :cost nil :billing api :context 12)
+        (should (equal '(:type usage :input 12 :output 7 :cache-read 0 :cache-write 0 :cost nil :billing api :context 12
+                         :usage (:input 12 :output 7 :cache-read 0 :cache-write 0 :context 12)
+                         :input-semantics "exclusive" :cache-write-status "reported")
                        (nth 6 events)))
         (should (equal '(:type done :stop-reason end-turn) (car (last events))))
         ;; Plain text replies leave nothing to remember.
@@ -831,12 +835,16 @@ at most every `harness-bedrock--progress-interval' seconds."
 The input leaves cached tokens out, so the context is input plus the
 parts the provider did report; a reported zero stays a reading."
   (should (equal '(:type usage :input 100 :output 20 :cache-read 50 :cache-write 10
-                   :cost nil :billing api :context 160)
+                   :cost nil :billing api :context 160
+                   :usage (:input 100 :output 20 :cache-read 50 :cache-write 10 :context 160)
+                   :input-semantics "exclusive" :cache-write-status "reported")
                  (harness-bedrock--usage-event
                   '(:inputTokens 100 :outputTokens 20
                     :cacheReadInputTokens 50 :cacheWriteInputTokens 10))))
   (should (equal '(:type usage :input 100 :output 20 :cache-read 0 :cache-write 0
-                   :cost nil :billing api :context 100)
+                   :cost nil :billing api :context 100
+                   :usage (:input 100 :output 20 :cache-read 0 :cache-write 0 :context 100)
+                   :input-semantics "exclusive" :cache-write-status "reported")
                  (harness-bedrock--usage-event
                   '(:inputTokens 100 :outputTokens 20
                     :cacheReadInputTokens 0 :cacheWriteInputTokens 0))))
@@ -849,6 +857,26 @@ parts the provider did report; a reported zero stays a reading."
       (should-not (plist-member event :cache-read))
       (should-not (plist-member event :cache-write))
       (should (= 100 (plist-get event :context))))))
+
+(ert-deftest harness-provider-bedrock-usage-provenance-preserves-raw-presence ()
+  "Exclusive counts keep only reported numeric categories, including zero."
+  (let ((event (harness-bedrock--usage-event nil)))
+    (should (= 0 (plist-get event :input)))
+    (should (plist-member event :usage))
+    (should-not (plist-get event :usage))
+    (should (equal "exclusive" (plist-get event :input-semantics)))
+    (should (equal "not-reported" (plist-get event :cache-write-status)))
+    (should-not (plist-member event :observed-cost)))
+  (let ((event (harness-bedrock--usage-event
+                '(:inputTokens 10 :outputTokens 0 :cacheReadInputTokens 0))))
+    (should (equal '(:input 10 :output 0 :cache-read 0) (plist-get event :usage)))
+    ;; The old context defaults the absent write to zero; raw usage does not.
+    (should (= 10 (plist-get event :context)))
+    (should-not (plist-member (plist-get event :usage) :context)))
+  (let ((event (harness-bedrock--usage-event
+                '(:outputTokens nil :cacheReadInputTokens -1 :cacheWriteInputTokens 0))))
+    (should (equal '(:cache-write 0) (plist-get event :usage)))
+    (should (equal "reported" (plist-get event :cache-write-status)))))
 
 (ert-deftest harness-provider-bedrock-stop-reasons-and-errors ()
   (harness-bedrock-test-with-keys

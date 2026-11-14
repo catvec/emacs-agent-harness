@@ -8,7 +8,7 @@ Cost accounting, usage summaries, budgets, output rates and live token counts.
 - **Source:** [lisp/modules/harness-usage.el](../../lisp/modules/harness-usage.el)
 - **Loaded:** by default
 - **Requires:** [store](store.md), [session](session.md), [provider](provider.md)
-- **Required by:** [commit-attribution](commit-attribution.md), [cost-compare](cost-compare.md)
+- **Required by:** [commit-attribution](commit-attribution.md), [cost-compare](cost-compare.md), [usage-history](usage-history.md)
 - **Brings along:** [ui-usage](ui-usage.md) (its UI)
 
 ## About
@@ -105,6 +105,7 @@ the plan's windows (see "Quota exchange rates" below).
 - `usage/rates` — Return the output rate of every measured session, newest first.
 - `usage/record` (row) — Persist usage ROW and return it with `:id` set.
 - `usage/remove-budget` (id) — Remove the budget ID.  Return non-nil when one was removed.
+- `usage/rows` (&rest opts) — Return persisted usage rows matching OPTS, oldest first, without repricing.
 - `usage/series` (&rest opts) — Return a continuous time series of usage per OPTS `:bucket` (day|hour).
 - `usage/session-budgets` (session-id &rest opts) — Return the status of every budget applying to SESSION-ID.
 - `usage/set-budget` (budget) — Add BUDGET, or replace the budget with the same `:id`.  Return it.

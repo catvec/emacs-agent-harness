@@ -104,6 +104,175 @@ Return (PROJECT-A PROJECT-B)."
       (should (equal (plist-get (harness-call 'session/get id) :project)
                      (plist-get (car (harness-call 'usage/summary :group-by 'project)) :key))))))
 
+;;;; Provenance metadata
+
+(ert-deftest harness-usage-details-preserve-missing-and-reported-zero ()
+  "Ledger defaults must not turn absent provider readings into known zeros."
+  (harness-usage-test-with
+    (let ((id (harness-usage-test-session)))
+      (harness-call 'session/usage-add id '(:input 10 :output 0))
+      (harness-call 'session/usage-add id
+                    '(:input 10 :output 0 :cache-read 0 :cache-write 0 :cost 0
+                      :input-semantics "exclusive"))
+      (pcase-let* ((`(,missing ,zero) (harness-call 'usage/rows :session id))
+                   (unknown (plist-get missing :details))
+                   (known (plist-get zero :details)))
+        ;; The old columns stay compatible with totals and budgets.
+        (dolist (row (list missing zero))
+          (should (= 0 (plist-get row :cache-read)))
+          (should (= 0 (plist-get row :cache-write))))
+        (should (equal '(:input 10 :output 0) (plist-get unknown :usage)))
+        (should (equal "unknown" (plist-get unknown :input-semantics)))
+        (should (equal "unknown" (plist-get unknown :cache-write-status)))
+        (should (equal '(:input 10 :output 0 :cache-read 0 :cache-write 0)
+                       (plist-get known :usage)))
+        (should (equal "exclusive" (plist-get known :input-semantics)))
+        (should (equal "reported" (plist-get known :cache-write-status)))
+        (should (= 20 (plist-get (harness-call 'usage/totals :session id) :input)))))))
+
+(ert-deftest harness-usage-details-provider-presence-overrides-normalizer-defaults ()
+  "Provider annotations win over synthetic zeros, including an empty reading."
+  (harness-usage-test-with
+    (let ((row (harness-call 'usage/record
+                            '(:model "demo:scripted" :input 100 :output 0 :cache-read 50 :cache-write 0
+                              :usage (:input 100 :output 0 :cache-read 50 :cache-write nil
+                                      :context 100 :last-output -1 :private "content")
+                              :input-semantics "inclusive" :cache-write-status "not-reported"))))
+      (let ((details (plist-get row :details)))
+        (should (equal '(:input 100 :output 0 :cache-read 50 :context 100) (plist-get details :usage)))
+        (should (equal "inclusive" (plist-get details :input-semantics)))
+        (should (equal "not-reported" (plist-get details :cache-write-status)))
+        (should-not (plist-member (plist-get details :usage) :cache-write))))
+    (let* ((row (harness-call 'usage/record '(:model "demo:scripted" :input 0 :output 0
+                                             :cache-read 0 :cache-write 0 :usage nil)))
+           (details (plist-get row :details)))
+      (should (= 1 (plist-get details :version)))
+      (should-not (plist-get details :usage))
+      (should (equal "unknown" (plist-get details :input-semantics)))
+      (should (equal "unknown" (plist-get details :cache-write-status))))))
+
+(ert-deftest harness-usage-details-cost-origin-survives-session-pricing ()
+  "Observed USD, catalogue estimates and plan-covered zeros stay distinct."
+  (harness-usage-test-with
+    (let ((id (harness-usage-test-session)))
+      (dolist (record '((:input 10 :output 0 :cost 0)
+                        (:input 10 :output 0)
+                        (:input 10 :output 0 :cost 0.0 :billing subscription)
+                        (:input 10 :output 0 :cost 0.02 :billing extra-usage :cost-source "estimated")))
+        (harness-call 'session/usage-add id record))
+      (let* ((rows (harness-call 'usage/rows :session id))
+             (details (mapcar (lambda (row) (plist-get row :details)) rows)))
+        (should (equal '("observed" "estimated" "subscription" "estimated")
+                       (mapcar (lambda (d) (plist-get d :cost-source)) details)))
+        (should (plist-member (car details) :observed-cost))
+        (should (= 0 (plist-get (car details) :observed-cost)))
+        (dolist (d (cdr details)) (should-not (plist-member d :observed-cost)))
+        (should (harness-usage-test-near 0.00001 (plist-get (nth 1 rows) :cost)))
+        (should (= 0.0 (plist-get (nth 2 rows) :cost)))
+        (should (harness-usage-test-near 0.00001 (plist-get (nth 2 rows) :list-cost)))
+        (should (harness-usage-test-near 0.02001 (plist-get (harness-call 'usage/totals :session id) :cost))))
+      ;; Other usage/record callers already calculate their own costs, without
+      ;; saying so.  A bare numeric cost is not evidence of a provider bill.
+      (let ((details (plist-get (harness-call 'usage/record '(:model "demo:scripted" :cost 1.0)) :details)))
+        (should (equal "unknown" (plist-get details :cost-source)))
+        (should-not (plist-member details :observed-cost))))))
+
+(ert-deftest harness-usage-details-snapshot-request-model-pricing-at-the-original-time ()
+  "Rates are whitelisted once, from the actual model and the time it was priced."
+  (harness-usage-test-with
+    (let ((id (harness-usage-test-session))
+          (rate 2.0)
+          (requests nil))
+      (cl-letf (((symbol-function 'harness-method/provider/model)
+                 (lambda (model)
+                   (list :id model :private "content"
+                         :pricing-fn (lambda (model _usage at)
+                                       (push (plist-get model :id) requests)
+                                       (should (= 100.0 at))
+                                       (list :input rate :output 0 :cache-read 0.1 :cache-write nil
+                                             :private "content" :authorization "credential"))))))
+        (harness-call 'session/usage-add id
+                      '(:model "demo:actual-request" :input 1000000 :output 0 :priced-at 100.0
+                        :usage (:input 1000000 :output 0) :input-semantics "exclusive"))
+        (let* ((row (car (harness-call 'usage/rows :session id)))
+               (details (plist-get row :details)))
+          (should (equal "demo:actual-request" (plist-get row :model)))
+          (should (cl-every (lambda (m) (equal "demo:actual-request" m)) requests))
+          (should (= 2.0 (plist-get row :cost)))
+          (should (equal '(:input 2.0 :output 0 :cache-read 0.1) (plist-get details :pricing)))
+          (should (equal "USD" (plist-get details :currency)))
+          (should (= 100.0 (plist-get details :priced-at)))
+          (setq rate 99.0 requests nil)
+          (should (equal details (plist-get (car (harness-call 'usage/rows :session id)) :details)))
+          (should-not requests))))))
+
+(ert-deftest harness-usage-details-migrate-a-v2-sqlite-table-without-reclassifying-legacy ()
+  "The additive JSON column leaves all old counter presence unknown."
+  (harness-usage-test-with
+    (let ((db (harness-call 'store/sqlite)))
+      (skip-unless db)
+      (sqlite-execute db "DROP TABLE usage")
+      (sqlite-execute db "CREATE TABLE usage (id INTEGER PRIMARY KEY, ts REAL, session TEXT, project TEXT, model TEXT, input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER, cost REAL, turn INTEGER, list_cost REAL, billing TEXT)")
+      (sqlite-execute db "INSERT INTO usage (ts, session, project, model, input, output, cache_read, cache_write, cost, turn, list_cost, billing) VALUES (100, 'legacy', '/p/', 'demo:scripted', 10, 0, 0, 0, 2.5, 1, 2.5, 'api')")
+      (setq harness-usage--schema-db (cons db 2))
+      (harness-call 'usage/record '(:ts 200 :session "new" :project "/p/" :model "demo:scripted"
+                                    :input 10 :output 0 :cost 0 :cost-source "observed"))
+      (should (equal '("TEXT")
+                     (cdr (assoc "details" (mapcar (lambda (c) (list (nth 1 c) (nth 2 c)))
+                                                   (sqlite-select db "PRAGMA table_info(usage)"))))))
+      (should (equal '(("null") ("text")) (sqlite-select db "SELECT typeof(details) FROM usage ORDER BY ts")))
+      (pcase-let ((`(,old ,new) (harness-call 'usage/rows :project "/p/")))
+        (should-not (plist-get old :details))
+        (should (= 0 (plist-get old :cache-read)))
+        (should (equal '(:input 10 :output 0) (plist-get (plist-get new :details) :usage))))
+      ;; Corrupt ancillary metadata must not disable otherwise valid budgets.
+      (sqlite-execute db "UPDATE usage SET details = '{invalid' WHERE session = 'new'")
+      (should-not (plist-get (car (harness-call 'usage/rows :session "new")) :details))
+      (let ((totals (harness-call 'usage/totals :project "/p/")))
+        (should (= 2 (plist-get totals :calls)))
+        (should (= 2.5 (plist-get totals :cost)))
+        (should (= 2.5 (plist-get totals :list-cost)))))))
+
+(ert-deftest harness-usage-details-jsonl-roundtrip-and-raw-row-filters ()
+  "JSONL preserves the SQLite metadata shape; reads do not enrich legacy rows."
+  (harness-usage-test-with
+    (let* ((record '(:ts 200.0 :session "s" :project "/p" :model "demo:scripted"
+                     :input 10 :output 0 :cache-read 0 :cache-write 0 :cost 0 :cost-source "observed"
+                     :usage (:input 10 :output 0 :cache-read 0) :input-semantics "inclusive"
+                     :cache-write-status "not-reported" :priced-at 100.0))
+           (expected (plist-get (harness-call 'usage/record record) :details)))
+      (cl-letf (((symbol-function 'harness-method/store/sqlite) (lambda () nil)))
+        (harness-call 'store/append harness-usage-jsonl-name
+                      '(:id "old" :ts 100.0 :session "old" :project "/p/" :model "demo:scripted"
+                        :input 5 :output 0 :cache-read 0 :cache-write 0 :cost 1.0))
+        (harness-call 'usage/record record)
+        (let* ((rows (harness-call 'usage/rows :since 200 :until 201 :session "s" :model "demo:scripted"
+                                  :projects '("/p") :billing ""))
+               (details (plist-get (car rows) :details)))
+          (should (= 1 (length rows)))
+          (should (equal expected details))
+          ;; Returned rows are independent snapshots, not mutable ledger state.
+          (setf (plist-get (plist-get details :usage) :input) 999)
+          (should (equal expected (plist-get (car (harness-call 'usage/rows :session "s")) :details))))
+        (should-not (plist-get (car (harness-call 'usage/rows :until 200)) :details))
+        (should (= 1.0 (plist-get (harness-call 'usage/totals) :cost)))))))
+
+(ert-deftest harness-usage-details-explicit-metadata-is-whitelisted-not-repriced ()
+  "An explicitly supplied snapshot keeps its origin, never private payloads."
+  (harness-usage-test-with
+    (let* ((row (harness-call 'usage/record
+                             '(:model "demo:scripted" :input 100 :cost 3
+                               :details (:version 1 :usage (:input 100 :cache-write "0" :secret "private")
+                                         :input-semantics "exclusive" :cost-source "estimated"
+                                         :pricing (:input 9 :cache-read -1 :authorization "private")
+                                         :currency "private" :priced-at 1.0 :private "content"))))
+           (details (plist-get row :details)))
+      (should (equal '(:version 1 :usage (:input 100) :input-semantics "exclusive"
+                       :cache-write-status "unknown" :cost-source "estimated"
+                       :pricing (:input 9) :currency "unknown" :priced-at 1.0)
+                     details)))
+    (should-not (plist-get (harness-call 'usage/record '(:input 10 :cost 1 :details nil)) :details))))
+
 ;;;; Summaries, totals, series
 
 (ert-deftest harness-usage-summaries-and-totals ()

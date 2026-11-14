@@ -1211,6 +1211,75 @@ present, as in the CLI's own accounting."
           :requests (and (numberp (plist-get data :cost)) (plist-get data :cost))
           :finish (plist-get data :finishReason))))
 
+(defun harness-provider-copilot--reported-call-usage (data)
+  "Return presence-preserving counts and input semantics from raw call DATA.
+Itemized input excludes the cache.  Without it, an inclusive input
+count can be split only when both cache categories were reported."
+  (let* ((details (harness-plist-get-in data '(:copilotUsage :tokenDetails)))
+         (detail (lambda (type)
+                   (let ((value (plist-get
+                                 (cl-find type details :key (lambda (x) (plist-get x :tokenType))
+                                          :test #'equal)
+                                 :tokenCount)))
+                     (and (harness-token-count-p value) value))))
+         (input-detail (funcall detail "input"))
+         (read (or (funcall detail "cache_read")
+                   (let ((value (plist-get data :cacheReadTokens)))
+                     (and (harness-token-count-p value) value))))
+         (writes (delq nil (list (funcall detail "cache_write") (funcall detail "cache_write_1h"))))
+         (write-total (plist-get data :cacheWriteTokens))
+         (write (cond ((harness-token-count-p write-total)
+                       (max write-total (if writes (apply #'+ writes) 0)))
+                      (writes (apply #'+ writes))))
+         (total (plist-get data :inputTokens))
+         (split (and (harness-token-count-p total) read write (<= (+ read write) total)))
+         (input (cond (input-detail input-detail)
+                      (split (- total read write))
+                      (t total)))
+         (output (or (funcall detail "output") (plist-get data :outputTokens))))
+    (list :counts
+          (cl-loop for (key value) on
+                   (list :input input :output output :cache-read read :cache-write write
+                         :context (cond ((harness-token-count-p total) total)
+                                        ((and input-detail read write) (+ input-detail read write)))
+                         :last-output output)
+                   by #'cddr
+                   when (harness-token-count-p value) append (list key value))
+          :input-semantics (cond ((or input-detail split) "exclusive")
+                                 ((harness-token-count-p total) "inclusive")
+                                 (t "unknown")))))
+
+(defun harness-provider-copilot--add-reported-usage (sum data agent)
+  "Add raw call DATA to SUM without inventing missing counters.
+A category belongs to the turn only when every call reported it.
+AGENT calls contribute counts but never the main conversation's size."
+  (let* ((call (harness-provider-copilot--reported-call-usage data))
+         (counts (plist-get call :counts))
+         (first (not (plist-get sum :calls)))
+         (reported (copy-sequence (plist-get sum :reported-usage)))
+         (semantics (plist-get call :input-semantics))
+         (write-status (if (plist-member counts :cache-write) "reported" "not-reported")))
+    (dolist (key '(:input :output :cache-read :cache-write))
+      (if (and (plist-member counts key) (or first (plist-member reported key)))
+          (setq reported (plist-put reported key (+ (or (plist-get reported key) 0)
+                                                    (plist-get counts key))))
+        (setq reported (harness-plist-remove reported key))))
+    (unless first
+      (unless (equal semantics (plist-get sum :input-semantics))
+        ;; Inclusive and exclusive counts cannot be summed together.
+        (setq semantics "unknown"
+              reported (harness-plist-remove reported :input)))
+      (unless (equal write-status (plist-get sum :cache-write-status))
+        (setq write-status "unknown")))
+    (unless agent
+      (setq reported (harness-plist-remove reported :context :last-output))
+      (dolist (key '(:context :last-output))
+        (when (plist-member counts key)
+          (setq reported (plist-put reported key (plist-get counts key))))))
+    (setq sum (plist-put sum :reported-usage reported))
+    (setq sum (plist-put sum :input-semantics semantics))
+    (plist-put sum :cache-write-status write-status)))
+
 (defun harness-provider-copilot--add-usage (turn data agent)
   "Add the model call that assistant.usage DATA reports to TURN.
 AGENT, the sub-agent that made the call, adds to the cost but not to
@@ -1219,7 +1288,8 @@ reported as a `call-usage' event, with the size of its prompt, for the
 output rate and the live token count; the turn's `usage' event counts
 it with the rest, and its output as the conversation's last."
   (let* ((call (harness-provider-copilot-call-usage data))
-         (sum (harness-provider-copilot-turn-usage turn))
+         (sum (harness-provider-copilot--add-reported-usage
+               (harness-provider-copilot-turn-usage turn) data agent))
          (context (plist-get call :context)))
     (unless agent
       (harness-provider-copilot--emit
@@ -1261,18 +1331,32 @@ up and additional usage is on (`extra-usage', billed at list price)."
 Its `:context' is the prompt of the main conversation's last call, which
 that call's output, `:last-output', follows; without one, the size the
 CLI last gave the conversation, which leaves nothing to follow."
-  (let ((usage (harness-provider-copilot-turn-usage turn)))
+  (let* ((usage (harness-provider-copilot-turn-usage turn))
+         (reported (copy-sequence (plist-get usage :reported-usage))))
     (when (plist-get usage :calls)
-      (append (list :type 'usage
-                    :input (plist-get usage :input) :output (plist-get usage :output)
-                    :cache-read (plist-get usage :cache-read) :cache-write (plist-get usage :cache-write)
-                    :context (or (plist-get usage :context) (plist-get usage :current)
-                                 (+ (plist-get usage :input) (plist-get usage :cache-read)
-                                    (plist-get usage :cache-write)))
-                    :last-output (if (plist-get usage :context)
-                                     (or (plist-get usage :last-output) 0)
-                                   0))
-              (harness-provider-copilot--billing-fields usage)))))
+      (unless (plist-member reported :context)
+        (when (harness-token-count-p (plist-get usage :current))
+          (setq reported (plist-put reported :context (plist-get usage :current)))))
+      (let ((billing (harness-provider-copilot--billing-fields usage)))
+        (append (list :type 'usage
+                      :input (plist-get usage :input) :output (plist-get usage :output)
+                      :cache-read (plist-get usage :cache-read) :cache-write (plist-get usage :cache-write)
+                      :context (or (plist-get usage :context) (plist-get usage :current)
+                                   (+ (plist-get usage :input) (plist-get usage :cache-read)
+                                      (plist-get usage :cache-write)))
+                      :last-output (if (plist-get usage :context)
+                                       (or (plist-get usage :last-output) 0)
+                                     0))
+                billing
+                (list :usage reported
+                      :input-semantics (or (plist-get usage :input-semantics) "unknown")
+                      :cache-write-status (or (plist-get usage :cache-write-status) "unknown"))
+                (cond ((eq (plist-get billing :billing) 'subscription)
+                       (list :cost-source "subscription"))
+                      ((numberp (plist-get billing :cost))
+                       ;; Nano-AIU and premium requests are converted at
+                       ;; fixed rates, never observed provider USD.
+                       (list :cost-source "estimated"))))))))
 
 ;;;; Account and quota
 

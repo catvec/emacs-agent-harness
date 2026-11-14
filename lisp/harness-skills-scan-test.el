@@ -213,6 +213,39 @@ listing that was cut says so; the SKILL.md is never among them."
           (should (equal (sort (copy-sequence (plist-get skill :files)) #'string<)
                          (plist-get skill :files))))))))
 
+(ert-deftest harness-skills-scan-bounds-ignore-directory-enumeration-order ()
+  "Count and byte bounds select the same files and fingerprint in either order."
+  (harness-skills-scan-test-with-root
+    (let* ((dir (expand-file-name "bare" root))
+           (entry (harness-skills-scan-test--entry root))
+           (orders '(("file-0.txt" "file-2.txt" "SKILL.md" "file-3.txt" "file-1.txt")
+                     ("file-3.txt" "file-1.txt" "file-2.txt" "file-0.txt" "SKILL.md")))
+           fingerprint)
+      (dotimes (i 4)
+        (with-temp-file (expand-file-name (format "file-%d.txt" i) dir)
+          (insert (make-string 8 ?x))))
+      ;; Exercise the count and byte bounds independently.
+      (dolist (limits '((3 . 100) (200 . 24)))
+        (let ((harness-skills-scan-max-files (car limits))
+              (harness-skills-scan-max-files-bytes (cdr limits)))
+          (dolist (order orders)
+            (let ((skill
+                   (cl-letf (((symbol-function 'directory-files)
+                              (lambda (_directory _full _match &optional nosort _count)
+                                ;; Emulate two filesystem orders, respecting
+                                ;; the caller's request for sorted entries.
+                                (let ((files (mapcar (lambda (name)
+                                                      (expand-file-name name dir))
+                                                    order)))
+                                  (if nosort files (sort files #'string<))))))
+                     (harness-skills-scan-read dir entry))))
+              (should (equal '("file-0.txt" "file-1.txt" "file-2.txt")
+                             (plist-get skill :files)))
+              (should (plist-get skill :files-truncated))
+              (if fingerprint
+                  (should (equal fingerprint (plist-get skill :fingerprint)))
+                (setq fingerprint (plist-get skill :fingerprint))))))))))
+
 (ert-deftest harness-skills-scan-roots-are-the-documented-conventions ()
   "The user's four conventions and the project's four, each with the
 origin a listing names, and the plugins when they are asked for."

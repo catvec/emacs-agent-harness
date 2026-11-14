@@ -1723,16 +1723,23 @@ EV is a provider's `usage' event.  The prompt cache stamp it carries
 \(`:cache-at', `:cache-ttl') is the stamp of the session's cache for
 MODEL, the model the request went to, whatever the session's is by now."
   (harness-call 'session/usage-add sid
-                (list :input (plist-get ev :input) :output (plist-get ev :output)
-                      :cache-read (plist-get ev :cache-read) :cache-write (plist-get ev :cache-write)
-                      :cost (plist-get ev :cost) :list-cost (plist-get ev :list-cost)
-                      :billing (plist-get ev :billing) :plan (plist-get ev :plan)
-                      :context (plist-get ev :context)
-                      ;; A hosted loop's turn says what its last call wrote.
-                      :last-output (plist-get ev :last-output)
-                      ;; The cache the request used is this model's.
-                      :model model
-                      :cache-at (plist-get ev :cache-at) :cache-ttl (plist-get ev :cache-ttl))))
+                (append
+                 (list :input (plist-get ev :input) :output (plist-get ev :output)
+                       :cache-read (plist-get ev :cache-read) :cache-write (plist-get ev :cache-write)
+                       :cost (plist-get ev :cost) :list-cost (plist-get ev :list-cost)
+                       :billing (plist-get ev :billing) :plan (plist-get ev :plan)
+                       :context (plist-get ev :context)
+                       ;; A hosted loop's turn says what its last call wrote.
+                       :last-output (plist-get ev :last-output)
+                       ;; The cache the request used is this model's.
+                       :model model
+                       :cache-at (plist-get ev :cache-at) :cache-ttl (plist-get ev :cache-ttl))
+                 ;; An explicit nil usage is a raw report with no counts;
+                 ;; an absent key is an older provider, not that report.
+                 (cl-loop for key in '(:usage :input-semantics :cache-write-status
+                                       :cost-source :observed-cost)
+                          when (plist-member ev key)
+                          append (list key (plist-get ev key))))))
 
 (defun harness-agent--usage-counts-p (ev)
   "Non-nil when the usage event EV counts a token or a cost."
@@ -1908,6 +1915,7 @@ The turn lets go of the node whether or not it could be written."
                                     (harness-agent--written-links sid node-id (or buf ""))))
                         :meta (list :model (or (gethash sid harness-agent--step-models)
                                                (plist-get (harness-call 'session/get sid) :model))
+                                    :project (plist-get (harness-call 'session/get sid) :project)
                                     :usage (and (not thinking) (harness-agent-turn-last-usage turn)))))
       (if thinking
           (setf (harness-agent-turn-think-node turn) nil (harness-agent-turn-think-buf turn) nil)

@@ -39,6 +39,19 @@ When CALLS, a cons, is given, its car counts how often ID is asked."
   "Return the context window `provider/model' gives MODEL-ID."
   (plist-get (harness-call 'provider/model model-id) :context-window))
 
+(ert-deftest harness-provider-model-cached-never-fetches-or-resolves ()
+  (harness-provider-test-with (test-cached)
+    (let ((calls (list 0)))
+      (harness-provider-test-static 'test-cached '(("model" . 100000)) calls)
+      (should-not (harness-call 'provider/model-cached "test-cached:model"))
+      (should-not (harness-call 'provider/model-cached "test-cached:unlisted"))
+      (should (= 0 (car calls)))
+      (harness-call 'provider/model "test-cached:model")
+      (should (= 1 (car calls)))
+      (should (equal "test-cached:model" (plist-get (harness-call 'provider/model-cached "test-cached:model") :id)))
+      (should-not (harness-call 'provider/model-cached "test-cached:unlisted"))
+      (should (= 1 (car calls))))))
+
 (ert-deftest harness-provider-model-asks-a-provider-not-listed-yet ()
   "A model is found with its window before anyone asked for the catalogue.
 The harness once answered the 128000 stand-in until a client asked

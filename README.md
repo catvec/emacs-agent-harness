@@ -240,6 +240,13 @@ A non-comprehensive list of all the different functionality offered by modules s
     in them, worked out from its own records and the use the plan
     reports; until a window has enough use to tell, the plan's name
     stands in
+  - [Historical token mix and spend](docs/design/historical-token-mix.md):
+    **Token mix** (or `H`) on the usage dashboard, with overall, project,
+    workspace and day breakdowns. Counter coverage, observed bills and
+    reconstructed category estimates remain separate; the pricing matrix
+    shows token volume versus monetary contribution on the actual workload.
+    [Synthetic walkthrough](docs/media/usage-token-mix.png):
+    `bash scripts/usage-history-demo.sh` in a dedicated development harness.
 - Completion providers
   - Claude Code SDK & API
   - ChatGPT

@@ -8,7 +8,7 @@ Usage and cost dashboard with charts, plan quota and budgets.
 - **Source:** [lisp/ui/harness-ui-usage.el](../../lisp/ui/harness-ui-usage.el)
 - **Loaded:** by default
 - **Requires:** [ui](ui.md)
-- **Required by:** [ui-cost-compare](ui-cost-compare.md), [ui-insights](ui-insights.md)
+- **Required by:** [ui-cost-compare](ui-cost-compare.md), [ui-insights](ui-insights.md), [ui-usage-history](ui-usage-history.md)
 - **Brings along:** [usage](usage.md) (the rest of it)
 
 ## About
@@ -48,6 +48,11 @@ One buffer, "*harness usage*", laid out top to bottom:
                 where a narrow window still shows them, and the
                 heading has [add budget] [plan]; with an Anthropic
                 Admin API key, I fetches Anthropic's cost report now
+
+[Token mix] or H opens the historical category breakdown in its own
+navigable view (`ui-usage-history`): overall, project, workspace and day,
+with counter coverage, separate billed totals and reconstructed category
+estimates, and the price matrix applied to the historical workload.
 
 Cost always means money billed.  A call a subscription pays for costs
 nothing; its value at API prices shows as covered by the plan.

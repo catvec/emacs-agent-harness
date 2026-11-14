@@ -2784,22 +2784,40 @@ loads no session."
   "Return RECORD for MODEL with a missing `:cost' and `:list-cost' priced.
 The cost is what was billed and the list cost what the call costs at
 API prices: the same thing unless a subscription paid, when only the
-list cost needs pricing.  Records without tokens are returned as is."
-  (if (not (or (plist-get record :input) (plist-get record :output)))
-      record
-    (let* ((priced 'unset)
-           (price (lambda ()
-                    (when (eq priced 'unset)
-                      (setq priced (and (harness-method-exists-p 'usage/price)
-                                        (ignore-errors (harness-call 'usage/price model record)))))
-                    priced))
-           (cost (plist-get record :cost))
-           (cost (if (numberp cost) cost (funcall price)))
-           (list-cost (plist-get record :list-cost))
-           (list-cost (cond ((numberp list-cost) list-cost)
-                            ((eq (harness-billing-of record) 'subscription) (funcall price))
-                            (t cost))))
-      (harness-plist-merge record (list :cost cost :list-cost list-cost)))))
+list cost needs pricing.  Before filling defaults, retain the cost's
+origin in `:cost-source' and an actual provider cost in `:observed-cost'.
+Provider origin annotations are kept, including an explicit unknown or
+estimated cost; a synthetic subscription zero is never observed cost.
+`:priced-at' is the time used for catalogue pricing.  RECORD's `:model',
+when present, is the request's model, ahead of the session's MODEL."
+  (let* ((model (or (plist-get record :model) model))
+         (reported (plist-get record :cost))
+         (source (or (plist-get record :cost-source)
+                     (and (eq (harness-billing-of record) 'subscription) "subscription")
+                     (and (numberp reported) "observed")))
+         (source (if (and source (symbolp source)) (symbol-name source) source))
+         (record (harness-plist-merge
+                  record (and source (list :cost-source source))
+                  (and (equal source "observed") (numberp reported)
+                       (not (numberp (plist-get record :observed-cost)))
+                       (list :observed-cost reported)))))
+    (if (not (or (plist-get record :input) (plist-get record :output)))
+        record
+      (let* ((at (if (numberp (plist-get record :priced-at)) (plist-get record :priced-at) (float-time)))
+             (priced 'unset)
+             (price (lambda ()
+                      (when (eq priced 'unset)
+                        (setq priced (and (harness-method-exists-p 'usage/price)
+                                          (ignore-errors (harness-call 'usage/price model record at)))))
+                      priced))
+             (cost (if (numberp reported) reported (funcall price)))
+             (list-cost (plist-get record :list-cost))
+             (list-cost (cond ((numberp list-cost) list-cost)
+                              ((eq (harness-billing-of record) 'subscription) (funcall price))
+                              (t cost))))
+        (harness-plist-merge record (list :cost cost :list-cost list-cost
+                                         :cost-source (or source (and (numberp cost) "estimated") "unknown")
+                                         :priced-at at))))))
 
 (defun harness-session--last-output (record)
   "Return the output of the request whose prompt usage RECORD's `:context' sizes.
@@ -2876,11 +2894,14 @@ shows as the conversation's observed cache rate, `:cache-reset' clearing
 it with the rest of the conversation.
 A missing `:cost' is priced from the model catalogue; a missing
 `:list-cost', the call at API prices, is the cost, or priced when a
-subscription paid.  The totals may also hold `:stream-output' and
-`:stream-seconds', the output tokens of the model calls whose streaming
-was timed and the seconds they streamed: those are added by
-`session/usage-note', not by this method, which keeps them as it finds
-them.  A request that follows another on the same model, with a cache
+subscription paid.  The emitted record retains `:cost-source',
+`:observed-cost' and `:priced-at' (`harness-session--price-record'), plus
+provider `:usage', `:input-semantics' and `:cache-write-status'
+annotations; they do not accumulate in the totals.  The totals may also
+hold `:stream-output' and `:stream-seconds', the output tokens of the model
+calls whose streaming was timed and the seconds they streamed: those are
+added by `session/usage-note', not by this method, which keeps them as it
+finds them.  A request that follows another on the same model, with a cache
 to reuse, also emits `cache/reuse' (SESSION-ID INFO) saying how much of
 the last prompt it read from the cache (see `harness-cache.el').
 Return the totals."

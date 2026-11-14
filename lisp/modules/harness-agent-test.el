@@ -53,6 +53,42 @@ carry agree."
   (let ((stamps (mapcar (lambda (n) (plist-get n :ts)) (harness-call 'session/nodes id))))
     (equal stamps (sort (copy-sequence stamps) #'<))))
 
+(ert-deftest harness-agent-usage-provenance-forwarding-preserves-key-presence ()
+  "New raw metadata survives the agent; absent usage remains an old event."
+  (harness-agent-test-with
+    (dolist (event '((:type usage :input 3 :output 0)
+                     (:type usage :input 3 :output 0 :usage nil
+                      :input-semantics "unknown" :cache-write-status "not-reported")
+                     (:type usage :input 3 :output 0 :cache-write 0
+                      :usage (:input 3 :output 0 :cache-read 0)
+                      :input-semantics "inclusive" :cache-write-status "not-reported"
+                      :cost-source "observed" :observed-cost 0.0)))
+      (let (forwarded)
+        (cl-letf (((symbol-function 'harness-call)
+                   (lambda (method sid record)
+                     (should (eq 'session/usage-add method))
+                     (should (equal "usage-sid" sid))
+                     (setq forwarded record))))
+          (harness-agent--add-usage "usage-sid" event "test:model"))
+        (should (= 3 (plist-get forwarded :input)))
+        (should (equal "test:model" (plist-get forwarded :model)))
+        (dolist (key '(:usage :input-semantics :cache-write-status :cost-source :observed-cost))
+          (should (eq (not (null (plist-member event key)))
+                      (not (null (plist-member forwarded key)))))
+          (should (equal (plist-get event key) (plist-get forwarded key))))))))
+
+(ert-deftest harness-agent-usage-node-stamps-recorded-project ()
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (project (plist-get (harness-call 'session/get id) :project))
+           (harness-provider-demo-script-override
+            '((:type text :delta "Fixture") (:type usage :input 10 :output 5)
+              (:type done :stop-reason end-turn))))
+      (harness-test-await (harness-call 'agent/prompt id "Fixture"))
+      (let ((node (cl-find-if (lambda (n) (eq (plist-get n :kind) 'assistant)) (harness-call 'session/nodes id))))
+        (should (equal project (plist-get (plist-get node :meta) :project)))
+        (should (plist-get (plist-get node :meta) :usage))))))
+
 ;;;; A hosted loop
 
 (defvar harness-agent-test-prompts nil

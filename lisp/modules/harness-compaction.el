@@ -1280,16 +1280,22 @@ The conversation starts over from the node
     ;; cache, so that next request stamps the new one (see
     ;; `harness-session--cache-stamp').
     (harness-call 'session/usage-add session-id
-                  (list :input (plist-get usage :input) :output (plist-get usage :output)
-                        :cache-read (plist-get usage :cache-read)
-                        :cache-write (plist-get usage :cache-write)
-                        :cost (plist-get usage :cost)
-                        ;; The compaction is all the conversation holds now.
-                        :context (+ (harness-estimate-tokens content)
-                                    (harness-compaction--nodes-tokens keep))
-                        :last-output 0
-                        :model model
-                        :cache-reset t))
+                  (append
+                   (list :input (plist-get usage :input) :output (plist-get usage :output)
+                         :cache-read (plist-get usage :cache-read)
+                         :cache-write (plist-get usage :cache-write)
+                         :cost (plist-get usage :cost)
+                         ;; The compaction is all the conversation holds now.
+                         :context (+ (harness-estimate-tokens content)
+                                     (harness-compaction--nodes-tokens keep))
+                         :last-output 0
+                         :model model
+                         :cache-reset t)
+                   ;; Preserve origin and raw presence just as the main agent
+                   ;; does; synthetic zeros and quota conversions are not bills.
+                   (cl-loop for key in '(:usage :input-semantics :cache-write-status :billing :plan
+                                         :list-cost :cost-source :observed-cost)
+                            when (plist-member usage key) append (list key (plist-get usage key)))))
     (harness-emit 'compaction/done session-id node)
     node))
 

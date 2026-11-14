@@ -38,6 +38,11 @@
 ;;                 heading has [add budget] [plan]; with an Anthropic
 ;;                 Admin API key, I fetches Anthropic's cost report now
 ;;
+;; [Token mix] or H opens the historical category breakdown in its own
+;; navigable view (`ui-usage-history'): overall, project, workspace and day,
+;; with counter coverage, separate billed totals and reconstructed category
+;; estimates, and the price matrix applied to the historical workload.
+;;
 ;; Cost always means money billed.  A call a subscription pays for costs
 ;; nothing; its value at API prices shows as covered by the plan.
 ;;
@@ -67,6 +72,7 @@
 (require 'harness-ui)
 
 (declare-function harness-cost-compare "harness-ui-cost-compare")
+(autoload 'harness-usage-history "harness-ui-usage-history" nil t)
 
 (defgroup harness-ui-usage nil
   "The usage and cost dashboard." :group 'harness-ui)
@@ -158,10 +164,9 @@ Every other project's worktrees are folded into its one line.")
 
 (defun harness-ui-usage--midnight (days-ago)
   "Return the float time of local midnight DAYS-AGO days before today."
-  (let* ((now (decode-time))
-         (today (encode-time (list 0 0 0 (decoded-time-day now) (decoded-time-month now)
-                                   (decoded-time-year now) nil -1 nil))))
-    (- (float-time today) (* days-ago 86400))))
+  (let ((now (decode-time)))
+    (float-time (encode-time (list 0 0 0 (- (decoded-time-day now) days-ago) (decoded-time-month now)
+                                   (decoded-time-year now) nil -1 nil)))))
 
 (defun harness-ui-usage--since (period)
   "Return the start time of PERIOD, or nil for all time."
@@ -416,6 +421,10 @@ a load in progress or an error stay longest.  WIDTH is as
     (list (cond (harness-ui-usage--loading (list (propertize "  loading…" 'face 'harness-dim-face) 95))
                 (harness-ui-usage--error
                  (list (concat "  " (propertize (format "error: %s" harness-ui-usage--error) 'face 'error)) 95)))
+          (when (fboundp 'harness-usage-history)
+            (list (concat "  " (harness-ui-usage--segment "Token mix" #'harness-usage-history nil
+                                                          "Historical token mix and spend"))
+                  70))
           (list (concat "  " (harness-ui-usage--segment "compare" #'harness-ui-usage-compare-costs nil
                                                         "Compare these costs at other models' prices"))
                 58)
@@ -1027,6 +1036,9 @@ so neither a refresh nor a fold scrolls it."
     map)
   "Keymap of `harness-ui-usage-mode'.")
 
+;; Top-level binding also updates keymaps retained across reloads.
+(define-key harness-ui-usage-mode-map (kbd "H") #'harness-usage-history)
+
 (define-derived-mode harness-ui-usage-mode special-mode "Usage"
   "Major mode of the usage and cost dashboard."
   (setq truncate-lines t
@@ -1042,6 +1054,7 @@ so neither a refresh nor a fold scrolls it."
         (". RET" "Row at point" harness-ui-usage-open)
         (". TAB" "Project fold" harness-ui-usage-tab)
         (". w" "All projects fold" harness-ui-usage-toggle-worktrees)
+        (". H" "Token mix" harness-usage-history)
         (". g" "Refresh" harness-ui-usage-refresh)]
        ["Budgets and plan"
         (". a" "Budget addition" harness-ui-usage-add-budget)

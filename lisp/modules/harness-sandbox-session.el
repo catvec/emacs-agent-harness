@@ -207,6 +207,9 @@ cut and dropped, so a broken supervisor cannot grow the harness's memory.")
      "if [ -n \"$missing\" ]; then printf 'R %s %s\\n' \"$version\" \"$missing\"; exit 3; fi"
      "printf 'R %s\\n' \"$version\""
      "export HARNESS_INSTANCE=$instance"
+     ;; A nested runtime inherits its caller's run tag.  Only commands,
+     ;; not the new supervisor's helpers, belong to a run.
+     "unset HARNESS_RUN"
      "live="
      "say() { printf '%s\\n' \"$*\"; }"
      ;; One block, one frame, one write(): `dd' returns on the first short
@@ -228,7 +231,17 @@ cut and dropped, so a broken supervisor cannot grow the harness's memory.")
      "  done"
      "  exec 9<&-"
      "}"
-     "pids_of() { grep -lzx \"HARNESS_RUN=$1\" /proc/[0-9]*/environ 2>/dev/null | sed -e 's|^/proc/||' -e 's|/environ$||'; }"
+     ;; Even when /proc includes another runtime, a run token alone is
+     ;; not ownership: status and cancellation both require this instance.
+     "environs_of() { grep -Flzx \"HARNESS_INSTANCE=$instance\" /proc/[0-9]*/environ 2>/dev/null; }"
+     "pids_of() {"
+     "  local f"
+     "  for f in $(environs_of); do"
+     "    grep -Fqzx \"HARNESS_RUN=$1\" \"$f\" 2>/dev/null || continue"
+     "    f=${f#/proc/}"
+     "    printf '%s\\n' \"${f%/environ}\""
+     "  done"
+     "}"
      "alive_of() {"
      "  local p st"
      "  for p in $(pids_of \"$1\"); do"
@@ -285,7 +298,7 @@ cut and dropped, so a broken supervisor cannot grow the harness's memory.")
      "}"
      "status_all() {"
      "  local n=0 f tok"
-     "  for f in /proc/[0-9]*/environ; do"
+     "  for f in $(environs_of); do"
      "    tok=$(tr '\\0' '\\n' < \"$f\" 2>/dev/null | sed -n 's/^HARNESS_RUN=//p' | head -1)"
      "    [ -n \"$tok\" ] || continue"
      "    case \" $live \" in *\" $tok \"*) ;; *) n=$((n+1));; esac"

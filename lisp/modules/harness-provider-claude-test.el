@@ -790,6 +790,58 @@ whatever made the first one fail cannot fail the second."
                                               '(:response :response :mcp_response :result))
                         :isError)))))
 
+(ert-deftest harness-provider-claude-usage-provenance-preserves-raw-presence-and-billing ()
+  "Hosted result counters precede zero defaults; API value is not plan spend."
+  (harness-provider-claude-test--setup)
+  (cl-labels ((result (usage billing using-extra base total)
+                (let* ((events nil)
+                       (harness-provider-claude--status (list :billing billing :using-extra using-extra))
+                       (entry (harness-provider-claude--make-session
+                               :id "usage-provenance" :active t :context 999 :cost-total base
+                               :account (list :billing billing)
+                               :on-event (lambda (ev) (push ev events)))))
+                  (cl-letf (((symbol-function 'harness-provider-claude--stale-p) (lambda () nil)))
+                    (harness-provider-claude--handle-result
+                     entry (list :type "result" :subtype "success" :usage usage :total_cost_usd total)))
+                  (harness-provider-claude-test--find events 'usage))))
+    (let ((event (result nil 'api nil 0.0 nil)))
+      (should (= 0 (plist-get event :cache-write)))
+      (should (plist-member event :usage))
+      (should-not (plist-get event :usage))
+      (should (equal "exclusive" (plist-get event :input-semantics)))
+      (should (equal "not-reported" (plist-get event :cache-write-status))))
+    (let ((event (result '(:input_tokens 0 :output_tokens 0 :cache_read_input_tokens 0
+                          :cache_creation_input_tokens 0) 'api nil 0.0 0.0)))
+      (should (equal '(:input 0 :output 0 :cache-read 0 :cache-write 0) (plist-get event :usage)))
+      (should (equal "reported" (plist-get event :cache-write-status)))
+      ;; The legacy context is not a raw complete last-call reading.
+      (should (= 999 (plist-get event :context)))
+      (should-not (plist-member (plist-get event :usage) :context))
+      (should (equal "observed" (plist-get event :cost-source)))
+      (should (= 0.0 (plist-get event :observed-cost))))
+    (let ((event (result '(:input_tokens nil :output_tokens 7
+                          :cache_read_input_tokens -1 :cache_creation_input_tokens "5")
+                         'api nil 0.0 nil)))
+      (should (equal '(:output 7) (plist-get event :usage)))
+      (should-not (plist-member event :observed-cost)))
+    (let ((event (result '(:input_tokens 4 :cache_creation_input_tokens 9) 'api nil 0.5 0.75)))
+      (should (= 9 (plist-get (plist-get event :usage) :cache-write)))
+      (should (= 0.25 (plist-get event :observed-cost)))
+      (should (equal "observed" (plist-get event :cost-source))))
+    (let ((event (result nil 'subscription nil 0.5 0.75)))
+      (should (= 0.0 (plist-get event :cost)))
+      (should (= 0.25 (plist-get event :list-cost)))
+      (should (equal "subscription" (plist-get event :cost-source)))
+      (should-not (plist-member event :observed-cost)))
+    (let ((event (result nil 'subscription t 0.5 0.75)))
+      (should (= 0.25 (plist-get event :cost)))
+      (should (= 0.25 (plist-get event :observed-cost)))
+      (should (equal "observed" (plist-get event :cost-source))))
+    (let ((event (result nil 'api nil nil 0.75)))
+      ;; A process total without its starting total is no turn cost.
+      (should-not (plist-member event :observed-cost))
+      (should-not (plist-member event :cost-source)))))
+
 (ert-deftest harness-provider-claude-turn-with-hosted-tool-call ()
   (harness-provider-claude-test--setup)
   (let* ((argv-file (harness-provider-claude-test--argv-file))

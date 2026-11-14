@@ -139,7 +139,7 @@ after changing it run \\[harness-restart]."
 
 (defconst harness-core-modules
   '(access acp admission agent compaction config images linking mcp naming perms priority project provider provider-check provider-claude
-    replay resilience retry sandbox session store usage worktree
+    replay resilience retry sandbox session store usage usage-history worktree
     tools tools-agent tools-emacs tools-fs tools-plan tools-question tools-session-info
     tools-shell tools-todo tools-jobs sandbox-session
     computers tools-computers

@@ -694,7 +694,9 @@ not take `none' is asked for its weakest effort instead of failing."
                            :messages ((:role user :content ((:type "text" :text "hi"))))))))
            (usage (cl-find 'usage events :key (lambda (e) (plist-get e :type)))))
       (should (equal '(:type usage :input 20 :output 7 :cache-read 80 :cache-write 0
-                       :cost nil :billing api :context 100)
+                       :cost nil :billing api :context 100
+                       :usage (:input 20 :output 7 :cache-read 80 :context 100)
+                       :input-semantics "exclusive" :cache-write-status "not-reported")
                      usage)))))
 
 (ert-deftest harness-provider-openai-deepseek-usage-splits-on-a-custom-host ()
@@ -714,14 +716,18 @@ not take `none' is asked for its weakest effort instead of failing."
                            :messages ((:role user :content ((:type "text" :text "hi"))))))))
            (usage (cl-find 'usage events :key (lambda (e) (plist-get e :type)))))
       (should (equal '(:type usage :input 100 :output 100 :cache-read 900 :cache-write 0
-                       :cost nil :billing api :context 1000)
+                       :cost nil :billing api :context 1000
+                       :usage (:input 100 :output 100 :cache-read 900 :context 1000)
+                       :input-semantics "exclusive" :cache-write-status "not-reported")
                      usage))))
   ;; A server that reports only the hits still splits: the misses are the rest.
   (let ((usage (harness-openai--usage-event
                 '(:prompt_tokens 100 :completion_tokens 7 :prompt_cache_hit_tokens 80)
                 '(:id proxy :base-url "https://llm.example/v1" :flavor openai))))
     (should (equal '(:type usage :input 20 :output 7 :cache-read 80 :cache-write 0
-                     :cost nil :billing api :context 100)
+                     :cost nil :billing api :context 100
+                     :usage (:input 20 :output 7 :cache-read 80 :context 100)
+                     :input-semantics "exclusive" :cache-write-status "not-reported")
                    usage))))
 
 (ert-deftest harness-provider-openai-cache-reading-needs-a-token-count ()
@@ -734,7 +740,9 @@ stays a reading, the miss it is."
         (deepseek '(:id testcache-ds :base-url "https://llm.example/v1" :flavor deepseek)))
     ;; Total and miss, no hit: DeepSeek's arithmetic gives the hits.
     (should (equal '(:type usage :input 20 :output 7 :cache-read 80 :cache-write 0
-                     :cost nil :billing api :context 100)
+                     :cost nil :billing api :context 100
+                     :usage (:input 20 :output 7 :cache-read 80 :context 100)
+                     :input-semantics "exclusive" :cache-write-status "not-reported")
                    (harness-openai--usage-event
                     '(:prompt_tokens 100 :completion_tokens 7
                       :prompt_cache_hit_tokens nil :prompt_cache_miss_tokens 20)
@@ -762,11 +770,66 @@ stays a reading, the miss it is."
       (should (= 100 (plist-get event :input))))
     ;; A reported zero is a miss, not an unknown.
     (should (equal '(:type usage :input 100 :output 7 :cache-read 0 :cache-write 0
-                     :cost nil :billing api :context 100)
+                     :cost nil :billing api :context 100
+                     :usage (:input 100 :output 7 :cache-read 0 :context 100)
+                     :input-semantics "exclusive" :cache-write-status "not-reported")
                    (harness-openai--usage-event
                     '(:prompt_tokens 100 :completion_tokens 7
                       :prompt_cache_hit_tokens 0 :prompt_cache_miss_tokens 100)
                     deepseek)))))
+
+(ert-deftest harness-provider-openai-usage-provenance-preserves-raw-presence ()
+  "Raw missing counters differ from reported zero and manufactured writes."
+  (let* ((endpoint '(:id test-usage-provenance :base-url "https://llm.example/v1"))
+         (empty (harness-openai--usage-event nil endpoint)))
+    (should (= 0 (plist-get empty :input)))
+    (should (= 0 (plist-get empty :output)))
+    (should (plist-member empty :usage))
+    (should-not (plist-get empty :usage))
+    (should-not (plist-member empty :cost-source))
+    (dolist (write '(0 17))
+      (let* ((event (harness-openai--usage-event
+                     (list :prompt_tokens 100 :completion_tokens 0
+                           :prompt_tokens_details (list :cached_tokens 40 :cache_write_tokens write)
+                           :cost 0.0 :provider_private "not usage") endpoint))
+             (raw (plist-get event :usage)))
+        ;; The generic route still counts cached reads inside input.
+        (should (= 100 (plist-get raw :input)))
+        (should (= 40 (plist-get raw :cache-read)))
+        (should (= write (plist-get raw :cache-write)))
+        (should (equal "inclusive" (plist-get event :input-semantics)))
+        (should (equal "reported" (plist-get event :cache-write-status)))
+        (should (equal "observed" (plist-get event :cost-source)))
+        (should (= 0.0 (plist-get event :observed-cost)))
+        (should-not (plist-member raw :provider_private))
+        ;; Existing top-level cache-write remains the manufactured zero.
+        (should (= 0 (plist-get event :cache-write)))))
+    (let* ((event (harness-openai--usage-event
+                   '(:prompt_tokens 0 :completion_tokens nil
+                     :prompt_tokens_details (:cached_tokens 0 :cache_write_tokens "17")) endpoint))
+           (raw (plist-get event :usage)))
+      (should (equal '(:input 0 :cache-read 0 :context 0) raw))
+      (should-not (plist-member raw :output))
+      (should-not (plist-member raw :cache-write))
+      (should (equal "not-reported" (plist-get event :cache-write-status))))
+    (let ((event (harness-openai--usage-event
+                  '(:prompt_tokens 100)
+                  '(:id test-usage-ds :base-url "https://llm.example/v1" :flavor deepseek))))
+      (should (equal '(:input 100 :context 100) (plist-get event :usage)))
+      (should (equal "unknown" (plist-get event :input-semantics))))
+    (let ((event (harness-openai--usage-event
+                  '(:prompt_tokens 100 :prompt_cache_hit_tokens 120)
+                  '(:id test-usage-ds :base-url "https://llm.example/v1" :flavor deepseek))))
+      ;; The legacy fallback is not a valid cache-miss reading when
+      ;; the reported hits exceed the total.
+      (should (= 100 (plist-get event :input)))
+      (should-not (plist-member (plist-get event :usage) :input))
+      (should (= 120 (plist-get (plist-get event :usage) :cache-read))))
+    (cl-letf (((symbol-function 'harness-openai--plan-status) (lambda (_) '(:plan "plus"))))
+      (let ((event (harness-openai--usage-event '(:prompt_tokens 3 :cost 0.25) endpoint)))
+        (should (= 0.0 (plist-get event :cost)))
+        (should (equal "subscription" (plist-get event :cost-source)))
+        (should-not (plist-member event :observed-cost))))))
 
 (ert-deftest harness-provider-openai-text-answer-with-usage ()
   (harness-openai-test-with-fake
@@ -788,7 +851,10 @@ stays a reading, the miss it is."
       (should (equal "thinking" (plist-get (nth 2 events) :delta)))
       (should (equal "lo" (plist-get (nth 3 events) :delta)))
       (should (equal '(:type usage :input 12 :output 3 :cache-read 5 :cache-write 0 :cost 0.00042
-                       :billing api :context 12)
+                       :billing api :context 12
+                       :usage (:input 12 :output 3 :cache-read 5 :context 12)
+                       :input-semantics "inclusive" :cache-write-status "not-reported"
+                       :cost-source "observed" :observed-cost 0.00042)
                      (nth 4 events)))
       (should (equal '(:type done :stop-reason end-turn) (car (last events)))))))
 
@@ -1557,7 +1623,9 @@ never reported a plan keeps the per-token billing it had."
         (usage '(:prompt_tokens 100 :completion_tokens 7)))
     (harness-provider-quota-forget 'testplanpaid)
     (should (equal '(:type usage :input 100 :output 7
-                     :cost nil :billing api :context 100)
+                     :cost nil :billing api :context 100
+                     :usage (:input 100 :output 7 :context 100)
+                     :input-semantics "inclusive" :cache-write-status "not-reported")
                    (harness-openai--usage-event usage endpoint)))
     (harness-provider-quota-publish
      'testplanpaid (harness-openai--subscription-status)
@@ -1566,7 +1634,10 @@ never reported a plan keeps the per-token billing it had."
         ("x-codex-primary-window-minutes" . "300")
         ("x-codex-plan-type" . "plus"))))
     (should (equal '(:type usage :input 100 :output 7
-                     :cost 0.0 :billing subscription :plan "plus" :context 100)
+                     :cost 0.0 :billing subscription :plan "plus" :context 100
+                     :usage (:input 100 :output 7 :context 100)
+                     :input-semantics "inclusive" :cache-write-status "not-reported"
+                     :cost-source "subscription")
                    (harness-openai--usage-event usage endpoint)))
     (harness-provider-quota-forget 'testplanpaid)))
 

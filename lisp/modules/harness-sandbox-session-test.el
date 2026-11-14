@@ -524,6 +524,78 @@ counted, and it keeps the runtime alive."
                          15 "the daemon counted")
       (should (harness-sandbox-session-sandbox sid)))))
 
+(ert-deftest harness-sandbox-session-a-supervisor-owns-only-its-instance ()
+  "Foreign runtime tags neither keep a runtime alive nor become cancellation targets.
+Run the real supervisor in this test's PID namespace, inheriting another
+runtime's tags, with one owned survivor and a foreign process carrying
+the same run token.  Count the survivor, cancel only this instance's
+processes, and report zero afterwards while the foreign process lives."
+  (harness-sandbox-session-test--setup)
+  (skip-unless (file-readable-p "/proc/self/environ"))
+  (dolist (program '("bash" "timeout" "setsid" "base64" "grep" "sed" "mkfifo" "dd" "tr"))
+    (skip-unless (executable-find program)))
+  (let* ((scratch (harness-test-temp-dir))
+         (frames (generate-new-buffer " *supervisor-ownership-test*"))
+         (instance (concat "test-" (harness-short-id)))
+         (token (concat "run-" (harness-short-id)))
+         (process-environment (copy-sequence process-environment))
+         supervisor owned foreign)
+    (cl-labels ((frame (regexp)
+                  (with-current-buffer frames
+                    (save-excursion
+                      (goto-char (point-min))
+                      (when (re-search-forward regexp nil t)
+                        (match-string-no-properties 0)))))
+                (await-frame (regexp)
+                  (harness-test-wait (lambda () (frame regexp)) 15 regexp)))
+      (unwind-protect
+          (progn
+            ;; Tagged stand-ins for an owned daemon and another runtime's
+            ;; work, deliberately colliding on their run token.
+            (setenv "HARNESS_INSTANCE" instance)
+            (setenv "HARNESS_RUN" token)
+            (setq owned (make-process :name "owned-survivor" :command '("sleep" "120")
+                                      :connection-type 'pipe :noquery t))
+            (setenv "HARNESS_INSTANCE" (concat instance "-foreign"))
+            (setq foreign (make-process :name "foreign-survivor" :command '("sleep" "120")
+                                        :connection-type 'pipe :noquery t)
+                  supervisor
+                  (make-process
+                   :name "ownership-supervisor" :buffer frames :noquery t :connection-type 'pipe
+                   :command (list "bash" "-c" harness-sandbox-session--supervisor-program
+                                  "supervisor" (number-to-string harness-sandbox-session--protocol)
+                                  instance scratch)))
+            (await-frame "^R 1$")
+            (process-send-string supervisor "status\n")
+            (should (equal "P 1" (await-frame "^P [0-9]+$")))
+            (should (process-live-p owned))
+            (should (process-live-p foreign))
+            ;; Start a real command with that token before cancelling it:
+            ;; the daemon and command must go, not the foreign bystander.
+            (process-send-string
+             supervisor (format "run %s 5 %s\n" token
+                                (base64-encode-string "printf 'ready\\n'; exec sleep 120" t)))
+            (await-frame (format "^O %s " token))
+            (process-send-string supervisor (format "kill %s\n" token))
+            (should (equal (format "K %s 0" token)
+                           (await-frame (format "^K %s [0-9]+$" token))))
+            (should (string-match-p
+                     " 0$" (await-frame (format "^X %s [0-9]+ [0-9]+$" token))))
+            (should-not (process-live-p owned))
+            (should (process-live-p foreign))
+            (with-current-buffer frames (erase-buffer))
+            (process-send-string supervisor "status\n")
+            (should (equal "P 0" (await-frame "^P [0-9]+$"))))
+        (when (and supervisor (process-live-p supervisor))
+          (ignore-errors
+            (process-send-string supervisor (format "kill %s\n" token))
+            (await-frame (format "^K %s 0$" token))
+            (process-send-string supervisor "quit\n")))
+        (dolist (proc (list supervisor owned foreign))
+          (when (and proc (process-live-p proc)) (delete-process proc)))
+        (kill-buffer frames)
+        (delete-directory scratch t)))))
+
 (ert-deftest harness-sandbox-session-a-runtime-goes-when-nothing-needs-it ()
   "A runtime with nothing in it is destroyed, and the next call builds another.
 Idle is no command in flight and no process the session left: a session

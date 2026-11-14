@@ -898,16 +898,47 @@ already in it, whether the details report it or not."
                  (harness-responses--usage-event
                   (list :input_tokens 120 :output_tokens 30 :input_tokens_details details)))))
     (should (equal '(:type usage :input 120 :output 30 :cache-read 64
-                     :cost 0.0 :billing subscription :context 120 :last-output 30)
+                     :cost 0.0 :billing subscription :context 120 :last-output 30
+                     :usage (:input 120 :output 30 :cache-read 64 :context 120 :last-output 30)
+                     :input-semantics "inclusive" :cache-write-status "not-reported"
+                     :cost-source "subscription")
                    (funcall usage '(:cached_tokens 64))))
     (should (equal '(:type usage :input 120 :output 30 :cache-read 0
-                     :cost 0.0 :billing subscription :context 120 :last-output 30)
+                     :cost 0.0 :billing subscription :context 120 :last-output 30
+                     :usage (:input 120 :output 30 :cache-read 0 :context 120 :last-output 30)
+                     :input-semantics "inclusive" :cache-write-status "not-reported"
+                     :cost-source "subscription")
                    (funcall usage '(:cached_tokens 0))))
     (dolist (details '((:cached_tokens nil) (:cached_tokens "64") (:cached_tokens -1) ()))
       (let ((event (funcall usage details)))
         (should-not (plist-member event :cache-read))
         (should-not (plist-member event :cache-write))
         (should (= 120 (plist-get event :context)))))))
+
+(ert-deftest harness-provider-responses-usage-provenance-preserves-raw-presence ()
+  "Missing counters are not zero; separately reported writes stay numeric."
+  (let ((empty (harness-responses--usage-event nil)))
+    (should (plist-member empty :usage))
+    (should-not (plist-get empty :usage))
+    (should (= 0 (plist-get empty :input)))
+    (should (= 0 (plist-get empty :last-output)))
+    (should-not (plist-member empty :observed-cost)))
+  (dolist (write '(0 19))
+    (let* ((event (harness-responses--usage-event
+                   (list :input_tokens 100 :input_tokens_details (list :cache_write_tokens write))))
+           (raw (plist-get event :usage)))
+      (should (equal (list :input 100 :cache-write write :context 100) raw))
+      (should-not (plist-member raw :output))
+      (should-not (plist-member raw :last-output))
+      (should-not (plist-member raw :cache-read))
+      (should (equal "reported" (plist-get event :cache-write-status)))
+      (should (equal "inclusive" (plist-get event :input-semantics)))
+      (should (equal "subscription" (plist-get event :cost-source)))))
+  (let ((event (harness-responses--usage-event
+                '(:input_tokens nil :output_tokens 0
+                  :input_tokens_details (:cached_tokens 0 :cache_write_tokens -1)))))
+    (should (equal '(:output 0 :cache-read 0 :last-output 0) (plist-get event :usage)))
+    (should (equal "not-reported" (plist-get event :cache-write-status)))))
 
 (ert-deftest harness-provider-responses-completed-without-a-call-ends-the-turn ()
   "A response that called nothing ends the turn, having streamed its text."

@@ -119,6 +119,15 @@
   "Return the column where the Cost cell of table LINE ends."
   (and (string-match "\\$[0-9.]+ " line) (match-end 0)))
 
+(ert-deftest harness-ui-usage-a-token-mix-command-is-lazy ()
+  "The dashboard's history key remains a command before its view loads."
+  (harness-ui-usage-test-with
+    (should-not (featurep 'harness-ui-usage-history))
+    (should (autoloadp (symbol-function 'harness-usage-history)))
+    (should (commandp 'harness-usage-history))
+    (should (eq (lookup-key harness-ui-usage-mode-map (kbd "H")) #'harness-usage-history))
+    (should (string-match-p "Token mix" (harness-ui-usage--header 2000)))))
+
 (ert-deftest harness-ui-usage-worktrees-fold-under-their-project ()
   "By project, a project's worktrees, its tasks', fold into one line with
 their sum; TAB, RET, w and the heading's button show and hide them."

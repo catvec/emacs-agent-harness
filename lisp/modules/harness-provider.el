@@ -753,6 +753,14 @@ silent small one."
             (puthash model-id (harness-provider--unlisted model-id pid name p)
                      harness-provider--lookups)))))
 
+(harness-defmethod provider/model-cached (model-id)
+  "Return cached metadata for MODEL-ID, or nil without any provider work.
+Unlike `provider/model', this never fetches a catalogue, resolves an
+alias, starts a CLI or asks for authentication.  Historical inspection
+uses it so unavailable rate evidence remains unknown."
+  (or (gethash model-id harness-provider--model-index)
+      (gethash model-id harness-provider--lookups)))
+
 (harness-defmethod provider/capabilities (model-id)
   "Return the capability plist for MODEL-ID."
   (plist-get (harness-call 'provider/model model-id) :capabilities))

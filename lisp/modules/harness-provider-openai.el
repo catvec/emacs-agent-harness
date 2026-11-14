@@ -1061,6 +1061,8 @@ nothing is inferred on an endpoint that is not billed that way."
          (input (if (harness-token-count-p raw-input) raw-input 0))
          (details (plist-get usage :prompt_tokens_details))
          (cached (and (listp details) (plist-get details :cached_tokens)))
+         (write (and (listp details) (plist-get details :cache_write_tokens)))
+         (raw-output (plist-get usage :completion_tokens))
          (hit-field (plist-get usage :prompt_cache_hit_tokens))
          (miss-field (plist-get usage :prompt_cache_miss_tokens))
          (cost (plist-get usage :cost))
@@ -1098,7 +1100,31 @@ nothing is inferred on an endpoint that is not billed that way."
          ;; catalogue (`session/usage-add').
          (list :cost 0.0 :billing 'subscription :plan (plist-get plan :plan))
        (list :cost (and (numberp cost) cost) :billing 'api))
-     (list :context (if deepseek (+ miss (or hit 0)) input)))))
+     (list :context (if deepseek (+ miss (or hit 0)) input))
+     ;; Keep the older event counters above as they were.  In particular,
+     ;; its cache-write zero is not a provider reading.
+     (list :usage
+           (cl-loop for (key value) on
+                    (list :input (cond ((not deepseek) raw-input)
+                                       ((harness-token-count-p miss-field) miss-field)
+                                       ((and (harness-token-count-p raw-input)
+                                             (harness-token-count-p hit)
+                                             (<= hit raw-input))
+                                        (- raw-input hit))
+                                       ((not (harness-token-count-p hit)) raw-input))
+                          :output raw-output :cache-read hit :cache-write write
+                          :context (cond ((harness-token-count-p raw-input) raw-input)
+                                         ((and deepseek (harness-token-count-p miss-field)
+                                               (harness-token-count-p hit))
+                                          (+ miss-field hit))))
+                    by #'cddr
+                    when (harness-token-count-p value) append (list key value))
+           :input-semantics (cond ((not deepseek) "inclusive")
+                                  ((harness-token-count-p hit) "exclusive")
+                                  (t "unknown"))
+           :cache-write-status (if (harness-token-count-p write) "reported" "not-reported"))
+     (cond (plan (list :cost-source "subscription"))
+           ((numberp cost) (list :cost-source "observed" :observed-cost cost))))))
 
 (defconst harness-openai--transport-patterns
   (concat "connection reset\\|recv failure\\|send failure\\|empty reply\\|broken pipe"

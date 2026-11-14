@@ -1296,7 +1296,8 @@ details are missing, null or no token count leaves `:cache-read' and
   (let* ((input (or (plist-get usage :input_tokens) 0))
          (output (or (plist-get usage :output_tokens) 0))
          (details (plist-get usage :input_tokens_details))
-         (cached (and (listp details) (plist-get details :cached_tokens))))
+         (cached (and (listp details) (plist-get details :cached_tokens)))
+         (write (and (listp details) (plist-get details :cache_write_tokens))))
     (append
      (list :type 'usage
            :input input
@@ -1306,15 +1307,26 @@ details are missing, null or no token count leaves `:cache-read' and
      ;; one: the key is left out.
      (and (harness-token-count-p cached)
           (list :cache-read cached))
-     (let ((write (and (listp details) (plist-get details :cache_write_tokens))))
-       (and (harness-token-count-p write) (list :cache-write write)))
+     (and (harness-token-count-p write) (list :cache-write write))
      (list :cost 0.0
            ;; Nothing is invented for the list price: `session/usage-add'
            ;; prices the record from the model catalogue, which has no rates
            ;; for this route, and a plan-covered call is free either way.
            :billing 'subscription
            :context input
-           :last-output output))))
+           :last-output output)
+     (list :usage
+           (cl-loop for (key value) on
+                    (list :input (plist-get usage :input_tokens)
+                          :output (plist-get usage :output_tokens)
+                          :cache-read cached :cache-write write
+                          :context (plist-get usage :input_tokens)
+                          :last-output (plist-get usage :output_tokens))
+                    by #'cddr
+                    when (harness-token-count-p value) append (list key value))
+           :input-semantics "inclusive"
+           :cache-write-status (if (harness-token-count-p write) "reported" "not-reported")
+           :cost-source "subscription"))))
 
 (defun harness-responses--finish (stream reason &optional error kind)
   "End STREAM with stop REASON and optional ERROR of kind KIND, once.

@@ -2955,6 +2955,33 @@ without asking (`harness-provider-claude--note-foreign-tool')."
                      :text (format "Claude Code reports the harness tool server as %s; tools are unavailable this turn"
                                    (plist-get server :status))))))))
 
+(defun harness-provider-claude--usage-metadata (entry usage billing)
+  "Return raw USAGE provenance for ENTRY, with its resolved BILLING fields.
+The CLI's result already sums its calls.  Only categories it actually
+reports belong here, not the zero defaults of the legacy event.  Its
+last-call context can also default absent cache counters to zero, so
+that arithmetic is deliberately not copied into the raw report."
+  (let ((write (plist-get usage :cache_creation_input_tokens))
+        (cost (plist-get billing :cost)))
+    (append
+     (list :usage
+           (cl-loop for (key value) on
+                    (list :input (plist-get usage :input_tokens)
+                          :output (plist-get usage :output_tokens)
+                          :cache-read (plist-get usage :cache_read_input_tokens)
+                          :cache-write write
+                          :last-output (gethash (harness-provider-claude-session-id entry)
+                                                harness-provider-claude--call-output))
+                    by #'cddr
+                    when (harness-token-count-p value) append (list key value))
+           :input-semantics "exclusive"
+           :cache-write-status (if (harness-token-count-p write) "reported" "not-reported"))
+     (cond ((eq (plist-get billing :billing) 'subscription)
+            ;; The reported API value is the list cost, not billed USD.
+            (list :cost-source "subscription"))
+           ((and (memq (plist-get billing :billing) '(api extra-usage)) (numberp cost))
+            (list :cost-source "observed" :observed-cost cost))))))
+
 (defun harness-provider-claude--handle-result (entry msg)
   "Handle the turn-ending result MSG on ENTRY."
   (let* ((usage (plist-get msg :usage))
@@ -2978,20 +3005,22 @@ without asking (`harness-provider-claude--note-foreign-tool')."
         (harness-provider-claude--note-model-usage entry (plist-get msg :modelUsage))
       (error (harness-log 'warn "provider-claude: cannot read the result's model usage: %s"
                           (harness-error-message err))))
-    (harness-provider-claude--emit
-     entry (append (list :type 'usage :input input
-                         :output (or (plist-get usage :output_tokens) 0)
-                         :cache-read cache-read :cache-write cache-write
-                         :context (or (harness-provider-claude-session-context entry)
-                                      (+ input cache-read cache-write)))
-                   ;; The last message's output follows its prompt in
-                   ;; the conversation.
-                   (when-let* ((last (gethash (harness-provider-claude-session-id entry)
-                                              harness-provider-claude--call-output)))
-                     (list :last-output last))
-                   (harness-provider-claude--cache-fields entry usage)
-                   (harness-provider-claude--billing-fields
+    (let ((billing (harness-provider-claude--billing-fields
                     entry (harness-provider-claude--turn-cost entry msg))))
+      (harness-provider-claude--emit
+       entry (append (list :type 'usage :input input
+                           :output (or (plist-get usage :output_tokens) 0)
+                           :cache-read cache-read :cache-write cache-write
+                           :context (or (harness-provider-claude-session-context entry)
+                                        (+ input cache-read cache-write)))
+                     ;; The last message's output follows its prompt in
+                     ;; the conversation.
+                     (when-let* ((last (gethash (harness-provider-claude-session-id entry)
+                                                harness-provider-claude--call-output)))
+                       (list :last-output last))
+                     (harness-provider-claude--cache-fields entry usage)
+                     billing
+                     (harness-provider-claude--usage-metadata entry usage billing))))
     (when (harness-provider-claude--stale-p)
       (harness-provider-claude--refresh entry))
     (harness-provider-claude--finish

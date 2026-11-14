@@ -1792,6 +1792,66 @@ and so does a queued one; the searchable transcript says who sent it."
         (should (= 1500 (plist-get u :context)))
         (should (= 1 (plist-get u :turns)))))))
 
+(ert-deftest harness-session-usage-pricing-keeps-provider-origin-before-defaults ()
+  "Filling the cost must not turn a catalogue estimate into a provider bill."
+  (harness-session-test-with
+    (let ((prices nil))
+      (harness-register-method 'usage/price
+                               (lambda (model usage &optional at)
+                                 (push (list model usage at) prices)
+                                 0.25))
+      (let* ((original '(:input 10 :output 0 :model "actual:request" :priced-at 100.0 :usage nil))
+             (priced (harness-session--price-record "session:changed" original)))
+        (should (equal "estimated" (plist-get priced :cost-source)))
+        (should (= 0.25 (plist-get priced :cost)))
+        (should (= 0.25 (plist-get priced :list-cost)))
+        (should-not (plist-member priced :observed-cost))
+        (should (plist-member priced :usage))
+        (should-not (plist-get priced :usage))
+        (should (equal "actual:request" (caar prices)))
+        (should (= 100.0 (nth 2 (car prices))))
+        (should-not (plist-member original :cost-source)))
+      (let ((observed (harness-session--price-record "m" '(:input 10 :output 0 :cost 0))))
+        (should (equal "observed" (plist-get observed :cost-source)))
+        (should (plist-member observed :observed-cost))
+        (should (= 0 (plist-get observed :observed-cost))))
+      (let ((plan (harness-session--price-record "m" '(:input 10 :output 0 :cost 0 :billing subscription))))
+        (should (equal "subscription" (plist-get plan :cost-source)))
+        (should (= 0.25 (plist-get plan :list-cost)))
+        (should-not (plist-member plan :observed-cost)))
+      (dolist (origin '("estimated" "unknown"))
+        (let ((priced (harness-session--price-record
+                       "m" (list :input 10 :output 0 :cost 0.5 :cost-source origin))))
+          (should (equal origin (plist-get priced :cost-source)))
+          (should-not (plist-member priced :observed-cost))))
+      ;; A bill without token readings still has an origin.
+      (let ((bill (harness-session--price-record "m" '(:cost 0.5))))
+        (should (equal "observed" (plist-get bill :cost-source)))
+        (should (= 0.5 (plist-get bill :observed-cost)))))))
+
+(ert-deftest harness-session-usage-emits-provenance-without-accumulating-it ()
+  "Raw normalized category presence is metadata, never a cumulative counter."
+  (harness-session-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
+           (records nil))
+      (harness-register-method 'usage/price (lambda (&rest _) 0.25))
+      (harness-on 'session/usage (lambda (_id _totals record) (push record records)))
+      (harness-call 'session/usage-add id
+                    '(:input 100 :output 0 :cache-read 0 :cache-write 0
+                      :usage (:input 100 :output 0) :input-semantics "inclusive"
+                      :cache-write-status "not-reported"))
+      (let ((record (car records))
+            (totals (plist-get (harness-call 'session/get id) :usage)))
+        (should (equal '(:input 100 :output 0) (plist-get record :usage)))
+        (should (equal "inclusive" (plist-get record :input-semantics)))
+        (should (equal "not-reported" (plist-get record :cache-write-status)))
+        (should (equal "estimated" (plist-get record :cost-source)))
+        (should (numberp (plist-get record :priced-at)))
+        (should (= 100 (plist-get totals :input)))
+        (should (= 0.25 (plist-get totals :cost)))
+        (dolist (key '(:usage :input-semantics :cache-write-status :cost-source :observed-cost :priced-at))
+          (should-not (plist-member totals key)))))))
+
 (ert-deftest harness-session-usage-keeps-the-output-after-the-prompt ()
   "`:last-output' is what the request the context measures wrote after its prompt.
 Together they are the size of the conversation, which the next request

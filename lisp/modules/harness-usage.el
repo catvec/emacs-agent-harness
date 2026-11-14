@@ -144,7 +144,7 @@ period (`harness-usage--hold-fresh-p').")
 (defvar harness-usage--schema-db nil
   "(DB . SCHEMA-VERSION) for the SQLite handle whose schema was ensured last.")
 
-(defconst harness-usage--schema-version 2
+(defconst harness-usage--schema-version 3
   "Bumped whenever the schema gains columns, so open databases migrate.")
 
 (defvar harness-usage--refreshed-models nil
@@ -152,22 +152,22 @@ period (`harness-usage--hold-fresh-p').")
 
 (defconst harness-usage--columns
   '(:id :ts :session :project :model :input :output :cache-read :cache-write :cost :turn
-    :list-cost :billing)
+    :list-cost :billing :details)
   "Row keys, in the order of the SELECT below.")
 
 (defconst harness-usage--select
-  "SELECT id, ts, session, project, model, input, output, cache_read, cache_write, cost, turn, list_cost, billing FROM usage"
+  "SELECT id, ts, session, project, model, input, output, cache_read, cache_write, cost, turn, list_cost, billing, details FROM usage"
   "Projection matching `harness-usage--columns'.")
 
 (defconst harness-usage--schema
-  '("CREATE TABLE IF NOT EXISTS usage (id INTEGER PRIMARY KEY, ts REAL, session TEXT, project TEXT, model TEXT, input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER, cost REAL, turn INTEGER, list_cost REAL, billing TEXT)"
+  '("CREATE TABLE IF NOT EXISTS usage (id INTEGER PRIMARY KEY, ts REAL, session TEXT, project TEXT, model TEXT, input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER, cost REAL, turn INTEGER, list_cost REAL, billing TEXT, details TEXT)"
     "CREATE INDEX IF NOT EXISTS usage_ts ON usage (ts)"
     "CREATE INDEX IF NOT EXISTS usage_session ON usage (session)"
     "CREATE INDEX IF NOT EXISTS usage_project ON usage (project)")
   "Statements that create the usage table and its indexes idempotently.")
 
 (defconst harness-usage--added-columns
-  '(("list_cost" . "REAL") ("billing" . "TEXT"))
+  '(("list_cost" . "REAL") ("billing" . "TEXT") ("details" . "TEXT"))
   "Columns added since the first schema, as (NAME . TYPE), for older databases.")
 
 ;;;; Small helpers
@@ -341,16 +341,91 @@ later calls can be priced."
         (setq harness-usage--schema-db (cons db harness-usage--schema-version)))
       db)))
 
+(defconst harness-usage--counter-keys
+  '(:input :output :cache-read :cache-write :context :last-output)
+  "Numeric usage fields safe to keep in a row's provenance metadata.
+These are normalized provider counters, before ledger defaults; a missing
+key is unknown and an explicit numeric zero is a reported zero.")
+
+(defconst harness-usage--price-keys '(:input :output :cache-read :cache-write)
+  "Numeric USD-per-million rates safe to snapshot from model pricing.")
+
+(defun harness-usage--numeric-fields (plist keys)
+  "Copy only nonnegative numeric fields of PLIST named by KEYS."
+  (when (listp plist)
+    (cl-loop for key in keys
+             for value = (plist-get plist key)
+             when (harness-token-count-p value) append (list key value))))
+
+(defun harness-usage--detail-choice (value choices)
+  "Return VALUE as a string when among CHOICES, else \"unknown\"."
+  (let ((string (if (symbolp value) (symbol-name value) value)))
+    (if (member string choices) string "unknown")))
+
+(defun harness-usage--clean-details (details)
+  "Return the whitelisted version 1 metadata of DETAILS, else nil.
+No provider payload, private content or authentication is retained."
+  (when (and (listp details) (eq (plist-get details :version) 1))
+    (append
+     (list :version 1
+           :usage (harness-usage--numeric-fields (plist-get details :usage) harness-usage--counter-keys)
+           :input-semantics (harness-usage--detail-choice
+                             (plist-get details :input-semantics) '("exclusive" "inclusive" "unknown"))
+           :cache-write-status (harness-usage--detail-choice
+                                (plist-get details :cache-write-status) '("reported" "not-reported" "unknown"))
+           :cost-source (harness-usage--detail-choice
+                         (plist-get details :cost-source) '("observed" "estimated" "subscription" "unknown" "legacy")))
+     (when (numberp (plist-get details :observed-cost))
+       (list :observed-cost (plist-get details :observed-cost)))
+     (list :pricing (harness-usage--numeric-fields (plist-get details :pricing) harness-usage--price-keys)
+           :currency (if (not (plist-member details :currency)) "USD"
+                       (let ((currency (plist-get details :currency)))
+                         (if (and (stringp currency) (string-match-p "\\`[A-Z]\\{3\\}\\'" currency))
+                             currency "unknown")))
+           :priced-at (and (numberp (plist-get details :priced-at)) (plist-get details :priced-at))))))
+
+(defun harness-usage--make-details (record model at)
+  "Snapshot the usage and pricing provenance of RECORD on MODEL at AT.
+A provider's `:usage' annotation, even nil, overrides counters to which
+its normalizer may have added zero defaults.  No input/cache partition
+is inferred without the provider's explicit `:input-semantics'.
+An unannotated direct `usage/record' call has unknown cost provenance:
+its numeric cost may already have been calculated by its caller."
+  (let* ((usage (harness-usage--numeric-fields
+                 (if (plist-member record :usage) (plist-get record :usage) record)
+                 harness-usage--counter-keys))
+         (source (or (plist-get record :cost-source)
+                     (and (eq (harness-billing-of record) 'subscription) "subscription")))
+         (observed (or (plist-get record :observed-cost)
+                       (and (equal (harness-usage--detail-choice source '("observed")) "observed")
+                            (plist-get record :cost))))
+         (priced-at (if (numberp (plist-get record :priced-at)) (plist-get record :priced-at) at))
+         (model (and model (harness-method-exists-p 'provider/model) (harness-call 'provider/model model)))
+         (pricing (and model (harness-usage--pricing-at model record priced-at))))
+    (harness-usage--clean-details
+     (list :version 1 :usage usage
+           :input-semantics (plist-get record :input-semantics)
+           :cache-write-status (or (plist-get record :cache-write-status)
+                                   (and (plist-member usage :cache-write) "reported"))
+           :cost-source source :observed-cost observed
+           :pricing pricing :priced-at priced-at))))
+
 (defun harness-usage--make-row (plist)
   "Return a fresh, fully keyed usage row built from PLIST.
-A missing `:list-cost' is the cost; `:billing' is stored as a string."
+A missing `:list-cost' is the cost; `:billing' is stored as a string.
+`:details' retains provider counter presence and pricing provenance;
+legacy rows read from storage are never run through this constructor."
   (let* ((cost (plist-get plist :cost))
          (cost (float (if (numberp cost) cost 0)))
          (list-cost (plist-get plist :list-cost))
          (billing (harness-billing-of plist))
-         (turn (plist-get plist :turn)))
+         (turn (plist-get plist :turn))
+         (ts (float (or (plist-get plist :ts) (float-time))))
+         (details (if (plist-member plist :details)
+                      (harness-usage--clean-details (plist-get plist :details))
+                    (harness-usage--make-details plist (plist-get plist :model) ts))))
     (list :id (plist-get plist :id)
-          :ts (float (or (plist-get plist :ts) (float-time)))
+          :ts ts
           :session (plist-get plist :session)
           :project (harness-usage--root (plist-get plist :project))
           :model (plist-get plist :model)
@@ -361,19 +436,22 @@ A missing `:list-cost' is the cost; `:billing' is stored as a string."
           :cost cost
           :turn (and (numberp turn) (truncate turn))
           :list-cost (if (numberp list-cost) (float list-cost) cost)
-          :billing (and billing (symbol-name billing)))))
+          :billing (and billing (symbol-name billing))
+          :details details)))
 
 (defun harness-usage--insert (row)
   "Persist ROW in SQLite or the JSONL log; return it with `:id' filled."
   (let ((db (harness-usage--db)))
     (if db
         (progn
-          (sqlite-execute db "INSERT INTO usage (ts, session, project, model, input, output, cache_read, cache_write, cost, turn, list_cost, billing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+          (sqlite-execute db "INSERT INTO usage (ts, session, project, model, input, output, cache_read, cache_write, cost, turn, list_cost, billing, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                           (list (plist-get row :ts) (plist-get row :session) (plist-get row :project)
                                 (plist-get row :model) (plist-get row :input) (plist-get row :output)
                                 (plist-get row :cache-read) (plist-get row :cache-write)
                                 (plist-get row :cost) (plist-get row :turn)
-                                (plist-get row :list-cost) (plist-get row :billing)))
+                                (plist-get row :list-cost) (plist-get row :billing)
+                                (and (plist-get row :details)
+                                     (harness-json-encode-text (plist-get row :details)))))
           (plist-put row :id (caar (sqlite-select db "SELECT last_insert_rowid()"))))
       (plist-put row :id (or (plist-get row :id) (harness-short-id)))
       (harness-call 'store/append harness-usage-jsonl-name row)
@@ -412,7 +490,11 @@ Filters: `:since' (inclusive), `:until' (exclusive), `:project',
     (when-let* ((v (plist-get opts :session))) (push "session = ?" where) (push v args))
     (when-let* ((v (plist-get opts :model))) (push "model = ?" where) (push v args))
     (mapcar (lambda (values)
-              (cl-loop for k in harness-usage--columns for v in values append (list k v)))
+              (cl-loop for k in harness-usage--columns for v in values
+                       ;; Ancillary metadata corruption must not break budgets.
+                       append (list k (if (eq k :details)
+                                          (condition-case nil (harness-json-parse v) (error nil))
+                                        v))))
             (sqlite-select db (concat harness-usage--select
                                       (if where (concat " WHERE " (string-join (nreverse where) " AND ")) "")
                                       " ORDER BY ts, id")
@@ -438,6 +520,24 @@ Lisp filter applies to both."
          (rows (if db (harness-usage--rows-sqlite db opts) (harness-usage--rows-jsonl opts)))
          (rows (cl-remove-if-not (lambda (r) (harness-usage--row-matches-p r opts)) rows)))
     (sort rows (lambda (a b) (< (plist-get a :ts) (plist-get b :ts))))))
+
+(harness-defmethod usage/rows (&rest opts)
+  "Return persisted usage rows matching OPTS, oldest first, without repricing.
+Filters: `:since' (inclusive), `:until' (exclusive), `:project',
+`:projects', `:session', `:model' and `:billing', as for `usage/totals'.
+Each row's `:details', when non-nil, is a version 1 provenance plist:
+`:usage' holds only present numeric normalized counters (`:input',
+`:output', `:cache-read', `:cache-write', `:context', `:last-output');
+`:input-semantics' is \"exclusive\", \"inclusive\" or \"unknown\";
+`:cache-write-status' is \"reported\", \"not-reported\" or \"unknown\";
+`:cost-source' is \"observed\", \"estimated\", \"subscription\",
+\"unknown\" or \"legacy\".  An actual provider cost is `:observed-cost'.
+`:pricing' snapshots only numeric input/output/cache rates per million,
+with `:currency' \"USD\" and `:priced-at' a float timestamp.  Missing
+counter and price keys remain unknown, not zero.  Old rows have no
+non-nil details and remain distinguishable; their defaults prove no
+provider counter presence.  This read-only method returns fresh data."
+  (copy-tree (apply #'harness-usage--rows opts)))
 
 (defun harness-usage--key (row group-by)
   "Return the GROUP-BY key of ROW."
@@ -497,8 +597,12 @@ Rows recorded before list costs were kept count their cost as list cost."
   "Persist usage ROW and return it with `:id' set.
 ROW: (:ts FLOAT :session ID :project ROOT :model ID :input N :output N
 :cache-read N :cache-write N :cost F :list-cost F :billing NAME :turn N);
-`:ts' defaults to now, `:list-cost' to the cost.  Event `usage/recorded'
-ROW."
+`:ts' defaults to now, `:list-cost' to the cost.  Optional `:usage',
+`:input-semantics', `:cache-write-status', `:cost-source' and
+`:observed-cost' annotations preserve provider provenance in `:details'
+(see `usage/rows').  A supplied `:details' is whitelisted instead of
+recomputed; nil leaves a row explicitly legacy/unknown.  Event
+`usage/recorded' ROW."
   (let ((row (harness-usage--insert (harness-usage--make-row row))))
     ;; What a budget has spent moved: the holds kept were worked out before.
     (harness-usage--forget-holds)
@@ -513,18 +617,27 @@ cost when a subscription paid.  Budgets are checked after."
   (when (and (harness-usage--countable-p record)
              (harness-call 'session/exists-p id))
     (let* ((session (harness-call 'session/get id))
-           (model (plist-get session :model))
+           (model (or (plist-get record :model) (plist-get session :model)))
+           (at (float-time))
            (cost (plist-get record :cost))
-           (cost (if (numberp cost) cost (harness-call 'usage/price model record)))
+           ;; Normally session/usage-add has priced this already.  Keep the
+           ;; fallback for direct event publishers, without calling it observed.
+           (record (if (numberp cost) record
+                     (harness-plist-merge
+                      record (list :cost-source (or (plist-get record :cost-source)
+                                                    (and (eq (harness-billing-of record) 'subscription) "subscription")
+                                                    "estimated")))))
+           (cost (if (numberp cost) cost (harness-call 'usage/price model record at)))
            (list-cost (plist-get record :list-cost))
            (billing (harness-billing-of record)))
       (harness-call 'usage/record
-                    (list :session id :project (plist-get session :project) :model model
+                    (list :session id :project (plist-get session :project) :model model :ts at
+                          :details (harness-usage--make-details record model at)
                           :input (plist-get record :input) :output (plist-get record :output)
                           :cache-read (plist-get record :cache-read) :cache-write (plist-get record :cache-write)
                           :cost cost
                           :list-cost (cond ((numberp list-cost) list-cost)
-                                           ((eq billing 'subscription) (harness-call 'usage/price model record))
+                                           ((eq billing 'subscription) (harness-call 'usage/price model record at))
                                            (t cost))
                           :billing billing
                           :turn (plist-get totals :turns)))

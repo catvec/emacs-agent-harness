@@ -37,9 +37,13 @@
        (clrhash harness-workspace-box--processes)
        (setq harness-workspace-box--loaded nil
              harness-workspace-box--subscribed nil)
-       (unwind-protect (progn ,@body)
-         (harness-workspace-box--shutdown)
-         (harness-workspace-box--stop-processes "w-1")))))
+       ;; The fixture below uses invented PIDs.  In a sandbox's small PID
+       ;; namespace they can name the test runner or its supervisor; neither
+       ;; the test body nor cleanup may signal them as adopted processes.
+       (cl-letf (((symbol-function 'harness-workspace-box--kill-pid) #'ignore))
+         (unwind-protect (progn ,@body)
+           (harness-workspace-box--shutdown)
+           (harness-workspace-box--stop-processes "w-1"))))))
 
 (defun harness-workspace-box-test-fake-running (id)
   "Store a running record for ID whose pids look alive."
@@ -49,6 +53,20 @@
                     :width 1280 :height 800 :vnc-port 5901 :web-port 6080
                     :token "token-1" :pids '(:xvfb 11 :vnc 12 :web 13))
            harness-workspace-box--records))
+
+(ert-deftest harness-workspace-box-fixture-never-signals-invented-pids ()
+  "Fake adopted PIDs are not processes owned by the fixture."
+  (let ((live '(11 12 13)) signalled)
+    (cl-letf (((symbol-function 'process-attributes)
+               (lambda (pid) (memq pid live)))
+              ((symbol-function 'signal-process)
+               (lambda (pid signal)
+                 (push (list pid signal) signalled)
+                 (setq live (delq pid live)))))
+      (harness-workspace-box-test-with
+        (harness-workspace-box-test-fake-running "w-1")
+        (harness-workspace-box--stop-processes "w-1")))
+    (should-not signalled)))
 
 (ert-deftest harness-workspace-box-status-says-what-is-missing ()
   "Without the tools the computer is unavailable and names them, not a screen."
