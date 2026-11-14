@@ -117,6 +117,8 @@ class UnmuteSidecar(Sidecar):
         self.next_utterance = 1
         self.buffered = {}
         self.release_at = None
+        self.output_generation = 0
+        self.synthesizing = None
         self.commentary = []
         self.said = []
 
@@ -136,7 +138,9 @@ class UnmuteSidecar(Sidecar):
         if reason:
             self.fail(reason)
             return
-        self.stopping.clear()
+        # Old HTTP workers may outlive a stop timeout; never revive their
+        # cancellation event when this sidecar object starts another call.
+        self.stopping = threading.Event()
         self.started = True
         self._start_workers()
 
@@ -145,11 +149,13 @@ class UnmuteSidecar(Sidecar):
             return
         for name, target in (("voice-stt", self._transcribe_loop),
                              ("voice-tts", self._synthesize_loop)):
-            worker = threading.Thread(target=target, name=name, daemon=True)
+            worker = threading.Thread(target=target, args=(self.stopping,),
+                                      name=name, daemon=True)
             worker.start()
             self.workers.append(worker)
 
     def on_stop(self):
+        self.output_generation += 1
         self.stopping.set()
         self.transcriptions.put(None)
         self.speech_items.put(None)
@@ -168,15 +174,43 @@ class UnmuteSidecar(Sidecar):
         self._clear_queues()
         self.started = False
 
+    def _clear_output(self, held=False):
+        """Invalidate queued/in-flight synthesis, optionally keeping its text."""
+        generation = self.output_generation
+        self.output_generation += 1
+        synthesizing = self.synthesizing
+        if held and synthesizing:
+            epoch, item_id, text = synthesizing
+            if epoch == generation:
+                self.hold(text, item_id)
+        while self.ready:
+            epoch, item_id, text, _pcm = self.ready.popleft()
+            if held and epoch == generation:
+                self.hold(text, item_id)
+        for work in (self.speech_items, self.audio):
+            while True:
+                try:
+                    item = work.get_nowait()
+                except queue.Empty:
+                    break
+                if item is not None and held and item[0] == generation:
+                    self.hold(item[2], item[1])
+
     def _clear_queues(self):
-        for work in (self.transcriptions, self.transcripts,
-                     self.speech_items, self.audio):
+        self._clear_output()
+        for work in (self.transcriptions, self.transcripts):
             while True:
                 try:
                     work.get_nowait()
                 except queue.Empty:
                     break
-        self.ready.clear()
+
+    def on_turn_hold(self, active):
+        # Neither an old false-trigger timer nor an in-flight synthesis may
+        # restart playback after the client clears a conversational hold.
+        self.cancel_release()
+        if active:
+            self._clear_output(held=True)
 
     def on_mute(self, muted):
         # A partial utterance from before the mute must not surface later.
@@ -186,6 +220,8 @@ class UnmuteSidecar(Sidecar):
         self.next_utterance = max(self.next_utterance, self.vad._uid + 1)
         self.speech_active = False
         self.held = []
+        self.cancel_release()
+        self.commentary = []
         self.announce_speech(False, reason="muted")
         if muted and self.player:
             self.player.stop()
@@ -193,17 +229,16 @@ class UnmuteSidecar(Sidecar):
         log("microphone %s" % ("muted" if muted else "open"))
 
     def interrupt(self):
-        """Silence the reply and drop what was queued behind it."""
-        self.held = []
-        self._clear_queues()
+        """Silence output, not microphone/transcription or the agent's work."""
+        self.cancel_release()
+        self._clear_output()
         super().interrupt()
 
     def fail(self, message):
         """Report a failure that ends the session."""
         self.failures += 1
         self.events.send("error", message=message)
-        if self.loop is not None:
-            self.loop.stop(1)
+        self.finish("voice failed", 1)
 
     # -- audio -------------------------------------------------------
 
@@ -256,11 +291,14 @@ class UnmuteSidecar(Sidecar):
                 self.announce_speech(False, result[1], "utterance-end")
             elif kind == "speech":
                 uid = result[2]
+                truncated = self.vad.take_truncated(uid)
                 self.announce_segment("accepted", uid,
-                                      len(result[1]) / (2.0 * self.rate))
+                                      len(result[1]) / (2.0 * self.rate),
+                                      truncated=truncated)
                 self.awaiting.add(uid)
-                self.events.send("transcribing", utterance=uid)
-                self.transcriptions.put((uid, result[1]))
+                fields = {"truncated": True} if truncated else {}
+                self.events.send("transcribing", utterance=uid, **fields)
+                self.transcriptions.put((uid, result[1], truncated))
             elif kind == "cancel":
                 # Too short to transcribe: back to listening, not stuck
                 # in a stage that waits for text that will not come.
@@ -272,11 +310,11 @@ class UnmuteSidecar(Sidecar):
 
     def gate_blocked(self):
         """Non-nil while assistant audio must not start."""
-        return bool(self.muted or self.speech_active or self.awaiting)
+        return bool(super().gate_blocked() or self.awaiting)
 
     def schedule_release(self, seconds):
         """Release held output after SECONDS if no real utterance follows."""
-        if self.held:
+        if self.held and not self.turn_held:
             self.release_at = time.monotonic() + seconds
 
     def cancel_release(self):
@@ -294,92 +332,121 @@ class UnmuteSidecar(Sidecar):
 
     # -- workers -----------------------------------------------------
 
-    def _transcribe_loop(self):
-        while not self.stopping.is_set():
-            item = self.transcriptions.get()
-            if item is None:
+    def _transcribe_loop(self, stopping):
+        while not stopping.is_set():
+            try:
+                item = self.transcriptions.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if item is None or stopping.is_set():
                 return
-            uid, pcm = item
+            uid, pcm, truncated = item
             text = self.transcribe(pcm)
-            if not self.stopping.is_set():
-                self.transcripts.put((uid, text))
+            if not stopping.is_set():
+                self.transcripts.put((uid, text, truncated))
 
-    def _synthesize_loop(self):
-        while not self.stopping.is_set():
-            item = self.speech_items.get()
-            if item is None:
+    def _synthesize_loop(self, stopping):
+        while not stopping.is_set():
+            try:
+                item = self.speech_items.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if item is None or stopping.is_set():
                 return
-            item_id, text = item
-            pcm = self.synthesize(text)
-            if pcm and not self.stopping.is_set():
-                self.audio.put((item_id, text, pcm))
+            generation, item_id, text = item
+            if generation != self.output_generation:
+                continue
+            self.synthesizing = item
+            try:
+                pcm = self.synthesize(text)
+                if (pcm and not stopping.is_set()
+                        and generation == self.output_generation):
+                    self.audio.put((generation, item_id, text, pcm))
+            finally:
+                if self.synthesizing is item:
+                    self.synthesizing = None
 
     def drain_transcripts(self):
         """Deliver completed transcripts in utterance order, exactly once."""
         while True:
             try:
-                uid, text = self.transcripts.get_nowait()
+                item = self.transcripts.get_nowait()
             except queue.Empty:
                 break
+            uid, text = item[:2]
+            truncated = item[2] if len(item) > 2 else False
             if uid < self.next_utterance:
                 # Mute dropped this utterance while it was being transcribed.
                 continue
-            self.buffered[uid] = text
+            self.buffered[uid] = (text, truncated)
         while self.next_utterance in self.buffered:
             uid = self.next_utterance
-            text = self.buffered.pop(uid)
+            text, truncated = self.buffered.pop(uid)
             self.next_utterance += 1
             self.awaiting.discard(uid)
             if text is None:
                 # The transcription itself failed; the error event says
                 # why, and the burst's marker says it never became words.
-                self.announce_segment("failed", uid)
+                self.announce_segment("failed", uid, truncated=truncated)
                 self.events.send("listening", utterance=uid)
                 self.schedule_release(1.0)
                 continue
             if not text:
                 # Silence, noise or an empty STT result: nothing to delegate.
-                self.announce_segment("dropped", uid, reason="no words")
+                self.announce_segment("dropped", uid, reason="no words",
+                                      truncated=truncated)
                 self.events.send("listening", utterance=uid)
                 self.schedule_release(1.0)
                 continue
             self.heard = text
+            self.cancel_release()
+            # Old synthesis may still be running when the transcript arrives.
+            # Keep its text as context, never as playback for the new request.
+            self._clear_output(held=True)
             pending = self.take_pending()
-            self.events.send("user_delta", text=text, final=True, utterance=uid)
+            fields = {"truncated": True} if truncated else {}
+            self.events.send("user_delta", text=text, final=True, utterance=uid,
+                             **fields)
             self.delegation(text, delegation_id="u-%d" % uid,
-                            pending=pending, utterance=uid)
+                            pending=pending, utterance=uid, truncated=truncated)
 
     def drain_audio(self):
-        """Play ready PCM only while the gate is open; hold everything else."""
+        """Play current PCM only while the gate is open; hold its text otherwise."""
         if self.gate_blocked():
             while self.ready:
-                item = self.ready.popleft()
-                self.hold(item[1], item[0])
+                self._hold_audio(self.ready.popleft())
             while True:
                 try:
-                    item = self.audio.get_nowait()
+                    self._hold_audio(self.audio.get_nowait())
                 except queue.Empty:
                     break
-                self.hold(item[1], item[0])
             return
         if self.ready and not (self.player and self.player.busy()):
-            item = self.ready.popleft()
-            self._play_item(item)
+            self._play_item(self.ready.popleft())
         while not self.ready:
             try:
                 item = self.audio.get_nowait()
             except queue.Empty:
                 break
+            if item[0] != self.output_generation:
+                continue
             if self.gate_blocked():
-                self.hold(item[1], item[0])
+                self._hold_audio(item)
                 continue
             if self.player and self.player.busy():
                 self.ready.append(item)
                 break
             self._play_item(item)
 
+    def _hold_audio(self, item):
+        generation, item_id, text, _pcm = item
+        if generation == self.output_generation:
+            self.hold(text, item_id)
+
     def _play_item(self, item):
-        item_id, text, pcm = item
+        generation, item_id, text, pcm = item
+        if generation != self.output_generation:
+            return
         if self.play(pcm):
             self.said.append(text)
         else:
@@ -430,15 +497,15 @@ class UnmuteSidecar(Sidecar):
         synthesis and cost the call its session.
         """
         text = speakable((text or "").strip())
-        if not text or self.muted:
+        if not text or self.muted or self.closed:
             return
         if self.gate_blocked():
             self.hold(text, item_id)
             return
         if not item_id:
-            self.hold_seq += 1
-            item_id = "say-%d" % self.hold_seq
-        self.speech_items.put((item_id, text))
+            self.held_seq += 1
+            item_id = "say-%d" % self.held_seq
+        self.speech_items.put((self.output_generation, item_id, text))
 
     def synthesize(self, text):
         """Return PCM16 for TEXT, or None when this reply has no audio.

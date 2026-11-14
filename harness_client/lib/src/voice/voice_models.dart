@@ -138,6 +138,8 @@ class VoicePrompt {
     this.displayText,
     this.id,
     this.segmentId,
+    this.segmentIds = const [],
+    this.truncated = false,
   });
 
   /// The words to send, if the provider transcribed the utterance.  A
@@ -164,6 +166,16 @@ class VoicePrompt {
   /// the provider's id (a live provider names a delegation, not an onset).
   final String? segmentId;
 
+  /// All source pipeline segments, oldest first, when a live delegation
+  /// covers several audio chunks. When nonempty, includes [segmentId], the
+  /// primary source. Older/custom backends may supply only [segmentId].
+  /// A controller accounts for every source when committing or cancelling.
+  final List<String> segmentIds;
+
+  /// True only when the capture/provider explicitly reports a recording-limit
+  /// cut. This is an audio chunk boundary, not a completed conversational turn.
+  final bool truncated;
+
   bool get isEmpty => (text == null || text!.trim().isEmpty) && audio == null;
 
   String? get spokenText => displayText ?? text;
@@ -172,6 +184,7 @@ class VoicePrompt {
     String? text,
     String? displayText,
     List<String>? pending,
+    bool? truncated,
   }) => VoicePrompt(
     text: text ?? this.text,
     audio: audio,
@@ -179,5 +192,7 @@ class VoicePrompt {
     displayText: displayText ?? this.displayText,
     id: id,
     segmentId: segmentId,
+    segmentIds: segmentIds,
+    truncated: truncated ?? this.truncated,
   );
 }

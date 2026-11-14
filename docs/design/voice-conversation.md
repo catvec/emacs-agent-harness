@@ -40,18 +40,22 @@ pronoun points at and which hesitation carries no request.  A rewrite
 before the agent sees the words takes that judgement away from the one
 place that has the conversation.
 
-This is also the shortest path between the microphone and the agent: the
-prompt leaves in the event that carried the transcript, with no second
-stage, no timer and no model call between them.  The full reasoning about
-where the words go -- one route, its generation and the shared pipeline
--- is in [the routing design](live-voice-routing.md).
+The timing now follows [voice turn completion](voice-turn-completion.md):
+audio chunks enter an unsent conversational turn, ordinary endings get a
+1.2-second grace period, and explicit continuation intent or a possible cut-off
+holds the thought until it is completed or released. No interpretation model
+is added. The full reasoning about where the words go -- one route, its
+generation and the shared pipeline -- is in [the routing
+design](live-voice-routing.md).
 
 ### The voice conversation
 
 The voice conversation is the audio-side record of one live call:
 
-- every user utterance **as the speech model returned it**, which is also
-  what crossed into the session;
+- captions of user utterances **as the speech model returned them**, and a
+  committed turn's `raw`/`sent` record when its words cross into the session;
+  adjacent chunks can form one request, while a recovery cue stays only in
+  the audio-side captions;
 - every line the voice actually spoke: spoken commentary, a spoken
   result, a backchannel, or the provider's own transcript line.
 
@@ -71,14 +75,13 @@ to the caption.
 
 ### What crosses, in order
 
-The prompt is the transcript, then the existing `<voice-turn-context>`
-block when the sidecar held assistant output while the person spoke.  The
-transcript is the first thing in the message.  No file/line or
-related-session block is added to a delegation, and no other session is
-looked up for one: the session voice mode is used in is the context, and a
-workflow that really spans sessions or projects belongs to the workspaces
-feature.  The held-output block is unchanged: it is a safety contract
-about what was *not* heard, not a wrapper around the request.
+The prompt contains the transcript's words, joining adjacent chunks of the
+same unsent thought in order. No held-output, file/line or related-session
+block is added, and no other session is looked up for one: the session voice
+mode is used in is the context, and a workflow that really spans sessions or
+projects belongs to the workspaces feature. A reply superseded by new input
+is not replayed or repeated into the request; the session already has the
+agent turn that produced it.
 
 A burst the speech model made no words of sends no session prompt and
 answers its delegation with empty text, so the sidecar is not left
@@ -110,12 +113,13 @@ memory.
 
 | Step | Cost | Basis |
 | --- | --- | --- |
-| Transcript → `session/prompt` | 0 ms | the same event; no timer, no batching, no model |
+| Transcript → `session/prompt` | ordinary 1.2-second grace; explicit holds have no silence deadline | client-local completion policy; no model call |
 | Route lookup | a plist compare | no I/O |
-| Held-output block | a bounded list already in memory | no model |
+| Held output | a bounded list already in memory | no model |
 
-Consecutive utterances stay separate session messages; joining them would
-either delay the first one or conflate two requests.
+Consecutive chunks of one unfinished thought now stay together. This
+intentionally favors not interrupting the person over the earlier immediate
+send policy. Completed turns remain separate session messages.
 
 ## Alternatives considered
 
@@ -131,11 +135,13 @@ either delay the first one or conflate two requests.
 - **Keep the context block and drop only the distillation.**  Sends the
   same earlier turns the session already has, grows with the call, and
   pushes the session's context window toward the audio side's small talk.
-- **Batch utterances for a short window.**  A 600 ms join window would
-  make two fragments one message and make every request 600 ms slower.
-  The person already hears the 850 ms end-of-speech hangover; adding to it
-  is the wrong trade.  Requests that need to be one message can be said as
-  one sentence.
+- **Immediate delivery versus chunk joining.** The earlier design rejected
+  even a 600 ms join window in favor of latency. That decision is superseded
+  by [voice turn completion](voice-turn-completion.md): an audio silence
+  threshold alone cannot distinguish a breath from a finished thought, and
+  asking people to avoid natural pauses is the wrong safety trade-off.
+  The new grace period is bounded for ordinary endings, while explicit
+  intent to continue remains held regardless of elapsed silence.
 - **A fixed request envelope.**  A stable `<voice-request>` block would be
   easy to parse in a test and wrong for a chat: it costs tokens on every
   turn, makes an ordinary request look like an event, and adds a format the

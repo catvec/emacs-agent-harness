@@ -562,6 +562,10 @@ class VoicePipelineTracker {
   int _playbackGeneration = 0;
 
   final List<VoiceSegment> _segments = [];
+  // Marker eviction is presentation only. Small identity tombstones prevent
+  // late STT/combined delivery from counting the same source a second time.
+  final Set<String> _seenSegments = <String>{};
+  final Set<String> _finishedSegments = <String>{};
   final List<VoiceTurn> _turns = [];
   final List<VoiceReply> _replies = [];
 
@@ -613,6 +617,8 @@ class VoicePipelineTracker {
   void begin() {
     _generation++;
     _segments.clear();
+    _seenSegments.clear();
+    _finishedSegments.clear();
     _turns.clear();
     _replies.clear();
     _accepted = 0;
@@ -684,8 +690,7 @@ class VoicePipelineTracker {
   /// The capture path kept this burst for transcription.
   void accept(String id, {Duration? duration, double? level}) {
     if (id.isEmpty) return;
-    final existing = _segment(id);
-    if (existing != null) {
+    if (!_seenSegments.add(id)) {
       _ignored++;
       return;
     }
@@ -717,10 +722,11 @@ class VoicePipelineTracker {
     final segmentId = (id == null || id.isEmpty)
         ? 'r-${++_segmentSequence}'
         : id;
-    if (_segment(segmentId) != null) {
+    if (!_seenSegments.add(segmentId)) {
       _ignored++;
       return;
     }
+    _finishedSegments.add(segmentId);
     _segments.add(
       VoiceSegment(
         id: segmentId,
@@ -787,6 +793,17 @@ class VoicePipelineTracker {
   }) {
     final segment = _segment(id);
     if (segment == null) {
+      if (_seenSegments.contains(id)) {
+        if (_finishedSegments.add(id)) {
+          _dropped++;
+          _changed();
+        } else {
+          _ignored++;
+        }
+        return;
+      }
+      _seenSegments.add(id);
+      _finishedSegments.add(id);
       _segments.add(
         VoiceSegment(
           id: id,
@@ -823,6 +840,12 @@ class VoicePipelineTracker {
   void fail(String id, {String? detail}) {
     final segment = _segment(id);
     if (segment == null) {
+      if (_seenSegments.contains(id)) {
+        _finishedSegments.add(id);
+        return;
+      }
+      _seenSegments.add(id);
+      _finishedSegments.add(id);
       _segments.add(
         VoiceSegment(
           id: id,
@@ -917,6 +940,7 @@ class VoicePipelineTracker {
     final turn = _turn(turnId);
     if (turn == null) return;
     for (final segmentId in turn.segmentIds) {
+      _finishedSegments.add(segmentId);
       final segment = _segment(segmentId);
       if (segment == null || segment.stage.terminal) continue;
       _replaceSegment(
@@ -1111,6 +1135,7 @@ class VoicePipelineTracker {
   }
 
   void _replaceSegment(VoiceSegment segment) {
+    if (segment.stage.terminal) _finishedSegments.add(segment.id);
     final index = _segments.indexWhere((item) => item.id == segment.id);
     if (index >= 0) _segments[index] = segment;
   }

@@ -7,6 +7,8 @@ import 'package:harness_client/src/desktop/buddy_window.dart';
 import 'package:harness_client/src/state/workspace_buddy_controller.dart';
 import 'package:harness_client/src/ui/theme/harness_theme.dart';
 import 'package:harness_client/src/ui/widgets/buddy_window_host.dart';
+import 'package:harness_client/src/voice/voice_backend.dart';
+import 'package:harness_client/src/voice/voice_models.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'support/buddy_window_fakes.dart';
@@ -219,6 +221,25 @@ void main() {
     expect(find.byKey(const Key('call-bar-view')), findsOneWidget);
     expect(app.workspaceBuddy!.running, isTrue);
     expect(backends.single.stopped, isFalse);
+
+    // The route below the bar must not block its accessibility controls.
+    backends.single.emit(const VoicePromptEvent(VoicePrompt(
+      text: 'Check the build, hold on',
+      id: 'pending-1',
+      segmentId: 'pending-1',
+    )));
+    await tester.pump();
+    expect(find.text('Unsent speech'), findsOneWidget);
+    expect(find.text('Waiting for continuation'), findsOneWidget);
+    expect(find.text('Submission'), findsOneWidget);
+    expect(
+      tester.getSemantics(find.byKey(const Key('voice-pending-tooltip'))).tooltip,
+      'Pending speech submission',
+    );
+    expect(
+      tester.getSemantics(find.byKey(const Key('call-bar-end'))).tooltip,
+      'Call · end',
+    );
 
     // Opening the view again is the same call, not a second one.
     await tester.tap(find.byKey(const Key('call-bar-view')));

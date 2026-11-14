@@ -11,6 +11,7 @@ import '../navigation.dart';
 import '../screens/voice_screen.dart';
 import '../theme/harness_theme.dart';
 import 'voice_buddy_dot.dart';
+import 'voice_pending_speech.dart';
 
 /// Open the full call view of [buddy]'s call: the same call the in-call bar
 /// shows, in the screen that owns the large controls.  Leaving the view does
@@ -189,21 +190,27 @@ class WorkspaceBuddy extends StatelessWidget {
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: controller,
-      builder: (context, _) => WorkspaceBuddyView(
-        model: controller.model,
-        onStart: () => unawaited(controller.start()),
-        onEnd: () => unawaited(controller.end()),
-        onMute: () => unawaited(controller.toggleMute()),
-        onPause: () => unawaited(controller.togglePause()),
-        onInterrupt: () => unawaited(controller.interrupt()),
-        onRetry: () => unawaited(controller.retry()),
-        onOff: () => unawaited(controller.disable()),
-        onOpenWorkspace: onOpenWorkspace,
-        onOpenSettings: onOpenSettings,
-        onDragUpdate: onDragUpdate,
-        onDragStart: onDragStart,
-        maxHeight: maxHeight,
-      ),
+      builder: (context, _) {
+        final voice = controller.voice;
+        return WorkspaceBuddyView(
+          model: controller.model,
+          onStart: () => unawaited(controller.start()),
+          onEnd: () => unawaited(controller.end()),
+          onMute: () => unawaited(controller.toggleMute()),
+          onPause: () => unawaited(controller.togglePause()),
+          onInterrupt: () => unawaited(controller.interrupt()),
+          onRetry: () => unawaited(controller.retry()),
+          onOff: () => unawaited(controller.disable()),
+          onOpenWorkspace: onOpenWorkspace,
+          onOpenSettings: onOpenSettings,
+          onDragUpdate: onDragUpdate,
+          onDragStart: onDragStart,
+          maxHeight: maxHeight,
+          pendingSpeech: voice == null || voice.pendingSpeech.isEmpty
+              ? null
+              : VoicePendingSpeech(controller: voice, compact: true),
+        );
+      },
     );
   }
 }
@@ -232,6 +239,7 @@ class WorkspaceBuddyView extends StatefulWidget {
     this.onDragUpdate,
     this.onDragStart,
     this.maxHeight,
+    this.pendingSpeech,
   });
 
   final BuddyViewModel model;
@@ -248,6 +256,9 @@ class WorkspaceBuddyView extends StatefulWidget {
   final ValueChanged<Offset>? onDragUpdate;
   final VoidCallback? onDragStart;
   final double? maxHeight;
+
+  /// A pending conversational turn stays in the glance, never behind Details.
+  final Widget? pendingSpeech;
 
   /// The width of the card at the current text scale, bounded so that it
   /// stays a corner surface at the app's 920 px desktop breakpoint and at
@@ -329,6 +340,10 @@ class _WorkspaceBuddyViewState extends State<WorkspaceBuddyView> {
               ),
               const SizedBox(height: 10),
               _callControls(context),
+              if (widget.pendingSpeech != null) ...[
+                const SizedBox(height: 8),
+                widget.pendingSpeech!,
+              ],
               if (_details) ...[
                 const SizedBox(height: 4),
                 _secondaryControls(context),

@@ -1,0 +1,78 @@
+
+In harness-elisp-load-snapshot:
+lisp/harness-elisp.el:287:10: Warning: Unused lexical variable ‘read-eval’
+
+In harness-links-parse:
+lisp/harness-links.el:88:2: Warning: docstring wider than 80 characters
+
+In harness-snapshot--filter-env:
+lisp/harness-snapshot.el:207:2: Warning: docstring wider than 80 characters
+
+In harness-snapshot-slice:
+lisp/harness-snapshot.el:708:2: Warning: docstring wider than 80 characters
+
+In toplevel form:
+lisp/modules/harness-commit-attribution.el:249:12: Warning: custom-declare-variable ‘harness-commit-attribution-retention-days’ docstring wider than 80 characters
+
+In harness-method/computer/register-remote:
+lisp/modules/harness-computers.el:1328:2: Warning: docstring wider than 80 characters
+
+In harness-method/link/resolve:
+lisp/modules/harness-linking.el:477:2: Warning: docstring wider than 80 characters
+
+In harness-tasks--shutdown:
+lisp/modules/harness-tasks.el:7088:2: Warning: docstring wider than 80 characters
+
+In toplevel form:
+lisp/modules/harness-tools-shell.el:596:11: Warning: defconst ‘harness-tools-shell--snapshot-options’ docstring wider than 80 characters
+
+In toplevel form:
+lisp/ui/harness-ui-chat.el:378:15: Warning: defvar ‘harness-chat--notice-check’ docstring wider than 80 characters
+
+In harness-chat--following-at-bottom-p:
+lisp/ui/harness-ui-chat.el:965:2: Warning: docstring wider than 80 characters
+
+In harness-chat--activity-overlay:
+lisp/ui/harness-ui-chat.el:6507:2: Warning: docstring wider than 80 characters
+
+In end of data:
+lisp/ui/harness-ui.el:7667:24: Warning: the function ‘harness-version’ is not known to be defined.
+lisp/ui/harness-ui.el:7665:24: Warning: the function ‘harness-remote-approve’ is not known to be defined.
+lisp/ui/harness-ui.el:7662:24: Warning: the function ‘harness-remote-control’ is not known to be defined.
+lisp/ui/harness-ui.el:7657:24: Warning: the function ‘harness-connect-server’ is not known to be defined.
+lisp/ui/harness-ui.el:7642:24: Warning: the function ‘harness-chatgpt-plan-page’ is not known to be defined.
+lisp/ui/harness-ui.el:7640:24: Warning: the function ‘harness-quick-search’ is not known to be defined.
+lisp/ui/harness-ui.el:7638:24: Warning: the function ‘harness-secrets-list-sources’ is not known to be defined.
+lisp/ui/harness-ui.el:7636:24: Warning: the function ‘harness-redact-secret’ is not known to be defined.
+lisp/ui/harness-ui.el:7634:24: Warning: the function ‘harness-memories’ is not known to be defined.
+lisp/ui/harness-ui.el:7632:24: Warning: the function ‘harness-remember’ is not known to be defined.
+lisp/ui/harness-ui.el:7619:24: Warning: the function ‘harness-record-audio’ is not known to be defined.
+lisp/ui/harness-ui.el:7617:24: Warning: the function ‘harness-voice’ is not known to be defined.
+lisp/ui/harness-ui.el:7615:24: Warning: the function ‘harness-pet’ is not known to be defined.
+lisp/ui/harness-ui.el:7611:24: Warning: the function ‘harness-workspace’ is not known to be defined.
+lisp/ui/harness-ui.el:7609:24: Warning: the function ‘harness-computers’ is not known to be defined.
+lisp/ui/harness-ui.el:7605:24: Warning: the function ‘harness-insights’ is not known to be defined.
+lisp/ui/harness-ui.el:7601:24: Warning: the function ‘harness-btw’ is not known to be defined.
+lisp/ui/harness-ui.el:7580:24: Warning: the function ‘harness-set-priority-all’ is not known to be defined.
+lisp/ui/harness-ui.el:7578:24: Warning: the function ‘harness-set-priority’ is not known to be defined.
+lisp/ui/harness-ui.el:7576:24: Warning: the function ‘harness-priority-lower’ is not known to be defined.
+lisp/ui/harness-ui.el:7574:24: Warning: the function ‘harness-priority-raise’ is not known to be defined.
+lisp/ui/harness-ui.el:7568:24: Warning: the function ‘harness-cache-keep-warm’ is not known to be defined.
+lisp/ui/harness-ui.el:7549:24: Warning: the function ‘harness-provider-check’ is not known to be defined.
+lisp/ui/harness-ui.el:7547:24: Warning: the function ‘harness-model-complexity’ is not known to be defined.
+lisp/ui/harness-ui.el:7532:24: Warning: the function ‘harness-search-sessions’ is not known to be defined.
+
+In harness-ui-tasks--setting-button:
+lisp/ui/harness-ui-tasks.el:3348:2: Warning: docstring wider than 80 characters
+
+In harness-ui-tasks--setting-target:
+lisp/ui/harness-ui-tasks.el:3794:2: Warning: docstring wider than 80 characters
+
+In harness-ui-tasks-start:
+lisp/ui/harness-ui-tasks.el:5510:2: Warning: docstring wider than 80 characters
+
+In harness-ui-tasks-queue:
+lisp/ui/harness-ui-tasks.el:5530:2: Warning: docstring wider than 80 characters
+
+In end of data:
+lisp/ui/harness-ui-workspace.el:509:58: Warning: the function ‘harness-computers’ is not known to be defined.

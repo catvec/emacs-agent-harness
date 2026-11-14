@@ -7,6 +7,7 @@ class VoiceUtterance {
     required this.samples,
     required this.sampleRate,
     required this.level,
+    this.truncated = false,
   });
 
   final Int16List samples;
@@ -14,6 +15,9 @@ class VoiceUtterance {
 
   /// The loudest frame of the utterance, 0..1, for the orb.
   final double level;
+
+  /// True only for a detector recording-limit cut, never silence or a flush.
+  final bool truncated;
 
   Duration get duration =>
       Duration(microseconds: samples.length * 1000000 ~/ sampleRate);
@@ -76,6 +80,9 @@ class PcmFramer {
     _leftover = offset == all.length ? Uint8List(0) : all.sublist(offset);
     return frames;
   }
+
+  /// Discard a partial frame when a capture generation is cancelled.
+  void reset() => _leftover = Uint8List(0);
 
   static Int16List _pcm16(Uint8List bytes, int offset, int length) {
     final view = ByteData.sublistView(bytes, offset, offset + length);
@@ -248,9 +255,9 @@ class VoiceActivityDetector {
       }
       final silence = _silenceRun * config.frameMillis;
       final length = _utterance.length * config.frameMillis;
-      if (silence >= config.endSilence.inMilliseconds ||
-          length >= config.maxUtterance.inMilliseconds) {
-        final done = _finish();
+      final endedBySilence = silence >= config.endSilence.inMilliseconds;
+      if (endedBySilence || length >= config.maxUtterance.inMilliseconds) {
+        final done = _finish(truncated: !endedBySilence);
         return done == null ? const [] : [done];
       }
       return const [];
@@ -286,7 +293,7 @@ class VoiceActivityDetector {
   }
 
   /// End what is being recorded, if anything, without waiting for silence.
-  /// A screen that is closing sends the last words rather than dropping them.
+  /// An explicit flush is not a recording-limit cut; cancellation uses reset.
   VoiceUtterance? flush() {
     if (!_speaking) return null;
     return _finish();
@@ -307,7 +314,7 @@ class VoiceActivityDetector {
     _level = 0;
   }
 
-  VoiceUtterance? _finish() {
+  VoiceUtterance? _finish({bool truncated = false}) {
     _speaking = false;
     _gateActive = false;
     _gateRun = 0;
@@ -346,6 +353,7 @@ class VoiceActivityDetector {
       samples: samples,
       sampleRate: config.sampleRate,
       level: math.min(1, peak / 0.14),
+      truncated: truncated,
     );
   }
 }

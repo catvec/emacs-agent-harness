@@ -12,7 +12,7 @@
 ;; Sidecar to Emacs: ready, listening, speaking, user_delta,
 ;; assistant_delta, backchannel, delegation, interrupted, error, closed.
 ;; Emacs to sidecar: start, context, mute, interrupt, stop, commentary,
-;; thinking, delegate_result.
+;; thinking, delegate_result, turn_hold.
 ;;
 ;; A delegation goes to the route as it stands, through the normal
 ;; `session/prompt' path for a session and `_harness/workspace/prompt'
@@ -39,6 +39,7 @@
 (require 'harness-ui-compose)
 (require 'harness-ui-voice-conversation)
 (require 'harness-ui-voice-pipeline)
+(require 'harness-ui-voice-turn)
 
 (declare-function harness-voice--adopt "harness-ui-voice")
 (declare-function harness-voice--button "harness-ui-voice")
@@ -142,12 +143,51 @@ reported with the next transcript and never spoken after a real
 utterance ends.")
 (defvar harness-voice-live--held-timer nil
   "Timer that releases held text after a false trigger, or nil.")
+(defvar harness-voice-live--held-token 0
+  "Invalidates false-trigger callbacks across newer speech and lifecycles.")
 (defvar harness-voice-live--turn-id nil
   "Id of the delegation whose output is arriving now.")
 (defvar harness-voice-live--seen (make-hash-table :test 'equal)
   "Utterance keys already delivered to the session.")
 (defvar harness-voice-live--held-seq 0
   "Counter for held pieces that came without an id.")
+
+(defcustom harness-voice-live-turn-grace 1.2
+  "Seconds of grace after a complete-looking final transcript.
+Speech or unresolved input cancels the deadline.  Continuation intent
+and possible cut-offs never expire; `harness-voice-live-send-now' or a
+standalone recovery cue can release them once input has resolved."
+  :type 'number
+  :group 'harness-voice)
+
+(defcustom harness-voice-live-pending-limit 100000
+  "Maximum characters of unsent speech retained in an automatic live turn.
+Exceeding this limit ends capture visibly rather than truncating or
+submitting the draft.  The complete unsent words remain in the transcript."
+  :type 'natnum
+  :group 'harness-voice)
+
+(defvar harness-voice-live--pending nil
+  "Unsent conversational turn: :route, ordered :items and :recovery.
+Each item retains its original :text, delegation :id and source :segment.
+Nothing is recorded as sent until the entire turn is committed.")
+(defvar harness-voice-live--pending-timer nil "Ordinary turn grace timer.")
+(defvar harness-voice-live--pending-token 0
+  "Invalidates grace callbacks after input, route or lifecycle changes.")
+(defvar harness-voice-live--input-chunks nil
+  "Source id -> input record, independent of the bounded pipeline display.
+Records retain onset order, route, truncation and unresolved transcription.")
+(defvar harness-voice-live--input-seq 0 "Monotonic source onset order.")
+(defvar harness-voice-live--input-anonymous nil
+  "Non-nil while unnumbered input is awaiting its delegation.")
+(defvar harness-voice-live--turn-held nil
+  "Whether this client has asked the sidecar to hold provider output.")
+(defvar harness-voice-live--caption-hold nil
+  "Continuation or cut-off hold from a caption without a delegation.
+It holds output and older pending words; captions never invent a request.")
+(defvar harness-voice-live--caption-text "" "Current unnumbered caption's partial words.")
+(defvar harness-voice-live--caption-hold-order 0 "Onset order of the latest finalized caption.")
+(defvar harness-voice-live--caption-recovery nil "Latest caption-only recovery awaiting input resolution.")
 
 (defcustom harness-voice-live-motion t
   "Whether the voice controls animate.
@@ -174,8 +214,9 @@ context and is never replayed blindly."
 (defvar harness-voice-live--stage nil
   "What the session is doing now.
 One of nil, `listening', `hearing', `transcribing', `holding', `thinking',
-`speaking', `muted' or `failed'.  The stage is what the controls, the
-stage line and the timer read; the state is what the sidecar reported.")
+`finishing', `continuation', `cut-off', `speaking', `muted' or `failed'.
+The stage is what the controls, the stage line and the timer read; the
+state is what the sidecar reported.")
 (defvar harness-voice-live--stage-since nil "Time the current stage began.")
 (defvar harness-voice-live--stage-timer nil "Timer animating an active stage.")
 (defvar harness-voice-live--stage-frame 0 "Frame of the busy indicator.")
@@ -363,14 +404,13 @@ thread."
 A queued delegation is answered so its sidecar does not wait for a turn
 that will never come; a turn already running is left to finish, and its
 reply is not spoken into the new thread."
+  (harness-voice-live--pending-cancel "retargeted")
   (let ((queued harness-voice-live--delegations))
     (setq harness-voice-live--delegations nil)
     (dolist (job queued)
       (harness-voice-live--pipeline-turn
        (plist-get job :id) 'cancelled "retargeted")
-      (harness-voice-live--send
-       (list :event "delegate_result" :id (plist-get job :id) :text ""
-             :error t :message "retargeted")))
+      (harness-voice-live--delegate-result job "" "retargeted"))
     (when harness-voice-live--delegation
       (harness-voice-live--pipeline-turn
        (plist-get harness-voice-live--delegation :id) 'cancelled "retargeted"))
@@ -380,8 +420,14 @@ reply is not spoken into the new thread."
     (harness-voice-live--cancel-held-timer)))
 
 (defun harness-voice-live--pipeline-turn (id state detail)
-  "Record that turn ID ended in STATE with DETAIL, when it is known."
+  "Record turn ID's STATE and DETAIL, including every source's terminal state."
   (when (and (stringp id) harness-voice-live--pipeline)
+    (let ((turn (harness-voice-pipeline--turn harness-voice-live--pipeline id)))
+      (dolist (source (plist-get turn :segments))
+        (harness-voice-pipeline-segment
+         harness-voice-live--pipeline source
+         (pcase state ('done 'answered) ('failed 'failed) (_ 'dropped))
+         (list :reason (harness-voice-live--pipeline-reason detail)))))
     (harness-voice-pipeline-turn
      harness-voice-live--pipeline id state
      (list :detail detail :generation (harness-voice-live--pipeline-generation)))
@@ -481,6 +527,9 @@ flickers in and out is noise, and a wait that short needs no clock."
     ('hearing "Hearing you")
     ('transcribing "Transcribing")
     ('holding "Holding reply")
+    ('finishing "Finishing thought")
+    ('continuation "Waiting for continuation")
+    ('cut-off "Possible cut-off")
     ('thinking "Working")
     ('speaking "Speaking")
     ('muted "Muted")
@@ -557,6 +606,8 @@ by naming the one that is."
      (concat " · " (harness-voice-live--stage-name)
              (let ((elapsed (harness-voice-live--elapsed)))
                (when elapsed (format " · %.1fs" elapsed)))))
+    ((memq harness-voice-live--stage '(finishing continuation cut-off))
+     (concat " · " (harness-voice-live--stage-name)))
     ((eq harness-voice-live--state 'speaking) " · Speaking")
     ((eq harness-voice-live--stage 'speaking) " · Speaking")
     ((eq harness-voice-live--stage 'holding) " · Holding reply")
@@ -653,6 +704,10 @@ never says `Listening' in a box the words do not go to."
                        (harness-voice--button "Start" #'harness-voice-live--start-here
                                               "Live voice · sidecar session")))
                      95 nil)
+               (and active here harness-voice-live--pending
+                    (not (harness-voice-live--input-busy-p))
+                    (list (harness-voice--button "Submission" #'harness-voice-live-send-now
+                                                 "Pending speech submission") 94 nil))
                (and active here
                     (list (harness-voice--button "Interrupt C-c V" #'harness-voice-live-interrupt
                                                  "Playback · interruption") 90 nil))
@@ -680,7 +735,16 @@ never says `Listening' in a box the words do not go to."
                 ;; stay readable at a narrow width.
                 (when (and active here (> room 20))
                   (concat "\n" (harness-voice-pipeline-compact-line
-                                harness-voice-live--pipeline room))))))))
+                                harness-voice-live--pipeline room)))
+                (when (and active here harness-voice-live--pending)
+                  (concat "\n" (harness-voice-live--pending-line room))))))))
+
+(defun harness-voice-live--pending-line (width)
+  "Return the unsent draft, fitted to WIDTH without changing its words."
+  (truncate-string-to-width
+   (concat (propertize "Unsent speech" 'face 'harness-label-face)
+           " · " (harness-ui-one-line (harness-voice-live--pending-text)))
+   width nil nil "…"))
 
 ;; The rule closes the pipeline block, above the transcript it belongs to.
 (defconst harness-voice-live--transcript-rule
@@ -748,6 +812,8 @@ which is the meter's rate, not the transcript's."
   "Return the pipeline block's lines for a window WIDTH wide."
   (append
    (harness-voice-pipeline-block harness-voice-live--pipeline width)
+   (when harness-voice-live--pending
+     (list (harness-voice-live--pending-line width)))
    (list (harness-ui-action-button
           (if harness-voice-live--pipeline-details "[Hide details]" "[Pipeline details]")
           #'harness-voice-live-pipeline-details
@@ -864,34 +930,33 @@ that one burst of the gate became one transcript."
             harness-voice-live--utterance nil))
     (harness-voice-live--pipeline-touch t)))
 
-(defun harness-voice-live--pipeline-turn-sent (id)
-  "Record that turn ID was handed to the session."
-  (let* ((segment (or harness-voice-live--utterance harness-voice-live--utterance-done))
-         (generation (harness-voice-live--pipeline-generation)))
-    (harness-voice-pipeline-turn harness-voice-live--pipeline id 'working
-                                 (list :segment segment :generation generation))
-    (when segment
-      (harness-voice-pipeline-segment harness-voice-live--pipeline segment 'in-turn
-                                      (list :generation generation))
-      (when (equal segment harness-voice-live--utterance-done)
-        (setq harness-voice-live--utterance-done nil)))
+(defun harness-voice-live--pipeline-turn-sent (id &optional segments)
+  "Record turn ID's delivery with all source SEGMENTS, in onset order."
+  (let ((generation (harness-voice-live--pipeline-generation)))
+    (dolist (segment (or segments (list (or harness-voice-live--utterance
+                                            harness-voice-live--utterance-done))))
+      (harness-voice-pipeline-turn harness-voice-live--pipeline id 'working
+                                   (list :segment segment :generation generation))
+      (when segment
+        (harness-voice-pipeline-segment harness-voice-live--pipeline segment 'in-turn
+                                        (list :generation generation))
+        (when (equal segment harness-voice-live--utterance-done)
+          (setq harness-voice-live--utterance-done nil))))
     (harness-voice-live--pipeline-touch t)))
 
-(defun harness-voice-live--pipeline-turn-queued (id)
-  "Record that turn ID waits behind the running turn."
-  (harness-voice-pipeline-turn harness-voice-live--pipeline id 'queued
-                               (list :segment (or harness-voice-live--utterance
-                                                  harness-voice-live--utterance-done)
-                                     :generation (harness-voice-live--pipeline-generation)))
+(defun harness-voice-live--pipeline-turn-queued (id &optional segments)
+  "Record that turn ID and its source SEGMENTS wait behind the running turn."
+  (dolist (segment (or segments (list (or harness-voice-live--utterance
+                                          harness-voice-live--utterance-done))))
+    (harness-voice-pipeline-turn
+     harness-voice-live--pipeline id 'queued
+     (list :segment segment :generation (harness-voice-live--pipeline-generation))))
   (harness-voice-live--pipeline-touch t))
 
 (defun harness-voice-live--pipeline-turn-ended (state &optional detail)
   "Record that the turn in flight ended in STATE, with DETAIL."
   (when harness-voice-live--turn-id
-    (harness-voice-pipeline-turn
-     harness-voice-live--pipeline harness-voice-live--turn-id state
-     (list :detail detail :generation (harness-voice-live--pipeline-generation)))
-    (harness-voice-live--pipeline-touch t)))
+    (harness-voice-live--pipeline-turn harness-voice-live--turn-id state detail)))
 
 (defun harness-voice-live--pipeline-reply-id (piece)
   "Return the reply id a speakable PIECE belongs to.
@@ -1060,9 +1125,9 @@ local pipeline, the fixture or a custom sidecar."
         harness-voice-live--heard ""))
 
 (defun harness-voice-live--clear-gate ()
-  "Forget speech, held output and the release timer."
-  (when (timerp harness-voice-live--held-timer)
-    (cancel-timer harness-voice-live--held-timer))
+  "Forget speech, pending input, held output and both release timers."
+  (harness-voice-live--pending-cancel "cancelled")
+  (harness-voice-live--cancel-held-timer)
   (setq harness-voice-live--held-timer nil
         harness-voice-live--speech-active nil
         harness-voice-live--held nil
@@ -1070,12 +1135,14 @@ local pipeline, the fixture or a custom sidecar."
 
 (defun harness-voice-live--holding-output-p ()
   "Non-nil while assistant text must not be sent to the sidecar."
-  (or harness-voice-live--speech-active
+  (or harness-voice-live--pending harness-voice-live--caption-hold
+      (harness-voice-live--input-busy-p)
       harness-voice-live--held
       (memq harness-voice-live--stage '(hearing transcribing holding))))
 
 (defun harness-voice-live--cancel-held-timer ()
-  "Cancel a pending false-trigger release."
+  "Cancel a pending false-trigger release, including an already queued callback."
+  (cl-incf harness-voice-live--held-token)
   (when (timerp harness-voice-live--held-timer)
     (cancel-timer harness-voice-live--held-timer))
   (setq harness-voice-live--held-timer nil))
@@ -1086,10 +1153,19 @@ Only a trigger that produced no utterance schedules this; a real
 utterance sends transcribing first, which cancels it."
   (harness-voice-live--cancel-held-timer)
   (when (and harness-voice-live--held
-             (not harness-voice-live--speech-active))
+             (not harness-voice-live--pending)
+             (not harness-voice-live--caption-hold)
+             (not (harness-voice-live--input-busy-p)))
     (setq harness-voice-live--held-timer
           (run-at-time harness-voice-live-pending-release-delay nil
-                       #'harness-voice-live--release-held))))
+                       #'harness-voice-live--held-expired harness-voice-live--held-token
+                       harness-voice-live--route-generation))))
+
+(defun harness-voice-live--held-expired (token generation)
+  "Release only the false trigger whose TOKEN and route GENERATION still match."
+  (when (and (= token harness-voice-live--held-token)
+             (harness-voice-live--route-current-p generation))
+    (harness-voice-live--release-held)))
 
 (defun harness-voice-live--hold (id text)
   "Hold assistant TEXT with ID until a transcript decides what to do."
@@ -1105,34 +1181,33 @@ utterance sends transcribing first, which cancels it."
             harness-voice-live--held)
       (when (> (length harness-voice-live--held) 40)
         (setq harness-voice-live--held (seq-take harness-voice-live--held 40))))
-    (harness-voice-live--stage-set 'holding)))
+    (harness-voice-live--stage-set
+     (cond (harness-voice-live--pending (harness-voice-live--pending-stage))
+           (harness-voice-live--caption-hold harness-voice-live--caption-hold)
+           (t 'holding)))))
 
 (defun harness-voice-live--release-held ()
   "Send held output now; only a false trigger or an explicit resume does."
   (harness-voice-live--cancel-held-timer)
-  (let ((items (reverse harness-voice-live--held)))
-    (setq harness-voice-live--held nil)
-    (dolist (item items)
-      (when (harness-voice-live--active-p)
-        (harness-voice-live--pipeline-reply-handed (plist-get item :id))
-        (harness-voice-live--send
-         (list :event "commentary"
-               :id (plist-get item :id)
-               :text (plist-get item :text)))
-        (harness-voice-conversation-say
-         harness-voice-live--conversation (plist-get item :text) 'commentary)))
-    (unless harness-voice-live--speech-active
-      (harness-voice-live--stage-set
-       (cond ((not (harness-voice-live--active-p)) nil)
-             (harness-voice-live--muted 'muted)
-             ((harness-voice-live--holding-output-p) 'holding)
-             (t 'listening))))))
+  (unless (or harness-voice-live--pending harness-voice-live--caption-hold
+              (harness-voice-live--input-busy-p))
+    (let ((items (reverse harness-voice-live--held)))
+      (setq harness-voice-live--held nil)
+      (dolist (item items)
+        (when (harness-voice-live--active-p)
+          (harness-voice-live--pipeline-reply-handed (plist-get item :id))
+          (harness-voice-live--send
+           (list :event "commentary"
+                 :id (plist-get item :id)
+                 :text (plist-get item :text)))
+          (harness-voice-conversation-say
+           harness-voice-live--conversation (plist-get item :text) 'commentary)))
+      (harness-voice-live--settle-stage))))
 
 (defun harness-voice-live--delegate-key (event)
   "Return the exact-once key of delegation EVENT."
   (or (plist-get event :utterance)
-      (plist-get event :id)
-      (plist-get event :text)))
+      (plist-get event :id)))
 
 (defun harness-voice-live--delegate-seen-p (event)
   "Return non-nil when EVENT's utterance already reached the session."
@@ -1526,7 +1601,321 @@ sent at all."
   (mapconcat (lambda (id) (or (plist-get (gethash id harness-voice-live--nodes) :text) ""))
              (reverse harness-voice-live--order) ""))
 
+;;;; Pending conversational input
+
+(defun harness-voice-live--input-source (event)
+  "Return EVENT's source segment id, when one is known."
+  (cond ((equal (plist-get event :event) "segment") (plist-get event :id))
+        ((plist-get event :utterance) (format "u-%s" (plist-get event :utterance)))
+        (t (or harness-voice-live--utterance-done harness-voice-live--utterance))))
+
+(defun harness-voice-live--input-record (source)
+  "Return SOURCE's input record, capturing its onset order and route."
+  (or (cdr (assoc source harness-voice-live--input-chunks))
+      (let* ((utterance (and (string-prefix-p "u-" source) (substring source 2)))
+             (record (list :segment source :order (cl-incf harness-voice-live--input-seq)
+                           :route (harness-voice-live--utterance-route utterance)
+                           :state 'speech :open nil :await-delegate nil :truncated nil
+                           :caption-text "" :accounted nil)))
+        (push (cons source record) harness-voice-live--input-chunks)
+        record)))
+
+(defun harness-voice-live--input-busy-p ()
+  "Whether speech or accepted input still awaits resolution."
+  (or harness-voice-live--speech-active harness-voice-live--input-anonymous
+      (cl-some (lambda (entry)
+                 (and (plist-get (cdr entry) :open)
+                      (harness-voice-live--route-current-p
+                       (plist-get (plist-get (cdr entry) :route) :generation))))
+               harness-voice-live--input-chunks)))
+
+(defun harness-voice-live--pending-cancel-timer ()
+  "Invalidate the pending turn's deadline, including callbacks already queued."
+  (cl-incf harness-voice-live--pending-token)
+  (when (timerp harness-voice-live--pending-timer)
+    (cancel-timer harness-voice-live--pending-timer))
+  (setq harness-voice-live--pending-timer nil))
+
+(defun harness-voice-live--turn-hold (held)
+  "Ask the provider to keep output HELD, without muting capture."
+  (unless (eq (and held t) harness-voice-live--turn-held)
+    (setq harness-voice-live--turn-held (and held t))
+    (harness-voice-live--send (list :event "turn_hold" :active (if held t :false)))))
+
+(defun harness-voice-live--pending-add (item)
+  "Add ITEM once, retaining source onset order rather than completion order."
+  (let* ((items (plist-get harness-voice-live--pending :items))
+         (old (cl-find (plist-get item :segment) items
+                       :key (lambda (old) (plist-get old :segment)) :test #'equal)))
+    (when (or (not old)
+              (and (plist-get old :failed) (not (plist-get item :failed)))
+              (and (not (plist-get old :id)) (plist-get item :id)))
+      (setf (plist-get harness-voice-live--pending :items)
+            (sort (cons item (remq old items))
+                  (lambda (a b) (< (plist-get a :order) (plist-get b :order)))))
+      ;; Recovery is an ordered property, not an arrival-time decision:
+      ;; a cue can finish transcribing before the earlier words it releases.
+      (let ((words nil))
+        (setf (plist-get harness-voice-live--pending :items)
+              (mapcar (lambda (part)
+                        (let* ((raw (plist-get part :raw-text))
+                               (recovery (and words (plist-get part :cue))))
+                          (setq part (plist-put part :text (unless recovery raw))
+                                part (plist-put part :recovery recovery))
+                          (when raw (setq words t))
+                          part))
+                      (plist-get harness-voice-live--pending :items))))
+      (setf (plist-get harness-voice-live--pending :recovery)
+            (plist-get (car (last (plist-get harness-voice-live--pending :items))) :recovery)))))
+
+(defun harness-voice-live--pending-text ()
+  "Return unsent words in their original order, joined by a single space."
+  (string-join (delq nil (mapcar (lambda (item) (plist-get item :text))
+                                 (plist-get harness-voice-live--pending :items))) " "))
+
+(defun harness-voice-live--pending-reason ()
+  "Return the current draft's ending classification."
+  (let* ((items (plist-get harness-voice-live--pending :items))
+         (last (car (last (cl-remove-if (lambda (item) (plist-get item :recovery)) items)))))
+    (cond
+     ((cl-some (lambda (item) (plist-get item :failed)) items) 'cut-off)
+     ((and harness-voice-live--caption-hold
+           (> harness-voice-live--caption-hold-order (or (plist-get last :order) 0)))
+      harness-voice-live--caption-hold)
+     (t (harness-voice-turn-reason (harness-voice-live--pending-text)
+                                   (plist-get last :truncated))))))
+
+(defun harness-voice-live--pending-stage ()
+  "Return the stage naming the unsent draft's reason."
+  (pcase (harness-voice-live--pending-reason)
+    ('continuation 'continuation)
+    ('cut-off 'cut-off)
+    (_ 'finishing)))
+
+(defun harness-voice-live--pending-expired (token generation)
+  "Commit only the draft whose TOKEN and route GENERATION own this deadline."
+  (when (and (= token harness-voice-live--pending-token)
+             (harness-voice-live--route-current-p generation))
+    (setq harness-voice-live--pending-timer nil)
+    (when (and harness-voice-live--pending
+               (eq (harness-voice-live--pending-reason) 'grace))
+      (harness-voice-live--pending-commit))))
+
+(defun harness-voice-live--pending-update ()
+  "Keep output held and arm ordinary grace only after all input resolves."
+  (when (and harness-voice-live--pending harness-voice-live--caption-recovery
+             (> (plist-get harness-voice-live--caption-recovery :order)
+                (or (plist-get (car (last (plist-get harness-voice-live--pending :items))) :order) 0)))
+    (harness-voice-live--pending-add harness-voice-live--caption-recovery)
+    (setq harness-voice-live--caption-recovery nil))
+  (when (and harness-voice-live--pending
+             (> (length (harness-voice-live--pending-text)) harness-voice-live-pending-limit))
+    (harness-voice-live--transcript-text
+     'unsent "Unsent speech" (concat (harness-voice-live--pending-text) "\n"))
+    (harness-voice-live--fail "Unsent speech limit"))
+  (when harness-voice-live--pending
+    (harness-voice-live--cancel-held-timer)
+    (harness-voice-live--turn-hold t)
+    (cond
+     ((harness-voice-live--input-busy-p) (harness-voice-live--pending-cancel-timer))
+     ((plist-get harness-voice-live--pending :recovery)
+      (harness-voice-live--pending-commit))
+     ((and (eq (harness-voice-live--pending-reason) 'grace)
+           (not harness-voice-live--pending-timer))
+      (let ((token harness-voice-live--pending-token))
+        (setq harness-voice-live--pending-timer
+              (run-at-time harness-voice-live-turn-grace nil
+                           #'harness-voice-live--pending-expired token
+                           harness-voice-live--route-generation)))))
+    (when harness-voice-live--pending
+      (unless (harness-voice-live--input-busy-p)
+        (harness-voice-live--stage-set (harness-voice-live--pending-stage)))
+      (harness-voice-live--pipeline-touch t)
+      (harness-voice-live--refresh))))
+
+(defun harness-voice-live--input-event (event)
+  "Track capture and unresolved chunks in EVENT independently of playback.
+A transcribed segment still waits for its delegation.  Listening is not
+transcription completion, and the bounded pipeline is not an activity store."
+  (let ((kind (plist-get event :event)))
+    (when (and (member kind '("speech" "hearing" "transcribing" "user_delta" "segment"))
+               (not harness-voice-live--muted)
+               (not (memq harness-voice-live--state '(ending failed))))
+      (when (or (equal kind "hearing")
+                (and (equal kind "speech") (plist-get event :active)))
+        (harness-voice-live--follow-selection))
+      (let* ((source (if (equal kind "segment") (plist-get event :id)
+                       (and (plist-get event :utterance)
+                            (format "u-%s" (plist-get event :utterance)))))
+             (record (and source (harness-voice-live--input-record source)))
+             (state (and (equal kind "segment") (plist-get event :state))))
+        (when (and record (eq (plist-get event :truncated) t))
+          (setf (plist-get record :truncated) t)
+          (when-let* ((item (cl-find source (plist-get harness-voice-live--pending :items)
+                                     :key (lambda (item) (plist-get item :segment)) :test #'equal)))
+            (setf (plist-get item :truncated) t)
+            (harness-voice-live--pending-cancel-timer)))
+        (unless (memq (plist-get record :state) '(resolved cancelled dropped failed))
+          (cond
+           ((and (equal kind "segment") (member state '("dropped" "failed")))
+            (setf (plist-get record :open) nil
+                  (plist-get record :state) (intern state))
+            (when (and (equal state "failed") harness-voice-live--pending)
+              (harness-voice-live--pending-cancel-timer)
+              (harness-voice-live--pending-add
+               (list :segment source :order (plist-get record :order) :failed t))))
+           ((or (member kind '("transcribing" "user_delta"))
+                (and (equal kind "segment")
+                     (member state '("accepted" "transcribing" "transcribed"))))
+            (harness-voice-live--pending-cancel-timer)
+            (harness-voice-live--cancel-held-timer)
+            (if record
+                (progn
+                  (when (or (equal kind "transcribing") (equal kind "segment"))
+                    (setf (plist-get record :await-delegate) t))
+                  (setf (plist-get record :open)
+                        (or (plist-get record :await-delegate)
+                            (not (and (equal kind "user_delta") (plist-get event :final))))
+                        (plist-get record :state)
+                        (if (plist-get record :open) 'transcribing 'caption-final)))
+              (setq harness-voice-live--input-anonymous
+                    (cond ((equal kind "transcribing") 'transcribing)
+                          ((eq harness-voice-live--input-anonymous 'transcribing) 'transcribing)
+                          ((plist-get event :final) nil)
+                          (t 'caption)))))
+           ((equal kind "hearing")
+            (harness-voice-live--pending-cancel-timer)
+            (if record (setf (plist-get record :open) t)
+              (setq harness-voice-live--input-anonymous 'hearing)))
+           ((and (equal kind "speech") (plist-get event :active))
+            (harness-voice-live--pending-cancel-timer))))))
+    (when (equal kind "listening")
+      (when (eq harness-voice-live--input-anonymous 'hearing)
+        (setq harness-voice-live--input-anonymous nil))
+      (when-let* ((source (and (plist-get event :utterance)
+                               (format "u-%s" (plist-get event :utterance))))
+                  (record (cdr (assoc source harness-voice-live--input-chunks))))
+        (when (eq (plist-get record :state) 'speech)
+          (setf (plist-get record :open) nil))))))
+
+(defun harness-voice-live--caption-hold-update (text final truncated source)
+  "Hold autonomous output for SOURCE's caption, never inventing a request.
+Finals are classified in onset order, not transcription completion order."
+  (let* ((record (and source (harness-voice-live--input-record source)))
+         (previous (if record (plist-get record :caption-text) harness-voice-live--caption-text))
+         (caption (if (and final (string-prefix-p previous text)) text (concat previous text))))
+    (if record (setf (plist-get record :caption-text) (if final "" caption))
+      (setq harness-voice-live--caption-text (if final "" caption)))
+    (when (and final (>= (or (plist-get record :order) harness-voice-live--input-seq)
+                          harness-voice-live--caption-hold-order))
+      (let ((reason (harness-voice-turn-reason caption truncated)))
+        (setq harness-voice-live--caption-hold-order
+              (or (plist-get record :order) harness-voice-live--input-seq)
+              harness-voice-live--caption-hold
+              (pcase reason ('continuation 'continuation) ('cut-off 'cut-off))
+              harness-voice-live--caption-recovery
+              (and (harness-voice-turn-recovery-p caption)
+                   (list :segment source :order harness-voice-live--caption-hold-order
+                         :raw-text caption :cue t)))
+        (harness-voice-live--cancel-held-timer)
+        (harness-voice-live--turn-hold
+         (or harness-voice-live--pending harness-voice-live--caption-hold
+             (harness-voice-live--input-busy-p)))
+        (cond (harness-voice-live--caption-hold
+               (harness-voice-live--stage-set harness-voice-live--caption-hold))
+              ((not harness-voice-live--pending)
+               (harness-voice-live--settle-stage)))))))
+
+(defun harness-voice-live--pending-cancel (reason)
+  "Discard the unsent turn and unresolved input with cancellation REASON."
+  (harness-voice-live--pending-cancel-timer)
+  (let ((pending harness-voice-live--pending))
+    (setq harness-voice-live--pending nil
+          harness-voice-live--input-anonymous nil
+          harness-voice-live--speech-active nil
+          harness-voice-live--utterance nil
+          harness-voice-live--utterance-done nil
+          harness-voice-live--caption-hold nil
+          harness-voice-live--caption-hold-order 0
+          harness-voice-live--caption-recovery nil
+          harness-voice-live--caption-text ""
+          harness-voice-live--heard "")
+    (dolist (item (plist-get pending :items))
+      (when (plist-get item :id)
+        (harness-voice-live--send
+         (list :event "delegate_result" :id (plist-get item :id) :text ""
+               :error t :message reason))))
+    (dolist (entry harness-voice-live--input-chunks)
+      (let ((record (cdr entry)))
+        (unless (memq (plist-get record :state) '(cancelled dropped))
+          (when (or (not (eq (plist-get record :state) 'resolved))
+                    (cl-find (car entry) (plist-get pending :items)
+                             :key (lambda (item) (plist-get item :segment)) :test #'equal))
+            (harness-voice-pipeline-segment
+             harness-voice-live--pipeline (car entry) 'dropped
+             (list :reason (harness-voice-live--pipeline-reason reason)))
+            (setf (plist-get record :state) 'cancelled
+                  (plist-get record :open) nil)))))
+    (harness-voice-live--cancel-held-timer)
+    (setq harness-voice-live--held nil)
+    (harness-voice-live--turn-hold nil)))
+
+(defun harness-voice-live--pending-commit ()
+  "Submit the whole draft exactly once, never over unresolved input."
+  (let ((pending harness-voice-live--pending))
+    (when pending
+      (harness-voice-live--follow-selection)
+      (when (and (eq pending harness-voice-live--pending)
+                 (harness-voice-live--active-p)
+                 (not harness-voice-live--muted)
+                 (not (memq harness-voice-live--state '(ending failed)))
+                 (not (harness-voice-live--input-busy-p))
+                 (harness-voice-live--route-current-p
+                  (plist-get (plist-get pending :route) :generation)))
+        (let* ((items (plist-get pending :items))
+               (text (harness-voice-live--pending-text))
+               (ids (delq nil (mapcar (lambda (item) (plist-get item :id)) items)))
+               (job (list :id (car ids) :ids ids :text text :route (plist-get pending :route)
+                          :segments (mapcar (lambda (item) (plist-get item :segment)) items))))
+          (harness-voice-live--pending-cancel-timer)
+          (dolist (item items)
+            (when-let* ((record (cdr (assoc (plist-get item :segment)
+                                            harness-voice-live--input-chunks))))
+              (setf (plist-get record :accounted) t
+                    (plist-get record :state) 'resolved)))
+          (setq harness-voice-live--pending nil
+                harness-voice-live--caption-hold nil
+                harness-voice-live--caption-recovery nil
+                harness-voice-live--held nil)
+          (harness-voice-live--turn-hold nil)
+          (harness-voice-live--transcript-sent
+           text (and (= (length items) 1) (plist-get (car items) :caption)))
+          (harness-voice-conversation-hear harness-voice-live--conversation text text)
+          (setq harness-voice-live--delegations
+                (nconc harness-voice-live--delegations (list job)))
+          (when harness-voice-live--delegation
+            (harness-voice-live--pipeline-turn-queued (car ids) (plist-get job :segments)))
+          (harness-voice-live--delegate-next))))))
+
+;;;###autoload
+(defun harness-voice-live-send-now ()
+  "Submit pending speech, only when no speech or transcription is active.
+An ineligible action is a no-op, not a deferred override."
+  (interactive)
+  (harness-voice-live--pending-commit))
+
 ;;;; Delegation
+
+(defun harness-voice-live--delegate-result (job text &optional error held)
+  "Answer each source delegation of JOB with TEXT, ERROR and HELD."
+  (dolist (id (or (plist-get job :ids) (list (plist-get job :id))))
+    (harness-voice-live--send
+     (append (list :event "delegate_result" :id id :text text)
+             (and error (list :error t :message error))
+             (and held (list :held t))))
+    ;; Every chunk receives an acknowledgement, but the combined reply
+    ;; is presented only once on the audio side too.
+    (setq text "")))
 
 (defun harness-voice-live--delegate-next ()
   "Send the next delegation to the agent, unless one is running.
@@ -1544,18 +1933,16 @@ them is not it."
       (if (not (harness-voice-live--route-current-p (plist-get route :generation)))
           (progn
             (harness-voice-live--pipeline-turn id 'cancelled "retargeted")
-            (harness-voice-live--send
-             (list :event "delegate_result" :id id :text ""
-                   :error t :message "retargeted"))
+            (harness-voice-live--delegate-result job "" "retargeted")
             (harness-voice-live--delegate-next))
         (setq harness-voice-live--delegation
-              (list :id id :route route :session (plist-get route :session))
+              (plist-put job :session (plist-get route :session))
               harness-voice-live--turn-id id
               harness-voice-live--working t
               harness-voice-live--turn-active t
               harness-voice-live--nodes (make-hash-table :test 'equal)
               harness-voice-live--order nil)
-        (harness-voice-live--pipeline-turn-sent id)
+        (harness-voice-live--pipeline-turn-sent id (plist-get job :segments))
         (harness-voice-live--send (list :event "thinking" :text "Agent turn started"))
         (harness-voice-live--stage-set 'thinking)
         (harness-voice-live--refresh)
@@ -1601,72 +1988,91 @@ interpret the words."
   (when (and (equal id (plist-get harness-voice-live--delegation :id)))
     (harness-voice-live--pipeline-turn-ended
      'failed (harness-ui-one-line (harness-error-message error)))
+    (harness-voice-live--delegate-result
+     harness-voice-live--delegation "" (harness-ui-one-line (harness-error-message error)))
+    (setq harness-voice-live--held
+          (cl-remove id harness-voice-live--held
+                     :key (lambda (item) (plist-get item :turn)) :test #'equal))
     (setq harness-voice-live--delegation nil
           harness-voice-live--turn-id nil
           harness-voice-live--working nil
           harness-voice-live--turn-active nil)
-    (harness-voice-live--send
-     (list :event "delegate_result" :id id :text ""
-           :error t :message (harness-ui-one-line (harness-error-message error))))
     (harness-voice-live--refresh)
     (harness-voice-live--delegate-next)))
 
 (defun harness-voice-live--delegate (event)
-  "Start a delegation from EVENT, or queue it behind the running turn.
-
-The utterance key is delivered once.  The transcript is the session
-message: it is what the speech model returned, sent to the route's
-target as it stands.  There is no distillation, no context envelope and
-no interpretation step, so nothing is added to what the person said and
-no model is asked about it before the target's own agent sees it.
-
-The route is captured here, with its generation, so the words reach the
-thread they were said in even when the person selects another one while
-the agent is working.  A burst the speech model made no words of is
-answered without a prompt."
+  "Accumulate EVENT's original words before any agent delivery.
+Stable utterance ids are consumed on receipt, including during a hold.
+The final transcript starts grace only after all accepted chunks resolve;
+continuation intent and explicit or likely cut-offs have no deadline."
   (harness-voice-live--follow-selection)
   (let* ((id (or (plist-get event :id) (format "d-%s" (float-time))))
          (text (or (plist-get event :text) (plist-get event :prompt) ""))
          (text (string-trim (if (string-empty-p text) harness-voice-live--heard text)))
-         (route (harness-voice-live--utterance-route (plist-get event :utterance)))
+         (source (or (harness-voice-live--input-source event) (concat "d:" id)))
+         (record (harness-voice-live--input-record source))
+         (route (plist-get record :route))
          (caption harness-voice-live--heard))
-    (if (harness-voice-live--delegate-seen-p event)
-        (harness-voice-live--refresh)
-      (setq harness-voice-live--heard "")
+    (unless (harness-voice-live--delegate-seen-p event)
+      (setq harness-voice-live--heard ""
+            harness-voice-live--input-anonymous nil)
+      (when (>= (plist-get record :order) harness-voice-live--caption-hold-order)
+        (setq harness-voice-live--caption-hold nil
+              harness-voice-live--caption-recovery nil))
+      (harness-voice-live--pending-cancel-timer)
       (harness-voice-live--cancel-held-timer)
-      ;; The person spoke: a reply held for the previous turn is
-      ;; superseded, and is neither spoken now nor repeated into the
-      ;; message.  The session's agent already has the turn it wrote.
-      (setq harness-voice-live--held nil)
       (cond
+       ((plist-get record :accounted)
+        (harness-voice-live--send (list :event "delegate_result" :id id :text "")))
+       ((or (eq (plist-get record :state) 'cancelled)
+            harness-voice-live--muted
+            (memq harness-voice-live--state '(ending failed))
+            (not (harness-voice-live--route-current-p (plist-get route :generation))))
+        (setf (plist-get record :open) nil)
+        (harness-voice-live--send
+         (list :event "delegate_result" :id id :text "" :error t
+               :message (if (harness-voice-live--route-current-p (plist-get route :generation))
+                            "cancelled" "retargeted"))))
        ((string-empty-p text)
-        ;; The speech model made no words of this burst: the record says
-        ;; so, the target gets no message, and the sidecar is answered so
-        ;; it does not wait for a turn that will never come.
+        (setf (plist-get record :open) nil
+              (plist-get record :state) 'dropped)
         (harness-voice-live--drop-burst event "no words")
         (harness-voice-live--transcript-sent nil)
         (harness-voice-live--send (list :event "delegate_result" :id id :text ""))
-        (harness-voice-live--settle-stage)
-        (harness-voice-live--refresh))
+        (harness-voice-live--turn-hold
+         (or harness-voice-live--pending (harness-voice-live--input-busy-p)))
+        (harness-voice-live--settle-stage))
        (t
-        ;; Show the crossing when it is not simply the caption again:
-        ;; the words that went to the target were the words on screen.
-        (harness-voice-live--transcript-sent text caption)
-        (harness-voice-conversation-hear
-         harness-voice-live--conversation text text)
-        (setq harness-voice-live--delegations
-              (nconc harness-voice-live--delegations
-                     (list (list :id id :text text :route route))))
-        (when harness-voice-live--delegation
-          (harness-voice-live--pipeline-turn-queued id))
-        (harness-voice-live--delegate-next))))))
+        (setf (plist-get record :open) nil
+              (plist-get record :state) 'resolved)
+        (harness-voice-pipeline-segment harness-voice-live--pipeline source 'transcribed
+                                        (list :text text))
+        (unless harness-voice-live--pending
+          (setq harness-voice-live--pending (list :route route :items nil)))
+        (harness-voice-live--pending-add
+         (list :id id :raw-text text :text text :caption caption
+               :segment source :order (plist-get record :order)
+               :cue (harness-voice-turn-recovery-p text)
+               :truncated (or (eq (plist-get event :truncated) t)
+                              (plist-get record :truncated))))
+        ;; A failure arriving before an earlier slow transcript is still
+        ;; a missing continuation, not permission to send the old fragment.
+        (dolist (entry harness-voice-live--input-chunks)
+          (when (and (eq (plist-get (cdr entry) :state) 'failed)
+                     (not (plist-get (cdr entry) :accounted))
+                     (harness-voice-live--route-current-p
+                      (plist-get (plist-get (cdr entry) :route) :generation)))
+            (harness-voice-live--pending-add
+             (list :segment (car entry) :order (plist-get (cdr entry) :order) :failed t))))
+        (when (equal source harness-voice-live--utterance-done)
+          (setq harness-voice-live--utterance-done nil))
+        (when (equal source harness-voice-live--utterance)
+          (setq harness-voice-live--utterance nil))
+        (harness-voice-live--pending-update))))))
 
 (defun harness-voice-live--drop-burst (event reason)
   "Record EVENT's burst as dropped with REASON, and return to listening."
-  (let ((segment (or harness-voice-live--utterance-done
-                     harness-voice-live--utterance
-                     (and (plist-get event :utterance)
-                          (format "u-%s" (plist-get event :utterance))))))
+  (let ((segment (harness-voice-live--input-source event)))
     (when segment
       (harness-voice-live--pipeline-segment
        (list :event "segment" :state "dropped" :id segment :reason reason))
@@ -1678,7 +2084,12 @@ answered without a prompt."
   (harness-voice-live--stage-set
    (cond ((not (harness-voice-live--active-p)) nil)
          (harness-voice-live--muted 'muted)
-         ((harness-voice-live--holding-output-p) 'holding)
+         (harness-voice-live--speech-active 'hearing)
+         ((harness-voice-live--input-busy-p) 'transcribing)
+         (harness-voice-live--pending (harness-voice-live--pending-stage))
+         (harness-voice-live--caption-hold harness-voice-live--caption-hold)
+         (harness-voice-live--held 'holding)
+         (harness-voice-live--working 'thinking)
          (t 'listening))))
 
 (defun harness-voice-live--finish-turn (outcome)
@@ -1701,12 +2112,12 @@ old one would arrive as if it answered the new one."
                 harness-voice-live--delegation nil
                 harness-voice-live--nodes nil
                 harness-voice-live--order nil)
-          (harness-voice-live--clear-gate)
+          (harness-voice-live--cancel-held-timer)
+          (setq harness-voice-live--held
+                (cl-remove (plist-get delegation :id) harness-voice-live--held
+                           :key (lambda (item) (plist-get item :turn)) :test #'equal))
           (when delegation
-            (harness-voice-live--send
-             (list :event "delegate_result"
-                   :id (plist-get delegation :id) :text ""
-                   :error t :message (or outcome "cancelled")))))
+            (harness-voice-live--delegate-result delegation "" (or outcome "cancelled"))))
       (maphash (lambda (id _entry)
                  (harness-voice-live--drain-node id t))
                (or harness-voice-live--nodes (make-hash-table)))
@@ -1721,10 +2132,7 @@ old one would arrive as if it answered the new one."
          (stale
           ;; The words went to the thread they were said in; the reply
           ;; stays there, and the sidecar is told so it stops waiting.
-          (harness-voice-live--send
-           (list :event "delegate_result"
-                 :id (plist-get delegation :id) :text ""
-                 :error t :message "retargeted")))
+          (harness-voice-live--delegate-result delegation "" "retargeted"))
          ((harness-voice-live--holding-output-p)
           ;; Keep the full result as context only when no sentence of
           ;; it was already held; otherwise the pieces are the truth.
@@ -1733,13 +2141,9 @@ old one would arrive as if it answered the new one."
                            :test #'equal)
             (harness-voice-live--hold
              (format "result:%s" (plist-get delegation :id)) text))
-          (harness-voice-live--send
-           (list :event "delegate_result"
-                 :id (plist-get delegation :id) :text text :held t)))
+          (harness-voice-live--delegate-result delegation text nil t))
          (t
-          (harness-voice-live--send
-           (list :event "delegate_result"
-                 :id (plist-get delegation :id) :text text))
+          (harness-voice-live--delegate-result delegation text)
           (harness-voice-conversation-say
            harness-voice-live--conversation text 'result))))
       (setq harness-voice-live--nodes nil
@@ -1829,8 +2233,31 @@ it is."
 
 ;;;; Sidecar events
 
+(defun harness-voice-live--stale-input-p (event)
+  "Whether EVENT is input canceled by a route or lifecycle change."
+  (when (member (plist-get event :event)
+                '("speech" "hearing" "transcribing" "user_delta" "segment"))
+    (let* ((source (if (equal (plist-get event :event) "segment") (plist-get event :id)
+                     (and (plist-get event :utterance)
+                          (format "u-%s" (plist-get event :utterance)))))
+           (record (cdr (assoc source harness-voice-live--input-chunks))))
+      (or harness-voice-live--muted
+          (memq harness-voice-live--state '(ending failed))
+          (eq (plist-get record :state) 'cancelled)
+          (and (equal (plist-get event :event) "user_delta")
+               (eq (plist-get record :state) 'resolved)
+               (not (and harness-voice-live--pending (eq (plist-get event :truncated) t))))
+          (and record (not (harness-voice-live--route-current-p
+                            (plist-get (plist-get record :route) :generation))))))))
+
 (defun harness-voice-live--handle (event)
   "Handle one parsed sidecar EVENT."
+  (unless (harness-voice-live--stale-input-p event)
+    (harness-voice-live--handle-current event)))
+
+(defun harness-voice-live--handle-current (event)
+  "Handle EVENT after its input route and lifecycle have been checked."
+  (harness-voice-live--input-event event)
   (pcase (plist-get event :event)
     ("level"
      (harness-voice-live--pipeline-level (plist-get event :input)
@@ -1872,10 +2299,11 @@ it is."
      (if (and harness-voice-live--held
               (not harness-voice-live--speech-active))
          (progn
-           (harness-voice-live--stage-set 'holding)
+           (harness-voice-live--stage-set
+            (if harness-voice-live--pending (harness-voice-live--pending-stage) 'holding))
            (harness-voice-live--schedule-held-release))
        (unless (memq harness-voice-live--stage
-                     '(hearing transcribing holding thinking))
+                     '(hearing transcribing holding thinking finishing continuation cut-off))
          (harness-voice-live--stage-set
           (if harness-voice-live--muted 'muted 'listening))))
      (harness-voice-live--refresh))
@@ -1912,12 +2340,19 @@ it is."
            (final (plist-get event :final)))
        (if (equal (plist-get event :event) "user_delta")
            (progn
+             (when (plist-get event :utterance)
+               (setq harness-voice-live--utterance
+                     (format "u-%s" (plist-get event :utterance))))
              (harness-voice-live--pipeline-caption text final)
              (setq harness-voice-live--heard
                    (concat harness-voice-live--heard text))
              (unless (eq harness-voice-live--stage 'transcribing)
                (harness-voice-live--stage-set 'hearing))
-             (harness-voice-live--caption "You" text final))
+             (harness-voice-live--caption "You" text final)
+             (unless harness-voice-live--muted
+               (harness-voice-live--caption-hold-update
+                text final (eq (plist-get event :truncated) t)
+                (harness-voice-live--input-source event))))
          (progn
            (harness-voice-live--caption "Voice" text final)
            ;; A provider's own speech, outside the agent's turn, is
@@ -1935,7 +2370,6 @@ it is."
         harness-voice-live--conversation text 'backchannel)))
     ("delegation"
      (harness-voice-live--cancel-held-timer)
-     (harness-voice-live--stage-set 'thinking)
      (harness-voice-live--delegate event))
     ("interrupted"
      (harness-voice-live--cancel-held-timer)
@@ -1964,7 +2398,23 @@ it is."
      (setq harness-voice-live--state nil
            harness-voice-live--closing nil)
      (harness-voice-live--clear-turn)
-     (harness-voice-live--refresh))))
+     (harness-voice-live--refresh)))
+  (harness-voice-live--pending-update)
+  (harness-voice-live--turn-hold
+   (and (not harness-voice-live--muted)
+        (not (memq harness-voice-live--state '(ending failed)))
+        (or harness-voice-live--pending harness-voice-live--caption-hold
+            (harness-voice-live--input-busy-p))))
+  (when (and harness-voice-live--caption-recovery
+             (not (plist-get harness-voice-live--caption-recovery :released))
+             (not harness-voice-live--pending)
+             (not (harness-voice-live--input-busy-p)))
+    (setf (plist-get harness-voice-live--caption-recovery :released) t)
+    (harness-voice-live--release-held))
+  (when (and harness-voice-live--caption-hold
+             (not harness-voice-live--pending)
+             (not (harness-voice-live--input-busy-p)))
+    (harness-voice-live--stage-set harness-voice-live--caption-hold)))
 
 ;;;; Commands
 
@@ -2034,6 +2484,8 @@ once, with a Retry control, rather than waiting out its own deadline."
             harness-voice-live--tail ""
             harness-voice-live--speaker nil
             harness-voice-live--seen (make-hash-table :test 'equal)
+            harness-voice-live--input-chunks nil
+            harness-voice-live--input-seq 0
             harness-voice-live--held-seq 0
             harness-voice-live--route-generation 0
             harness-voice-live--utterance-routes nil)
@@ -2169,6 +2621,7 @@ missed an event still starts."
   "End the live sidecar session."
   (interactive)
   (unless (eq harness-voice-live--state 'ending)
+    (harness-voice-live--pending-cancel "cancelled")
     (cond
      ((harness-voice-live--active-p)
       (setq harness-voice-live--state 'ending
@@ -2232,6 +2685,12 @@ missed an event still starts."
   (unless (harness-voice-live--active-p)
     (user-error "Live voice inactive"))
   (setq harness-voice-live--muted (not harness-voice-live--muted))
+  (when harness-voice-live--muted
+    (harness-voice-live--pending-cancel "cancelled")
+    (setq harness-voice-live--speech-active nil
+          harness-voice-live--utterance nil
+          harness-voice-live--utterance-done nil)
+    (harness-voice-live--stage-set 'muted))
   (harness-voice-live--pipeline-muted harness-voice-live--muted)
   (harness-voice-live--send
    (list :event "mute" :on (if harness-voice-live--muted :false t)))

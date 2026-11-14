@@ -58,6 +58,37 @@ void main() {
       }).single as VoiceDelegateEvent;
       expect(delegate.text, 'rename the task');
       expect(delegate.callId, 'c1');
+      expect(delegate.segmentId, isNull, reason: 'call id is not input id');
+      expect(delegate.truncated, isFalse);
+    });
+
+    test('only a real truncated boolean marks a delegation', () {
+      for (final value in [true, false, null, 'true', 'false', 1, 0, <Object>[]]) {
+        final delegate = protocol.decode({
+          'type': 'delegate',
+          'id': 'call-1',
+          'utterance': 7,
+          'text': 'the request and',
+          'truncated': value,
+        }).single as VoiceDelegateEvent;
+        expect(delegate.truncated, identical(value, true), reason: '$value');
+        expect(delegate.segmentId, 'u-7');
+      }
+      const delegate = VoiceDelegateEvent('ordinary');
+      expect(delegate.truncated, isFalse);
+    });
+
+    test('plain delegations associate only explicit input ids', () {
+      for (final field in ['item_id', 'itemId', 'utterance']) {
+        final delegate = protocol.decode({
+          'type': 'delegate',
+          'id': 'call-id',
+          field: 'input-id',
+          'text': 'request',
+        }).single as VoiceDelegateEvent;
+        expect(delegate.callId, 'call-id');
+        expect(delegate.segmentId, 'input-id');
+      }
     });
 
     test('reports an error as a problem', () {
@@ -138,10 +169,14 @@ void main() {
         'type': 'response.function_call_arguments.done',
         'name': 'delegate_to_agent',
         'call_id': 'call_7',
-        'arguments': jsonEncode({'request': 'check the tests'}),
+        'item_id': 'function-output-item',
+        'truncated': true,
+        'arguments': jsonEncode({'request': 'check the tests', 'truncated': true}),
       }).single as VoiceDelegateEvent;
       expect(event.text, 'check the tests');
       expect(event.callId, 'call_7');
+      expect(event.segmentId, isNull, reason: 'function item id is not user audio');
+      expect(event.truncated, isFalse, reason: 'model/tool output is not capture metadata');
     });
 
     test('ignores another function call and unknown events', () {
@@ -163,8 +198,19 @@ void main() {
       expect(update['type'], 'session.update');
       final session = update['session']! as Map<String, Object?>;
       expect(session['model'], 'gpt-live-1');
-      expect(session['voice'], 'vale');
-      expect(session['turn_detection'], isA<Map>());
+      final audio = session['audio']! as Map;
+      final input = audio['input']! as Map;
+      expect(input['turn_detection'], {
+        'type': 'semantic_vad',
+        'eagerness': 'low',
+      });
+      expect(input['transcription'], {'model': 'whisper-1', 'language': 'en'});
+      expect(audio['output'], {'voice': 'vale'});
+      expect(session.containsKey('turn_detection'), isFalse);
+      expect(session.containsKey('voice'), isFalse);
+      expect(session.containsKey('input_audio_format'), isFalse);
+      expect(session.containsKey('output_audio_format'), isFalse);
+      expect(session.containsKey('input_audio_transcription'), isFalse);
       final tools = session['tools']! as List;
       expect((tools.single as Map)['name'], 'delegate_to_agent');
       expect('${session['instructions']}', contains('Backchannel policy'));
@@ -177,6 +223,14 @@ void main() {
           'type': 'function_call_output',
           'call_id': 'call_7',
           'output': 'it passed',
+        },
+      });
+      expect(protocol.agentReply('', callId: 'call_8'), {
+        'type': 'conversation.item.create',
+        'item': {
+          'type': 'function_call_output',
+          'call_id': 'call_8',
+          'output': '',
         },
       });
       final continuation = protocol.continuation()!;
@@ -200,6 +254,13 @@ void main() {
       expect(text, contains('/tmp/project'));
       expect(text, contains('Person: hello'));
       expect(text.toLowerCase(), contains('do not claim'));
+      expect(text, contains('"hold on", "one second", "let me think"'));
+      expect(text, contains('without an automatic timeout'));
+      expect(text, contains('Do not delegate, acknowledge or start a reply during that pause.'));
+      expect(text, contains('unfinished request or likely audio cut-off'));
+      expect(text, contains('An entire utterance of "continue" or "go on"'));
+      expect(text, contains('With no held request, pass that cue on unchanged'));
+      expect(text, contains('Embedded or quoted recovery cues are not commands.'));
     });
   });
 }

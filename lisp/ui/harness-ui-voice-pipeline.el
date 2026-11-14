@@ -205,6 +205,7 @@ or a turn already answered.")
   (level-at nil)
   (gate nil)
   (segments nil)
+  (counted (make-hash-table :test 'equal))
   (accepted 0)
   (dropped 0)
   (turns nil)
@@ -240,6 +241,7 @@ the new session's own state."
         (harness-voice-pipeline-level-at p) nil
         (harness-voice-pipeline-gate p) nil
         (harness-voice-pipeline-segments p) nil
+        (harness-voice-pipeline-counted p) (make-hash-table :test 'equal)
         (harness-voice-pipeline-accepted p) 0
         (harness-voice-pipeline-dropped p) 0
         (harness-voice-pipeline-turns p) nil
@@ -326,6 +328,17 @@ decoration."
           (seq-take (harness-voice-pipeline-segments p) harness-voice-pipeline-segments)))
   p)
 
+(defun harness-voice-pipeline--count-segment (p id kept)
+  "Count ID once in P as KEPT or dropped, independently of display eviction.
+A conversational turn can have more sources than the strip displays;
+marking an older source in-turn or answered must not count a new burst."
+  (let* ((flag (if kept 1 2))
+         (counted (gethash id (harness-voice-pipeline-counted p) 0)))
+    (unless (/= 0 (logand counted flag))
+      (puthash id (logior counted flag) (harness-voice-pipeline-counted p))
+      (if kept (cl-incf (harness-voice-pipeline-accepted p))
+        (cl-incf (harness-voice-pipeline-dropped p))))))
+
 (defun harness-voice-pipeline-segment (p id stage &optional args)
   "Record that segment ID is at STAGE in P.
 ARGS is a plist of :seconds, :reason, :text, :at and :generation.  A
@@ -350,9 +363,9 @@ stage is never left."
             ;; accept event is only missing, not untrue.  A failed one was
             ;; not counted as kept, and a dropped one is its own count.
             (when (memq stage '(accepted transcribing transcribed in-turn answered))
-              (cl-incf (harness-voice-pipeline-accepted p)))
+              (harness-voice-pipeline--count-segment p id t))
             (when (eq stage 'dropped)
-              (cl-incf (harness-voice-pipeline-dropped p)))
+              (harness-voice-pipeline--count-segment p id nil))
             (harness-voice-pipeline--changed p))
         (let ((current (plist-get existing :stage)))
           (cond
@@ -364,7 +377,7 @@ stage is never left."
             (setf (plist-get existing :stage) 'dropped
                   (plist-get existing :reason) (or reason 'cancelled)
                   (plist-get existing :seconds) (or seconds (plist-get existing :seconds)))
-            (cl-incf (harness-voice-pipeline-dropped p))
+            (harness-voice-pipeline--count-segment p id nil)
             (harness-voice-pipeline--changed p))
            ((eq stage 'failed)
             (setf (plist-get existing :stage) 'failed

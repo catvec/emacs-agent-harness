@@ -891,11 +891,28 @@ model is this one."
   :type 'string
   :group 'harness-voice)
 
+(defconst harness-voice-chatgpt-default-instructions
+  (concat
+   "You are the voice of a coding agent. Speak briefly and naturally, one "
+   "or two sentences at a time. Delegate every request that needs files, "
+   "commands, tools or the project to the backend with the delegation "
+   "mechanism, and say only that you are on it while it works. Never claim "
+   "to have run a command or changed a file. Never ask for or accept a "
+   "permission decision: the screen handles approvals. "
+   "Treat breathing pauses, likely incomplete sentences and phrases such as "
+   "\"one second\", \"hold on\" or \"let me think\" as a continuing thought, "
+   "not a turn boundary. Remain silent and do not delegate an unfinished "
+   "request until the person finishes. If they say \"continue\" or \"go on\" "
+   "after a pause, respond to their pending request without making them "
+   "repeat it or appending the recovery cue to it. The client's pending-turn "
+   "hold is authoritative; do not talk over it.")
+  "Default live model instructions, also used by the bundled GPT sidecar.")
+
 (defcustom harness-voice-chatgpt-instructions nil
   "Extra instructions for the ChatGPT voice provider, or nil.
-The bundled sidecar already asks for short spoken replies and
-delegation of every request that needs files, commands or tools; this
-text is appended to that prompt."
+The bundled instructions ask for short replies, delegation of project
+work and silence during breathing/thinking pauses and unfinished
+requests.  This text is appended without replacing that prompt."
   :type '(choice (const :tag "Default" nil) string)
   :group 'harness-voice)
 
@@ -957,11 +974,13 @@ leaves a speaking mouth below it."
 
 (defun harness-voice-chatgpt-command ()
   "Return the argv list running the bundled GPT-Live sidecar."
-  (append (list "python3" (harness-voice--script "harness-voice-live-gpt")
-                "--model" harness-voice-chatgpt-live-id
-                "--voice" harness-voice-chatgpt-voice)
-          (when harness-voice-chatgpt-instructions
-            (list "--instructions" harness-voice-chatgpt-instructions))))
+  (list "python3" (harness-voice--script "harness-voice-live-gpt")
+        "--model" harness-voice-chatgpt-live-id
+        "--voice" harness-voice-chatgpt-voice
+        "--instructions"
+        (string-join (delq nil (list harness-voice-chatgpt-default-instructions
+                                    harness-voice-chatgpt-instructions))
+                     "\n\n")))
 
 (defun harness-voice-unmute--pipeline-url (key)
   "Return the harness pipeline's URL for KEY, or nil.

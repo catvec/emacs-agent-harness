@@ -46,6 +46,26 @@
    (harness-voice-pipeline-compact-line pipeline (or room 100)
                                         (or now harness-ui-voice-pipeline-test--now))))
 
+(ert-deftest harness-ui-voice-pipeline-counts-survive-display-eviction ()
+  "A many-source turn advances old sources without counting extra bursts."
+  (let ((pipeline (harness-voice-pipeline-create 'live))
+        (harness-voice-pipeline-segments 2))
+    (dotimes (index 3)
+      (harness-voice-pipeline-segment pipeline (format "u-%d" index) 'accepted))
+    (dotimes (index 3)
+      (harness-voice-pipeline-segment pipeline (format "u-%d" index) 'in-turn))
+    (dotimes (index 3)
+      (harness-voice-pipeline-segment pipeline (format "u-%d" index) 'answered))
+    (should (= 3 (harness-voice-pipeline-accepted pipeline)))
+    (harness-voice-pipeline-segment pipeline "drop-1" 'dropped)
+    (harness-voice-pipeline-segment pipeline "drop-2" 'dropped)
+    (harness-voice-pipeline-segment pipeline "drop-3" 'dropped)
+    (harness-voice-pipeline-segment pipeline "drop-1" 'dropped)
+    (should (= 3 (harness-voice-pipeline-dropped pipeline)))
+    (harness-voice-pipeline-bump pipeline 'live)
+    (harness-voice-pipeline-segment pipeline "u-0" 'accepted)
+    (should (= 1 (harness-voice-pipeline-accepted pipeline)))))
+
 ;;;; The capture
 
 (ert-deftest harness-ui-voice-pipeline-capture-and-level-words ()

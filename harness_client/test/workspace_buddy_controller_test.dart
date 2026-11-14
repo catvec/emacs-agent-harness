@@ -193,6 +193,8 @@ void main() {
         const VoicePromptEvent(VoicePrompt(text: 'one message')),
       );
       await settle();
+      unawaited(rig.controller.voice!.sendPendingNow());
+      await settle();
       expect(rig.host.session.sent, hasLength(1));
       await rig.controller.end();
       await settle();

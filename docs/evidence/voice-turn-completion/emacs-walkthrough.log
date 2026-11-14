@@ -1,0 +1,31 @@
+more
+(:state speaking :stage speaking :setup-error nil :pending nil :reason
+	nil :sent
+	("Please document the parser, hold on. Include its error cases."))
+cut
+(:state listening :stage cut-off :setup-error nil :pending
+	"And add an example for the" :reason cut-off :sent
+	("Please document the parser, hold on. Include its error cases."))
+/home/noah/documents/ai/emacs-agent-harness/.worktrees/task-improve-voice-mode-speech-end-detection-i1fre8ks/docs/media/voice-turn-cut-off-emacs.png
+recover
+(:state listening :stage listening :setup-error nil :pending nil
+	:reason nil :sent
+	("And add an example for the"
+	 "Please document the parser, hold on. Include its error cases."))
+truncated
+(:state listening :stage cut-off :setup-error nil :pending
+	"That sentence looks complete." :reason cut-off :sent
+	("And add an example for the"
+	 "Please document the parser, hold on. Include its error cases."))
+"M-x harness-voice-live-send-now RET in *harness: Voice turn completion*"
+(:state listening :stage listening :setup-error nil :pending nil
+	:reason nil :sent
+	("That sentence looks complete." "And add an example for the"
+	 "Please document the parser, hold on. Include its error cases."))
+recover
+(:state listening :stage listening :setup-error nil :pending nil
+	:reason nil :sent
+	("Go on." "That sentence looks complete."
+	 "And add an example for the"
+	 "Please document the parser, hold on. Include its error cases."))
+*ERROR*: End of file during parsing

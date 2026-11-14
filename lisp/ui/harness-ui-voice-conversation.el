@@ -14,9 +14,9 @@
 ;; the same reason: a request is not a thing to be rewritten, and the
 ;; session's own agent is the only reader that can tell which earlier
 ;; turn a pronoun points at.  The agent sees the conversation it is in;
-;; the voice only delivers the words.  Sending them unchanged is also
-;; the shortest path, so a transcript reaches its target in the event
-;; that carried it.
+;; the voice only delivers the words.  Automatic live voice first holds
+;; unsent chunks for conversational completion (harness-ui-voice-turn);
+;; this record receives only their committed, unchanged words.
 ;;
 ;; The design and its alternatives are in docs/design/voice-conversation.md.
 

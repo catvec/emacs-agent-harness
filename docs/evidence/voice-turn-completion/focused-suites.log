@@ -1,0 +1,12 @@
+== test.sh 2026-11-13 13:32:07 (5 files)
+ok    harness-ui-voice-live-test.el                        Ran 84 tests, 84 results as expected, 0 unexpected (2026-11-13 13:31:36-0500, 3.572012 sec)
+ok    harness-ui-voice-turn-test.el                        Ran 3 tests, 3 results as expected, 0 unexpected (2026-11-13 13:31:33-0500, 0.001098 sec)
+ok    harness-ui-voice-pipeline-test.el                    Ran 26 tests, 26 results as expected, 0 unexpected (2026-11-13 13:31:33-0500, 0.019541 sec)
+ok    harness-ui-voice-providers-test.el                   Ran 41 tests, 40 results as expected, 0 unexpected, 1 skipped (2026-11-13 13:31:34-0500, 0.963787 sec)
+ok    harness-voice-gate-test.el                           Ran 1 tests, 1 results as expected, 0 unexpected (2026-11-13 13:32:07-0500, 34.650188 sec)
+
+TEST RESULT: PASS (selected run)
+result record: /home/noah/documents/ai/emacs-agent-harness/.worktrees/task-improve-voice-mode-speech-end-detection-i1fre8ks/scripts/.dev/test-stamp.json
+full logs: /home/noah/documents/ai/emacs-agent-harness/.worktrees/task-improve-voice-mode-speech-end-detection-i1fre8ks/scripts/.dev/test-logs
+test.sh: 5 files, 0 failed, 35s wall (4 at a time)
+The Flutter app (harness_client/) changed on this branch; the build check passed for 6de5ce1d977f, and the app is unchanged since.

@@ -115,10 +115,20 @@ chat or a workspace looks like to the live transport."
            (harness-voice-live--conversation (harness-voice-conversation-create))
            (harness-voice-live--speech-active nil)
            (harness-voice-live--held nil)
-           (harness-voice-live--held-timer nil)
+           (harness-voice-live--held-timer nil) (harness-voice-live--held-token 0)
            (harness-voice-live--turn-id nil)
            (harness-voice-live--seen (make-hash-table :test 'equal))
            (harness-voice-live--held-seq 0)
+           (harness-voice-live--pending nil) (harness-voice-live--pending-timer nil)
+           (harness-voice-live--pending-token 0) (harness-voice-live--turn-held nil)
+           (harness-voice-live--input-chunks nil) (harness-voice-live--input-seq 0)
+           (harness-voice-live--input-anonymous nil)
+           (harness-voice-live--caption-hold nil) (harness-voice-live--caption-text "")
+           (harness-voice-live--caption-hold-order 0) (harness-voice-live--caption-recovery nil)
+           (harness-voice-live--utterance-routes nil)
+           ;; Existing transport tests cross the real grace boundary with
+           ;; explicit waits.  Deterministic safety tests below use 1.2s.
+           (harness-voice-live-turn-grace 0.03)
            (harness-voice-live-pending-release-delay 0.15)
            (harness-voice-conversation-turns 40)
            (harness-voice-live-follow-selection nil)
@@ -196,6 +206,18 @@ chat or a workspace looks like to the live transport."
   (let* ((call (car harness-ui-voice-live-test--calls))
          (params (nth 2 call)))
     (plist-get (car (plist-get params :prompt)) :text)))
+
+(defun harness-ui-voice-live-test--delegate-after-grace (event)
+  "Deliver EVENT, verifying no immediate prompt, then cross real ordinary grace.
+Transport tests use this explicitly where their old assertion assumed an
+instant send.  Indefinite holds belong in the deterministic tests below."
+  (let ((before (length harness-ui-voice-live-test--calls)))
+    (harness-voice-live--handle event)
+    (when harness-voice-live--pending
+      (should (eq 'grace (harness-voice-live--pending-reason)))
+      (should (= before (length harness-ui-voice-live-test--calls)))
+      (harness-test-wait (lambda () (null harness-voice-live--pending))
+                         5 "ordinary voice turn grace"))))
 
 (defun harness-ui-voice-live-test--chunk (text &optional id)
   "Deliver assistant TEXT for node ID."
@@ -462,7 +484,7 @@ which used to leave the line reading Off after a rejected Start."
             (should (equal "session-b" harness-voice-live--session))
             (should (eq other harness-voice-live--buffer))
             ;; The words go to B now.
-            (harness-voice-live--handle
+           (harness-ui-voice-live-test--delegate-after-grace
              (list :event "delegation" :id "d-b" :text "Check the tests."))
             (should (equal "session-b" (car (car harness-ui-voice-live-test--calls))))
             (should (equal "Check the tests."
@@ -495,7 +517,7 @@ words were spoken, so A is where they go, and the sidecar is answered."
             (harness-voice-live--handle
              (list :event "user_delta" :text "Add a docstring." :final t
                    :utterance 1))
-            (harness-voice-live--handle
+           (harness-ui-voice-live-test--delegate-after-grace
              (list :event "delegation" :id "d-a" :utterance 1
                    :text "Add a docstring."))
             ;; Nothing went to B, and the sidecar was told why.
@@ -506,7 +528,7 @@ words were spoken, so A is where they go, and the sidecar is answered."
               (should (equal "d-a" (plist-get result :id)))
               (should (equal "retargeted" (plist-get result :message))))
             ;; The next words go to B.
-            (harness-voice-live--handle
+           (harness-ui-voice-live-test--delegate-after-grace
              (list :event "delegation" :id "d-b" :utterance 2
                    :text "Now check the tests."))
             (should (equal "session-b" (car (car harness-ui-voice-live-test--calls))))
@@ -525,7 +547,7 @@ sidecar is told the turn ended without one."
     (harness-voice-live-start)
     (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
                        5 "sidecar ready")
-    (harness-voice-live--handle (list :event "delegation" :id "d-a"
+   (harness-ui-voice-live-test--delegate-after-grace (list :event "delegation" :id "d-a"
                                       :text "Do the work." :utterance 1))
     (harness-voice--on-event "agent/turn-started" '("live-session"))
     (should harness-voice-live--working)
@@ -559,9 +581,9 @@ delegation goes to B without waiting for a turn that will not start."
     (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
                        5 "sidecar ready")
     ;; A turn runs for A, with one utterance queued behind it.
-    (harness-voice-live--handle (list :event "delegation" :id "d-a1"
+   (harness-ui-voice-live-test--delegate-after-grace (list :event "delegation" :id "d-a1"
                                       :text "First." :utterance 1))
-    (harness-voice-live--handle (list :event "delegation" :id "d-a2"
+   (harness-ui-voice-live-test--delegate-after-grace (list :event "delegation" :id "d-a2"
                                       :text "Second." :utterance 2))
     (should (= 1 (length harness-ui-voice-live-test--calls)))
     (let ((other (harness-ui-voice-live-test--box "session-b")))
@@ -576,7 +598,7 @@ delegation goes to B without waiting for a turn that will not start."
                                     "delegate_result")
                                    :id)))
             (harness-voice--on-event "agent/turn-ended" '("live-session" "end-turn"))
-            (harness-voice-live--handle (list :event "delegation" :id "d-b"
+           (harness-ui-voice-live-test--delegate-after-grace (list :event "delegation" :id "d-b"
                                               :text "Third." :utterance 3))
             (should (equal "session-b" (car (car harness-ui-voice-live-test--calls))))
             (should (equal "Third." (harness-ui-voice-live-test--latest-prompt))))
@@ -609,7 +631,7 @@ sessions, and the sidecar is never restarted."
             (should (eq 1 (cl-count-if #'identity
                                        (list (harness-voice-live--active-p)))))
             (should (equal "session-b" harness-voice-live--session))
-            (harness-voice-live--handle (list :event "delegation" :id "d-last"
+           (harness-ui-voice-live-test--delegate-after-grace (list :event "delegation" :id "d-last"
                                               :text "One target."))
             (should (equal "session-b" (car (car harness-ui-voice-live-test--calls))))
             (should (= 1 (length harness-ui-voice-live-test--calls))))
@@ -682,7 +704,7 @@ Looking at a buffer with no compose box moves nothing."
             (should (harness-voice-live--follow-selection))
             (should (equal "session-b" harness-voice-live--session))
             ;; And the utterance goes there.
-            (harness-voice-live--handle (list :event "delegation" :id "d-follow"
+           (harness-ui-voice-live-test--delegate-after-grace (list :event "delegation" :id "d-follow"
                                               :text "Follow me."))
             (should (equal "session-b" (car (car harness-ui-voice-live-test--calls))))
             ;; Following back to the first box works the same way.
@@ -708,7 +730,7 @@ The workspace's own agent does the work; the voice adds no second model."
             (should (eq 'workspace harness-voice-live--route-kind))
             (should (equal "workspace-3" harness-voice-live--route-workspace))
             (should (equal "thread-7" harness-voice-live--route-thread))
-            (harness-voice-live--handle
+           (harness-ui-voice-live-test--delegate-after-grace
              (list :event "delegation" :id "d-w" :text "Add a README."))
             ;; It went through the workspace, to that thread, and not
             ;; through a session prompt.
@@ -734,7 +756,7 @@ none of them is delivered twice."
                        5 "sidecar ready")
     (dotimes (index 3)
       (let ((n (1+ index)))
-        (harness-voice-live--handle
+       (harness-ui-voice-live-test--delegate-after-grace
          (list :event "delegation" :id (format "d-%d" n) :utterance n
                :text (format "Request %d." n)))
         (harness-voice--on-event "agent/turn-started" '("live-session"))
@@ -745,7 +767,7 @@ none of them is delivered twice."
                              (plist-get (car (plist-get (nth 2 call) :prompt)) :text))
                            (reverse harness-ui-voice-live-test--calls))))
     ;; The same utterance twice is one prompt.
-    (harness-voice-live--handle
+   (harness-ui-voice-live-test--delegate-after-grace
      (list :event "delegation" :id "d-3" :utterance 3 :text "Request 3."))
     (should (= 3 (length harness-ui-voice-live-test--calls)))))
 
@@ -992,8 +1014,8 @@ Two starts of one stack leave two speech services on one port."
           (harness-ui-voice-live-test--command "quiet"))
     (harness-voice-live-start)
     (harness-test-wait (lambda () (eq harness-voice-live--state 'listening)) 5 "sidecar ready")
-    (harness-voice-live--handle (list :event "delegation" :id "d-1" :text "First."))
-    (harness-voice-live--handle (list :event "delegation" :id "d-2" :text "Second."))
+   (harness-ui-voice-live-test--delegate-after-grace (list :event "delegation" :id "d-1" :text "First."))
+   (harness-ui-voice-live-test--delegate-after-grace (list :event "delegation" :id "d-2" :text "Second."))
     (should (= 1 (length harness-ui-voice-live-test--calls)))
     (harness-voice-live--finish-turn "end-turn")
     (should (= 2 (length harness-ui-voice-live-test--calls)))
@@ -1015,7 +1037,7 @@ own agent reads the words, and nothing is asked about them first."
     (let ((raw "Uh, add a docstring, um, to the the parser."))
       (harness-voice-live--handle
        (list :event "user_delta" :text raw :final t :utterance 1))
-      (harness-voice-live--handle
+     (harness-ui-voice-live-test--delegate-after-grace
        (list :event "delegation" :id "d-mumble" :utterance 1 :text raw))
       (let ((prompt (harness-ui-voice-live-test--latest-prompt)))
         (should (equal raw prompt))
@@ -1049,7 +1071,7 @@ and does not add an envelope around the words."
     (harness-voice-live--handle
      (list :event "assistant_delta" :final t
            :text "The timer wakes it every 200 ms."))
-    (harness-voice-live--handle
+   (harness-ui-voice-live-test--delegate-after-grace
      (list :event "delegation" :id "d-ctx" :utterance 1
            :text "Do that instead."))
     (let ((prompt (harness-ui-voice-live-test--latest-prompt)))
@@ -1068,7 +1090,7 @@ come, and the burst says why it stopped."
     (harness-voice-live-start)
     (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
                        5 "sidecar ready")
-    (harness-voice-live--handle
+   (harness-ui-voice-live-test--delegate-after-grace
      (list :event "delegation" :id "d-noise" :utterance 1 :text "   "))
     (should-not harness-ui-voice-live-test--calls)
     (let ((result (harness-ui-voice-live-test--wait-event
@@ -1096,7 +1118,7 @@ come, and the burst says why it stopped."
     (harness-voice-live-start)
     (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
                        5 "sidecar ready")
-    (harness-voice-live--handle
+   (harness-ui-voice-live-test--delegate-after-grace
      (list :event "delegation" :id "d-1" :utterance 1 :text "Add a test."))
     (should (harness-voice-conversation-turns
              harness-voice-live--conversation))
@@ -1114,7 +1136,7 @@ come, and the burst says why it stopped."
           (harness-ui-voice-live-test--command "quiet"))
     (harness-voice-live-start)
     (harness-test-wait (lambda () (eq harness-voice-live--state 'listening)) 5 "sidecar ready")
-    (harness-voice-live--handle (list :event "delegation" :id "d-2" :text "Announce it."))
+   (harness-ui-voice-live-test--delegate-after-grace (list :event "delegation" :id "d-2" :text "Announce it."))
     (harness-voice--on-event "agent/turn-started" '("live-session"))
     (harness-voice--on-update
      "live-session"
@@ -1348,6 +1370,12 @@ a speech server answers with no audio at all."
     (harness-voice-live--handle (list :event "transcribing"))
     (should (string-search "Transcribing" (harness-voice-live--stage-text)))
     (harness-voice-live--handle (list :event "delegation" :id "d-9" :text "Do it."))
+   (should (equal "● Finishing thought" (harness-voice-live--stage-text)))
+   (should-not harness-ui-voice-live-test--calls)
+   ;; This is a renderer-only test with no sidecar.  The live tests cross
+   ;; grace before agent delivery; render the subsequent stage explicitly.
+   (harness-voice-live--pending-cancel "cancelled")
+   (harness-voice-live--stage-set 'thinking)
     (should (string-search "Working" (harness-voice-live--stage-text)))
     (setq harness-voice-live--stage-since (- (float-time) 1.4))
     (harness-voice-live--stage-redraw)
@@ -1416,7 +1444,7 @@ a speech server answers with no audio at all."
     (harness-voice-live-start)
     (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
                        5 "sidecar ready")
-    (harness-voice-live--handle (list :event "delegation" :id "d-1"
+   (harness-ui-voice-live-test--delegate-after-grace (list :event "delegation" :id "d-1"
                                       :text "Do the work." :utterance 1))
     (harness-voice--on-event "agent/turn-started" '("live-session"))
     (harness-voice-live--handle (list :event "speech" :active t :utterance 2))
@@ -1430,7 +1458,7 @@ a speech server answers with no audio at all."
                          :key (lambda (e) (plist-get e :event)) :test #'equal))
     (harness-voice-live--handle (list :event "speech" :active nil :utterance 2))
     (harness-voice--on-event "agent/turn-ended" '("live-session" "end-turn"))
-    (harness-voice-live--handle
+   (harness-ui-voice-live-test--delegate-after-grace
      (list :event "delegation" :id "d-2" :utterance 2
            :text "Wait, also check the tests."
            :pending (list (list :id "sidecar-1" :text "The sidecar held this."))))
@@ -1444,7 +1472,7 @@ a speech server answers with no audio at all."
       (should-not (string-search "The parser is ready." prompt))
       (should-not (string-search "The sidecar held this." prompt)))
     ;; The same utterance arriving twice is not a second prompt.
-    (harness-voice-live--handle
+   (harness-ui-voice-live-test--delegate-after-grace
      (list :event "delegation" :id "d-2" :utterance 2
            :text "Wait, also check the tests."))
     (should (= 2 (length harness-ui-voice-live-test--calls)))
@@ -1717,6 +1745,476 @@ a speech server answers with no audio at all."
     (harness-voice-toggle)
     (harness-test-wait (lambda () (null harness-voice-live--state)) 5 "toggle off")
     (should-not (harness-voice-live--active-p))))
+
+;;;; Conservative conversational turns, with deterministic deadlines
+
+(defvar harness-ui-voice-live-test--timers nil)
+(defvar harness-ui-voice-live-test--output nil)
+
+(defmacro harness-ui-voice-live-test-clock (&rest body)
+  "Run BODY with a live route, captured output and manually fired timers."
+  (declare (indent 0))
+  `(harness-ui-voice-live-test-with
+    (let ((harness-voice-live-turn-grace 1.2)
+          (harness-ui-voice-live-test--timers nil)
+          (harness-ui-voice-live-test--output nil))
+      (setq harness-voice-live--state 'listening
+            harness-voice-live--stage 'listening
+            harness-voice-live--buffer (current-buffer)
+            harness-voice-live--session "live-session")
+      (cl-letf (((symbol-function 'harness-voice-live--active-p) (lambda () t))
+                ((symbol-function 'harness-voice-live--send)
+                 (lambda (event) (push event harness-ui-voice-live-test--output) t))
+                ((symbol-function 'run-at-time)
+                 (lambda (delay repeat function &rest args)
+                   (let ((timer (timer-create)))
+                     (push (list timer delay repeat function args)
+                           harness-ui-voice-live-test--timers)
+                     timer))))
+        ,@body))))
+
+(defun harness-ui-voice-live-test--fire (timer)
+  "Fire TIMER even when canceled, to exercise stale callback guards."
+  (let ((entry (assq timer harness-ui-voice-live-test--timers)))
+    (should entry)
+    (apply (nth 3 entry) (nth 4 entry))))
+
+(defun harness-ui-voice-live-test--utterance (id text &optional truncated)
+  "Deliver a completed numbered local chunk ID with TEXT and TRUNCATED."
+  (harness-voice-live--handle
+   (list :event "transcribing" :utterance id))
+  (harness-voice-live--handle
+   (list :event "user_delta" :utterance id :text text :final t))
+  (harness-voice-live--handle
+   (list :event "delegation" :id (format "d-%s" id) :utterance id
+         :text text :truncated truncated)))
+
+(ert-deftest harness-ui-voice-live-turn-ordinary-grace-and-single-crossing ()
+  (harness-ui-voice-live-test-clock
+   (harness-ui-voice-live-test--utterance 1 "Run  the tests.")
+   (should-not harness-ui-voice-live-test--calls)
+   (should-not (harness-voice-conversation-turns harness-voice-live--conversation))
+   (should (equal "Run  the tests." (harness-voice-live--pending-text)))
+   (let ((timer harness-voice-live--pending-timer))
+     (should (= 1.2 (nth 1 (assq timer harness-ui-voice-live-test--timers))))
+     (should (equal '(:event "turn_hold" :active t)
+                    (car harness-ui-voice-live-test--output)))
+     (harness-ui-voice-live-test--fire timer)
+     (should (equal "Run  the tests." (harness-ui-voice-live-test--latest-prompt)))
+     (should (= 1 (length harness-ui-voice-live-test--calls)))
+     (should (= 1 (length (harness-voice-conversation-turns harness-voice-live--conversation))))
+     (should-not harness-voice-live--pending)
+     (should-not harness-voice-live--turn-held)
+     (harness-ui-voice-live-test--fire timer)
+     (should (= 1 (length harness-ui-voice-live-test--calls))))))
+
+(ert-deftest harness-ui-voice-live-turn-breath-and-slow-transcription ()
+  (harness-ui-voice-live-test-clock
+   (harness-ui-voice-live-test--utterance 1 "Fix the tests.")
+   (let ((old harness-voice-live--pending-timer))
+     (harness-voice-live--handle '(:event "speech" :utterance 2 :active t))
+     (harness-voice-live--handle '(:event "segment" :id "u-2" :state "accepted"))
+     (harness-voice-live--handle '(:event "speech" :utterance 2 :active nil))
+     (harness-voice-live--handle '(:event "listening"))
+     (harness-ui-voice-live-test--fire old)
+     (should-not harness-ui-voice-live-test--calls)
+     (should-not harness-voice-live--pending-timer)
+     (harness-ui-voice-live-test--utterance 2 "Also check the parser.")
+     (should-not harness-ui-voice-live-test--calls)
+     (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+     (should (equal "Fix the tests. Also check the parser."
+                    (harness-ui-voice-live-test--latest-prompt)))
+     (let ((turn (harness-voice-pipeline--turn harness-voice-live--pipeline "d-1")))
+       (should (equal '("u-1" "u-2") (plist-get turn :segments))))
+     (harness-voice-live--finish-turn "end-turn")
+     (dolist (source '("u-1" "u-2"))
+       (should (eq 'answered (plist-get (harness-voice-pipeline--segment
+                                         harness-voice-live--pipeline source) :stage)))))))
+
+(ert-deftest harness-ui-voice-live-turn-indefinite-holds-and-output-safety ()
+  (dolist (example '(("Fix it, one second." continuation nil)
+                     ("Let me think." continuation nil)
+                     ("Change the handler because." cut-off nil)
+                     ("Complete request." cut-off t)))
+    (harness-ui-voice-live-test-clock
+     (harness-ui-voice-live-test--utterance 1 (nth 0 example) (nth 2 example))
+     (should (eq (nth 1 example) (harness-voice-live--pending-reason)))
+     (should-not harness-voice-live--pending-timer)
+     (dotimes (_ 3) (harness-voice-live--handle '(:event "listening")))
+     (harness-voice-live--speak "A previous answer." "n-1")
+     (harness-voice-live--release-held)
+     (should harness-voice-live--held)
+     (should-not harness-voice-live--held-timer)
+     (should-not (cl-find "commentary" harness-ui-voice-live-test--output
+                          :key (lambda (event) (plist-get event :event)) :test #'equal))
+     (should-not harness-ui-voice-live-test--calls)
+     (harness-voice-live-send-now)
+     (harness-voice-live-send-now)
+     (should (= 1 (length harness-ui-voice-live-test--calls)))
+     (should (equal (nth 0 example) (harness-ui-voice-live-test--latest-prompt))))))
+
+(ert-deftest harness-ui-voice-live-turn-more-words-finish-a-hold ()
+  (harness-ui-voice-live-test-clock
+   (harness-ui-voice-live-test--utterance 1 "Fix it, hold on.")
+   (should-not harness-voice-live--pending-timer)
+   (harness-ui-voice-live-test--utterance 2 "The parser test is the failing one.")
+   (should (eq 'grace (harness-voice-live--pending-reason)))
+   (should-not harness-ui-voice-live-test--calls)
+   (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+   (should (equal "Fix it, hold on. The parser test is the failing one."
+                  (harness-ui-voice-live-test--latest-prompt)))))
+
+(ert-deftest harness-ui-voice-live-turn-recovery-releases-unchanged ()
+  (harness-ui-voice-live-test-clock
+   (harness-ui-voice-live-test--utterance 1 "Use the new branch and")
+   (harness-ui-voice-live-test--utterance 2 "Go on, please.")
+   (should (= 1 (length harness-ui-voice-live-test--calls)))
+   (should (equal "Use the new branch and" (harness-ui-voice-live-test--latest-prompt)))
+   (should (string-search "Go on, please." (harness-ui-voice-live-test--transcript)))
+   (harness-voice-live--handle '(:event "delegation" :id "retry" :utterance 2 :text "Go on, please."))
+   (should (= 1 (length harness-ui-voice-live-test--calls)))
+   (harness-voice-live--finish-turn "end-turn")
+   (should (equal '("d-1" "d-2")
+                  (sort (mapcar (lambda (event) (plist-get event :id))
+                                (cl-remove-if-not
+                                 (lambda (event) (equal "delegate_result" (plist-get event :event)))
+                                 harness-ui-voice-live-test--output))
+                        #'string<)))
+   (harness-ui-voice-live-test--utterance 3 "Continue!")
+   (should harness-voice-live--pending-timer)
+   (should (= 1 (length harness-ui-voice-live-test--calls)))
+   (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+   (should (equal "Continue!" (harness-ui-voice-live-test--latest-prompt)))))
+
+(ert-deftest harness-ui-voice-live-turn-dedup-pending-and-repeated-words ()
+  (harness-ui-voice-live-test-clock
+   (harness-ui-voice-live-test--utterance 1 "yes")
+   (harness-voice-live--handle '(:event "delegation" :id "retry" :utterance 1 :text "yes"))
+   (should (equal "yes" (harness-voice-live--pending-text)))
+   (harness-voice-live--handle '(:event "delegation" :text "yes"))
+   (harness-voice-live--handle '(:event "delegation" :text "yes"))
+   (should (equal "yes yes yes" (harness-voice-live--pending-text)))
+   (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+   (should (= 1 (length harness-ui-voice-live-test--calls)))
+   (should (equal "yes yes yes" (harness-ui-voice-live-test--latest-prompt)))))
+
+(ert-deftest harness-ui-voice-live-turn-source-order-not-completion-order ()
+  (harness-ui-voice-live-test-clock
+   (harness-voice-live--handle '(:event "segment" :id "u-1" :state "accepted" :truncated t))
+   (harness-voice-live--handle '(:event "segment" :id "u-2" :state "accepted"))
+   (harness-ui-voice-live-test--utterance 2 "the parser test.")
+   (should-not harness-voice-live--pending-timer)
+   (harness-ui-voice-live-test--utterance 1 "Fix  only")
+   (should (equal "Fix  only the parser test." (harness-voice-live--pending-text)))
+   ;; A later complete chunk finishes an earlier hard boundary.
+   (should (eq 'grace (harness-voice-live--pending-reason)))
+   (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+   (should (equal "Fix  only the parser test." (harness-ui-voice-live-test--latest-prompt)))
+   (should (equal '("u-1" "u-2") (plist-get harness-voice-live--delegation :segments)))))
+
+(ert-deftest harness-ui-voice-live-turn-hard-cut-metadata-not-duration ()
+  (harness-ui-voice-live-test-clock
+   (harness-voice-live--handle '(:event "segment" :id "u-1" :state "accepted" :seconds 100))
+   (harness-ui-voice-live-test--utterance 1 "Complete request.")
+   (should (eq 'grace (harness-voice-live--pending-reason)))
+   (let ((old harness-voice-live--pending-timer))
+     ;; Metadata is authoritative even if it arrives after the delegation.
+     (harness-voice-live--handle '(:event "segment" :id "u-1" :state "transcribed" :truncated t))
+     (should (eq 'cut-off (harness-voice-live--pending-reason)))
+     (should-not harness-voice-live--pending-timer)
+     (harness-ui-voice-live-test--fire old)
+     (should-not harness-ui-voice-live-test--calls))))
+
+(ert-deftest harness-ui-voice-live-turn-failed-transcription-is-not-missing-silence ()
+  (harness-ui-voice-live-test-clock
+   (harness-ui-voice-live-test--utterance 1 "Fix the tests.")
+   (harness-voice-live--handle '(:event "segment" :id "u-2" :state "accepted"))
+   (harness-voice-live--handle '(:event "segment" :id "u-2" :state "failed" :reason "transcription failed"))
+   (harness-voice-live--handle '(:event "notice" :message "Transcription failed"))
+   (harness-voice-live--handle '(:event "listening"))
+   (should (eq 'cut-off (harness-voice-live--pending-reason)))
+   (should-not harness-voice-live--pending-timer)
+   (should-not harness-ui-voice-live-test--calls)
+   (should (equal "Live voice · Transcription failed" harness-voice-live--notice))))
+
+(ert-deftest harness-ui-voice-live-turn-empty-and-dropped-chunks-unblock-grace ()
+  (dolist (end '(empty dropped))
+    (harness-ui-voice-live-test-clock
+     (harness-ui-voice-live-test--utterance 1 "Fix the tests.")
+     (harness-voice-live--handle '(:event "segment" :id "u-2" :state "accepted"))
+     (if (eq end 'empty)
+         (harness-voice-live--handle '(:event "delegation" :id "d-2" :utterance 2 :text ""))
+       (harness-voice-live--handle '(:event "segment" :id "u-2" :state "dropped" :reason "no words")))
+     (should harness-voice-live--pending-timer)
+     (should (equal "Fix the tests." (harness-voice-live--pending-text)))
+     (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+     (should (equal "Fix the tests." (harness-ui-voice-live-test--latest-prompt))))))
+
+(ert-deftest harness-ui-voice-live-turn-manual-action-not-a-queued-override ()
+  (harness-ui-voice-live-test-clock
+   (harness-ui-voice-live-test--utterance 1 "Fix the tests.")
+   (harness-voice-live--handle '(:event "segment" :id "u-2" :state "accepted"))
+   (harness-voice-live-send-now)
+   (should-not harness-ui-voice-live-test--calls)
+   (should-not (string-search "[Submission]" (harness-voice-live--controls)))
+   (harness-voice-live--handle '(:event "segment" :id "u-2" :state "dropped"))
+   (should-not harness-ui-voice-live-test--calls)
+   (should harness-voice-live--pending-timer)
+   (harness-voice-live-send-now)
+   (should (= 1 (length harness-ui-voice-live-test--calls)))))
+
+(ert-deftest harness-ui-voice-live-turn-cancelled-lifecycles-invalidate-timers ()
+  (dolist (end '(mute stop fail dispose reset closed session workspace))
+    (harness-ui-voice-live-test-clock
+     (harness-ui-voice-live-test--utterance 1 "Fix the tests.")
+     (let ((timer harness-voice-live--pending-timer))
+       (pcase end
+         ('mute (harness-voice-live-mute))
+         ('stop (harness-voice-live-stop))
+         ('fail (harness-voice-live--fail "Live voice failed"))
+         ('dispose (harness-voice-live--dispose))
+         ('reset (harness-voice-live--reset))
+         ('closed (harness-voice-live--handle '(:event "closed")))
+         ('session (harness-voice-live--route-set '(:kind session :session "new")))
+         ('workspace (harness-voice-live--route-set '(:kind workspace :workspace "w" :thread "new"))))
+       (harness-ui-voice-live-test--fire timer)
+       (should-not harness-ui-voice-live-test--calls)
+       (should-not harness-voice-live--pending)
+       (should-not harness-voice-live--pending-timer)
+       (should-not harness-voice-live--held-timer)
+       (should-not harness-voice-live--turn-held)
+       (unless (eq end 'reset)
+         (should (eq 'dropped (plist-get (harness-voice-pipeline--segment
+                                          harness-voice-live--pipeline "u-1") :stage))))))))
+
+(ert-deftest harness-ui-voice-live-turn-listening-cannot-release-a-real-draft ()
+  (harness-ui-voice-live-test-clock
+   (setq harness-voice-live--speech-active t)
+   (harness-voice-live--speak "Old answer." "n-1")
+   (setq harness-voice-live--speech-active nil)
+   (harness-voice-live--handle '(:event "listening"))
+   (let ((false-trigger harness-voice-live--held-timer))
+     (should false-trigger)
+     (harness-ui-voice-live-test--utterance 1 "Hold on.")
+     (harness-ui-voice-live-test--fire false-trigger)
+     (dotimes (_ 3) (harness-voice-live--handle '(:event "listening")))
+     (should harness-voice-live--held)
+     (should-not harness-voice-live--held-timer)
+     (should-not (cl-find "commentary" harness-ui-voice-live-test--output
+                          :key (lambda (event) (plist-get event :event)) :test #'equal)))))
+
+(ert-deftest harness-ui-voice-live-turn-caption-only-hold-and-recovery ()
+  (harness-ui-voice-live-test-clock
+   (harness-voice-live--handle '(:event "user_delta" :utterance 1 :text "Hold on." :final t))
+   (should harness-voice-live--turn-held)
+   (should-not harness-voice-live--pending)
+   (should-not (string-search "[Submission]" (harness-voice-live--controls)))
+   (harness-voice-live--handle '(:event "listening"))
+   (should (equal "Live · Waiting for continuation" (harness-voice-live--status)))
+   (should-not harness-voice-live--held-timer)
+   (harness-voice-live--handle '(:event "user_delta" :utterance 2 :text "Go on." :final t))
+   (should-not harness-voice-live--turn-held)
+   (should-not harness-voice-live--caption-hold)
+   (should-not harness-ui-voice-live-test--calls)))
+
+(ert-deftest harness-ui-voice-live-turn-autonomous-final-caption-not-unresolved-input ()
+  (harness-ui-voice-live-test-clock
+   (harness-voice-live--handle '(:event "user_delta" :utterance 1 :text "Hello" :final t))
+   (should-not (harness-voice-live--input-busy-p))
+   (should-not harness-voice-live--turn-held)
+   (should-not harness-ui-voice-live-test--calls)
+   (harness-ui-voice-live-test--utterance 2 "Run the tests.")
+   (should harness-voice-live--pending-timer)
+   (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+   (should (equal "Run the tests." (harness-ui-voice-live-test--latest-prompt)))))
+
+(ert-deftest harness-ui-voice-live-turn-exact-rendered-copy ()
+  (dolist (example '(("Complete request." "Finishing thought")
+                     ("Hold on." "Waiting for continuation")
+                     ("Because" "Possible cut-off")))
+    (harness-ui-voice-live-test-clock
+     (cl-letf (((symbol-function 'harness-compose--room)
+                (lambda () (* 500 (frame-char-width)))))
+       (harness-ui-voice-live-test--utterance 1 (car example))
+       (should (equal (concat "Live · " (cadr example)) (harness-voice-live--status)))
+       (should (equal (concat "● " (cadr example)) (harness-voice-live--stage-text)))
+       (let* ((controls (harness-voice-live--controls))
+              (lines (split-string (substring-no-properties controls) "\n"))
+              (at (string-search "[Submission]" controls)))
+         (should (equal (concat " Live · " (cadr example)
+                                " · [End] · [Submission] · [Interrupt C-c V]"
+                                " · [Mute C-c v] · [Transcript] · [Setup]")
+                        (car lines)))
+         (should (equal (concat "Unsent speech · " (car example)) (nth 2 lines)))
+         (should at)
+         (should (equal "Pending speech submission" (get-text-property at 'help-echo controls)))
+         (should (member (concat "Unsent speech · " (car example))
+                         (mapcar #'substring-no-properties
+                                 (harness-voice-live--pipeline-block 500)))))))))
+
+(ert-deftest harness-ui-voice-live-turn-bound-never-truncates-or-sends ()
+  (harness-ui-voice-live-test-clock
+   (let ((harness-voice-live-pending-limit 5))
+     (harness-ui-voice-live-test--utterance 1 "Complete request.")
+     (should (eq 'failed harness-voice-live--state))
+     (should (equal "Unsent speech limit" harness-voice-live--error))
+     (should (equal "Live · Failed" (harness-voice-live--status)))
+     (should (string-search "Complete request." (harness-ui-voice-live-test--transcript)))
+     (should-not harness-voice-live--pending)
+     (should-not harness-voice-live--pending-timer)
+     (should-not harness-ui-voice-live-test--calls))))
+
+(ert-deftest harness-ui-voice-live-turn-recovery-completes-before-earlier-words ()
+  (harness-ui-voice-live-test-clock
+    (harness-voice-live--handle '(:event "segment" :id "u-1" :state "accepted"))
+    (harness-voice-live--handle '(:event "segment" :id "u-2" :state "accepted"))
+    (harness-ui-voice-live-test--utterance 2 "Go on.")
+    (should-not harness-ui-voice-live-test--calls)
+    (harness-ui-voice-live-test--utterance 1 "Change the handler because")
+    (should (= 1 (length harness-ui-voice-live-test--calls)))
+    (should (equal "Change the handler because" (harness-ui-voice-live-test--latest-prompt)))))
+
+(ert-deftest harness-ui-voice-live-turn-failure-sticky-until-explicit-recovery ()
+  (harness-ui-voice-live-test-clock
+    (harness-ui-voice-live-test--utterance 1 "Fix the tests.")
+    (harness-voice-live--handle '(:event "segment" :id "u-2" :state "failed"))
+    (harness-ui-voice-live-test--utterance 3 "Also check the parser.")
+    (should (eq 'cut-off (harness-voice-live--pending-reason)))
+    (should-not harness-voice-live--pending-timer)
+    (should-not harness-ui-voice-live-test--calls)
+    (harness-ui-voice-live-test--utterance 4 "Continue.")
+    (should (equal "Fix the tests. Also check the parser." (harness-ui-voice-live-test--latest-prompt)))
+    (harness-voice-live--finish-turn "end-turn")
+    (harness-ui-voice-live-test--utterance 5 "Another request.")
+    (should (eq 'grace (harness-voice-live--pending-reason)))))
+
+(ert-deftest harness-ui-voice-live-turn-mute-cancels-failed-input ()
+  (harness-ui-voice-live-test-clock
+    (harness-ui-voice-live-test--utterance 1 "First request.")
+    (harness-voice-live--handle '(:event "segment" :id "u-2" :state "failed"))
+    (should (eq 'cut-off (harness-voice-live--pending-reason)))
+    (harness-voice-live-mute)
+    (should (eq 'cancelled (plist-get (cdr (assoc "u-2" harness-voice-live--input-chunks)) :state)))
+    (should-not harness-voice-live--pending)
+    (harness-voice-live-mute)
+    (harness-ui-voice-live-test--utterance 3 "Next request.")
+    (should (equal "Next request." (harness-voice-live--pending-text)))
+    (should (eq 'grace (harness-voice-live--pending-reason)))
+    (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+    (should (equal "Next request." (harness-ui-voice-live-test--latest-prompt)))))
+
+(ert-deftest harness-ui-voice-live-turn-successful-retry-restores-missing-words ()
+  (harness-ui-voice-live-test-clock
+    (harness-ui-voice-live-test--utterance 1 "Fix")
+    (harness-voice-live--handle '(:event "segment" :id "u-2" :state "failed"))
+    (harness-ui-voice-live-test--utterance 2 "the parser tests.")
+    (should (equal "Fix the parser tests." (harness-voice-live--pending-text)))
+    (should (eq 'grace (harness-voice-live--pending-reason)))
+    (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+    (should (equal "Fix the parser tests." (harness-ui-voice-live-test--latest-prompt)))))
+
+(ert-deftest harness-ui-voice-live-turn-old-route-agent-failure-keeps-new-draft ()
+  (dolist (failure '(turn-error dispatch-error))
+    (harness-ui-voice-live-test-clock
+      (harness-ui-voice-live-test--utterance 1 "First request.")
+      (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+      (harness-voice-live--route-set '(:kind session :session "session-b"))
+      (harness-ui-voice-live-test--utterance 2 "Second request, hold on.")
+      (if (eq failure 'turn-error) (harness-voice-live--finish-turn "cancelled")
+        (harness-voice-live--delegate-error "d-1" '(error "old request failure")))
+      (should (equal "Second request, hold on." (harness-voice-live--pending-text)))
+      (should harness-voice-live--turn-held)
+      (should (eq 'continuation (harness-voice-live--pending-reason)))
+      (should-not harness-voice-live--pending-timer))))
+
+(ert-deftest harness-ui-voice-live-turn-consumed-caption-retry-cannot-rehold ()
+  (harness-ui-voice-live-test-clock
+    (harness-ui-voice-live-test--utterance 1 "Hold on.")
+    (harness-voice-live-send-now)
+    (harness-voice-live--finish-turn "end-turn")
+    (harness-voice-live--handle '(:event "user_delta" :utterance 1 :text "Hold on." :final t))
+    (harness-voice-live--handle '(:event "delegation" :utterance 1 :id "retry" :text "Hold on."))
+    (should-not harness-voice-live--turn-held)
+    (should-not harness-voice-live--caption-hold)
+    (should-not harness-voice-live--pending)
+    (should (= 1 (length harness-ui-voice-live-test--calls)))))
+
+(ert-deftest harness-ui-voice-live-turn-newer-caption-hold-blocks-older-draft ()
+  (harness-ui-voice-live-test-clock
+    (harness-voice-live--handle '(:event "hearing" :utterance 1))
+    (harness-voice-live--handle '(:event "hearing" :utterance 2))
+    (harness-voice-live--handle '(:event "user_delta" :utterance 2 :text "Hold on." :final t))
+    (harness-voice-live--handle '(:event "user_delta" :utterance 1 :text "Run the tests." :final t))
+    (harness-voice-live--handle '(:event "delegation" :utterance 1 :id "d-1" :text "Run the tests."))
+    (should harness-voice-live--turn-held)
+    (should (eq 'continuation (harness-voice-live--pending-reason)))
+    (should-not harness-voice-live--pending-timer)
+    (should-not harness-ui-voice-live-test--calls)
+    (should (equal "Run the tests." (harness-voice-live--pending-text)))
+    (harness-voice-live--handle '(:event "user_delta" :utterance 3 :text "Go on." :final t))
+    (should (equal "Run the tests." (harness-ui-voice-live-test--latest-prompt)))
+    (should (= 1 (length harness-ui-voice-live-test--calls)))
+    ;; A delayed delegation of the caption-only control is acknowledged,
+    ;; not appended to another request or sent again.
+    (harness-voice-live--handle '(:event "delegation" :utterance 3 :id "d-3" :text "Go on."))
+    (should (= 1 (length harness-ui-voice-live-test--calls)))
+    (should-not harness-voice-live--pending)))
+
+(ert-deftest harness-ui-voice-live-turn-unresolved-input-holds-provider-output ()
+  (harness-ui-voice-live-test-clock
+    (harness-voice-live--handle '(:event "transcribing" :utterance 1))
+    (should (equal '(:event "turn_hold" :active t) (car harness-ui-voice-live-test--output)))
+    (harness-voice-live--handle '(:event "user_delta" :utterance 1 :text "Hold on." :final t))
+    (harness-voice-live--handle '(:event "transcribing" :utterance 2))
+    (harness-voice-live--handle '(:event "user_delta" :utterance 2 :text "Complete thought." :final t))
+    (should (harness-voice-live--input-busy-p))
+    (should harness-voice-live--turn-held)
+    (should-not (cl-find :false harness-ui-voice-live-test--output
+                         :key (lambda (event) (plist-get event :active))))))
+
+(ert-deftest harness-ui-voice-live-turn-empty-out-of-order-source-accounting ()
+  (harness-ui-voice-live-test-clock
+    (harness-voice-live--handle '(:event "transcribing" :utterance 1))
+    (harness-voice-live--handle '(:event "transcribing" :utterance 2))
+    (harness-voice-live--handle '(:event "delegation" :utterance 1 :id "d-1" :text ""))
+    (should (eq 'dropped (plist-get (harness-voice-pipeline--segment harness-voice-live--pipeline "u-1") :stage)))
+    (should (eq 'transcribing (plist-get (harness-voice-pipeline--segment harness-voice-live--pipeline "u-2") :stage)))
+    (harness-ui-voice-live-test--utterance 2 "Complete thought.")
+    (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+    (harness-voice-live--finish-turn "end-turn")
+    (should (eq 'answered (plist-get (harness-voice-pipeline--segment harness-voice-live--pipeline "u-2") :stage)))))
+
+(ert-deftest harness-ui-voice-live-turn-stale-false-trigger-cannot-release-new-output ()
+  (harness-ui-voice-live-test-clock
+    (setq harness-voice-live--speech-active t)
+    (harness-voice-live--speak "Old answer." "n-old")
+    (setq harness-voice-live--speech-active nil)
+    (harness-voice-live--handle '(:event "listening"))
+    (let ((old harness-voice-live--held-timer))
+      (harness-voice-live--route-set '(:kind session :session "session-b"))
+      (setq harness-voice-live--speech-active t)
+      (harness-voice-live--speak "New answer." "n-new")
+      (setq harness-voice-live--speech-active nil)
+      (harness-voice-live--handle '(:event "listening"))
+      (let ((current harness-voice-live--held-timer))
+        (harness-ui-voice-live-test--fire old)
+        (should harness-voice-live--held)
+        (should (eq current harness-voice-live--held-timer))
+        (harness-ui-voice-live-test--fire current)
+        (should-not harness-voice-live--held)))))
+
+(ert-deftest harness-ui-voice-live-turn-many-sources-one-count-each ()
+  (harness-ui-voice-live-test-clock
+    (dotimes (index 7) (harness-ui-voice-live-test--utterance (1+ index) "Complete thought."))
+    (should (= 7 (harness-voice-pipeline-accepted harness-voice-live--pipeline)))
+    (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+    (should (= 7 (length (plist-get harness-voice-live--delegation :segments))))
+    (should (= 7 (harness-voice-pipeline-accepted harness-voice-live--pipeline)))
+    (harness-voice-live--finish-turn "end-turn")
+    (should (= 7 (harness-voice-pipeline-accepted harness-voice-live--pipeline)))
+    (should (= 7 (length (cl-remove-if-not
+                          (lambda (event) (equal "delegate_result" (plist-get event :event)))
+                          harness-ui-voice-live-test--output))))))
 
 (provide 'harness-ui-voice-live-test)
 ;;; harness-ui-voice-live-test.el ends here

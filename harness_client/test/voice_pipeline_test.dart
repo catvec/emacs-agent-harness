@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:harness_client/src/voice/voice_backend.dart';
 import 'package:harness_client/src/voice/voice_controller.dart';
@@ -437,6 +439,32 @@ void main() {
       expect(tracker.snapshot.segments.last.id, 'u-10');
     });
 
+    test('evicted markers do not recount or resurrect an eight-source turn', () {
+      final tracker = VoicePipelineTracker(clock: _now);
+      tracker.begin();
+      final ids = [for (var i = 0; i < 8; i++) 'u-$i'];
+      for (final id in ids) {
+        tracker.accept(id);
+      }
+      expect(tracker.snapshot.accepted, 8);
+      for (final id in ids) {
+        tracker.transcript(id, 'words $id', finalized: true);
+        tracker.turnSent('combined', segmentId: id);
+      }
+      tracker.turnAnswered('combined');
+      tracker.turnDone('combined');
+      expect(tracker.snapshot.accepted, 8);
+      expect(tracker.snapshot.turns.single.segmentIds, ids);
+      expect(tracker.snapshot.segments, hasLength(6));
+      expect(tracker.snapshot.segments.map((s) => s.stage),
+          everyElement(VoicePipelineStage.answered));
+      tracker.accept(ids.first);
+      tracker.transcript(ids.first, 'stale words', finalized: true);
+      tracker.drop(ids.first);
+      expect(tracker.snapshot.accepted, 8);
+      expect(tracker.snapshot.dropped, 0);
+    });
+
     test('durations and excerpts read as a person reads them', () {
       expect(voicePipelineDuration(const Duration(milliseconds: 640)), '640ms');
       expect(voicePipelineDuration(const Duration(milliseconds: 1400)), '1.4s');
@@ -488,11 +516,12 @@ void main() {
           ),
         );
         await settle();
+        await rig.controller.sendPendingNow();
         expect(rig.session.sent.single.text, 'the tests pass');
         expect(rig.controller.pipelineState.turns.single.label, 'done');
         expect(
           rig.controller.pipelineState.segments.single.stage,
-          VoicePipelineStage.inTurn,
+          VoicePipelineStage.answered,
         );
         expect(rig.controller.pipelineState.turnLabel, 'Turn · done');
 
@@ -695,6 +724,8 @@ void main() {
           const VoicePromptEvent(VoicePrompt(text: 'first', id: 'u-1')),
         );
         await settle();
+        unawaited(rig.controller.sendPendingNow());
+        await settle();
         rig.session.reply('First piece.');
         rig.session.reply('Second piece.');
         await settle();
@@ -713,6 +744,8 @@ void main() {
         rig.backend.emit(
           const VoicePromptEvent(VoicePrompt(text: 'second', id: 'u-2')),
         );
+        await settle();
+        unawaited(rig.controller.sendPendingNow());
         await settle();
         rig.session.reply('Another answer.');
         await settle();
@@ -825,13 +858,14 @@ void main() {
         ),
       );
       await settle();
+      await rig.controller.sendPendingNow();
       final snapshot = rig.controller.pipelineState;
       expect(snapshot.turns.single.failed, isTrue);
       expect(snapshot.turnLabel, 'Turn · failed');
       expect(
         snapshot.segments.single.stage,
-        VoicePipelineStage.inTurn,
-        reason: 'the audio was sent; the turn is what failed',
+        VoicePipelineStage.failed,
+        reason: 'every source reaches a terminal stage with its failed turn',
       );
       await rig.controller.stop();
     });

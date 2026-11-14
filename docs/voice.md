@@ -174,6 +174,56 @@ The Flutter client sends the transcript the same way
 (`harness_client/lib/src/voice/voice_conversation.dart`), so a request composed
 on a phone has the same shape.
 
+### Pauses, unfinished thoughts and recovery
+
+Automatic voice input keeps **Unsent speech** separate from messages already
+sent to the agent, in both Emacs and Flutter. An ordinary transcript shows
+**Finishing thought** for a 1.2-second grace period. Speaking again or a
+transcription still in flight keeps it unsent, so a breath need not start a
+second request.
+
+A trailing “one second”, “hold on”, “let me think”, or similar thinking cue
+shows **Waiting for continuation**, with no silence timeout. A likely dangling
+clause, trailing ellipsis/dash, or a recorder's reported hard cut shows
+**Possible cut-off** and also stays unsent. These are conservative English
+text checks, not a guarantee that speech recognition or the end-of-thought
+judgment is correct.
+
+Continue speaking to complete the draft. Saying just **“continue”** or
+**“go on”** releases an existing draft, even if it still looks incomplete;
+**Submission** is the on-screen equivalent once speech and transcription have
+finished. Without a pending draft, those words remain an ordinary request to
+the agent. Captions retain the recovery cue; the request contains the held
+words, not an added control phrase. Adjacent chunks are joined in order,
+without summarization or deletion of hesitations.
+
+Assistant output waits while a thought is held, and the microphone stays
+open. Mute, pause, end, a backend restart, or a change of target cancels an
+unsent draft rather than sending it somewhere else. Manually submitted Emacs
+dictation is unchanged. Flutter's audio-only prompt mode cannot inspect words
+and does not apply these text checks. A live provider can also produce captions
+without delegating work: the client can hold its output for a pause cue, but
+only an actual delegation becomes an agent request. Custom providers must
+honor the output-hold extension to prevent their own autonomous speech.
+
+[Voice turn completion](design/voice-turn-completion.md) records the policy,
+protocol limits, and shared regression examples. `scripts/voice-turn-demo.sh`
+provides a scripted Emacs walkthrough without a microphone, API key or speech
+service.
+
+![Unsent speech waiting for continuation in the transcript, the same draft on the chat's control line](media/voice-turn-completion-emacs.png)
+
+![A likely fragment held as a possible cut-off while the finished turn above it was sent](media/voice-turn-cut-off-emacs.png)
+
+Both Emacs pictures come from that scripted walkthrough: the sidecar
+events, the pending-turn guard and the session request are real, the
+speech is not.  The Flutter surfaces are drawn by `HARNESS_SHOTS=<dir>
+flutter test test/voice_pending_speech_screenshots_test.dart`:
+`voice-pending-grace.png`, `voice-pending-continuation.png`,
+`voice-pending-cut-off.png`, `voice-pending-full-narrow.png`,
+`voice-pending-full-large-text.png`, `voice-pending-compact-narrow.png`,
+`workspace-pending-narrow.png` and `workspace-buddy-pending.png`.
+
 ## Live voice with a sidecar
 
 The live capability keeps a sidecar process in charge of the microphone,

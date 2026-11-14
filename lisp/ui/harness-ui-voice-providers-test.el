@@ -96,6 +96,37 @@
     (should (equal "0.004" (cadr (member "--threshold" command)))))
   (should (equal '("--demo") (last (harness-voice-fixture-command)))))
 
+(ert-deftest harness-ui-voice-providers-live-instructions-preserve-turn-policy ()
+  "Extra model instructions preserve the pause/continuation policy."
+  (let* ((harness-voice-chatgpt-instructions nil)
+         (command (harness-voice-chatgpt-command)))
+    (should (equal harness-voice-chatgpt-default-instructions
+                   (cadr (member "--instructions" command)))))
+  (let* ((harness-voice-chatgpt-instructions "Use a calm voice.")
+         (command (harness-voice-chatgpt-command))
+         (instructions (cadr (member "--instructions" command))))
+    (should (equal (concat harness-voice-chatgpt-default-instructions
+                           "\n\nUse a calm voice.")
+                   instructions))
+    (dolist (phrase '("\"one second\"" "\"hold on\"" "\"let me think\""
+                      "breathing pauses" "likely incomplete sentences"
+                      "\"continue\"" "\"go on\""
+                      "pending-turn hold is authoritative"))
+      (should (string-match-p (regexp-quote phrase) instructions)))))
+
+(ert-deftest harness-ui-voice-providers-live-instructions-match-sidecar-default ()
+  "Direct sidecar startup and the Emacs provider have the same model prompt."
+  (skip-unless (executable-find "python3"))
+  (with-temp-buffer
+    (should
+     (eq 0 (call-process
+            "python3" nil t nil "-B" "-c"
+            (concat "import runpy,sys; "
+                    "sys.stdout.write(runpy.run_path(sys.argv[1], "
+                    "run_name='harness_voice_prompt_test')['DEFAULT_INSTRUCTIONS'])")
+            (harness-voice--script "harness-voice-live-gpt"))))
+    (should (equal harness-voice-chatgpt-default-instructions (buffer-string)))))
+
 (ert-deftest harness-ui-voice-providers-command-validation ()
   "A provider whose program is missing fails before a process starts."
   (let ((harness-voice-provider 'chatgpt))

@@ -1,0 +1,20 @@
+client_toolchain: Flutter 3.47.7: /home/noah/documents/ai/emacs-agent-harness/.git/harness-client-toolchain/flutter-versions/3.47.7
+client_toolchain: JDK 21: /home/noah/documents/ai/emacs-agent-harness/.git/harness-client-toolchain/jdk/jdk-21.0.13+9
+client_toolchain: Android SDK: /home/noah/documents/ai/emacs-agent-harness/.git/harness-client-toolchain/android-sdk
+check_build: checking commit 6de5ce1d977f (branch started at cb5621e3605f)
+==> pub-get            flutter pub get --enforce-lockfile
+ok   pub-get            1s
+==> analyze            flutter analyze
+ok   analyze            14s
+==> test               flutter test
+    (running the tests at cb5621e3605f to see which of the failures are old)
+ok   test               498s   2005 tests: 1968 passed, 21 failed, 16 skipped
+     NOTE: all 21 failing tests already fail at cb5621e3605f; this branch adds none.  They are
+     listed in /home/noah/documents/ai/emacs-agent-harness/.worktrees/task-improve-voice-mode-speech-end-detection-i1fre8ks/scripts/.dev/client-check/logs/03-test.log -- somebody should mend them.
+==> build              flutter build apk --release
+ok   build              255s
+skip upgrade    (dependencies and Android files are as they were at cb5621e3605f)
+skip tool-tests (tool/ is as it was at cb5621e3605f)
+
+check_build: PASSED in 768s for commit 6de5ce1d977f -- stamp: /home/noah/documents/ai/emacs-agent-harness/.worktrees/task-improve-voice-mode-speech-end-detection-i1fre8ks/scripts/.dev/client-check/stamp.json
+check_build: release APK 109140991 bytes, sha256 06c06b622939ef993fa223cd3f1403e7247df1ca8184c83871435c8d7dbd11ce

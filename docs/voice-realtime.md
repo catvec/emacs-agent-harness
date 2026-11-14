@@ -299,17 +299,18 @@ model, and the test sidecars do exactly that.
 | sidecar → Emacs | `level` | `input` | The microphone's level before the speech filter, 0..1, at most ten times a second; the capture loop measures it on the PCM it just read |
 | sidecar → Emacs | `hearing` | `utterance` | The user started speaking (a stage, not the gate) |
 | sidecar → Emacs | `speech` | `active`, `utterance`, `reason` | The low-latency gate: true at speech onset, before any transcript; false at speech end |
-| sidecar → Emacs | `segment` | `id`, `state`, `seconds`, `reason` | One burst's own decision: `accepted` when the gate kept it, `dropped` with `too short` or `no words`, `failed` when its transcription failed |
+| sidecar → Emacs | `segment` | `id`, `state`, `seconds`, `reason`, `truncated` | One burst's own decision: `accepted` when the gate kept it, `dropped` with `too short` or `no words`, `failed` when its transcription failed; `truncated: true` only for a known hard recording cut |
 | sidecar → Emacs | `transcribing` | `utterance` | A completed utterance is being transcribed |
 | sidecar → Emacs | `user_delta` / `assistant_delta` | `text`, `final` | Caption fragments; `final` ends the caption line |
 | sidecar → Emacs | `backchannel` | `text` | Brief listening sound |
-| sidecar → Emacs | `delegation` | `id`, `text`, `utterance`, `pending`, `speech_active` | Backend request: the transcript as heard, and assistant output held while the person spoke; the client sends the transcript unchanged |
+| sidecar → Emacs | `delegation` | `id`, `text`, `utterance`, `pending`, `speech_active`, `truncated` | Backend request: the transcript as heard, assistant output held while the person spoke, and a known hard-cut flag; the client accumulates unsent chunks until the conversational turn is ready |
 | sidecar → Emacs | `interrupted` | — | Playback stopped |
 | sidecar → Emacs | `notice` | `message` | One reply or utterance could not be done; the session goes on |
 | sidecar → Emacs | `error` | `message` | The sidecar cannot carry on: the client ends the session |
 | sidecar → Emacs | `closed` | `reason` | Clean end |
 | Emacs → sidecar | `start` | `protocol` | Session start |
 | Emacs → sidecar | `mute` | `on` | Microphone off or on |
+| Emacs → sidecar | `turn_hold` | `active` | Persistent assistant-output hold while a thought is unfinished; capture remains open |
 | Emacs → sidecar | `interrupt` | — | Stop playback now, without ending the session |
 | Emacs → sidecar | `stop` | — | End the session |
 | Emacs → sidecar | `commentary` | `text` | Speakable agent text |
@@ -340,9 +341,13 @@ an empty body.
 
 The implemented loop:
 
-1. `delegation` becomes a message in the chat through `session/prompt`.
-   The message is the transcript as the speech model returned it: nothing is
-   stripped from it and nothing is added to it.  No file/line or
+1. `delegation` enters a client-side pending conversational turn before a
+   message goes through `session/prompt`. A 1.2-second grace period protects
+   ordinary pauses; explicit continuation intent and likely cut-offs stay
+   held until more words or an explicit recovery. See [voice turn
+   completion](design/voice-turn-completion.md). The message retains the
+   transcript's words; adjacent chunks of one unsent thought are joined in
+   order. No file/line or
    related-session block is added, and no other session is looked up for a
    delegation: the session voice mode is used in is the context, and the
    session's own agent reads the words in the conversation it is already in.

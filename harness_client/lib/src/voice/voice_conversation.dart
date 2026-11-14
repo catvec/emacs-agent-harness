@@ -1,10 +1,10 @@
 /// The voice conversation of one call.
 ///
-/// Voice has two records, not one.  The *voice conversation* is what was said
-/// and heard on the audio side: every user utterance as the speech model
-/// returned it, and every line the voice actually spoke.  A *session message*
-/// is what crosses into the chat: the transcript, sent as it came back from
-/// speech to text.
+/// Voice has two records, not one. The *voice conversation* records committed
+/// user turns and every line the voice actually spoke. A *session message*
+/// crosses into the chat only after the pending-turn guard commits it. Adjacent
+/// chunks join in source order, with their wording intact; immediate per-chunk
+/// captions and the unsent draft are separate from this delivery record.
 ///
 /// There is no distillation and no context envelope.  An earlier version
 /// removed hesitation sounds here, and added a bounded block of earlier voice
@@ -12,9 +12,9 @@
 /// reason: a request is not a thing to be rewritten, and the session's own
 /// agent is the only reader that can tell which earlier turn a pronoun points
 /// at.  The agent sees the conversation it is in; the voice only delivers the
-/// words, in the event that carried them.  The Emacs client is the same, in
-/// `lisp/ui/harness-ui-voice-conversation.el`; the design is in
-/// `docs/design/voice-conversation.md`.
+/// words of the committed conversational turn. The Emacs client is the same,
+/// in `lisp/ui/harness-ui-voice-conversation.el`; the designs are in
+/// `docs/design/voice-conversation.md` and `docs/design/voice-turn-completion.md`.
 library;
 
 import 'dart:math' as math;

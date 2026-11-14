@@ -33,13 +33,13 @@ class FakeSession implements VoiceSessionBridge {
   final List<Completer<void>> pending = <Completer<void>>[];
 
   @override
-  String get cwd => '/tmp/project';
+  String cwd = '/tmp/project';
 
   @override
   List<String> get history => const ['Person: earlier', 'Agent: yes'];
 
   @override
-  String get sessionId => 'session-1';
+  String sessionId = 'session-1';
 
   @override
   String get sessionTitle => 'Build the thing';
@@ -87,7 +87,7 @@ class FakeSession implements VoiceSessionBridge {
   }
 }
 
-class FakeBackend implements VoiceBackend {
+class FakeBackend implements VoiceBackend, VoiceTurnControl, VoiceTurnSources {
   FakeBackend({this.autoStart = true});
 
   final bool autoStart;
@@ -107,6 +107,22 @@ class FakeBackend implements VoiceBackend {
   int interrupts = 0;
   final List<String> spoken = <String>[];
   final List<String> handed = <String>[];
+  bool turnHeld = false;
+  final List<bool> holds = <bool>[];
+  final List<List<String>> committedSources = <List<String>>[];
+  final List<String> discardedPrompts = <String>[];
+
+  @override
+  Future<void> setTurnHeld(bool held) async {
+    turnHeld = held;
+    holds.add(held);
+  }
+
+  @override
+  void commitTurn(List<String> promptIds) => committedSources.add([...promptIds]);
+
+  @override
+  void discardPrompt(String promptId) => discardedPrompts.add(promptId);
 
   @override
   Stream<VoiceBackendEvent> get events => _events.stream;
@@ -189,6 +205,8 @@ class Rig {
     ),
     String address = 'ws://harness.test:9999/acp',
     Duration pendingReleaseDelay = const Duration(milliseconds: 1500),
+    Duration turnCompletionDelay = const Duration(milliseconds: 1200),
+    int pendingTextLimit = 100000,
   }) : session = FakeSession() {
     controller = VoiceController(
       settings: settings,
@@ -204,6 +222,8 @@ class Rig {
       },
       mediaButtons: media,
       pendingReleaseDelay: pendingReleaseDelay,
+      turnCompletionDelay: turnCompletionDelay,
+      pendingTextLimit: pendingTextLimit,
     );
   }
 

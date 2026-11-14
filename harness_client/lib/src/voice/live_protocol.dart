@@ -14,6 +14,8 @@ You are the voice of an emacs-agent-harness session named "${config.sessionTitle
 
 You talk with the person in real time. Keep the conversation natural and short. Do not read code, diffs, file paths or long lists aloud; say what they mean, and let the screen show the details. Stay quiet while the person thinks.
 
+Turn completion policy: an audio chunk or silence is not necessarily the end of a thought. When the person says "hold on", "one second", "let me think" or another direct pause cue, wait silently for their continuation without an automatic timeout. Do not delegate, acknowledge or start a reply during that pause. A trailing hesitation, dangling clause, unfinished request or likely audio cut-off also means wait for more words. Quoted or named pause cues are ordinary content. Combine a continued request in its original wording and delegate it once when complete. An entire utterance of "continue" or "go on" (optionally "please", ignoring case and terminal punctuation) releases an existing held request immediately; do not append the recovery cue to that request. With no held request, pass that cue on unchanged as an ordinary request. Embedded or quoted recovery cues are not commands. Never treat a thinking pause as permission to speak.
+
 You have one tool, delegate_to_agent. Call it whenever the person asks for anything that needs the session: work to do, a question about the project, a file to read, a task to check, a change to make, or a correction to work already asked for. Put the person's request in the request field, in their own words where you can. Do not call it for greetings, acknowledgements, or questions about what you can do.
 
 While the agent works, say one short line to acknowledge the request, then wait. The agent's result comes back as the tool result; say it briefly, in your own voice. If the person interrupts you, stop speaking and listen. Do not claim work is done before the agent says it is. Never approve a permission request or answer a question for the person: the app asks them on screen, and you should say that an answer is needed.
@@ -156,13 +158,16 @@ class LiveProtocol {
   }
 
   /// The provider's own name for the input item a message is about.
-  String? _itemId(Map<String, Object?> message) {
+  String? _itemId(
+    Map<String, Object?> message, {
+    bool fallbackToId = true,
+  }) {
     final item = _string(message['item_id']) ?? _string(message['itemId']);
     if (item != null && item.isNotEmpty) return item;
     final utterance = message['utterance'];
     if (utterance is num) return 'u-$utterance';
     if (utterance is String && utterance.isNotEmpty) return utterance;
-    final id = _string(message['id']);
+    final id = fallbackToId ? _string(message['id']) : null;
     return id != null && id.isNotEmpty ? id : null;
   }
 
@@ -216,6 +221,8 @@ class LiveProtocol {
       VoiceDelegateEvent(
         text.trim(),
         callId: _string(message['id']) ?? _string(message['callId']),
+        segmentId: _itemId(message, fallbackToId: false),
+        truncated: _bool(message['truncated']) ?? false,
       ),
     ];
   }
@@ -287,18 +294,21 @@ class LiveProtocol {
       'session': <String, Object?>{
         'type': 'realtime',
         'model': config.model,
-        if (voice.isNotEmpty) 'voice': voice,
         'instructions': liveVoiceInstructions(config),
-        'input_audio_format': 'pcm16',
-        'output_audio_format': 'pcm16',
-        'input_audio_transcription': <String, Object?>{
-          if (config.language.trim().isNotEmpty) 'language': config.language,
-          'model': 'whisper-1',
-        },
-        'turn_detection': <String, Object?>{
-          'type': 'server_vad',
-          'silence_duration_ms': 800,
-          'prefix_padding_ms': 300,
+        // Realtime GA audio settings; WebRTC negotiates the media format.
+        // https://developers.openai.com/api/docs/guides/realtime-vad
+        'audio': <String, Object?>{
+          'input': <String, Object?>{
+            'transcription': <String, Object?>{
+              if (config.language.trim().isNotEmpty) 'language': config.language,
+              'model': 'whisper-1',
+            },
+            'turn_detection': <String, Object?>{
+              'type': 'semantic_vad',
+              'eagerness': 'low',
+            },
+          },
+          if (voice.isNotEmpty) 'output': <String, Object?>{'voice': voice},
         },
         'tools': <Object?>[
           <String, Object?>{
@@ -325,7 +335,12 @@ class LiveProtocol {
   /// The agent's finished result, to be spoken or shown by the provider.
   Map<String, Object?>? agentReply(String text, {String? callId}) {
     final trimmed = text.trim();
-    if (trimmed.isEmpty) return null;
+    // An empty identified result closes a grouped tool call without asking
+    // for duplicate speech. Ordinary empty replies are still ignored.
+    if (trimmed.isEmpty &&
+        (!openAi || callId == null || callId.isEmpty)) {
+      return null;
+    }
     if (!openAi) {
       return <String, Object?>{'type': 'agent_reply', 'text': trimmed};
     }

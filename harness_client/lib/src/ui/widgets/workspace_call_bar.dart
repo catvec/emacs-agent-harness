@@ -7,6 +7,7 @@ import '../../state/workspace_buddy_controller.dart';
 import '../../voice/voice_buddy.dart';
 import '../theme/harness_theme.dart';
 import 'voice_buddy_dot.dart';
+import 'voice_pending_speech.dart';
 import 'workspace_buddy.dart'
     show workspaceBuddyPhaseColor, workspaceBuddyPhaseIcon;
 
@@ -127,10 +128,15 @@ class _WorkspaceCallBarHostState extends State<WorkspaceCallBarHost> {
         else
           const SizedBox.shrink(),
         Expanded(
-          child: MediaQuery.removePadding(
-            context: context,
-            removeTop: bar,
-            child: widget.child,
+          // Route BlockSemantics must stay inside the navigator's container;
+          // the persistent call controls above it are not a covered route.
+          child: Semantics(
+            container: true,
+            child: MediaQuery.removePadding(
+              context: context,
+              removeTop: bar,
+              child: widget.child,
+            ),
           ),
         ),
       ],
@@ -159,12 +165,16 @@ class WorkspaceCallBar extends StatelessWidget {
       animation: controller,
       builder: (context, _) {
         if (!visible) return const SizedBox.shrink();
+        final voice = controller.voice;
         return WorkspaceCallBarView(
           model: controller.model,
           onMute: () => unawaited(controller.toggleMute()),
           onEnd: () => unawaited(controller.end()),
           onRetry: () => unawaited(controller.retry()),
-          onOpenCallView: controller.voice == null ? null : onOpenCallView,
+          onOpenCallView: voice == null ? null : onOpenCallView,
+          pendingSpeech: voice == null || voice.pendingSpeech.isEmpty
+              ? null
+              : VoicePendingSpeech(controller: voice, compact: true),
         );
       },
     );
@@ -181,6 +191,7 @@ class WorkspaceCallBarView extends StatelessWidget {
     required this.onEnd,
     required this.onRetry,
     this.onOpenCallView,
+    this.pendingSpeech,
   });
 
   final BuddyViewModel model;
@@ -191,6 +202,9 @@ class WorkspaceCallBarView extends StatelessWidget {
   /// Open the full call view.  Null while the call has no controller to
   /// show, such as the first moment of Starting or a start that failed.
   final VoidCallback? onOpenCallView;
+
+  /// The call's unsent turn, independent of the page below the bar.
+  final Widget? pendingSpeech;
 
   static const double wide = 860;
   static const Color _endColor = Color(0xFFD65A36);
@@ -222,7 +236,7 @@ class WorkspaceCallBarView extends StatelessWidget {
               final scale = MediaQuery.textScalerOf(context)
                   .scale(1)
                   .clamp(1.0, 2.0);
-              return SizedBox(
+              final bar = SizedBox(
                 height: (isWide ? 60 : 56) + (scale - 1) * (isWide ? 12 : 20),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -312,6 +326,18 @@ class WorkspaceCallBarView extends StatelessWidget {
                     ],
                   ),
                 ),
+              );
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  bar,
+                  if (pendingSpeech != null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+                      child: pendingSpeech,
+                    ),
+                ],
               );
             },
           ),

@@ -45,8 +45,8 @@ def process_alive(pid):
 
 import voice_fixtures as fixtures  # noqa: E402
 from harness_voice_sidecar import (  # noqa: E402
-    AUDIO_BACKENDS, LEVEL_FLOOR_DBFS, LOCAL_RATE, FakeEvents, NullAudio,
-    Player, Recorder, SpeechDetector, Vad, audio_backend, audio_backend_names,
+    AUDIO_BACKENDS, LEVEL_FLOOR_DBFS, LOCAL_RATE, FakeConnection, FakeEvents, NullAudio,
+    Player, Recorder, Sidecar, SpeechDetector, Vad, audio_backend, audio_backend_names,
     audio_backends, audio_missing_reason, level_dbfs, pcm_energy, pcm_from_wav,
     pcm_peak, self_test_audio, wav_from_pcm,
 )
@@ -521,6 +521,43 @@ class DetectorTest(unittest.TestCase):
               % (elapsed / seconds * 1000.0, seconds))
 
 
+class VadCutTest(unittest.TestCase):
+    def test_only_actual_limit_cuts_are_marked_without_changing_tuples(self):
+        vad = Vad(max_speech=1.4)
+        events = vad.feed(fixtures.voiced(1.5) + fixtures.silence(1.2))
+        speech = [event for event in events if event[0] == "speech"]
+        self.assertEqual(len(speech), 2, events)
+        for event in events:
+            if event[0] in ("start", "end"):
+                kind, uid = event
+                self.assertIsInstance(uid, int)
+            elif event[0] == "speech":
+                kind, pcm, uid = event
+                self.assertIsInstance(pcm, bytes)
+        self.assertEqual(vad.truncated_utterances, (speech[0][2],))
+        self.assertTrue(vad.take_truncated(speech[0][2]))
+        self.assertFalse(vad.take_truncated(speech[0][2]), "cut consumed twice")
+        self.assertFalse(vad.take_truncated(speech[1][2]), "silence marked cut")
+        self.assertEqual(vad.truncated_utterances, ())
+
+    def test_unconsumed_cut_history_is_bounded_and_reset_safe(self):
+        vad = Vad(max_speech=0.1, pre_roll=0.02)
+        vad.TRUNCATED_HISTORY = 3
+        events = vad.feed(fixtures.voiced(1.2))
+        cuts = [event[2] for event in events if event[0] == "speech"]
+        self.assertGreater(len(cuts), 3)
+        self.assertEqual(vad.truncated_utterances, tuple(cuts[-3:]))
+        vad.reset()
+        self.assertEqual(vad.truncated_utterances, ())
+        self.assertFalse(vad.take_truncated(cuts[-1]))
+        vad.max_speech = 120.0
+        flushed = vad.feed(fixtures.voiced(0.4)) + vad.flush()
+        for event in flushed:
+            if event[0] == "speech":
+                self.assertGreater(event[2], cuts[-1])
+                self.assertFalse(vad.take_truncated(event[2]), "flush marked cut")
+
+
 class SidecarGateTest(unittest.TestCase):
     def test_output_is_held_before_the_transcript_exists(self):
         rig = SidecarRig()
@@ -705,7 +742,337 @@ class SidecarGateTest(unittest.TestCase):
             rig.stop()
 
 
+class TurnHoldTest(unittest.TestCase):
+    def test_base_hold_is_explicit_output_only_and_cleared_without_replay(self):
+        sidecar = Sidecar(events=FakeEvents(), player=NullAudio())
+        stopped = []
+        sidecar.player.stop = lambda: stopped.append(True)
+        sidecar.working = True
+        sidecar.handle({"event": "turn_hold", "active": True})
+        self.assertEqual(stopped, [True])
+        self.assertFalse(sidecar.muted)
+        self.assertTrue(sidecar.working, "output hold canceled backend work")
+        sidecar.announce_speech(False, reason="utterance-end")
+        sidecar.announce_listening()
+        sidecar.tick_playback()
+        self.assertTrue(sidecar.turn_held)
+        self.assertFalse(sidecar.play(b"audio"))
+        # A non-boolean must not release a held thought.
+        sidecar.handle({"event": "turn_hold", "active": "false"})
+        self.assertTrue(sidecar.turn_held)
+        sidecar.hold("Old result.", "old")
+        sidecar.handle({"event": "turn_hold", "active": False})
+        self.assertEqual(sidecar.held, [])
+        self.assertEqual(sidecar.player.played, b"")
+        self.assertTrue(sidecar.play(b"fresh"))
+        sidecar.close()
+        self.assertFalse(sidecar.play(b"late"))
+        sidecar.handle({"event": "turn_hold", "active": True})
+        self.assertFalse(sidecar.turn_held, "closed lifecycle accepted a hold")
+
+    def test_local_hold_survives_transcript_listening_timer_and_ready_audio(self):
+        rig = SidecarRig()
+        try:
+            rig.sidecar.handle({"event": "turn_hold", "active": True})
+            rig.sidecar.handle({"event": "commentary", "text": "Old update.",
+                                "id": "old"})
+            generation = rig.sidecar.output_generation
+            rig.sidecar.audio.put((generation, "late", "Late synthesis.", b"pcm"))
+            rig.sidecar.drain_audio()
+            rig.feed(fixtures.voiced(1.2) + fixtures.silence(1.2))
+            self.assertTrue(rig.pump(until=lambda: rig.find("delegation")))
+            self.assertTrue(rig.sidecar.turn_held)
+            self.assertFalse(rig.sidecar.muted)
+            self.assertEqual(rig.find("delegation")[0]["pending"], [
+                {"id": "old", "text": "Old update."},
+                {"id": "late", "text": "Late synthesis."},
+            ])
+            rig.sidecar.handle({"event": "delegate_result", "id": "u-old",
+                                "text": "Held result."})
+            rig.sidecar.announce_listening()
+            rig.sidecar.release_at = time.monotonic() - 1
+            rig.sidecar.maybe_release()
+            rig.sidecar.tick_playback()
+            self.assertTrue(rig.sidecar.gate_blocked())
+            self.assertEqual(rig.tts_calls, [])
+            self.assertEqual(rig.player.played, b"")
+            rig.sidecar.handle({"event": "turn_hold", "active": False})
+            # A later no-words trigger cannot resurrect the old held result.
+            rig.sidecar.schedule_release(-1)
+            rig.sidecar.maybe_release()
+            self.assertEqual(rig.sidecar.held, [])
+            self.assertEqual(rig.tts_calls, [])
+            self.assertEqual(rig.player.played, b"")
+            rig.sidecar.handle({"event": "delegate_result", "id": "u-new",
+                                "text": "Fresh result."})
+            self.assertTrue(rig.pump(until=lambda: rig.player.played))
+            self.assertEqual(rig.tts_calls, ["Fresh result."])
+        finally:
+            rig.stop()
+
+    def test_hold_does_not_stop_capture_or_transcription(self):
+        rig = SidecarRig()
+        try:
+            rig.sidecar.handle({"event": "turn_hold", "active": True})
+            rig.sidecar.recorder = ChunkRecorder([
+                fixtures.voiced(1.2), fixtures.silence(1.2)])
+            rig.sidecar.tick()
+            rig.sidecar.tick()
+            self.assertTrue(rig.pump(until=lambda: rig.find("delegation")))
+            self.assertTrue(rig.find("level"))
+            self.assertFalse(rig.sidecar.muted)
+            self.assertTrue(rig.sidecar.turn_held)
+            self.assertEqual(rig.player.played, b"")
+        finally:
+            rig.stop()
+
+    def test_late_synthesis_is_not_played_after_hold_or_real_transcript(self):
+        for superseded_by in ("hold", "transcript", "mute", "interrupt", "stop"):
+            with self.subTest(superseded_by=superseded_by):
+                rig = SidecarRig()
+                entered = threading.Event()
+                release = threading.Event()
+                returned = threading.Event()
+
+                def synthesize(text):
+                    entered.set()
+                    release.wait(5)
+                    returned.set()
+                    return b"stale pcm"
+
+                rig.sidecar.synthesize = synthesize
+                try:
+                    rig.sidecar.handle({"event": "commentary", "id": "old",
+                                        "text": "Old result."})
+                    self.assertTrue(entered.wait(1), "synthesis never started")
+                    if superseded_by == "transcript":
+                        rig.sidecar.transcripts.put((1, "New request.", False))
+                        rig.sidecar.drain_transcripts()
+                        self.assertEqual(rig.find("delegation")[0]["pending"],
+                                         [{"id": "old", "text": "Old result."}])
+                    elif superseded_by == "hold":
+                        rig.sidecar.handle({"event": "turn_hold", "active": True})
+                        rig.sidecar.handle({"event": "turn_hold", "active": False})
+                    elif superseded_by == "mute":
+                        rig.sidecar.handle({"event": "mute", "on": True})
+                        rig.sidecar.handle({"event": "mute", "on": False})
+                    else:
+                        rig.sidecar.handle({"event": superseded_by})
+                    release.set()
+                    self.assertTrue(returned.wait(1), "synthesis never returned")
+                    rig.pump(timeout=0.05)
+                    rig.sidecar.schedule_release(-1)
+                    rig.sidecar.maybe_release()
+                    self.assertEqual(rig.player.played, b"", superseded_by)
+                    self.assertEqual(rig.sidecar.held, [], superseded_by)
+                finally:
+                    release.set()
+                    rig.stop()
+
+    def test_interrupt_preserves_input_and_explicit_hold(self):
+        rig = SidecarRig()
+        try:
+            rig.stt_gate.clear()
+            rig.sidecar.handle({"event": "turn_hold", "active": True})
+            rig.feed(fixtures.voiced(1.2) + fixtures.silence(1.2))
+            self.assertTrue(rig.pump(until=lambda: rig.stt_calls))
+            rig.sidecar.handle({"event": "interrupt"})
+            self.assertTrue(rig.sidecar.turn_held)
+            self.assertTrue(rig.sidecar.awaiting)
+            rig.stt_gate.set()
+            self.assertTrue(rig.pump(until=lambda: rig.find("delegation")))
+            self.assertTrue(rig.sidecar.turn_held)
+        finally:
+            rig.stt_gate.set()
+            rig.stop()
+
+    def test_mute_and_end_drop_stale_output_and_reset_cut_bookkeeping(self):
+        rig = SidecarRig()
+        try:
+            rig.sidecar.handle({"event": "turn_hold", "active": True})
+            rig.sidecar.handle({"event": "commentary", "text": "Old result."})
+            rig.sidecar.vad.max_speech = 0.4
+            rig.sidecar.vad.feed(fixtures.voiced(0.5))
+            self.assertTrue(rig.sidecar.vad.truncated_utterances)
+            rig.sidecar.handle({"event": "mute", "on": True})
+            rig.sidecar.handle({"event": "mute", "on": False})
+            self.assertEqual(rig.sidecar.vad.truncated_utterances, ())
+            self.assertEqual(rig.sidecar.held, [])
+            # Mute/unmute is not permission to release a conversational hold.
+            self.assertTrue(rig.sidecar.turn_held)
+            rig.stop()
+            self.assertFalse(rig.sidecar.turn_held)
+            rig.sidecar.audio.put((rig.sidecar.output_generation, "late", "Late.", b"pcm"))
+            rig.sidecar.drain_audio()
+            self.assertEqual(rig.player.played, b"")
+            rig.sidecar.start_session({"event": "start", "protocol": 1})
+            self.assertFalse(rig.sidecar.turn_held)
+            self.assertFalse(rig.sidecar.gate_blocked())
+        finally:
+            rig.stop()
+
+    def test_stopped_workers_cannot_rejoin_a_restarted_call(self):
+        rig = SidecarRig()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def synthesize(text):
+            if text == "Old result.":
+                entered.set()
+                release.wait(5)
+                return b"stale pcm"
+            return b"fresh pcm"
+
+        rig.sidecar.synthesize = synthesize
+        try:
+            rig.sidecar.handle({"event": "commentary", "id": "old", "text": "Old result."})
+            self.assertTrue(entered.wait(1))
+            old_workers = list(rig.sidecar.workers)
+            rig.stop()
+            rig.sidecar.start_session({"event": "start", "protocol": 1})
+            release.set()
+            for worker in old_workers:
+                worker.join(timeout=1)
+                self.assertFalse(worker.is_alive(), "a canceled worker joined the new call")
+            rig.sidecar.handle({"event": "commentary", "id": "new", "text": "New result."})
+            self.assertTrue(rig.pump(until=lambda: rig.player.played))
+            self.assertEqual(rig.player.played, b"fresh pcm")
+        finally:
+            release.set()
+            rig.stop()
+
+    def test_fatal_failure_blocks_late_output(self):
+        rig = SidecarRig()
+        try:
+            rig.sidecar.handle({"event": "turn_hold", "active": True})
+            rig.sidecar.fail("Fixture failure")
+            rig.sidecar.handle({"event": "turn_hold", "active": False})
+            rig.sidecar.handle({"event": "commentary", "text": "Late result."})
+            rig.sidecar.audio.put((rig.sidecar.output_generation, "late", "Late.", b"pcm"))
+            rig.sidecar.drain_audio()
+            self.assertTrue(rig.sidecar.closed)
+            self.assertEqual(rig.sidecar.held, [])
+            self.assertEqual(rig.player.played, b"")
+        finally:
+            rig.stop()
+
+    def test_empty_secondary_results_do_not_synthesize_or_notice(self):
+        rig = SidecarRig()
+        try:
+            rig.sidecar.handle({"event": "delegate_result", "id": "u-1",
+                                "text": "Combined answer."})
+            rig.sidecar.handle({"event": "delegate_result", "id": "u-2", "text": ""})
+            self.assertTrue(rig.pump(until=lambda: rig.player.played))
+            self.assertEqual(rig.tts_calls, ["Combined answer."])
+            self.assertEqual(rig.find("notice"), [])
+        finally:
+            rig.stop()
+
+
 class GptGateTest(unittest.TestCase):
+    def sidecar(self, recorder=None):
+        sidecar = gpt.GptSidecar(gpt.parse_args([GPT_SCRIPT]), events=FakeEvents(),
+                                 connection=FakeConnection(), player=NullAudio(),
+                                 recorder=recorder or NullAudio())
+        # No reader/network: server startup is already acknowledged in this rig.
+        sidecar.started = True
+        self.addCleanup(sidecar.close)
+        return sidecar
+
+    def test_turn_hold_blocks_streaming_after_transcript_and_speech_end(self):
+        sidecar = self.sidecar(ChunkRecorder([
+            tone(0.6, rate=24000), b"\x00\x00" * 36000]))
+        audio = __import__("base64").b64encode(b"\x01\x00" * 480).decode("ascii")
+        sidecar.handle({"event": "turn_hold", "active": True})
+        sidecar.on_server_message(json.dumps(
+            {"type": "session.input_transcript.delta", "delta": "Hold on."}))
+        sidecar.on_server_message(json.dumps({"type": "session.input_transcript.done"}))
+        sidecar.on_server_message(json.dumps(
+            {"type": "session.delegation.created", "delegation_id": "d-held"}))
+        for _ in range(2):
+            sidecar.on_tick()
+            sidecar.on_server_message(json.dumps(
+                {"type": "session.output_audio.delta", "delta": audio}))
+        sidecar.handle({"event": "commentary", "id": "old", "text": "Old update."})
+        sidecar.handle({"event": "delegate_result", "id": "d-old", "text": "Old result."})
+        sidecar.announce_listening()
+        sidecar.tick_playback()
+        self.assertTrue(sidecar.turn_held)
+        self.assertFalse(sidecar.speech_active)
+        self.assertFalse(sidecar.muted)
+        self.assertEqual(sidecar.player.played, b"")
+        self.assertFalse(any(item["type"] == "session.commentary.append"
+                             for item in sidecar.connection.sent))
+        self.assertEqual(sum(item["type"] == "session.input_audio.append"
+                             for item in sidecar.connection.sent), 2,
+                         "held output stopped microphone streaming")
+        sidecar.handle({"event": "turn_hold", "active": False})
+        self.assertEqual(sidecar.held, [])
+        self.assertEqual(sidecar.player.played, b"", "hold release replayed audio")
+        sidecar.on_audio_delta(audio)
+        self.assertEqual(sidecar.player.played, b"\x01\x00" * 480)
+
+    def test_cut_telemetry_does_not_invent_gpt_commits_or_transcript_correlation(self):
+        sidecar = self.sidecar()
+        sidecar.vad.max_speech = 1.4
+        sidecar.gate(tone(1.5, rate=24000) + b"\x00\x00" * 28800)
+        segments = [event for event in sidecar.events.sent
+                    if event["event"] == "segment" and event["state"] == "accepted"]
+        self.assertEqual(len(segments), 2)
+        self.assertIs(segments[0].get("truncated"), True)
+        self.assertNotIn("truncated", segments[1])
+        sidecar.on_user_delta("Provider-selected transcript.")
+        sidecar.on_server_message(json.dumps({"type": "session.input_transcript.done"}))
+        sidecar.on_delegation({"delegation_id": "d-1"})
+        for event in sidecar.events.sent:
+            if event["event"] in ("user_delta", "delegation"):
+                self.assertNotIn("truncated", event)
+        self.assertFalse(any("commit" in item["type"] for item in sidecar.connection.sent))
+        self.assertEqual(sidecar.vad.truncated_utterances, ())
+
+    def test_empty_secondary_results_and_muted_closed_callbacks_are_silent(self):
+        sidecar = self.sidecar()
+        sidecar.handle({"event": "delegate_result", "id": "d-1", "text": "Combined answer."})
+        sidecar.handle({"event": "delegate_result", "id": "d-2", "text": ""})
+        commentary = [item for item in sidecar.connection.sent
+                      if item["type"] == "session.commentary.append"]
+        self.assertEqual([item["text"] for item in commentary], ["Combined answer."])
+        sidecar.handle({"event": "turn_hold", "active": True})
+        sidecar.handle({"event": "mute", "on": True})
+        sidecar.on_server_message(json.dumps(
+            {"type": "session.input_transcript.delta", "delta": "Stale input."}))
+        sidecar.on_server_message(json.dumps({"type": "session.delegation.created"}))
+        sidecar.handle({"event": "mute", "on": False})
+        self.assertEqual(sidecar.transcript, "")
+        self.assertTrue(sidecar.turn_held)
+        self.assertEqual(sidecar.held, [])
+        sidecar.close()
+        sidecar.on_server_message(json.dumps(
+            {"type": "session.output_audio.delta", "delta": "cGNt"}))
+        sidecar.handle({"event": "commentary", "text": "Late result."})
+        self.assertFalse(sidecar.turn_held)
+        self.assertEqual(sidecar.player.played, b"")
+        self.assertEqual(sidecar.vad.truncated_utterances, ())
+        self.assertEqual(sidecar.held, [])
+
+    def test_fatal_failure_blocks_late_streaming_audio(self):
+        sidecar = self.sidecar()
+        sidecar.handle({"event": "turn_hold", "active": True})
+        sidecar.fail("Fixture failure")
+        sidecar.handle({"event": "turn_hold", "active": False})
+        sidecar.on_server_message(json.dumps(
+            {"type": "session.output_audio.delta", "delta": "cGNt"}))
+        self.assertTrue(sidecar.closed)
+        self.assertFalse(sidecar.turn_held)
+        self.assertEqual(sidecar.player.played, b"")
+
+    def test_default_instructions_cover_continuation_and_recovery(self):
+        instructions = gpt.parse_args([GPT_SCRIPT]).instructions
+        for phrase in ('"one second"', '"hold on"', '"let me think"',
+                       "breathing pauses", "likely incomplete sentences",
+                       '"continue"', '"go on"', "pending-turn hold is authoritative"):
+            self.assertIn(phrase, instructions)
+
     def test_the_gpt_sidecar_gates_its_own_server_audio(self):
         from harness_voice_sidecar import FakeConnection, NullAudio
         events = FakeEvents()
@@ -741,6 +1108,68 @@ class GptGateTest(unittest.TestCase):
 
 
 class ProtocolTest(unittest.TestCase):
+    def test_local_limit_metadata_tracks_the_same_utterance_through_stt(self):
+        rig = SidecarRig()
+        try:
+            rig.sidecar.vad.max_speech = 1.4
+            rig.transcript_queue = ["An unfinished thought", "and its ending."]
+            rig.feed(fixtures.voiced(1.5) + fixtures.silence(1.2))
+            self.assertTrue(rig.pump(until=lambda: len(rig.find("delegation")) == 2))
+            segments = [item for item in rig.find("segment")
+                        if item["state"] == "accepted"]
+            self.assertEqual(len(segments), 2)
+            self.assertIs(segments[0].get("truncated"), True)
+            self.assertNotIn("truncated", segments[1])
+            for event in ("transcribing", "user_delta", "delegation"):
+                messages = rig.find(event)
+                self.assertEqual(len(messages), 2, event)
+                self.assertEqual([item["utterance"] for item in messages], [1, 2])
+                self.assertIs(messages[0].get("truncated"), True, event)
+                self.assertNotIn("truncated", messages[1], event)
+            self.assertEqual(rig.sidecar.vad.truncated_utterances, ())
+        finally:
+            rig.stop()
+
+    def test_late_out_of_order_cut_metadata_does_not_leak_to_next_transcript(self):
+        rig = SidecarRig()
+        try:
+            rig.sidecar.awaiting.update({1, 2})
+            rig.sidecar.transcripts.put((2, "Normal ending.", False))
+            rig.sidecar.transcripts.put((1, "The cut", True))
+            rig.sidecar.drain_transcripts()
+            messages = rig.find("delegation")
+            self.assertEqual([item["text"] for item in messages],
+                             ["The cut", "Normal ending."])
+            self.assertIs(messages[0].get("truncated"), True)
+            self.assertNotIn("truncated", messages[1])
+            rig.sidecar.handle({"event": "mute", "on": True})
+            rig.sidecar.handle({"event": "mute", "on": False})
+            rig.sidecar.transcripts.put((1, "Stale cut.", True))
+            rig.sidecar.drain_transcripts()
+            self.assertEqual(len(rig.find("delegation")), 2)
+        finally:
+            rig.stop()
+
+    def test_failed_or_empty_cut_keeps_metadata_without_delegating(self):
+        rig = SidecarRig()
+        try:
+            rig.sidecar.awaiting.update({1, 2, 3})
+            rig.sidecar.transcripts.put((1, None, True))
+            rig.sidecar.transcripts.put((2, "", True))
+            rig.sidecar.transcripts.put((3, "", False))
+            rig.sidecar.drain_transcripts()
+            segments = rig.find("segment")
+            self.assertEqual([item["state"] for item in segments],
+                             ["failed", "dropped", "dropped"])
+            self.assertIs(segments[0].get("truncated"), True)
+            self.assertIs(segments[1].get("truncated"), True)
+            self.assertNotIn("truncated", segments[2])
+            self.assertEqual(rig.find("delegation"), [])
+            self.assertEqual(rig.sidecar.buffered, {})
+            self.assertEqual(rig.sidecar.awaiting, set())
+        finally:
+            rig.stop()
+
     def test_speech_events_come_before_transcribing(self):
         rig = SidecarRig()
         try:

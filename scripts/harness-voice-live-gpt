@@ -53,7 +53,14 @@ DEFAULT_INSTRUCTIONS = (
     "commands, tools or the project to the backend with the delegation "
     "mechanism, and say only that you are on it while it works. Never claim "
     "to have run a command or changed a file. Never ask for or accept a "
-    "permission decision: the screen handles approvals."
+    "permission decision: the screen handles approvals. "
+    "Treat breathing pauses, likely incomplete sentences and phrases such as "
+    "\"one second\", \"hold on\" or \"let me think\" as a continuing thought, "
+    "not a turn boundary. Remain silent and do not delegate an unfinished "
+    "request until the person finishes. If they say \"continue\" or \"go on\" "
+    "after a pause, respond to their pending request without making them "
+    "repeat it or appending the recovery cue to it. The client's pending-turn "
+    "hold is authoritative; do not talk over it."
 )
 
 
@@ -117,6 +124,11 @@ class GptSidecar(Sidecar):
     # -- lifecycle ---------------------------------------------------
 
     def on_start(self):
+        self.vad.reset()
+        self.transcript = ""
+        self.hearing = False
+        self.finished = False
+        self.started = False
         key = self.key_override or os.environ.get(self.args.api_key_env, "")
         if not key:
             self.fail("ChatGPT Live key missing · %s" % self.args.api_key_env)
@@ -148,10 +160,12 @@ class GptSidecar(Sidecar):
         """Report a failure that ends the session."""
         self.events.send("error", message=message)
         self.finished = True
-        if self.loop is not None:
-            self.loop.stop(1)
+        self.finish("voice failed", 1)
 
     def on_stop(self):
+        self.vad.reset()
+        self.transcript = ""
+        self.hearing = False
         self.recorder.close()
         if self.reader is not None and not self.finished:
             try:
@@ -170,6 +184,9 @@ class GptSidecar(Sidecar):
 
     def on_mute(self, muted):
         self.vad.reset()
+        self.transcript = ""
+        self.hearing = False
+        self.held = []
         self.speech_active = False
         self.announce_speech(False, reason="muted")
         if muted and self.player:
@@ -189,8 +206,8 @@ class GptSidecar(Sidecar):
                 if kind == "message":
                     self.on_server_message(payload)
                 elif kind == "error":
-                    self.events.send("error", message="ChatGPT Live connection lost · %s" % payload)
-                    self.working = False
+                    self.fail("ChatGPT Live connection lost · %s" % payload)
+                    return
                 else:
                     self.finished = True
                     self.finish("session closed")
@@ -217,7 +234,7 @@ class GptSidecar(Sidecar):
                 "audio": base64.b64encode(chunk).decode("ascii"),
             })
         except Exception as error:  # noqa: BLE001 - reported to Emacs
-            self.events.send("error", message="ChatGPT Live send failed · %s" % error)
+            self.fail("ChatGPT Live send failed · %s" % error)
 
     def gate(self, chunk):
         """Feed microphone PCM to the local gate before the server hears it.
@@ -250,8 +267,12 @@ class GptSidecar(Sidecar):
                 # The local gate kept this burst.  GPT-Live does its own
                 # transcription, so this is the filter's own decision, not
                 # a claim about what the provider did with it.
-                self.announce_segment("accepted", result[2],
-                                      len(result[1]) / (2.0 * self.rate))
+                self.announce_segment(
+                    "accepted", result[2], len(result[1]) / (2.0 * self.rate),
+                    truncated=self.vad.take_truncated(result[2]))
+                # GPT-Live streams continuously: it has no audio commit or
+                # input-item correlation.  This local cut is telemetry only,
+                # not proof that its next transcript/delegation was cut.
             elif kind == "cancel":
                 self.announce_segment("dropped", result[1],
                                       result[2] if len(result) > 2 else None,
@@ -267,6 +288,12 @@ class GptSidecar(Sidecar):
             log("GPT-Live sent invalid JSON")
             return
         kind = event.get("type")
+        if self.closed and kind != "session.closed":
+            return
+        if self.muted and kind in ("session.input_transcript.delta",
+                                    "session.input_transcript.done",
+                                    "session.delegation.created"):
+            return
         if kind == "session.started":
             self.started = True
             self.session_id = (event.get("session") or {}).get("id")
@@ -330,7 +357,7 @@ class GptSidecar(Sidecar):
     # -- Emacs to GPT-Live -------------------------------------------
 
     def on_commentary(self, text, event=None):
-        if self.speech_active:
+        if self.gate_blocked():
             self.hold(text, (event or {}).get("id"))
             return
         self.steer("session.commentary.append", text)
@@ -344,13 +371,13 @@ class GptSidecar(Sidecar):
         try:
             self.connection.send_json({"type": kind, "text": text})
         except Exception as error:  # noqa: BLE001 - reported to Emacs
-            self.events.send("error", message="ChatGPT Live send failed · %s" % error)
+            self.fail("ChatGPT Live send failed · %s" % error)
 
     def on_result(self, delegation_id, text, error):
         if error:
             self.steer("session.thinking.append", "The backend could not finish: %s" % error)
             return
-        if self.speech_active:
+        if self.gate_blocked():
             self.hold(text, "result:%s" % (delegation_id or "voice"))
             return
         self.steer("session.commentary.append", text)

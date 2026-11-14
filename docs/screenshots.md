@@ -38,6 +38,25 @@ HARNESS_SHOTS=screenshots flutter test test/computers_screenshots_test.dart
 They are `computers-phone.png`, `computers-phone-large.png`,
 `computers-desktop.png`, `computers-empty.png` and `computer-screen.png`.
 
+The **unsent speech** pictures are the last exception.  Both Emacs
+pictures, `voice-turn-completion-emacs.png` and
+`voice-turn-cut-off-emacs.png`, come from `scripts/voice-turn-demo.sh`: a
+development harness whose live sidecar events are scripted while the
+pending-turn guard, the transcript and the session request are real, so no
+microphone, API key or speech service is used.  The Flutter surfaces are
+drawn by the app's own test, on the phone and in the compact and workspace
+call surfaces:
+
+```sh
+cd harness_client
+HARNESS_SHOTS=screenshots flutter test test/voice_pending_speech_screenshots_test.dart
+```
+
+They are `voice-pending-grace.png`, `voice-pending-continuation.png`,
+`voice-pending-cut-off.png`, `voice-pending-full-narrow.png`,
+`voice-pending-full-large-text.png`, `voice-pending-compact-narrow.png`,
+`workspace-pending-narrow.png` and `workspace-buddy-pending.png`.
+
 ## Taking them again
 
 ```sh

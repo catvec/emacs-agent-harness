@@ -3496,7 +3496,12 @@ one, so the meter draws the scale a live call draws.  The utterance keeps
 the mumbles the speech model returned: what crossed into the session is
 those words, unchanged."
   (harness-voice-conversation-clear harness-voice-live--conversation)
-  (setq harness-voice-live--seen (make-hash-table :test 'equal)
+  (harness-voice-live--clear-gate)
+  (harness-voice-live--clear-turn)
+  (setq harness-voice-live--input-chunks nil
+        harness-voice-live--input-seq 0
+        harness-voice-live--utterance-routes nil
+        harness-voice-live--seen (make-hash-table :test 'equal)
         harness-voice-live--utterance nil
         harness-voice-live--utterance-done nil
         harness-voice-live--speaker nil
@@ -3517,7 +3522,12 @@ those words, unchanged."
                    (:event "delegation" :id "d-1"
                            :text "Uh, add a comment, um, to TokenBucket.take about its refill and retry behavior.")))
     (harness-voice-live--handle event))
-  (harness-voice-live--pipeline-turn-sent "d-1")
+  ;; This picture is a committed turn, not a clock-dependent pending draft.
+  ;; Exercise the real submission action; only the sidecar-liveness check
+  ;; and network dispatch are fixtures, so no request reaches a model.
+  (cl-letf (((symbol-function 'harness-voice-live--active-p) (lambda () t))
+            ((symbol-function 'harness-voice-live--dispatch) (lambda (&rest _) nil)))
+    (harness-voice-live-send-now))
   (harness-voice-live--pipeline-reply-ready
    "n-1" "Refill and retry are documented on TokenBucket.take now.")
   (harness-voice-live--handle

@@ -385,6 +385,8 @@ void main() {
         const VoicePromptEvent(VoicePrompt(text: 'open the merge queue task')),
       );
       await tester.pump();
+      // A clip endpoint is not a conversational turn endpoint: allow grace.
+      await tester.pump(const Duration(milliseconds: 1200));
       await tester.pump(const Duration(milliseconds: 200));
 
       expect(_prompts(rig).single, [

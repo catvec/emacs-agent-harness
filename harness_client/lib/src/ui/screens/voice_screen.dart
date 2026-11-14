@@ -9,6 +9,7 @@ import '../../voice/voice_models.dart';
 import '../../voice/voice_settings.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/voice_orb.dart';
+import '../widgets/voice_pending_speech.dart';
 import '../widgets/voice_pipeline.dart';
 import '../widgets/voice_settings_sheet.dart';
 
@@ -191,6 +192,59 @@ class _VoiceScreenState extends State<VoiceScreen> {
                             constraints: const BoxConstraints(maxWidth: 720),
                             child: LayoutBuilder(
                               builder: (context, constraints) {
+                                final scale = MediaQuery.textScalerOf(context)
+                                    .scale(1)
+                                    .clamp(1.0, 2.0);
+                                if (_controller.pendingSpeech.isNotEmpty &&
+                                    constraints.maxHeight < 500 * scale) {
+                                  // A short call view gives the pending turn
+                                  // the orb's room. Large text and long drafts
+                                  // scroll instead of squeezing the status or
+                                  // the captions into a zero-height flex slot.
+                                  return SingleChildScrollView(
+                                    key: const Key('voice-pending-call-scroll'),
+                                    child: Column(
+                                      children: [
+                                        Padding(
+                                          padding: const EdgeInsets.fromLTRB(
+                                            18,
+                                            4,
+                                            18,
+                                            10,
+                                          ),
+                                          child: VoicePendingSpeech(
+                                            controller: _controller,
+                                            compact: true,
+                                          ),
+                                        ),
+                                        ..._statusWidgets(phase),
+                                        Padding(
+                                          padding: const EdgeInsets.fromLTRB(
+                                            18,
+                                            12,
+                                            18,
+                                            12,
+                                          ),
+                                          child: VoicePipelineView(
+                                            snapshot: _controller.pipelineState,
+                                            compact: true,
+                                          ),
+                                        ),
+                                        SizedBox(
+                                          height: math.max(
+                                            160.0,
+                                            constraints.maxHeight * 0.5,
+                                          ),
+                                          child: _Transcript(
+                                            captions: _controller.captions,
+                                            scroll: _captions,
+                                            color: color,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                }
                                 return Column(
                                   children: [
                                     Expanded(
@@ -234,25 +288,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
                                                     phase != VoicePhase.ended,
                                               ),
                                               const SizedBox(height: 10),
-                                              Text(
-                                                phase.label,
-                                                key: const Key('voice-status'),
-                                                textAlign: TextAlign.center,
-                                                style: TextStyle(
-                                                  color: const Color(0xFFF3F0EA)
-                                                      .withValues(alpha: 0.94),
-                                                  fontSize: 14,
-                                                  fontWeight: FontWeight.w500,
-                                                  letterSpacing: 0.2,
-                                                ),
-                                              ),
-                                              if (phase == VoicePhase.approval)
-                                                _ApprovalNotice(onOpen: _close),
-                                              if (_controller.problem != null)
-                                                _ProblemNotice(
-                                                  problem: _controller.problem!,
-                                                  onRetry: _controller.retry,
-                                                ),
+                                              ..._statusWidgets(phase),
                                             ],
                                           );
                                         },
@@ -272,6 +308,21 @@ class _VoiceScreenState extends State<VoiceScreen> {
                                             constraints.maxWidth < 330,
                                       ),
                                     ),
+                                    if (_controller.pendingSpeech.isNotEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.fromLTRB(
+                                          18,
+                                          0,
+                                          18,
+                                          10,
+                                        ),
+                                        child: VoicePendingSpeech(
+                                          controller: _controller,
+                                          compact:
+                                              constraints.maxHeight < 560 ||
+                                              constraints.maxWidth < 330,
+                                        ),
+                                      ),
                                     Expanded(
                                       flex: 4,
                                       child: _Transcript(
@@ -312,6 +363,26 @@ class _VoiceScreenState extends State<VoiceScreen> {
       ),
     );
   }
+
+  List<Widget> _statusWidgets(VoicePhase phase) => [
+    Text(
+      phase.label,
+      key: const Key('voice-status'),
+      textAlign: TextAlign.center,
+      style: TextStyle(
+        color: const Color(0xFFF3F0EA).withValues(alpha: 0.94),
+        fontSize: 14,
+        fontWeight: FontWeight.w500,
+        letterSpacing: 0.2,
+      ),
+    ),
+    if (phase == VoicePhase.approval) _ApprovalNotice(onOpen: _close),
+    if (_controller.problem != null)
+      _ProblemNotice(
+        problem: _controller.problem!,
+        onRetry: _controller.retry,
+      ),
+  ];
 }
 
 class _Header extends StatelessWidget {

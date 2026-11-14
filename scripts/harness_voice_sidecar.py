@@ -18,6 +18,7 @@ Protocol (both directions unless said otherwise), one object per line:
     delegate_result  Emacs -> sidecar  ``id``, ``text``, ``error``, ``message``
     commentary / thinking  Emacs -> sidecar  speakable reply, quiet progress
     mute / interrupt / stop    Emacs -> sidecar
+    turn_hold  Emacs -> sidecar  boolean ``active``; output only, not the mic
     interrupted / notice / error / closed  sidecar -> Emacs
 
 ``error`` ends the session: only a failure the sidecar cannot carry on
@@ -1129,8 +1130,12 @@ class Vad:
     room cannot record forever.  Events are ``("start", ID)``,
     ``("end", ID)``, then ``("speech", PCM, ID)`` or ``("cancel", ID)``.
     A long dictation is one utterance up to MAX_SPEECH, not a prompt per
-    natural pause.
+    natural pause.  ``take_truncated(ID)`` reports an actual MAX_SPEECH
+    cut without changing these tuple shapes.  Consume it when handling
+    ``speech``: the unconsumed history is bounded and reset clears it.
     """
+
+    TRUNCATED_HISTORY = 256
 
     def __init__(self, rate=LOCAL_RATE, threshold=0.004, frame=0.01,
                  hangover=0.85, pre_roll=0.3, min_speech=0.15,
@@ -1154,6 +1159,16 @@ class Vad:
         self._speech = b""
         self._uid = 0
         self._active_uid = None
+        self._truncated = collections.OrderedDict()
+
+    def take_truncated(self, uid):
+        """Return and forget whether UID ended at the recording limit."""
+        return bool(self._truncated.pop(uid, False))
+
+    @property
+    def truncated_utterances(self):
+        """The unconsumed forced-cut ids, oldest first (at most 256)."""
+        return tuple(self._truncated)
 
     @property
     def gate_active(self):
@@ -1177,6 +1192,7 @@ class Vad:
         self._tail = b""
         self._speech = b""
         self._active_uid = None
+        self._truncated.clear()
 
     def _start(self, output):
         self._uid += 1
@@ -1221,6 +1237,9 @@ class Vad:
                     # A very long dictation is cut into another utterance
                     # rather than held in memory or dropped.
                     uid = self._active_uid
+                    self._truncated[uid] = True
+                    while len(self._truncated) > self.TRUNCATED_HISTORY:
+                        self._truncated.popitem(last=False)
                     output.append(("speech", self._speech, uid))
                     self._uid += 1
                     self._active_uid = self._uid
@@ -1523,6 +1542,8 @@ class Sidecar:
         self.caption = ""
         self.loop = None
         self.speech_active = False
+        self.turn_held = False
+        self.closed = False
         self.held = []
         self.held_seq = 0
         self.level_meter = LevelMeter()
@@ -1536,18 +1557,28 @@ class Sidecar:
 
     def start_session(self, event):
         """Handle the harness's `start` command."""
+        self.closed = False
         self.speech_active = False
+        self.turn_held = False
         self.held = []
         self.announce()
         self.on_start()
 
     def close(self, reason="stopped"):
-        """End the session: flush, stop playback and report closed."""
+        """End the session: stop playback and reject late callbacks."""
+        if self.closed:
+            return
+        self.closed = True
         try:
             self.on_stop()
         finally:
             if self.player:
                 self.player.close()
+            self.turn_held = False
+            self.speech_active = False
+            self.speaking = False
+            self.working = False
+            self.held = []
             self.events.send("closed", reason=reason)
 
     def finish(self, reason="stopped", code=0):
@@ -1561,8 +1592,14 @@ class Sidecar:
     def handle(self, event):
         """Dispatch one harness command."""
         kind = event.get("event")
+        if self.closed and kind != "start":
+            return
         if kind == "start":
             self.start_session(event)
+        elif kind == "turn_hold":
+            active = event.get("active")
+            if isinstance(active, bool):
+                self.set_turn_held(active)
         elif kind == "mute":
             self.muted = bool(event.get("on"))
             self.on_mute(self.muted)
@@ -1607,13 +1644,16 @@ class Sidecar:
         """
         self.events.send("notice", message=message)
 
-    def announce_segment(self, state, uid, seconds=None, reason=None):
-        """Report one burst's own decision: accepted, or dropped."""
+    def announce_segment(self, state, uid, seconds=None, reason=None,
+                         truncated=False):
+        """Report one burst's decision, with an actual recording-limit cut."""
         fields = {"state": state, "id": "u-%s" % uid}
         if seconds is not None:
             fields["seconds"] = round(float(seconds), 2)
         if reason:
             fields["reason"] = reason
+        if truncated:
+            fields["truncated"] = True
         self.events.send("segment", **fields)
 
     def announce_speech(self, active, utterance=None, reason=None):
@@ -1657,14 +1697,35 @@ class Sidecar:
         if self.speaking and self.player and not self.player.busy():
             self.announce_listening()
 
-    def play(self, pcm):
-        """Play PCM bytes, reporting the speaker as busy.
+    def gate_blocked(self):
+        """Non-nil while assistant audio must not start (not a mic mute)."""
+        return bool(self.closed or self.muted or self.speech_active
+                    or self.turn_held)
 
-        While the person is speaking no reply audio starts: the gate owns
-        the output.  A sidecar that already synthesized audio keeps the
-        text and reports it as held instead of replaying it later.
+    def set_turn_held(self, active):
+        """Hold output until the client explicitly clears ACTIVE.
+
+        Listening and speech-ended events cannot clear this flag.  Clearing
+        it does not replay held output: a real transcript may supersede it.
         """
-        if not pcm or self.muted or self.speech_active:
+        self.turn_held = active
+        if active:
+            if self.player:
+                self.player.stop()
+            self.announce_listening()
+        else:
+            # The commit/cancel supersedes old output.  In particular it
+            # must not become a later false trigger's replay candidate.
+            self.held = []
+        self.on_turn_hold(active)
+
+    def play(self, pcm):
+        """Play PCM bytes only while neither speech nor a pending turn holds it.
+
+        A sidecar that already synthesized audio keeps the text as pending
+        context instead of buffering audio for an unsolicited replay.
+        """
+        if not pcm or self.gate_blocked():
             return False
         if self.player is None:
             return False
@@ -1682,7 +1743,7 @@ class Sidecar:
         without counting one twice.
         """
         text = (text or "").strip()
-        if not text:
+        if not text or self.closed:
             return
         if not item_id:
             self.held_seq += 1
@@ -1703,7 +1764,7 @@ class Sidecar:
     # -- delegations -------------------------------------------------
 
     def delegation(self, text, delegation_id=None, final=True, pending=None,
-                   utterance=None):
+                   utterance=None, truncated=False):
         """Ask the harness's agent for work, with the spoken transcript."""
         text = (text or "").strip()
         if not text:
@@ -1715,6 +1776,8 @@ class Sidecar:
             fields["pending"] = list(pending)
         if utterance is not None:
             fields["utterance"] = utterance
+        if truncated:
+            fields["truncated"] = True
         fields["speech_active"] = bool(self.speech_active)
         self.events.send("delegation", **fields)
 
@@ -1728,7 +1791,7 @@ class Sidecar:
             message = event.get("message") or "delegation failed"
             self.events.send("assistant_delta", text=message, final=True)
             if held:
-                self.hold("result:%s" % (delegation_id or "error"), message)
+                self.hold(message, "result:%s" % (delegation_id or "error"))
                 self.on_held_result(delegation_id, message)
             else:
                 self.on_result(delegation_id, message, message)
@@ -1748,6 +1811,7 @@ class Sidecar:
     def on_start(self): pass
     def on_stop(self): pass
     def on_mute(self, muted): pass
+    def on_turn_hold(self, active): pass
     def on_commentary(self, text, event=None): pass
     def on_thinking(self, text): pass
     def on_result(self, delegation_id, text, error): pass

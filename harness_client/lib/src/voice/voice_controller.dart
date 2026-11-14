@@ -9,6 +9,7 @@ import 'voice_media_buttons.dart';
 import 'voice_models.dart';
 import 'voice_pipeline.dart';
 import 'voice_settings.dart';
+import 'voice_turn_completion.dart';
 
 /// The session side of a voice screen: sends what was heard, and hears what
 /// the agent says back.
@@ -126,20 +127,43 @@ typedef VoiceBackendFactory = VoiceBackend Function(
 class VoiceController extends ChangeNotifier {
   VoiceController({
     required VoiceSettings settings,
-    required this.bridge,
+    required VoiceSessionBridge bridge,
     required String harnessAddress,
     required VoiceBackendFactory backendFactory,
     required this.onSettingsChanged,
     VoiceMediaButtons? mediaButtons,
     VoiceConversation? conversation,
     this.pendingReleaseDelay = const Duration(milliseconds: 1500),
+    this.turnCompletionDelay = const Duration(milliseconds: 1200),
+    this.pendingTextLimit = 100000,
   }) : conversation = conversation ?? VoiceConversation(),
+       _bridge = bridge,
        _settings = settings,
        _harnessAddress = harnessAddress,
        _backendFactory = backendFactory,
        _mediaButtons = mediaButtons ?? defaultVoiceMediaButtons();
 
-  VoiceSessionBridge bridge;
+  VoiceSessionBridge _bridge;
+  VoiceSessionBridge get bridge => _bridge;
+
+  /// A running call is pinned to its conversation. Retargeting ends it rather
+  /// than delivering a late transcription to whichever thread is selected now.
+  set bridge(VoiceSessionBridge next) {
+    if (identical(next, _bridge)) return;
+    if (_followSession) {
+      _bridge.removeReplyListener(_onAgentReply);
+      _bridge.removeSessionListener(_sessionChanged);
+    }
+    _cancelPending(drop: VoiceSegmentDrop.retargeted, detail: 'retargeted');
+    _bridge = next;
+    _rememberRoute();
+    if (_followSession) {
+      _bridge.addReplyListener(_onAgentReply);
+      _bridge.addSessionListener(_sessionChanged);
+    }
+    if (started && !phase.finished) unawaited(stop());
+  }
+
   final String _harnessAddress;
   final VoiceBackendFactory _backendFactory;
   final VoiceMediaButtons _mediaButtons;
@@ -163,7 +187,17 @@ class VoiceController extends ChangeNotifier {
   final List<({String text, String id})> _heldReplies =
       <({String text, String id})>[];
   Timer? _heldTimer;
-  final Set<String> _sentPrompts = <String>{};
+  // Receipt deduplication precedes accumulation, not just delivery. Accepted
+  // source order wins over the order asynchronous transcripts happen to finish.
+  final Set<String> _receivedPrompts = <String>{};
+  final Map<String, _VoiceInput> _inputs = <String, _VoiceInput>{};
+  final Map<String, String> _captionDraft = <String, String>{};
+  Timer? _completionTimer;
+  int _pendingGeneration = 0;
+  int _inputSequence = 0;
+  bool _backendTurnHeld = false;
+  String? _routeSessionId;
+  String? _routeCwd;
 
   /// The pipe from microphone to speaker, as the screen and the compact
   /// presentation show it.  It is fed only by events and decisions that
@@ -193,12 +227,21 @@ class VoiceController extends ChangeNotifier {
   /// it is spoken.  A transcript cancels the wait; a pause does not speak it.
   final Duration pendingReleaseDelay;
 
+  /// Ordinary transcript endings get a fresh grace after speech and every
+  /// outstanding transcription settle. Explicit intent and cut-offs never expire.
+  final Duration turnCompletionDelay;
+
+  /// A safe bound, not a truncation limit. Exceeding it stops capture with the
+  /// full unsent words still visible; it never sends a shortened request.
+  final int pendingTextLimit;
+
   VoiceBackend? _backend;
   StreamSubscription<VoiceBackendEvent>? _events;
   bool _followSession = false;
   bool _disposed = false;
   bool _stopping = false;
   bool _stopInProgress = false;
+  bool _replacingBackend = false;
   bool _mediaButtonsStarted = false;
   bool _levelReported = false;
   int _sequence = 0;
@@ -243,8 +286,59 @@ class VoiceController extends ChangeNotifier {
   bool get holdingOutput =>
       speechActive ||
       paused ||
+      _outstandingInput ||
+      pendingSpeech.isNotEmpty ||
       phase == VoicePhase.hearing ||
       phase == VoicePhase.transcribing;
+
+  String get _captionText {
+    final captions = _captionDraft.entries.toList()
+      ..sort((a, b) => _inputs[a.key]!.order.compareTo(_inputs[b.key]!.order));
+    return captions.map((entry) => entry.value).join(' ');
+  }
+
+  /// The original words, independent of the agent's work and its captions.
+  /// Caption-only live holds are visible too, but are never invented requests.
+  String get pendingSpeech {
+    final draft = _draft;
+    return [
+      if (draft.text.isNotEmpty) draft.text,
+      if (_captionDraft.isNotEmpty) _captionText,
+    ].join(' ');
+  }
+
+  VoiceTurnReason? get pendingReason {
+    final draft = _draft;
+    final caption = _captionText;
+    if (caption.isNotEmpty) return classifyVoiceTurn(caption);
+    return draft.text.isEmpty ? null : draft.reason;
+  }
+
+  bool get _outstandingInput => _inputs.values.any(
+    (input) => !input.cancelled && !input.consumed && !input.transcribed,
+  );
+
+  bool get _inputSettled =>
+      !_disposed &&
+      started &&
+      !_stopping &&
+      !_replacingBackend &&
+      !phase.finished &&
+      !paused &&
+      !muted &&
+      !speechActive &&
+      !_outstandingInput &&
+      phase != VoicePhase.hearing &&
+      phase != VoicePhase.transcribing;
+
+  /// Manual submission cannot cut across speech or transcription. Nondelegated
+  /// live captions remain provider-owned, so have no submission action.
+  bool get canSendPending => _inputSettled && _draft.text.isNotEmpty;
+
+  Future<void> sendPendingNow() async {
+    if (!canSendPending) return;
+    await _commitPending();
+  }
 
   /// The status the screen shows: the phase, or the conversation's own state
   /// while the voice provider is idle.
@@ -284,6 +378,7 @@ class VoiceController extends ChangeNotifier {
     started = true;
     _stopping = false;
     _stopInProgress = false;
+    _replacingBackend = false;
     _levelReported = false;
     captions.clear();
     conversation.clear();
@@ -292,7 +387,10 @@ class VoiceController extends ChangeNotifier {
     paused = false;
     speechActive = false;
     _heldReplies.clear();
-    _sentPrompts.clear();
+    _cancelPending();
+    _inputs.clear();
+    _receivedPrompts.clear();
+    _rememberRoute();
     _heldTimer?.cancel();
     _heldTimer = null;
     pipeline.begin();
@@ -335,6 +433,7 @@ class VoiceController extends ChangeNotifier {
       _onEvent(event);
     });
     _backend = backend;
+    _backendTurnHeld = false;
     _events = events;
     try {
       await backend.start();
@@ -371,11 +470,13 @@ class VoiceController extends ChangeNotifier {
   }
 
   void _onEvent(VoiceBackendEvent event) {
-    if (_disposed || _stopping) return;
+    if (_disposed || _stopping || _replacingBackend || !_checkRoute()) return;
     switch (event) {
       case VoiceSpeechEvent(:final active):
+        if (muted || paused) break;
         speechActive = active;
         pipeline.gate(active);
+        _cancelCompletion();
         if (active) {
           _heldTimer?.cancel();
           _heldTimer = null;
@@ -386,9 +487,29 @@ class VoiceController extends ChangeNotifier {
           _scheduleHeldRelease();
         }
       case VoicePhaseEvent(:final phase):
-        if (phase == VoicePhase.muted) muted = true;
+        if (phase == VoicePhase.muted) {
+          muted = true;
+          speechActive = false;
+          _cancelPending();
+        }
+        if (phase == VoicePhase.paused) {
+          paused = true;
+          speechActive = false;
+          _cancelPending();
+        }
+        if ((muted || paused) &&
+            phase != VoicePhase.muted &&
+            phase != VoicePhase.paused &&
+            !phase.finished) {
+          break;
+        }
         _setPhase(phase);
-        if (phase == VoicePhase.listening && problem?.recoverable == true) {
+        if (phase == VoicePhase.hearing || phase == VoicePhase.transcribing) {
+          _cancelCompletion();
+        }
+        if (phase == VoicePhase.listening &&
+            problem?.recoverable == true &&
+            pendingSpeech.isEmpty) {
           problem = null;
         }
         if ((phase == VoicePhase.listening ||
@@ -418,21 +539,38 @@ class VoiceController extends ChangeNotifier {
         :final drop,
         :final detail,
       ):
+        final input = _input(id, segmentId: id);
+        if (input.cancelled || input.consumed) break;
+        if (muted || paused) {
+          input.cancelled = true;
+          pipeline.drop(id, drop: VoiceSegmentDrop.cancelled);
+          break;
+        }
         switch (stage) {
           case VoiceSegmentStage.accepted:
             pipeline.accept(id, duration: duration, level: level);
+            if (!input.transcribed) _cancelCompletion();
           case VoiceSegmentStage.transcribing:
             pipeline.transcribing(id);
+            if (!input.transcribed) _cancelCompletion();
           case VoiceSegmentStage.transcribed:
             pipeline.transcript(id, text ?? '', finalized: true);
+            input.transcribed = true;
+            _cancelCompletion();
           case VoiceSegmentStage.dropped:
+            input.transcribed = true;
+            input.failed = drop == VoiceSegmentDrop.failed;
             pipeline.drop(
               id,
               drop: drop ?? VoiceSegmentDrop.cancelled,
               detail: detail,
             );
+            _cancelCompletion();
           case VoiceSegmentStage.failed:
+            input.transcribed = true;
+            input.failed = true;
             pipeline.fail(id, detail: detail);
+            _cancelCompletion();
         }
       case VoicePlaybackEvent(
         :final playing,
@@ -448,8 +586,16 @@ class VoiceController extends ChangeNotifier {
         pipeline.replyHanded(replyId);
       case VoiceHeldEvent(:final text, :final id):
         _holdReply(text, id: id);
-      case VoiceCaptionEvent(:final speaker, :final text, :final finalized):
+      case VoiceCaptionEvent(
+        :final speaker,
+        :final text,
+        :final finalized,
+        :final segmentId,
+      ):
         _addCaption(speaker, text, finalized: finalized);
+        if (speaker == VoiceSpeaker.you && finalized && !muted && !paused) {
+          _onUserCaption(text, segmentId: segmentId);
+        }
         if (speaker == VoiceSpeaker.agent && finalized) {
           // The provider's own spoken line, outside the chat's transcript.
           conversation.say(text, source: 'provider');
@@ -457,7 +603,7 @@ class VoiceController extends ChangeNotifier {
       case VoicePromptEvent(:final prompt):
         // Even a prompt with no words goes through: the segment it names
         // is then dropped with a reason instead of waiting forever.
-        unawaited(_sendPrompt(prompt));
+        _receivePrompt(prompt);
       case VoiceFailureEvent(:final problem):
         _setProblem(problem);
         pipeline.problem(problem);
@@ -470,6 +616,10 @@ class VoiceController extends ChangeNotifier {
         problem = null;
         pipeline.problem(null);
       case VoiceEndedEvent():
+        _cancelPending();
+        _heldTimer?.cancel();
+        _heldTimer = null;
+        _dropHeld('ended');
         _unexpectedEnd = !_stopping;
         pipeline.end(
           state: _unexpectedEnd
@@ -480,6 +630,8 @@ class VoiceController extends ChangeNotifier {
       case VoiceDelegateEvent():
         break;
     }
+    _enforcePendingLimit();
+    _advancePending();
     _syncPipeline();
     notifyListeners();
   }
@@ -500,90 +652,338 @@ class VoiceController extends ChangeNotifier {
     pipeline.problem(problem);
   }
 
-  /// Audio that was still waiting to become a request when the conversation
-  /// stopped.  It will not be sent, and the pipe says so.
-  void _cancelPending() {
+  /// Audio and words still waiting to become a request are canceled, never
+  /// flushed into a stopped or newly selected conversation.
+  void _cancelPending({
+    VoiceSegmentDrop drop = VoiceSegmentDrop.cancelled,
+    String detail = 'cancelled',
+  }) {
+    _cancelCompletion();
+    _captionDraft.clear();
+    final backend = _backend;
+    if (backend case VoiceTurnSources control) control.commitTurn(const []);
+    for (final input in _inputs.values) {
+      if (!input.consumed) input.cancelled = true;
+      input.prompt = null;
+      input.sources.clear();
+    }
     for (final segment in pipelineState.segments) {
-      if (segment.stage.terminal) continue;
-      pipeline.drop(
-        segment.id,
-        drop: VoiceSegmentDrop.cancelled,
-        detail: 'cancelled',
-      );
+      if (segment.stage.terminal || segment.stage == VoicePipelineStage.inTurn) {
+        continue;
+      }
+      pipeline.drop(segment.id, drop: drop, detail: detail);
+    }
+    _syncTurnHold();
+  }
+
+  _VoiceInput _input(String key, {String? segmentId}) => _inputs.putIfAbsent(
+    key,
+    () => _VoiceInput(key, ++_inputSequence, segmentId: segmentId),
+  );
+
+  _VoiceDraft get _draft {
+    final inputs = <_VoiceInput>[];
+    final words = <String>[];
+    final sources = <String>{};
+    var release = false;
+    var truncated = false;
+    for (final input in _inputs.values) {
+      if (input.cancelled || input.consumed) continue;
+      final prompt = input.prompt;
+      if (prompt == null) {
+        // A recovery caption can finish before earlier STT. Interpret it by
+        // source order when those earlier words arrive, not by arrival order.
+        if (input.recovery && words.isNotEmpty) {
+          release = true;
+          if (input.segmentId != null) sources.add(input.segmentId!);
+        }
+        continue;
+      }
+      inputs.add(input);
+      final text = prompt.text?.trim() ?? '';
+      sources.addAll(input.sources);
+      if (words.isNotEmpty && isVoiceTurnRecovery(text)) {
+        // Control cues stay in captions, never in the combined session request.
+        release = true;
+      } else {
+        words.add(text);
+        release = false;
+        truncated = prompt.truncated;
+      }
+    }
+    // Later words cannot reconstruct failed audio. Missing input stays sticky
+    // for this turn until explicit recovery/submission or cancellation.
+    final missingWords = _inputs.values.any((input) =>
+        !input.cancelled && !input.consumed && input.failed);
+    final text = words.join(' ');
+    return _VoiceDraft(
+      text,
+      inputs,
+      sources.toList(),
+      classifyVoiceTurn(text, truncated: truncated || missingWords),
+      release,
+    );
+  }
+
+  void _receivePrompt(VoicePrompt prompt) {
+    if (prompt.id case final id? when id.isNotEmpty) {
+      if (!_receivedPrompts.add(id)) return;
+    }
+    final sources = <String>{
+      if (prompt.segmentId case final id? when id.isNotEmpty) id,
+      ...prompt.segmentIds.where((id) => id.isNotEmpty),
+    };
+    if (sources.isEmpty) {
+      if (prompt.id case final id? when id.isNotEmpty) sources.add(id);
+    }
+    final inputs = [
+      for (final source in sources) _input(source, segmentId: source),
+    ]..sort((a, b) => a.order.compareTo(b.order));
+    if (inputs.any((input) => input.cancelled || input.consumed ||
+        input.prompt != null || input.covered)) {
+      final backend = _backend;
+      if (backend case VoiceTurnSources control) {
+        if (prompt.id case final id? when id.isNotEmpty) control.discardPrompt(id);
+      }
+      return;
+    }
+    final input = inputs.isEmpty
+        ? _input('anonymous-${++_inputSequence}')
+        : inputs.first;
+    if (muted || paused || phase.finished) {
+      for (final source in inputs) {
+        source.cancelled = true;
+        if (source.segmentId != null) pipeline.drop(source.segmentId!);
+      }
+      return;
+    }
+    _cancelCompletion();
+    final raw = prompt.text?.trim() ?? '';
+    for (final source in inputs) {
+      source.transcribed = true;
+      if (source != input) source.covered = true;
+      _captionDraft.remove(source.key);
+    }
+    if (sources.isEmpty) {
+      _captionDraft.removeWhere((key, value) =>
+          key.startsWith('caption-') && value == raw);
+    }
+    input.transcribed = true;
+    input.sources.addAll(inputs.map((source) => source.segmentId).whereType<String>());
+    if (raw.isEmpty && prompt.audio == null) {
+      input.consumed = true;
+      for (final source in sources) {
+        pipeline.drop(source, drop: VoiceSegmentDrop.noWords, detail: 'no words');
+      }
+      _scheduleHeldRelease();
+      return;
+    }
+    final shown = prompt.spokenText;
+    if (shown != null && shown.trim().isNotEmpty) {
+      _addCaption(VoiceSpeaker.you, shown.trim(), finalized: true);
+    }
+    for (final source in sources) {
+      if (raw.isNotEmpty) pipeline.transcript(source, raw, finalized: true);
+    }
+    if (prompt.audio != null) {
+      // Audio-only delivery has no lexical information. Preserve its existing
+      // clip behavior; it cannot obey spoken pause/recovery cues locally.
+      input.consumed = true;
+      unawaited(_deliverPrompt(prompt, sources.toList()));
+      return;
+    }
+    input.prompt = prompt;
+  }
+
+  void _onUserCaption(String text, {String? segmentId}) {
+    final raw = text.trim();
+    if (raw.isEmpty) return;
+    final input = segmentId == null
+        ? _input('caption-${++_inputSequence}')
+        : _input(segmentId, segmentId: segmentId);
+    if (input.cancelled || input.consumed) return;
+    input.transcribed = true;
+    input.recovery = isVoiceTurnRecovery(raw);
+    if (input.recovery) {
+      _captionDraft.removeWhere((key, _) => _inputs[key]!.order <= input.order);
+      _cancelCompletion();
+      return;
+    }
+    if (input.prompt != null || input.covered) return;
+    if (_inputs.values.any((later) => !later.cancelled && !later.consumed &&
+        later.recovery && later.order > input.order)) {
+      return;
+    }
+    // A provider may decide not to delegate a greeting. Only explicit holds
+    // get a caption-only draft; no caption becomes an invented work request.
+    final key = input.key;
+    final before = _captionDraft[key];
+    _captionDraft[key] = raw;
+    final reason = classifyVoiceTurn(_captionText);
+    if (reason == VoiceTurnReason.grace) {
+      _captionDraft.clear();
+    } else if (before != raw) {
+      _cancelCompletion();
     }
   }
 
-  Future<void> _sendPrompt(VoicePrompt prompt) async {
-    if (prompt.id case final id? when id.isNotEmpty) {
-      if (!_sentPrompts.add(id)) return;
-    }
-    final raw = prompt.text?.trim() ?? '';
-    if (raw.isEmpty && prompt.audio == null) {
-      // The speech model made no words of this burst: the voice
-      // conversation keeps nothing new, the session gets no request, and
-      // the segment says why it stopped.
-      final segment = prompt.segmentId ?? prompt.id;
-      if (segment != null && segment.isNotEmpty) {
-        pipeline.drop(
-          segment,
-          drop: VoiceSegmentDrop.noWords,
-          detail: 'no words',
-        );
-      }
-      _scheduleHeldRelease();
-      if (!_disposed) notifyListeners();
-      return;
-    }
-    // The message is the transcript.  No distillation and no context
-    // envelope: the session's own agent has the conversation, and the
-    // words reach it in the event that carried them.  A burst that
-    // carries audio instead of words travels as it is.
+  void _cancelCompletion() {
+    _pendingGeneration++;
+    _completionTimer?.cancel();
+    _completionTimer = null;
+  }
+
+  void _enforcePendingLimit() {
+    if (phase.finished || pendingSpeech.length <= pendingTextLimit) return;
+    _cancelCompletion();
+    speechActive = false;
+    pipeline.gate(false);
     _heldTimer?.cancel();
     _heldTimer = null;
-    _heldReplies.clear();
-    final text = raw.isEmpty ? null : raw;
-    if (text != null) conversation.hear(raw: raw, sent: text);
-    final display = prompt.spokenText;
+    _dropHeld('input limit');
+    _setProblem(const VoiceProblem('Unsent speech limit', recoverable: false));
+    _setPhase(VoicePhase.failed);
+    // Retain the complete draft/captions for inspection; stop only capture and
+    // dispatch. Nothing is silently clipped or flushed to the agent.
+    for (final segment in pipelineState.segments) {
+      if (!segment.stage.terminal && segment.stage != VoicePipelineStage.inTurn) {
+        pipeline.drop(segment.id, detail: 'unsent speech limit');
+      }
+    }
+    unawaited(_closeBackend());
+  }
+
+  void _advancePending() {
+    _syncTurnHold();
+    if (!canSendPending) {
+      _completionTimer?.cancel();
+      _completionTimer = null;
+      return;
+    }
+    final draft = _draft;
+    // A newer caption-only pause owns the floor even when an older delegated
+    // request arrives late. Only its delegation, recovery or manual override
+    // may release the known request; caption-only words are never synthesized.
+    if (_captionDraft.isNotEmpty) return;
+    if (draft.release) {
+      unawaited(_commitPending());
+      return;
+    }
+    if (draft.reason != VoiceTurnReason.grace || _completionTimer != null) return;
+    final generation = _pendingGeneration;
+    final life = _lifecycle;
+    final epoch = _backendEpoch;
+    _completionTimer = Timer(turnCompletionDelay, () {
+      _completionTimer = null;
+      if (_disposed || life != _lifecycle || epoch != _backendEpoch ||
+          generation != _pendingGeneration || !_checkRoute() ||
+          !canSendPending || _draft.reason != VoiceTurnReason.grace) {
+        return;
+      }
+      unawaited(_commitPending());
+    });
+  }
+
+  Future<void> _commitPending() async {
+    if (!canSendPending || !_checkRoute()) return;
+    final draft = _draft;
+    final first = draft.inputs.first.prompt!;
+    _cancelCompletion();
+    final backend = _backend;
+    if (backend case VoiceTurnSources control) {
+      control.commitTurn([
+        for (final input in draft.inputs)
+          if (input.prompt!.id case final id? when id.isNotEmpty) id,
+      ]);
+    }
+    for (final input in _inputs.values) {
+      if (!input.cancelled && input.transcribed) {
+        if (input.segmentId case final id? when !draft.sources.contains(id)) {
+          pipeline.drop(id, detail: 'no delegation');
+        }
+        input.consumed = true;
+        // Keep only an id/order tombstone, never a second growing transcript.
+        input.prompt = null;
+        input.sources.clear();
+      }
+    }
+    _captionDraft.clear();
+    _syncTurnHold();
+    await _deliverPrompt(
+      VoicePrompt(
+        text: draft.text,
+        displayText: draft.text,
+        id: first.id,
+        segmentId: draft.sources.isEmpty ? null : draft.sources.first,
+        segmentIds: draft.sources,
+        truncated: draft.reason == VoiceTurnReason.cutOff,
+      ),
+      draft.sources,
+    );
+  }
+
+  void _syncTurnHold() {
+    final backend = _backend;
+    final held = !_disposed && !_stopping && !_replacingBackend &&
+        !phase.finished && holdingOutput;
+    if (backend case VoiceTurnControl control when _backendTurnHeld != held) {
+      _backendTurnHeld = held;
+      // A backend owns reporting failures from its transport. Capability failures
+      // must not escape an unawaited UI/event callback.
+      unawaited(control.setTurnHeld(held).catchError((Object _) {}));
+    }
+  }
+
+  Future<void> _deliverPrompt(VoicePrompt prompt, List<String> sources) async {
+    if (_disposed || _stopping || !_checkRoute()) return;
+    final life = _lifecycle;
+    final epoch = _backendEpoch;
+    final target = bridge;
+    _heldTimer?.cancel();
+    _heldTimer = null;
+    _dropHeld('superseded');
+    final text = prompt.text?.trim();
+    if (text != null && text.isNotEmpty) conversation.hear(raw: text, sent: text);
     final turnId = 't-${++_turnSequence}';
     _openTurns.add(turnId);
-    pipeline.turnSent(turnId, segmentId: prompt.segmentId ?? prompt.id);
+    pipeline.turnSent(turnId);
+    for (final source in sources) {
+      pipeline.turnSent(turnId, segmentId: source);
+    }
+    notifyListeners();
     try {
-      if (display case final shown? when shown.trim().isNotEmpty) {
-        _addCaption(VoiceSpeaker.you, shown.trim(), finalized: true);
-      }
-      await bridge.send(
-        VoicePrompt(
-          text: text,
-          audio: prompt.audio,
-          displayText: display,
-          id: prompt.id,
-          segmentId: prompt.segmentId,
-        ),
-      );
+      await target.send(prompt);
+      if (_disposed || life != _lifecycle || epoch != _backendEpoch) return;
       _openTurns.remove(turnId);
+      pipeline.turnAnswered(turnId);
       pipeline.turnDone(turnId);
-      if (!_disposed) notifyListeners();
+      notifyListeners();
     } catch (error) {
+      if (_disposed || life != _lifecycle || epoch != _backendEpoch) return;
       _openTurns.remove(turnId);
       pipeline.turnFailed(turnId, detail: '$error');
-      _setProblem(
-        VoiceProblem('Send failed', detail: '$error', recoverable: true),
-      );
-      if (!_disposed) notifyListeners();
+      for (final source in sources) {
+        pipeline.fail(source, detail: '$error');
+      }
+      _setProblem(VoiceProblem('Send failed', detail: '$error', recoverable: true));
+      notifyListeners();
     }
   }
 
   void _scheduleHeldRelease() {
     _heldTimer?.cancel();
-    if (paused || speechActive || _heldReplies.isEmpty) return;
+    if (_disposed || _stopping || holdingOutput || _heldReplies.isEmpty) return;
+    final life = _lifecycle;
+    final epoch = _backendEpoch;
     _heldTimer = Timer(pendingReleaseDelay, () {
+      if (life != _lifecycle || epoch != _backendEpoch) return;
       _heldTimer = null;
       unawaited(_releaseHeld());
     });
   }
 
   Future<void> _releaseHeld() async {
-    if (_disposed || paused || speechActive || _heldReplies.isEmpty) return;
+    if (_disposed || _stopping || holdingOutput || _heldReplies.isEmpty) return;
     final held = List<({String text, String id})>.of(_heldReplies);
     _heldReplies.clear();
     final backend = _backend;
@@ -619,12 +1019,30 @@ class VoiceController extends ChangeNotifier {
     return pipeline.replyReady(text, turnId: _turnForReply());
   }
 
+  void _rememberRoute() {
+    _routeSessionId = bridge.sessionId;
+    _routeCwd = bridge.cwd;
+  }
+
+  bool _checkRoute() {
+    if (_routeSessionId == null) _rememberRoute();
+    if (_routeSessionId == bridge.sessionId && _routeCwd == bridge.cwd) {
+      return true;
+    }
+    _cancelPending(drop: VoiceSegmentDrop.retargeted, detail: 'retargeted');
+    _dropHeld('retargeted');
+    if (started && !_stopping) unawaited(stop());
+    return false;
+  }
+
   void _sessionChanged() {
-    if (!_disposed) notifyListeners();
+    if (_disposed) return;
+    _checkRoute();
+    notifyListeners();
   }
 
   void _onAgentReply(String text) {
-    if (_disposed) return;
+    if (_disposed || !_checkRoute()) return;
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
     _addCaption(VoiceSpeaker.agent, trimmed, finalized: true);
@@ -688,9 +1106,13 @@ class VoiceController extends ChangeNotifier {
     if (muted) {
       _heldTimer?.cancel();
       _heldTimer = null;
+      speechActive = false;
+      pipeline.gate(false);
+      _cancelPending();
       _dropHeld('muted');
     }
     _setPhase(muted ? VoicePhase.muted : VoicePhase.listening);
+    _syncTurnHold();
     _syncPipeline();
     notifyListeners();
     await backend.setMuted(muted);
@@ -709,12 +1131,15 @@ class VoiceController extends ChangeNotifier {
   Future<void> pause() async {
     if (_disposed || paused || phase.finished) return;
     paused = true;
+    speechActive = false;
+    pipeline.gate(false);
     _heldTimer?.cancel();
     _heldTimer = null;
+    _cancelPending();
     _dropHeld('paused');
+    _setPhase(VoicePhase.paused);
     final backend = _backend;
     if (backend != null) await backend.pause();
-    _setPhase(VoicePhase.paused);
     _syncPipeline();
     notifyListeners();
   }
@@ -752,7 +1177,7 @@ class VoiceController extends ChangeNotifier {
     _heldTimer?.cancel();
     _heldTimer = null;
     _dropHeld('restart');
-    _sentPrompts.clear();
+    _receivedPrompts.clear();
     _openTurns.clear();
     speechActive = false;
     paused = false;
@@ -790,14 +1215,28 @@ class VoiceController extends ChangeNotifier {
         next.speechRate != _settings.speechRate ||
         next.speechPitch != _settings.speechPitch ||
         next.speechVolume != _settings.speechVolume;
+    if (restart && wasRunning) {
+      _replacingBackend = true;
+      _lifecycle++;
+      _heldTimer?.cancel();
+      _heldTimer = null;
+      _cancelPending();
+      _dropHeld('restart');
+    }
+    final life = _lifecycle;
     _settings = next;
     await onSettingsChanged(next);
     if (!_disposed) notifyListeners();
     if (!restart || !wasRunning) return;
-    _lifecycle++;
-    _cancelPending();
+    if (_disposed || _stopping || life != _lifecycle) return;
     await _closeBackend();
+    if (_disposed || _stopping || life != _lifecycle) return;
     pipeline.end(state: VoiceInputState.off);
+    _inputs.clear();
+    _receivedPrompts.clear();
+    _openTurns.clear();
+    speechActive = false;
+    _replacingBackend = false;
     started = true;
     _setPhase(VoicePhase.connecting);
     pipeline.begin();
@@ -862,6 +1301,7 @@ class VoiceController extends ChangeNotifier {
     if (_disposed) return;
     _disposed = true;
     _lifecycle++;
+    _cancelPending();
     _heldTimer?.cancel();
     _heldTimer = null;
     _heldReplies.clear();
@@ -876,4 +1316,31 @@ class VoiceController extends ChangeNotifier {
     unawaited(_closeBackend());
     super.dispose();
   }
+}
+
+/// A source keeps its acceptance order even when its transcript arrives late.
+class _VoiceInput {
+  _VoiceInput(this.key, this.order, {this.segmentId});
+
+  final String key;
+  final int order;
+  final String? segmentId;
+  final Set<String> sources = <String>{};
+  VoicePrompt? prompt;
+  bool transcribed = false;
+  bool failed = false;
+  bool cancelled = false;
+  bool consumed = false;
+  bool covered = false;
+  bool recovery = false;
+}
+
+class _VoiceDraft {
+  const _VoiceDraft(this.text, this.inputs, this.sources, this.reason, this.release);
+
+  final String text;
+  final List<_VoiceInput> inputs;
+  final List<String> sources;
+  final VoiceTurnReason reason;
+  final bool release;
 }

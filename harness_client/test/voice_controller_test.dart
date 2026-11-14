@@ -10,6 +10,14 @@ import 'support/voice_fakes.dart';
 
 Future<void> settle() => Future<void>.delayed(Duration.zero);
 
+// These delivery-focused tests explicitly exercise the manual flush. The
+// virtual-clock turn-completion suite verifies the normal 1.2-second grace.
+Future<void> submit(Rig rig) async {
+  await settle();
+  await rig.controller.sendPendingNow();
+  await settle();
+}
+
 void main() {
   test('starts the configured backend and listens', () async {
     final rig = Rig();
@@ -67,7 +75,7 @@ void main() {
       rig.backend.emit(
         const VoicePromptEvent(VoicePrompt(text: 'open the task')),
       );
-      await settle();
+      await submit(rig);
       expect(rig.session.sent.single.text, 'open the task');
       expect(
         rig.controller.captions.map((caption) => caption.text),
@@ -286,8 +294,8 @@ void main() {
         ),
       ),
     );
-    await settle();
-    await settle();
+    rig.backend.emit(const VoiceSpeechEvent(false));
+    await submit(rig);
     expect(rig.session.sent, hasLength(1));
     final prompt = rig.session.sent.single;
     // The held reply is not spoken and not repeated into the message: the
@@ -347,7 +355,7 @@ void main() {
       rig.backend.emit(
         const VoicePromptEvent(VoicePrompt(text: 'what changed', id: 'u-1')),
       );
-      await settle();
+      await submit(rig);
       expect(rig.session.sent.single.text, 'what changed');
       rig.backend.emit(const VoicePhaseEvent(VoicePhase.listening));
       await Future<void>.delayed(const Duration(milliseconds: 60));
@@ -435,7 +443,8 @@ void main() {
         ),
       ),
     );
-    await settle();
+    rig.backend.emit(const VoiceSpeechEvent(false));
+    await submit(rig);
     final prompt = rig.session.sent.single;
     expect(prompt.text, 'what changed');
     expect(occurrences('The parser is ready.', prompt.text!), 0);
@@ -443,7 +452,7 @@ void main() {
     await rig.controller.stop();
   });
 
-  test('a prompt id is sent once and late prompts still arrive', () async {
+  test('prompt ids deduplicate while pending and late chunks combine once', () async {
     final rig = Rig();
     await rig.controller.start();
     await settle();
@@ -456,11 +465,10 @@ void main() {
     rig.backend.emit(
       const VoicePromptEvent(VoicePrompt(text: 'first again', id: 'u-1')),
     );
-    await settle();
-    expect(rig.session.sent.map((prompt) => prompt.displayText), [
-      'second',
-      'first',
-    ]);
+    await submit(rig);
+    // No onset/acceptance ids preceded these chunks, so their receipt order is
+    // the only source order available. They form one conversational turn.
+    expect(rig.session.sent.single.displayText, 'second first');
     await rig.controller.stop();
   });
 
@@ -472,7 +480,7 @@ void main() {
     rig.backend.emit(
       const VoicePromptEvent(VoicePrompt(text: raw, id: 'u-1')),
     );
-    await settle();
+    await submit(rig);
     final prompt = rig.session.sent.single;
     // No distillation, no context block, no meta-instruction.
     expect(prompt.text, raw);
@@ -527,7 +535,7 @@ void main() {
         VoicePrompt(text: 'Do that instead.', id: 'u-1'),
       ),
     );
-    await settle();
+    await submit(rig);
     final prompt = rig.session.sent.single;
     // The session's agent has the conversation; the voice sends only the
     // words the person said, and adds no envelope around them.
@@ -541,7 +549,7 @@ void main() {
         VoicePrompt(text: 'Add a docstring to parse.', id: 'u-2'),
       ),
     );
-    await settle();
+    await submit(rig);
     expect(rig.session.sent.last.text, 'Add a docstring to parse.');
     await rig.controller.stop();
   });
@@ -553,7 +561,7 @@ void main() {
     rig.backend.emit(
       const VoicePromptEvent(VoicePrompt(text: 'Add a test.', id: 'u-1')),
     );
-    await settle();
+    await submit(rig);
     expect(rig.controller.conversation.turns, isNotEmpty);
     await rig.controller.stop();
     expect(rig.controller.conversation.turns, isEmpty);

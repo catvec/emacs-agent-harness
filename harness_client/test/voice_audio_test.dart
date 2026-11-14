@@ -20,6 +20,15 @@ void main() {
       expect(frames.single[2], 3);
     });
 
+    test('reset discards a partial frame from cancelled capture', () {
+      final framer = PcmFramer();
+      expect(framer.add(Uint8List.fromList([7, 0, 9])), isEmpty);
+      framer.reset();
+      final frames = framer.add(Uint8List(640));
+      expect(frames, hasLength(1));
+      expect(frames.single, everyElement(0));
+    });
+
     test('the same stream cut differently makes the same frames', () {
       final samples = List<int>.generate(1280, (i) => i - 640);
       final bytes = Uint8List(samples.length * 2);
@@ -103,6 +112,7 @@ void main() {
       expect(clip.duration.inMilliseconds, greaterThan(140));
       expect(clip.duration.inMilliseconds, lessThan(400));
       expect(clip.level, closeTo(1.0, 0.1));
+      expect(clip.truncated, isFalse);
       expect(vad.speaking, isFalse);
     });
 
@@ -124,7 +134,9 @@ void main() {
       for (var i = 0; i < 400; i++) {
         out.addAll(vad.addFrame(tone(amplitude: 0.2)));
       }
-      expect(out, isNotEmpty);
+      expect(out, hasLength(1));
+      expect(out.single.truncated, isTrue);
+      expect(vad.flush()!.truncated, isFalse, reason: 'no sticky cut-off flag');
       expect(
         out.first.duration,
         lessThanOrEqualTo(config.maxUtterance + const Duration(milliseconds: 20)),
@@ -140,7 +152,39 @@ void main() {
       final clip = vad.flush();
       expect(clip, isNotNull);
       expect(clip!.samples, isNotEmpty);
+      expect(clip.truncated, isFalse);
       expect(vad.speaking, isFalse);
+    });
+
+    test('a silence endpoint at the recording limit is not a hard cut', () {
+      final vad = VoiceActivityDetector(
+        config: const VoiceActivityConfig(
+          startHold: Duration(milliseconds: 20),
+          preRoll: Duration(milliseconds: 20),
+          minUtterance: Duration(milliseconds: 20),
+          trailingKeep: Duration(milliseconds: 20),
+          endSilence: Duration(milliseconds: 80),
+          maxUtterance: Duration(milliseconds: 140),
+        ),
+      );
+      final out = <VoiceUtterance>[];
+      for (var i = 0; i < 3; i++) {
+        out.addAll(vad.addFrame(tone()));
+      }
+      for (var i = 0; i < 4; i++) {
+        out.addAll(vad.addFrame(tone(amplitude: 0)));
+      }
+      expect(out, hasLength(1));
+      expect(out.single.truncated, isFalse);
+    });
+
+    test('manual utterances default to non-truncated', () {
+      final clip = VoiceUtterance(
+        samples: Int16List(320),
+        sampleRate: 16000,
+        level: 0,
+      );
+      expect(clip.truncated, isFalse);
     });
 
     test('the level follows the room', () {

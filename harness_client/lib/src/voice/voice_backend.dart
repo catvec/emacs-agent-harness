@@ -65,9 +65,21 @@ class VoicePromptEvent extends VoiceBackendEvent {
 /// A live provider asked the agent to do something.  [callId] is the
 /// provider's own id for the request, which its result is returned under.
 class VoiceDelegateEvent extends VoiceBackendEvent {
-  const VoiceDelegateEvent(this.text, {this.callId});
+  const VoiceDelegateEvent(
+    this.text, {
+    this.callId,
+    this.segmentId,
+    this.truncated = false,
+  });
   final String text;
   final String? callId;
+
+  /// The provider's input utterance, when explicitly named. A function-call
+  /// output item's id is not an input utterance id.
+  final String? segmentId;
+
+  /// The provider explicitly ended this audio chunk at its recording limit.
+  final bool truncated;
 }
 
 class VoiceFailureEvent extends VoiceBackendEvent {
@@ -216,6 +228,29 @@ abstract class VoiceBackend {
   Future<void> resume();
 
   Future<void> stop();
+}
+
+/// Optional output control while a conversational turn is still pending.
+///
+/// A hold silences remote assistant audio, not the microphone: the person
+/// must remain able to continue. Listening events and playback timers must
+/// not release it. The controller releases it on commitment or cancellation.
+abstract class VoiceTurnControl {
+  Future<void> setTurnHeld(bool held);
+}
+
+/// Optional association of a committed turn with its source delegations.
+///
+/// The controller calls this once before delivery, with ordered prompt ids.
+/// A live backend returns one agent result to all of those tool calls without
+/// speaking it several times. An empty list discards uncommitted associations
+/// on cancellation; already committed turns keep their result association.
+abstract class VoiceTurnSources {
+  void commitTurn(List<String> promptIds);
+
+  /// Discard a newly received delegation whose source was already consumed
+  /// or cancelled, acknowledging its tool call without soliciting speech.
+  void discardPrompt(String promptId);
 }
 
 /// The microphone, as a stream of PCM16 mono chunks.  The platform's own

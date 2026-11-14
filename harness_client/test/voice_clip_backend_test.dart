@@ -27,7 +27,184 @@ Uint8List _bytes(Int16List samples) {
 
 Future<void> _settle() => Future<void>.delayed(Duration.zero);
 
+void _hearUtterance(MemoryVoiceMicrophone mic, {int speechFrames = 6}) {
+  for (var i = 0; i < speechFrames; i++) {
+    mic.hear(_bytes(voiceFrame(samples: 320, amplitude: 0.2)));
+  }
+  for (var i = 0; i < 10; i++) {
+    mic.hear(_bytes(voiceFrame(samples: 320, amplitude: 0.001)));
+  }
+}
+
+ClipVoiceBackend _backend(
+  MemoryVoiceMicrophone mic,
+  VoiceTranscriber transcriber, {
+  ClipDelivery delivery = ClipDelivery.transcript,
+  VoiceActivityConfig vadConfig = _vad,
+}) => ClipVoiceBackend(
+  microphone: mic,
+  transcriber: transcriber,
+  speech: RecordingVoiceSpeech(),
+  delivery: delivery,
+  endpoint: 'https://speech.test/inference',
+  model: '',
+  token: '',
+  language: 'en',
+  speakReplies: false,
+  vadConfig: vadConfig,
+);
+
 void main() {
+  test('prompt copies preserve capture metadata', () {
+    const ordinary = VoicePrompt(text: 'ordinary');
+    expect(ordinary.truncated, isFalse);
+    const cut = VoicePrompt(
+      text: 'unfinished',
+      id: 'u-1',
+      segmentId: 's-1',
+      segmentIds: ['s-1', 's-2'],
+      truncated: true,
+    );
+    final copy = cut.copyWith(text: 'unfinished and more');
+    expect(copy.truncated, isTrue);
+    expect(copy.id, cut.id);
+    expect(copy.segmentId, cut.segmentId);
+    expect(copy.segmentIds, ['s-1', 's-2']);
+    expect(copy.copyWith(truncated: false).truncated, isFalse);
+  });
+
+  for (final delivery in ClipDelivery.values) {
+    test('recording-limit metadata survives $delivery, not normal silence', () async {
+      final mic = MemoryVoiceMicrophone();
+      final backend = _backend(
+        mic,
+        ScriptedVoiceTranscriber(['first part', 'continued thought']),
+        delivery: delivery,
+        vadConfig: const VoiceActivityConfig(
+          startHold: Duration(milliseconds: 60),
+          endSilence: Duration(milliseconds: 120),
+          preRoll: Duration(milliseconds: 60),
+          trailingKeep: Duration(milliseconds: 60),
+          minUtterance: Duration(milliseconds: 100),
+          maxUtterance: Duration(milliseconds: 300),
+        ),
+      );
+      final events = <VoiceBackendEvent>[];
+      backend.events.listen(events.add);
+      await backend.start();
+      _hearUtterance(mic, speechFrames: 20);
+      await _settle();
+      await _settle();
+      final prompts = events.whereType<VoicePromptEvent>().map((event) => event.prompt);
+      expect(prompts.map((prompt) => prompt.truncated), [true, false]);
+      expect(prompts.map((prompt) => prompt.id), ['u-1', 'u-2']);
+      await backend.stop();
+    });
+  }
+
+  for (final action in ['mute', 'pause']) {
+    for (final failure in [false, true]) {
+      test('$action cancels queued/in-flight transcription, stale failure=$failure', () async {
+        final mic = MemoryVoiceMicrophone();
+        final transcriber = _DeferredTranscriber();
+        final backend = _backend(mic, transcriber);
+        final events = <VoiceBackendEvent>[];
+        backend.events.listen(events.add);
+        await backend.start();
+        _hearUtterance(mic);
+        _hearUtterance(mic);
+        await _settle();
+        expect(transcriber.results, hasLength(1));
+        expect(
+          events.whereType<VoiceSegmentEvent>().where((event) => event.stage == VoiceSegmentStage.accepted),
+          hasLength(2),
+        );
+        if (action == 'mute') {
+          await backend.setMuted(true);
+          await backend.setMuted(false);
+        } else {
+          await backend.pause();
+          await backend.resume();
+        }
+        await _settle();
+        expect(events.whereType<VoicePhaseEvent>().last.phase, VoicePhase.listening);
+        final cancelled = events.whereType<VoiceSegmentEvent>().where(
+          (event) => event.drop == VoiceSegmentDrop.cancelled,
+        );
+        expect(cancelled.map((event) => event.id), ['u-1', 'u-2']);
+
+        // A new generation can run even while the old network call hangs.
+        _hearUtterance(mic);
+        await _settle();
+        expect(transcriber.results, hasLength(2));
+        if (failure) {
+          transcriber.results.first.completeError(StateError('stale failure'));
+        } else {
+          transcriber.results.first.complete('stale words');
+        }
+        await _settle();
+        expect(events.whereType<VoicePromptEvent>(), isEmpty);
+        expect(events.whereType<VoiceFailureEvent>(), isEmpty);
+        expect(events.whereType<VoicePhaseEvent>().last.phase, VoicePhase.transcribing);
+        transcriber.results.last.complete('fresh words');
+        await _settle();
+        final prompt = events.whereType<VoicePromptEvent>().single.prompt;
+        expect(prompt.text, 'fresh words');
+        expect(prompt.segmentId, 'u-3');
+        expect(events.whereType<VoiceCaptionEvent>().single.text, 'fresh words');
+        expect(transcriber.results, hasLength(2), reason: 'cancelled queue never transcribed');
+        await backend.stop();
+      });
+    }
+  }
+
+  test('mute invalidates capture before platform mute finishes', () async {
+    final mic = _DelayedMuteMicrophone();
+    final transcriber = _DeferredTranscriber();
+    final backend = _backend(mic, transcriber);
+    final events = <VoiceBackendEvent>[];
+    backend.events.listen(events.add);
+    await backend.start();
+    _hearUtterance(mic);
+    await _settle();
+    final muted = backend.setMuted(true);
+    transcriber.results.single.complete('too late');
+    _hearUtterance(mic); // The platform has not muted, but the backend has.
+    await _settle();
+    expect(events.whereType<VoicePromptEvent>(), isEmpty);
+    expect(transcriber.results, hasLength(1));
+    expect(
+      events.whereType<VoiceSegmentEvent>().where((event) => event.drop == VoiceSegmentDrop.cancelled),
+      hasLength(1),
+    );
+    mic.muteReady.complete();
+    await muted;
+    await backend.stop();
+  });
+
+  test('stop accounts for cancelled transcription without a stale prompt', () async {
+    final mic = MemoryVoiceMicrophone();
+    final transcriber = _DeferredTranscriber();
+    final backend = _backend(mic, transcriber);
+    final events = <VoiceBackendEvent>[];
+    backend.events.listen(events.add);
+    await backend.start();
+    _hearUtterance(mic);
+    _hearUtterance(mic);
+    await _settle();
+    await backend.stop();
+    transcriber.results.single.completeError(StateError('closed request'));
+    await _settle();
+    expect(events.whereType<VoicePromptEvent>(), isEmpty);
+    expect(events.whereType<VoiceFailureEvent>(), isEmpty);
+    expect(events.whereType<VoiceCaptionEvent>(), isEmpty);
+    final cancelled = events.whereType<VoiceSegmentEvent>().where(
+      (event) => event.drop == VoiceSegmentDrop.cancelled,
+    );
+    expect(cancelled.map((event) => event.id), ['u-1', 'u-2']);
+    expect(events.last, isA<VoiceEndedEvent>());
+  });
+
   test('a spoken sentence becomes one transcribed prompt', () async {
     final mic = MemoryVoiceMicrophone();
     final transcriber = ScriptedVoiceTranscriber(['open the merge queue task']);
@@ -73,6 +250,8 @@ void main() {
     final prompt = events.whereType<VoicePromptEvent>().single;
     expect(prompt.prompt.text, 'open the merge queue task');
     expect(prompt.prompt.audio, isNull);
+    expect(prompt.prompt.truncated, isFalse);
+    expect(prompt.prompt.segmentIds, [prompt.prompt.segmentId]);
     expect(events.whereType<VoicePhaseEvent>().last.phase, VoicePhase.thinking);
     await backend.stop();
   });
@@ -388,6 +567,36 @@ void main() {
     );
     await backend.stop();
   });
+}
+
+class _DelayedMuteMicrophone extends MemoryVoiceMicrophone {
+  final muteReady = Completer<void>();
+
+  @override
+  Future<void> setMuted(bool value) async {
+    if (value) await muteReady.future;
+    await super.setMuted(value);
+  }
+}
+
+class _DeferredTranscriber implements VoiceTranscriber {
+  final results = <Completer<String>>[];
+
+  @override
+  Future<String> transcribe(
+    Uint8List wav, {
+    required String endpoint,
+    required String model,
+    required String token,
+    required String language,
+  }) {
+    final result = Completer<String>();
+    results.add(result);
+    return result.future;
+  }
+
+  @override
+  Future<void> dispose() async {}
 }
 
 class _BrokenTranscriber implements VoiceTranscriber {

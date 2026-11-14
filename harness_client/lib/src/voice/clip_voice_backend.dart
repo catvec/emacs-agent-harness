@@ -53,7 +53,9 @@ class ClipVoiceBackend implements VoiceBackend {
   bool _paused = false;
   bool _closed = false;
   bool _speaking = false;
-  bool _transcribing = false;
+  int _captureGeneration = 0;
+  int? _drainingGeneration;
+  String? _transcribingId;
   int _generation = 0;
   int _utteranceSequence = 0;
   int _dropSequence = 0;
@@ -95,7 +97,7 @@ class ClipVoiceBackend implements VoiceBackend {
   }
 
   void _onBytes(Uint8List bytes) {
-    if (_closed) return;
+    if (_closed || _muted || _paused) return;
     for (final frame in _framer.add(bytes)) {
       final wasActive = _vad.gateActive;
       final utterances = _vad.addFrame(frame, outputActive: _speaking);
@@ -152,6 +154,7 @@ class ClipVoiceBackend implements VoiceBackend {
   }
 
   void _accept(VoiceUtterance utterance) {
+    if (_closed || _muted || _paused) return;
     if (utterance.duration < vadConfig.minUtterance) {
       _emit(
         VoiceSegmentEvent(
@@ -178,7 +181,7 @@ class ClipVoiceBackend implements VoiceBackend {
       ),
     );
     _queue.add((id: id, utterance: utterance));
-    if (!_transcribing) unawaited(_drain());
+    if (_drainingGeneration != _captureGeneration) unawaited(_drain());
   }
 
   List<String> _takeHeld() {
@@ -187,11 +190,39 @@ class ClipVoiceBackend implements VoiceBackend {
     return held;
   }
 
+  bool _currentCapture(int generation) =>
+      generation == _captureGeneration && !_closed && !_muted && !_paused;
+
+  /// Invalidate queued and in-flight work before awaiting a platform mute or
+  /// stop. A later listening phase cannot make the old future current again.
+  void _cancelCapture() {
+    _captureGeneration++;
+    final cancelled = [
+      if (_transcribingId case final id?) id,
+      ..._queue.map((queued) => queued.id),
+    ];
+    _transcribingId = null;
+    _drainingGeneration = null;
+    _queue.clear();
+    _vad.reset();
+    _framer.reset();
+    for (final id in cancelled) {
+      _emit(
+        VoiceSegmentEvent(
+          id: id,
+          stage: VoiceSegmentStage.dropped,
+          drop: VoiceSegmentDrop.cancelled,
+        ),
+      );
+    }
+  }
+
   Future<void> _drain() async {
-    if (_transcribing) return;
-    _transcribing = true;
+    final generation = _captureGeneration;
+    if (_drainingGeneration == generation) return;
+    _drainingGeneration = generation;
     try {
-      while (_queue.isNotEmpty && !_closed) {
+      while (_queue.isNotEmpty && _currentCapture(generation)) {
         final queued = _queue.removeAt(0);
         final utterance = queued.utterance;
         final promptId = queued.id;
@@ -213,12 +244,15 @@ class ClipVoiceBackend implements VoiceBackend {
                 displayText: 'Voice message',
                 id: promptId,
                 segmentId: promptId,
+                segmentIds: [promptId],
+                truncated: utterance.truncated,
               ),
             ),
           );
           _emit(const VoicePhaseEvent(VoicePhase.thinking));
           continue;
         }
+        _transcribingId = promptId;
         _emit(const VoicePhaseEvent(VoicePhase.transcribing));
         _emit(
           VoiceSegmentEvent(
@@ -236,6 +270,8 @@ class ClipVoiceBackend implements VoiceBackend {
             language: language,
           )).trim();
         } catch (error) {
+          if (!_currentCapture(generation)) return;
+          _transcribingId = null;
           _emit(
             VoiceSegmentEvent(
               id: promptId,
@@ -247,6 +283,8 @@ class ClipVoiceBackend implements VoiceBackend {
           _emit(const VoicePhaseEvent(VoicePhase.listening));
           continue;
         }
+        if (!_currentCapture(generation)) return;
+        _transcribingId = null;
         if (text.isEmpty) {
           // The burst was kept by the filter and no words came back: it is
           // reported as dropped for having no words, not as silence.
@@ -284,13 +322,18 @@ class ClipVoiceBackend implements VoiceBackend {
               pending: pending.isEmpty ? null : pending,
               id: promptId,
               segmentId: promptId,
+              segmentIds: [promptId],
+              truncated: utterance.truncated,
             ),
           ),
         );
         _emit(const VoicePhaseEvent(VoicePhase.thinking));
       }
     } finally {
-      _transcribing = false;
+      if (_drainingGeneration == generation) {
+        _drainingGeneration = null;
+        _transcribingId = null;
+      }
     }
   }
 
@@ -298,19 +341,25 @@ class ClipVoiceBackend implements VoiceBackend {
   Future<void> setMuted(bool muted) async {
     if (_closed || _muted == muted) return;
     _muted = muted;
+    if (muted) {
+      _cancelCapture();
+      _heldReplies.clear();
+    }
     try {
       await microphone.setMuted(muted || _paused);
     } catch (error) {
       _fail(VoiceProblem('Microphone unavailable', detail: _oneLine(error)));
       return;
     }
-    if (muted) {
-      _vad.reset();
-      _heldReplies.clear();
-      _emit(const VoicePhaseEvent(VoicePhase.muted));
-    } else {
-      _emit(const VoicePhaseEvent(VoicePhase.listening));
-    }
+    _emit(
+      VoicePhaseEvent(
+        _paused
+            ? VoicePhase.paused
+            : _muted
+            ? VoicePhase.muted
+            : VoicePhase.listening,
+      ),
+    );
   }
 
   @override
@@ -334,6 +383,7 @@ class ClipVoiceBackend implements VoiceBackend {
   Future<void> pause() async {
     if (_closed || _paused) return;
     _paused = true;
+    _cancelCapture();
     _generation++;
     _speaking = false;
     _heldReplies.clear();
@@ -431,6 +481,7 @@ class ClipVoiceBackend implements VoiceBackend {
   @override
   Future<void> stop() async {
     if (_closed) return;
+    _cancelCapture();
     _emit(const VoiceEndedEvent());
     _closed = true;
     _generation++;
@@ -455,6 +506,7 @@ class ClipVoiceBackend implements VoiceBackend {
 
   void _fail(VoiceProblem problem) {
     if (_closed) return;
+    if (!problem.recoverable) _cancelCapture();
     _emit(VoiceFailureEvent(problem));
   }
 
