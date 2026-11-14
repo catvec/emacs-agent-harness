@@ -174,6 +174,18 @@ exactly (`test/voice_pipeline_widget_test.dart`, `test/voice_pipeline_test.dart`
 | details | `Pipeline details`, `No segments yet`, `1 utterance`, `2 replies` |
 | backend problem | the backend's own label, e.g. `Microphone permission denied` (data, not new copy) |
 
+A pipeline that reads a camera rather than a microphone says so, and
+none of its words is a microphone's (`harness-ui-voice-pipeline-test'
+asserts the pairs exactly):
+
+| Where | Microphone | Camera |
+| --- | --- | --- |
+| capture | `Mic · live` | `Camera · live` |
+| level | `Level · 56%`, `Level · no data` | `Motion · 56%`, `Motion · no data` |
+| gate | `Speech · heard` | `Mouth · moving` |
+| closed capture | `Mic · muted` | `Camera · paused` |
+| Input tooltip | *Microphone level before the speech filter* | *Mouth motion before the speech gate* |
+
 The tooltips, the summary and the details list are all asserted; the
 `test/voice_pipeline_widget_test.dart` copy test is the regression check, and
 the screenshot test draws every state for a person to look at.

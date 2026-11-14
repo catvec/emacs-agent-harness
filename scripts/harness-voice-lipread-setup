@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Install the lip-reading model and the runtime, on request, once.
+
+The harness never downloads a model by itself: this script is the one
+place a lip-reading model and its runtime are fetched, and it prints
+everything it does.  Two things are installed:
+
+* the model files, into ``--model-dir`` (default
+  ``$XDG_DATA_HOME/harness/lipread``), each checked against its
+  published SHA-256;
+* the Python runtime -- onnxruntime, numpy, opencv-python-headless -- as
+  named packages, with ``--runtime``, into this interpreter's
+  environment or the ``--python`` named.
+
+    scripts/harness-voice-lipread-setup --check
+    scripts/harness-voice-lipread-setup --model --runtime
+    scripts/harness-voice-lipread-setup --model --python /path/to/venv/bin/python
+
+The model's licence is not this repository's: Auto-AVSR's code is
+Apache-2.0, its LRS3-trained weights carry the terms of the LRS3 dataset,
+which allow research and non-commercial use only, and the community
+int8 ONNX export inherits them.  The face detector is OpenCV's YuNet,
+Apache-2.0.  ``--check`` prints that summary every time rather than
+letting it be discovered later.
+
+No camera is touched: this script installs files.
+"""
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import harness_voice_lipread as lipread  # noqa: E402
+
+LICENCE = """\
+Model · Auto-AVSR LRS3 visual-only · int8 ONNX export · English
+Code · Apache-2.0 (mpc001/auto_avsr, Copyright Imperial College London)
+Weights · LRS3 dataset terms · research and non-commercial use only
+Export · community int8 export by eschmechel/auto-avsr-lrs3-vsr-int8-onnx
+Detector · OpenCV YuNet · Apache-2.0
+Voice output · the harness's own local speech stack, or none\
+"""
+
+
+def show_licence():
+    """Print the model's licence summary."""
+    print(LICENCE)
+
+
+def check(args):
+    """Report what is installed, and exit nonzero when something is missing."""
+    show_licence()
+    print()
+    print("model dir · %s" % args.model_dir)
+    for entry in lipread.MODEL_FILES:
+        path = os.path.join(args.model_dir, entry["name"])
+        if os.path.isfile(path):
+            print("  installed · %s · %d MB · %s" % (
+                entry["name"], os.path.getsize(path) // (1024 * 1024), entry["what"]))
+        else:
+            print("  missing · %s · %d MB · %s" % (
+                entry["name"], entry["bytes"] // (1024 * 1024), entry["what"]))
+    try:
+        lipread.load_runtime()
+        print("runtime · ready")
+    except RuntimeError as error:
+        print("runtime · %s" % error)
+    problems = lipread.verify(args.model_dir)
+    for problem in problems:
+        print(problem)
+    return 0 if not problems else 1
+
+
+def install_model(args):
+    """Download the model files that are missing or the wrong size."""
+    print("model dir · %s" % args.model_dir)
+    failures = 0
+    for entry in lipread.MODEL_FILES:
+        name = entry["name"]
+        path = os.path.join(args.model_dir, name)
+        if os.path.isfile(path) and os.path.getsize(path) == entry["bytes"]:
+            print("  present · %s" % name)
+            continue
+        print("  download · %s · %d MB · %s" % (
+            name, entry["bytes"] // (1024 * 1024), lipread.MODEL_URLS[name]))
+        try:
+            lipread.download(name, args.model_dir)
+        except Exception as error:  # noqa: BLE001 - the reason is the output
+            print("  failed · %s · %s" % (name, error))
+            failures += 1
+    if failures:
+        return 1
+    problems = lipread.verify(args.model_dir, hashes=True)
+    for problem in problems:
+        print(problem)
+    return 0 if not problems else 1
+
+
+def install_runtime(args):
+    """Install the Python runtime packages into the named interpreter."""
+    python = args.python or sys.executable
+    print("runtime · %s" % python)
+    if not os.path.exists(python) and not shutil.which(python):
+        print("  failed · interpreter unavailable · %s" % python)
+        return 1
+    command = [python, "-m", "pip", "install"] + list(lipread.RUNTIME_PACKAGES)
+    print("  command · %s" % " ".join(command))
+    result = subprocess.call(command)
+    if result != 0:
+        print("  failed · pip exited %d" % result)
+        return result
+    try:
+        lipread.load_runtime()
+        print("  ready")
+        return 0
+    except RuntimeError as error:
+        print("  failed · %s" % error)
+        return 1
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        description="Install the harness's local lip-reading model and runtime")
+    parser.add_argument("--model-dir", default=lipread.default_model_dir())
+    parser.add_argument("--check", action="store_true",
+                        help="report what is installed, install nothing")
+    parser.add_argument("--model", action="store_true", help="download the model files")
+    parser.add_argument("--runtime", action="store_true",
+                        help="install the Python packages the runtime needs")
+    parser.add_argument("--python", default=None,
+                        help="the interpreter to install the runtime into")
+    return parser.parse_args(argv[1:])
+
+
+def main(argv):
+    args = parse_args(argv)
+    if args.check or not (args.model or args.runtime):
+        return check(args)
+    show_licence()
+    print()
+    status = 0
+    if args.model:
+        status = install_model(args) or status
+    if args.runtime:
+        status = install_runtime(args) or status
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

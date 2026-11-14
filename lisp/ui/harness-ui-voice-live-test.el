@@ -1186,6 +1186,53 @@ come, and the burst says why it stopped."
                          :key (lambda (e) (plist-get e :event)) :test #'equal))
     (should (eq harness-voice-live--state 'listening))))
 
+(ert-deftest harness-ui-voice-live-a-camera-provider-is-paused-not-muted ()
+  "A camera provider's controls and strip use a camera's words.
+Its session closes the device rather than muting a microphone, so the
+control is Pause, the status says Paused, and the pipeline is told the
+input is a camera.  A microphone provider keeps Mute and Muted."
+  (harness-ui-voice-live-test-with
+    (harness-define-voice-provider 'camera-test
+      :label "Camera test" :capability 'live :camera t :command '("true"))
+    (setq harness-voice-provider 'camera-test)
+    (cl-letf (((symbol-function 'harness-voice-live--active-p) (lambda () t)))
+      ;; The controls that close the capture path are drawn only in the
+      ;; call's own box, so this box must be the target for them to show.
+      (setq harness-voice-live--buffer (current-buffer)
+            harness-voice-live--state 'listening
+            harness-voice-live--working nil
+            harness-voice-live--muted nil
+            harness-voice-live--error nil)
+      (harness-voice-live--pipeline-bump 'live)
+      (let ((line (harness-voice-live--controls)))
+        (should (string-search "[Pause C-c v]" line))
+        (should-not (string-search "[Mute C-c v]" line))
+        (let ((at (string-search "[Pause C-c v]" line)))
+          (should (equal "Camera · live capture" (get-text-property at 'help-echo line)))))
+      (should (equal "Live · Listening" (harness-voice-live--status)))
+      ;; Closing the device is a pause, in the status and in the pipeline.
+      (setq harness-voice-live--muted t)
+      (harness-voice-live--pipeline-muted t)
+      (harness-voice-live--stage-set 'muted)
+      (should (equal "Live · Paused" (harness-voice-live--status)))
+      (should (equal 'paused (harness-voice-pipeline-capture
+                              harness-voice-live--pipeline)))
+      (should (equal "Camera · paused"
+                     (harness-voice-pipeline-capture-label
+                      harness-voice-live--pipeline)))
+      (should (string-search "[Resume C-c v]" (harness-voice-live--controls)))
+      (should-not (string-search "[Unmute C-c v]" (harness-voice-live--controls))))
+    ;; A microphone provider is unchanged.
+    (setq harness-voice-provider 'custom)
+    (cl-letf (((symbol-function 'harness-voice-live--active-p) (lambda () t)))
+      (setq harness-voice-live--state 'listening
+            harness-voice-live--working nil
+            harness-voice-live--muted nil
+            harness-voice-live--error nil)
+      (harness-voice-live--pipeline-bump 'live)
+      (should (string-search "[Mute C-c v]" (harness-voice-live--controls)))
+      (should (eq 'mic (harness-voice-pipeline-input harness-voice-live--pipeline))))))
+
 (ert-deftest harness-ui-voice-live-mute-sends-both-states ()
   "Muting and unmuting are explicit protocol booleans."
   (harness-ui-voice-live-test-with

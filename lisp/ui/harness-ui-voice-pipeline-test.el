@@ -17,9 +17,9 @@
 (defconst harness-ui-voice-pipeline-test--now 1000.0
   "The time the tests measure levels against.")
 
-(defun harness-ui-voice-pipeline-test--pipeline (&optional capture)
-  "Return a pipeline in CAPTURE, with a level at the tests' time."
-  (let ((pipeline (harness-voice-pipeline-create (or capture 'live))))
+(defun harness-ui-voice-pipeline-test--pipeline (&optional capture input)
+  "Return a pipeline in CAPTURE reading INPUT, with a level at the tests' time."
+  (let ((pipeline (harness-voice-pipeline-create (or capture 'live) input)))
     (harness-voice-pipeline-set-level pipeline 0.56
                                       harness-ui-voice-pipeline-test--now)
     pipeline))
@@ -77,6 +77,52 @@
                     (disconnected . "Mic · disconnected") (ended . "Mic · ended")))
       (harness-voice-pipeline-set-capture pipeline (car case))
       (should (equal (cdr case) (harness-voice-pipeline-capture-label pipeline))))))
+
+(ert-deftest harness-ui-voice-pipeline-a-camera-is-never-a-microphone ()
+  "A camera session's facts are its own: no word of it says microphone.
+The same state, level and gate, read from a camera, say what a camera
+measures.  A person must not read `Mic' or `Speech' about a silent
+camera, and no surface may disagree with another."
+  (let ((pipeline (harness-ui-voice-pipeline-test--pipeline 'live 'camera))
+        (now harness-ui-voice-pipeline-test--now))
+    (should (equal "Camera · live" (harness-voice-pipeline-capture-label pipeline)))
+    (should (equal "Motion · 56%" (harness-voice-pipeline-level-label pipeline now)))
+    (harness-voice-pipeline-set-gate pipeline t)
+    (should (equal "Mouth · moving" (harness-voice-pipeline-gate-label pipeline)))
+    ;; The summary, the strip and its tooltip say the same.
+    (should (equal (concat "Camera · live · Motion · 56% · Mouth · moving"
+                           " · Speaker · silent")
+                   (substring-no-properties
+                    (harness-voice-pipeline-summary pipeline now))))
+    (let ((strip (harness-ui-voice-pipeline-test--lines pipeline)))
+      (should (string-search "Camera · live" strip))
+      (should (string-search "Motion · 56%" strip))
+      (should (string-search "Mouth · moving" strip)))
+    (should (equal "Mouth motion before the speech gate"
+                   (nth 1 (nth 0 (harness-voice-pipeline-columns pipeline now)))))
+    ;; A closed camera is paused; it is never muted, which is a
+    ;; microphone's word.
+    (harness-voice-pipeline-set-capture pipeline 'paused)
+    (should (equal "Camera · paused" (harness-voice-pipeline-capture-label pipeline)))
+    (should (equal "Motion · no data" (harness-voice-pipeline-level-label pipeline now)))
+    (should-not (harness-voice-pipeline-gate-label pipeline))
+    ;; Nothing on any surface calls it a microphone.
+    (dolist (surface (append (list (harness-voice-pipeline-summary pipeline now)
+                                   (harness-voice-pipeline-short-summary pipeline))
+                             (harness-voice-pipeline-block pipeline 120 now)))
+      (should-not (string-match-p "Mic\\|Microphone\\|Speech"
+                                  (substring-no-properties surface)))))
+  ;; The microphone keeps every word it had.
+  (let ((pipeline (harness-ui-voice-pipeline-test--pipeline 'live 'mic))
+        (now harness-ui-voice-pipeline-test--now))
+    (should (equal "Mic · live" (harness-voice-pipeline-capture-label pipeline)))
+    (should (equal "Level · 56%" (harness-voice-pipeline-level-label pipeline now)))
+    (harness-voice-pipeline-set-gate pipeline t)
+    (should (equal "Speech · heard" (harness-voice-pipeline-gate-label pipeline)))
+    (should (equal "Microphone level before the speech filter"
+                   (nth 1 (nth 0 (harness-voice-pipeline-columns pipeline now))))))
+  ;; A pipeline made without a word for its input is a microphone's.
+  (should (eq 'mic (harness-voice-pipeline-input (harness-voice-pipeline-create 'off)))))
 
 (ert-deftest harness-ui-voice-pipeline-level-is-a-measurement ()
   "A level is drawn only when the capture path sent one, and it goes stale."

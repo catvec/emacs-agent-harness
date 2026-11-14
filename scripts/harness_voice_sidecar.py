@@ -1774,8 +1774,17 @@ class Sidecar:
     # -- delegations -------------------------------------------------
 
     def delegation(self, text, delegation_id=None, final=True, pending=None,
-                   utterance=None, truncated=False):
-        """Ask the harness's agent for work, with the spoken transcript."""
+                   utterance=None, certainty=None, truncated=False):
+        """Ask the harness's agent for work, with the spoken transcript.
+
+        ``certainty`` is the provider's own statement about the words: a
+        visual provider that reads lips says ``sure``, ``likely`` or
+        ``unsure``, and Emacs passes it on to the session message so a
+        guess is never presented as certain speech.  A provider that has
+        no such measure leaves it nil and the field is absent.
+
+        ``truncated`` marks words that were cut off rather than finished.
+        """
         text = (text or "").strip()
         if not text:
             return
@@ -1787,6 +1796,8 @@ class Sidecar:
             fields["pending"] = list(pending)
         if utterance is not None:
             fields["utterance"] = utterance
+        if certainty:
+            fields["certainty"] = certainty
         if truncated:
             fields["truncated"] = True
         fields["speech_active"] = bool(self.speech_active)

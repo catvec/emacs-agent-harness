@@ -20,6 +20,7 @@ model providers have capabilities of their own:
 | `wav` (the default) | `wav` | Local push-to-talk dictation and spoken replies |
 | `chatgpt` | `live` | GPT-Live over the API, delegating work to this chat |
 | `unmute` | `live` | The harness's local pipeline: whisper.cpp or Parakeet for speech to text and Kokoro for text to speech |
+| `lipread` | `live` | A webcam and a local visual speech model: silent lip reading, no microphone, no key and no upload |
 | `fixture` | `live` | The scripted sidecar: the whole loop without a microphone, key or model |
 | `custom` | `live` | Any sidecar in `harness-voice-live-command` |
 
@@ -28,6 +29,14 @@ and what each still needs; the `[Setup]` control opens the same list.
 `harness-voice-capability` is what every command reads, so a new provider with
 an existing capability changes nothing in the chat, the tools or the permission
 panels.
+
+`lipread` is the third kind of input: no microphone at all. The camera reads
+lips with Auto-AVSR's LRS3 visual model on this machine, and the words enter
+the session like a transcript. It asks for the camera once per session, shows
+the faces it sees, marks readings it is unsure about as uncertain, and never
+turns one of those into a request. The model's weights are research and
+non-commercial only; [webcam lip reading](voice-lip-reading.md) has the
+research, the measured accuracy and the limits.
 
 The default WAV provider is a push-to-talk, text-mediated voice layer, **not**
 ChatGPT Live's full-duplex transport:

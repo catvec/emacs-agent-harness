@@ -48,6 +48,7 @@
 (require 'harness-util)
 (require 'harness-ui)
 (require 'harness-ui-media)
+(require 'harness-ui-voice-lipread)
 ;; The local voice pipeline is the harness server's (`speech/status'
 ;; over ACP, see harness-speech.el): a client has no docker, no
 ;; whisper.cpp and no Kokoro of its own, and a phone has none at all.
@@ -100,17 +101,29 @@ harness server's; a client only ever reads this.")
 
 (defvar harness-voice-providers (make-hash-table :test 'eq)
   "Voice provider id -> plist of :id, :label, :capability, :doc,
-:command, :needs and :efforts.")
+:command, :needs, :efforts and the hooks below.
+`:prepare' runs before a live session starts and may refuse it with a
+user error; `:stopped' runs whenever one ends, however it ends;
+`:camera' says the provider watches a camera, so the controls show a
+camera state and the setup list has a camera line.")
 
-(cl-defun harness-define-voice-provider (id &key label capability doc command needs efforts)
+(cl-defun harness-define-voice-provider (id &key label capability doc command needs
+                                            efforts prepare stopped camera)
   "Register voice provider ID.
 LABEL names it in the UI, CAPABILITY is `wav' or `live' (`live' when
 omitted), DOC explains it, COMMAND is an argv list or a function of no
 arguments returning one, and NEEDS is a list of things the provider
 needs: `(env NAME)', `(executable NAME)' or a function returning a
 one-line reason when it cannot run.  EFFORTS maps `low', `medium' and
-`high' to argv fragments this provider adds at that effort.  Defining
-ID again replaces it."
+`high' to argv fragments this provider adds at that effort.
+
+PREPARE is a function of no arguments that runs before a live session
+starts; it signals a user error to refuse the start, which is how a
+provider asks for a permission the person has not granted yet.  STOPPED
+is a function of no arguments that runs when the session ends, however
+it ends, so a provider can drop what the session was allowed.  CAMERA
+non-nil marks a provider that captures from a camera.  Defining ID again
+replaces it."
   (unless (memq capability harness-voice-capabilities)
     (setq capability 'live))
   (puthash id (list :id id
@@ -119,7 +132,10 @@ ID again replaces it."
                     :doc doc
                     :command command
                     :needs needs
-                    :efforts efforts)
+                    :efforts efforts
+                    :prepare prepare
+                    :stopped stopped
+                    :camera camera)
            harness-voice-providers)
   id)
 
@@ -130,6 +146,12 @@ ID again replaces it."
 (defun harness-voice-provider-capability (id)
   "Return the capability of voice provider ID, or nil."
   (plist-get (harness-voice-provider-get id) :capability))
+
+(defun harness-voice-provider-camera-p (&optional id)
+  "Non-nil when voice provider ID captures from a camera.
+A camera provider needs an explicit, per-session permission, and the
+controls and the setup list say so."
+  (plist-get (harness-voice-provider-get (or id harness-voice-provider)) :camera))
 
 (defun harness-voice-provider-label (id)
   "Return the label of voice provider ID, or its name."
@@ -597,6 +619,7 @@ keep saying a running service is missing."
     (harness-voice--insert-stt-model)
     (harness-voice--insert-output-voice)
     (harness-voice--insert-audio)
+    (harness-voice--insert-camera)
     (insert "\n"
             (propertize "Effort" 'face 'harness-label-face)
             "  ")
@@ -1162,6 +1185,16 @@ the reason names the programs that would make it work."
   :doc "Local whisper.cpp or Parakeet speech to text and Kokoro text to speech · no hosted model, no key."
   :command #'harness-voice-unmute-command
   :needs '(harness-voice--audio-need harness-voice-unmute-need))
+
+(harness-define-voice-provider 'lipread
+  :label "Webcam lip reading"
+  :capability 'live
+  :doc "Local webcam lip reading: Auto-AVSR's visual model on this machine · no microphone, no key, no upload."
+  :command #'harness-voice-lipread-command
+  :needs (list #'harness-voice-lipread-need)
+  :prepare #'harness-voice-lipread--prepare
+  :stopped #'harness-voice-lipread--stopped
+  :camera t)
 
 (harness-define-voice-provider 'fixture
   :label "Scripted fixture"

@@ -110,6 +110,11 @@ route is captured at the burst's onset and its transcript goes there.")
 (defvar harness-voice-live--stderr nil "Buffer holding the sidecar's stderr.")
 (defvar harness-voice-live--tail "" "Unparsed stdout after the last newline.")
 (defvar harness-voice-live--timer nil "Startup or stop timer, or nil.")
+(defvar harness-voice-live--camera nil
+  "The camera state the sidecar last reported, or nil.
+A provider that captures from a camera -- the webcam lip reader -- sends
+`camera' events with its device, the faces in view and its frame rate;
+every other provider leaves this nil and shows no camera at all.")
 (defvar harness-voice-live--pipeline-timer nil
   "Timer following the shared local pipeline while it initializes, or nil.")
 (defvar harness-voice-live--state nil
@@ -536,7 +541,7 @@ flickers in and out is noise, and a wait that short needs no clock."
     ('cut-off "Possible cut-off")
     ('thinking "Working")
     ('speaking "Speaking")
-    ('muted "Muted")
+    ('muted (harness-voice-live--paused-word))
     ('failed "Failed")))
 
 (defun harness-voice-live--busy-p ()
@@ -587,6 +592,20 @@ Speaking has its own mark: the reply is arriving, not waited for."
     (harness-voice-live--stage-redraw)
     (harness-voice-live--refresh)))
 
+(defun harness-voice-live--paused-word ()
+  "Return the word for a session whose capture path is closed.
+A camera session is paused: the device is closed and nothing is read.  A
+microphone session is muted, which is what that word means."
+  (if (harness-voice-provider-camera-p) "Paused" "Muted"))
+
+(defun harness-voice-live--pause-button ()
+  "Return the control that closes the capture path, for this provider."
+  (if (harness-voice-provider-camera-p) "Pause C-c v" "Mute C-c v"))
+
+(defun harness-voice-live--resume-button ()
+  "Return the control that opens the capture path again, for this provider."
+  (if (harness-voice-provider-camera-p) "Resume C-c v" "Unmute C-c v"))
+
 (defvar harness-voice-live--status-names-target nil
   "Non-nil makes the status name the target even in the target's box.
 The mode line is one indicator for the whole frame, so it always names
@@ -616,7 +635,8 @@ by naming the one that is."
     ((eq harness-voice-live--stage 'speaking) " · Speaking")
     ((eq harness-voice-live--stage 'holding) " · Holding reply")
     (harness-voice-live--working " · Working")
-    ((and harness-voice-live--muted (harness-voice-live--active-p)) " · Muted")
+    ((and harness-voice-live--muted (harness-voice-live--active-p))
+     (concat " · " (harness-voice-live--paused-word)))
     ((or (eq harness-voice-live--state 'listening)
          (eq harness-voice-live--stage 'listening)) " · Listening")
     ((null harness-voice-live--state) " · Off")
@@ -679,6 +699,33 @@ the call has nowhere to go and ends."
         ((harness-voice-live--microphone-on-p) 'harness-caution-face)
         (t 'harness-label-face)))
 
+(defconst harness-voice-live--camera-states
+  '(("opening" . "opening") ("live" . "live") ("paused" . "paused")
+    ("denied" . "denied") ("failed" . "failed"))
+  "The words for a camera provider's state in the controls.")
+
+(defun harness-voice-live--camera-label ()
+  "Return the controls' camera words: the state and the face count.
+A camera that is on but sees no face says so, which is the difference
+between capturing and reading."
+  (let* ((camera harness-voice-live--camera)
+         (state (or (plist-get camera :state) "closed"))
+         (word (or (cdr (assoc state harness-voice-live--camera-states)) state))
+         (faces (plist-get camera :faces)))
+    (concat "Camera · " word
+            (when (and (equal state "live") faces)
+              (concat " · " (if (zerop faces) "no face"
+                              (format "%d %s" faces (if (= faces 1) "face" "faces"))))))))
+
+(defun harness-voice-live--camera-face ()
+  "Return the face for the camera state in the controls."
+  (pcase (plist-get harness-voice-live--camera :state)
+    ("live" (if (zerop (or (plist-get harness-voice-live--camera :faces) 0))
+                'harness-caution-face
+              'harness-success-face))
+    ((or "failed" "denied") 'harness-failure-face)
+    (_ 'harness-caution-face)))
+
 (defun harness-voice-live--controls ()
   "Return fitted live voice controls for a compose box, or nil.
 A box that is not the call's target still shows the call, with the
@@ -718,6 +765,11 @@ never says `Listening' in a box the words do not go to."
                (and harness-voice-live--error
                     (list (propertize harness-voice-live--error 'face 'harness-failure-face
                                       'help-echo harness-voice-live--error) 85 nil))
+               (and active harness-voice-live--camera
+                    (list (propertize (harness-voice-live--camera-label)
+                                      'face (harness-voice-live--camera-face)
+                                      'help-echo "Camera · live capture")
+                          84 nil))
                (and active harness-voice-live--notice
                     (list (propertize harness-voice-live--notice 'face 'harness-caution-face
                                       'help-echo harness-voice-live--notice) 83 nil))
@@ -726,8 +778,13 @@ never says `Listening' in a box the words do not go to."
                                                  "Agent turn · cancellation") 80 nil))
                (and active here
                     (list (harness-voice--button
-                           (if harness-voice-live--muted "Unmute C-c v" "Mute C-c v")
-                           #'harness-voice-live-mute "Microphone · live session") 70 nil))
+                           (if harness-voice-live--muted
+                               (harness-voice-live--resume-button)
+                             (harness-voice-live--pause-button))
+                           #'harness-voice-live-mute
+                           (if (harness-voice-provider-camera-p)
+                               "Camera · live capture"
+                             "Microphone · live session")) 70 nil))
                (list (harness-voice--button "Transcript" #'harness-voice-live-transcript
                                             "Live transcript") 60 nil)
                (list (harness-voice--button "Setup" #'harness-voice-setup
@@ -762,13 +819,20 @@ never says `Listening' in a box the words do not go to."
 (defvar-local harness-voice-live--pipeline-details nil
   "Non-nil when the transcript shows every marker of the pipeline.")
 
+(defun harness-voice-live--input ()
+  "Return the input the selected provider reads: `mic' or `camera'."
+  (if (harness-voice-provider-camera-p) 'camera 'mic))
+
 (defun harness-voice-live--pipeline-generation ()
   "Return the generation of the pipeline this session feeds."
   (harness-voice-pipeline-generation harness-voice-live--pipeline))
 
 (defun harness-voice-live--pipeline-bump (capture)
-  "Begin a new pipeline, with the microphone in CAPTURE state."
-  (harness-voice-pipeline-bump harness-voice-live--pipeline capture)
+  "Begin a new pipeline, with the capture path in CAPTURE state.
+The pipeline is told which input the provider reads, so a camera session
+is never described with a microphone's words."
+  (harness-voice-pipeline-bump harness-voice-live--pipeline capture
+                               (harness-voice-live--input))
   (setq harness-voice-live--utterance nil
         harness-voice-live--utterance-done nil
         harness-voice-live--caption-seq 0
@@ -1031,9 +1095,14 @@ offset; a whole held result is one piece of its own."
     (harness-voice-live--pipeline-touch t)))
 
 (defun harness-voice-live--pipeline-muted (muted)
-  "Record that the microphone is MUTED, or open again."
+  "Record that the capture path is closed, MUTED, or open again.
+A camera that is closed is paused, not muted: it has no microphone, and
+its own word is the one the strip says."
   (harness-voice-pipeline-set-capture harness-voice-live--pipeline
-                                      (if muted 'muted 'live)
+                                      (cond ((not muted) 'live)
+                                            ((eq (harness-voice-live--input) 'camera)
+                                             'paused)
+                                            (t 'muted))
                                       nil (harness-voice-live--pipeline-generation))
   (when muted
     (harness-voice-pipeline-finish-replies harness-voice-live--pipeline 'dropped "muted"
@@ -1116,7 +1185,12 @@ local pipeline, the fixture or a custom sidecar."
       (when (process-live-p process) (delete-process process))))
   (when (buffer-live-p harness-voice-live--stderr)
     (kill-buffer harness-voice-live--stderr))
-  (setq harness-voice-live--stderr nil))
+  (setq harness-voice-live--stderr nil)
+  (setq harness-voice-live--camera nil)
+  ;; Every way a session ends passes here: the provider drops what the
+  ;; session was allowed -- a camera grant, a device -- before the next
+  ;; one starts.
+  (harness-voice-live--stopped))
 
 (defun harness-voice-live--clear-turn ()
   "Forget the turn in flight and every delegation."
@@ -1264,9 +1338,11 @@ utterance sends transcribing first, which cancels it."
       (when (buffer-live-p harness-voice-live--stderr)
         (kill-buffer harness-voice-live--stderr))
       (setq harness-voice-live--stderr nil
-            harness-voice-live--closing nil)
+            harness-voice-live--closing nil
+            harness-voice-live--camera nil)
       (harness-voice-live--clear-gate)
       (harness-voice-live--clear-turn)
+      (harness-voice-live--stopped)
       (cond
        (closing
         (setq harness-voice-live--state nil))
@@ -1410,21 +1486,37 @@ Return non-nil when a heading was written."
         (insert (if face (propertize text 'face face) text))))
     start))
 
-(defun harness-voice-live--caption (speaker text &optional final)
-  "Show SPEAKER's TEXT, ending the caption line with FINAL."
+(defun harness-voice-live--caption (speaker text &optional final certain)
+  "Show SPEAKER's TEXT, ending the caption line with FINAL.
+CERTAIN, when given, is a word the provider added to what it heard --
+`likely' for a reading it is less sure of -- and the heading says it, so
+a hedged reading is never drawn as certain speech."
   (unless (string-empty-p text)
     (unless (equal harness-voice-live--speaker speaker)
       (when harness-voice-live--speaker
         (harness-voice-live--transcript-insert "\n"))
       (setq harness-voice-live--speaker speaker))
     (if (equal speaker "You")
-        (harness-voice-live--transcript-text 'user "You" text)
+        (harness-voice-live--transcript-text
+         'user (if certain (format "You · %s" certain) "You") text)
       (harness-voice-live--transcript-text 'agent "Voice" text 'harness-agent-face)))
   (when final
     (when harness-voice-live--speaker
       (harness-voice-live--transcript-insert "\n"))
     (setq harness-voice-live--speaker nil
           harness-voice-live--section nil)))
+
+(defun harness-voice-live--uncertain-caption (text &optional final)
+  "Show TEXT, a reading the provider is not sure of, as uncertain words.
+The words stay visible and are marked; they never enter the voice
+conversation as something the person said, and no request is made from
+them.  FINAL ends the caption line, as for any caption."
+  (harness-voice-live--transcript-section 'uncertain "Uncertain")
+  (harness-voice-live--transcript-insert
+   (concat "  " text " · not sent" (if final "\n" ""))
+   'harness-caution-face)
+  (when final
+    (setq harness-voice-live--section nil)))
 
 (defun harness-voice-live--backchannel (text)
   "Show a backchannel TEXT in the transcript."
@@ -2307,6 +2399,16 @@ it is."
      (harness-voice-live--pipeline-level (plist-get event :input)
                                          (plist-get event :peak)
                                          (plist-get event :dbfs)))
+    ("camera"
+     ;; A camera provider's own state: the device, the faces in view and
+     ;; the rate.  It is drawn beside the live status, so an open camera
+     ;; is never invisible, and `closed' or `ended' clears it.
+     (setq harness-voice-live--camera
+           (pcase (plist-get event :state)
+             ("closed" nil)
+             ("ended" nil)
+             (_ event)))
+     (harness-voice-live--refresh))
     ("segment"
      (harness-voice-live--pipeline-segment event))
     ("ready"
@@ -2381,32 +2483,41 @@ it is."
      (harness-voice-live--refresh))
     ((or "user_delta" "assistant_delta")
      (let ((text (or (plist-get event :text) ""))
+           (certainty (plist-get event :certainty))
            (final (plist-get event :final)))
-       (if (equal (plist-get event :event) "user_delta")
-           (progn
-             (when (plist-get event :utterance)
-               (setq harness-voice-live--utterance
-                     (format "u-%s" (plist-get event :utterance))))
-             (harness-voice-live--pipeline-caption text final)
-             (setq harness-voice-live--heard
-                   (concat harness-voice-live--heard text))
-             (unless (eq harness-voice-live--stage 'transcribing)
-               (harness-voice-live--stage-set 'hearing))
-             (harness-voice-live--caption "You" text final)
-             (unless harness-voice-live--muted
-               (harness-voice-live--caption-hold-update
-                text final (eq (plist-get event :truncated) t)
-                (harness-voice-live--input-source event))))
-         (progn
-           (harness-voice-live--caption "Voice" text final)
-           ;; A provider's own speech, outside the agent's turn, is
-           ;; voice-only: the session never saw it.  A turn's result is
-           ;; recorded when it is handed back, and held text was not
-           ;; heard, so neither is a voice turn here.
-           (unless (or (harness-voice-live--holding-output-p)
-                       harness-voice-live--turn-active)
-             (harness-voice-conversation-say
-              harness-voice-live--conversation text 'provider nil t))))))
+       (cond
+        ((and (equal (plist-get event :event) "user_delta")
+              (equal certainty "unsure"))
+         ;; A provider that measures its own confidence says when its
+         ;; words are a guess.  They are shown as such, and no request
+         ;; crosses into the session: the person may not have said any
+         ;; of it.
+         (harness-voice-live--uncertain-caption text final))
+        ((equal (plist-get event :event) "user_delta")
+         (when (plist-get event :utterance)
+           (setq harness-voice-live--utterance
+                 (format "u-%s" (plist-get event :utterance))))
+         (harness-voice-live--pipeline-caption text final)
+         (setq harness-voice-live--heard
+               (concat harness-voice-live--heard text))
+         (unless (eq harness-voice-live--stage 'transcribing)
+           (harness-voice-live--stage-set 'hearing))
+         (harness-voice-live--caption "You" text final
+                                       (and (equal certainty "likely") "likely"))
+         (unless harness-voice-live--muted
+           (harness-voice-live--caption-hold-update
+            text final (eq (plist-get event :truncated) t)
+            (harness-voice-live--input-source event))))
+        (t
+         (harness-voice-live--caption "Voice" text final)
+         ;; A provider's own speech, outside the agent's turn, is
+         ;; voice-only: the session never saw it.  A turn's result is
+         ;; recorded when it is handed back, and held text was not
+         ;; heard, so neither is a voice turn here.
+         (unless (or (harness-voice-live--holding-output-p)
+                     harness-voice-live--turn-active)
+           (harness-voice-conversation-say
+            harness-voice-live--conversation text 'provider nil t))))))
     ("backchannel"
      (let ((text (or (plist-get event :text) "mm-hmm")))
        (harness-voice-live--backchannel text)
@@ -2497,6 +2608,26 @@ cannot be interrupted from the UI that is gone."
      ;; reads Off with a Start button that seems to do nothing.
      (harness-voice--refresh))))
 
+(defun harness-voice-live--prepare ()
+  "Run the selected provider's start hook, or refuse the session.
+A camera provider asks for the camera here, once per session, and a
+refusal is a user error: no sidecar process starts and no device opens."
+  (let ((prepare (plist-get (harness-voice-provider-get harness-voice-provider)
+                            :prepare)))
+    (when (functionp prepare)
+      (funcall prepare))))
+
+(defun harness-voice-live--stopped ()
+  "Tell the selected provider its session ended, however it ended."
+  (let ((stopped (plist-get (harness-voice-provider-get harness-voice-provider)
+                            :stopped)))
+    (when (functionp stopped)
+      (condition-case err
+          (funcall stopped)
+        (error
+         (harness-log 'warn "voice: the stopped hook failed: %s"
+                      (harness-error-message err)))))))
+
 ;;;###autoload
 (defun harness-voice-live-start ()
   "Start the live sidecar session for this compose box.
@@ -2518,31 +2649,36 @@ once, with a Retry control, rather than waiting out its own deadline."
       (user-error "Live voice session unavailable"))
     (if (harness-voice-live--active-p)
         (harness-voice-live-retarget (current-buffer))
-      (unless harness-voice-mode (harness-voice-mode 1))
-      (harness-voice--adopt)
-      (harness-voice-live--pipeline-bump 'connecting)
-      (setq harness-voice-live--error nil
-            harness-voice-live--notice nil
-            harness-voice-live--muted nil
-            harness-voice-live--closing nil
-            harness-voice-live--tail ""
-            harness-voice-live--speaker nil
-            harness-voice-live--seen (make-hash-table :test 'equal)
-            harness-voice-live--input-chunks nil
-            harness-voice-live--input-seq 0
-            harness-voice-live--held-seq 0
-            harness-voice-live--route-generation 0
-            harness-voice-live--utterance-routes nil)
-      (harness-voice-live--route-set route)
-      (harness-voice-live--clear-gate)
-      (harness-voice-live--clear-turn)
-      (when (buffer-live-p harness-voice-live--transcript)
-        (with-current-buffer harness-voice-live--transcript
-          (let ((inhibit-read-only t)) (erase-buffer))
-          (setq-local harness-voice-live--pipeline-end nil))
-        (harness-voice-live--pipeline-draw))
-      (harness-voice-live--transcript-route)
-      (harness-voice-live--begin))))
+      (progn
+        ;; The provider's own permission and readiness, before anything starts.
+        (harness-voice-live--prepare)
+        (unless harness-voice-mode (harness-voice-mode 1))
+        (harness-voice--adopt)
+        (setf (harness-voice-pipeline-input harness-voice-live--pipeline)
+              (harness-voice-live--input))
+        (harness-voice-live--pipeline-bump 'connecting)
+        (setq harness-voice-live--error nil
+              harness-voice-live--notice nil
+              harness-voice-live--muted nil
+              harness-voice-live--closing nil
+              harness-voice-live--tail ""
+              harness-voice-live--speaker nil
+              harness-voice-live--seen (make-hash-table :test 'equal)
+              harness-voice-live--input-chunks nil
+              harness-voice-live--input-seq 0
+              harness-voice-live--held-seq 0
+              harness-voice-live--route-generation 0
+              harness-voice-live--utterance-routes nil)
+        (harness-voice-live--route-set route)
+        (harness-voice-live--clear-gate)
+        (harness-voice-live--clear-turn)
+        (when (buffer-live-p harness-voice-live--transcript)
+          (with-current-buffer harness-voice-live--transcript
+            (let ((inhibit-read-only t)) (erase-buffer))
+            (setq-local harness-voice-live--pipeline-end nil))
+          (harness-voice-live--pipeline-draw))
+        (harness-voice-live--transcript-route)
+        (harness-voice-live--begin)))))
 
 (defun harness-voice-live--begin ()
   "Start the sidecar, once the speech services it needs are up.
@@ -2638,7 +2774,18 @@ missed an event still starts."
           harness-voice-live--state 'starting
           harness-voice-live--error nil
           harness-voice-live--closing nil
-          harness-voice-live--tail "")
+          harness-voice-live--camera nil
+          harness-voice-live--tail ""
+          harness-voice-live--speaker nil
+          harness-voice-live--seen (make-hash-table :test 'equal)
+          harness-voice-live--held-seq 0)
+    (harness-voice-live--clear-gate)
+    (harness-voice-live--clear-turn)
+    (when (buffer-live-p harness-voice-live--transcript)
+      (with-current-buffer harness-voice-live--transcript
+        (let ((inhibit-read-only t)) (erase-buffer))
+        (setq-local harness-voice-live--pipeline-end nil))
+      (harness-voice-live--pipeline-draw))
     (condition-case err
         (let ((process
                (make-process
@@ -2752,7 +2899,10 @@ missed an event still starts."
   (harness-ui-notify "session/cancel" (list :sessionId harness-voice-live--session)))
 
 (defun harness-voice-live--reset ()
-  "Stop the sidecar and discard its transcripts, on reload or redaction."
+  "Stop the sidecar and discard its transcripts, on reload or redaction.
+The provider's stopped hook runs even when no process is left -- a
+failed session has none -- so a camera grant never outlives the session
+it was granted for."
   (harness-voice-live--cancel-pipeline-timer)
   (when (harness-voice-live--active-p)
     (harness-voice-live--dispose))
@@ -2765,6 +2915,7 @@ missed an event still starts."
         harness-voice-live--notice nil
         harness-voice-live--muted nil
         harness-voice-live--closing nil
+        harness-voice-live--camera nil
         harness-voice-live--buffer nil
         harness-voice-live--session nil
         harness-voice-live--route-kind 'session

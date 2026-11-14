@@ -1,0 +1,873 @@
+#!/usr/bin/env python3
+"""A webcam lip-reading sidecar for the harness's `lipread` voice provider.
+
+Emacs starts this script when the selected voice provider is `lipread`.
+It opens the camera, follows the mouth, runs a local visual speech
+recognition model on each utterance and sends the transcript to the
+harness's agent as a delegation, exactly like the microphone sidecars
+do.  Nothing leaves the machine: the frames are cropped in memory and
+dropped when the utterance ends, and no frame is written to disk or
+sent over the network.
+
+    scripts/harness-voice-live-lipread [--model-dir DIR] [--device N]
+                                       [--camera-consent] [--source FILE]
+                                       [--tts-url URL] [--min-confidence X]
+                                       [--self-test | --check]
+
+The model is Auto-AVSR's LRS3 visual-only recognizer exported to ONNX
+(English, 25 fps, 88x88 mouth crops).  Its weights are research and
+non-commercial use only, because LRS3 is; see docs/voice-lip-reading.md.
+``scripts/harness-voice-lipread-setup`` fetches the files.  This script
+never downloads a model and never opens a camera unless Emacs passed
+``--camera-consent``, which it does only after the person granted the
+session.
+
+What the harness sees, on top of the shared protocol:
+
+    camera  {"state": "closed|opening|live|paused|denied|failed|ended",
+             "device", "faces", "fps", "reason"}   the camera's own state
+    user_delta  {"text", "final", "certainty": "sure|likely|unsure"}
+    delegation  {"text", "certainty": "sure|likely"}
+    notice      what one utterance could not do: no face, two faces,
+                too short, low confidence, a model failure
+
+A transcript the model is not sure about is shown as uncertain and never
+becomes a request: an unsure lip read is not presented as the person's
+speech.  The device is released on stop, on mute, on any failure and
+when Emacs' pipe closes.  ``--self-test`` holds the sidecar to that with
+a scripted camera, tracker and recognizer, and opens no device.
+
+Reply speech is optional and local: ``--tts-url`` names an
+OpenAI-compatible speech server (the harness's own local voice pipeline
+answers it).  Without one, replies are captioned and not spoken.
+"""
+
+import argparse
+import collections
+import os
+import queue
+import sys
+import threading
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import harness_voice_lipread as lipread  # noqa: E402
+from harness_voice_sidecar import (  # noqa: E402
+    Events, FakeEvents, Loop, NullAudio, Player, Sidecar, http_json, log,
+    pcm_from_wav, self_test_failed, self_test_ok, speakable,
+)
+
+#: How many frames are kept before an utterance starts.  The onset takes
+#: a few frames to confirm, and the model needs the mouth from the first.
+PREROLL = 4
+
+#: The fraction of an utterance's frames that may be unusable -- no face,
+#: two faces -- before the utterance is dropped instead of guessed at.
+BAD_FRAME_LIMIT = 0.2
+
+#: Seconds without a face before the notice says so, once.
+NO_FACE_SECONDS = 2.0
+
+#: Seconds a replayed recording keeps its session after its last frame,
+#: so the last utterance's inference and the words it reads still arrive.
+SOURCE_TAIL = 3.0
+
+
+class LipreadSidecar(Sidecar):
+    """Camera, mouth tracking and local lip reading, on the harness protocol.
+
+    The camera is read on the sidecar's loop; one utterance's inference
+    runs on a worker, so a slow model call never stops the camera or the
+    motion gate.  Speech for replies, when a speech server is named, runs
+    on a worker as well.  The base class keeps the mute state, the
+    captions, the held output and the delegation bookkeeping in one
+    place, so this sidecar behaves like the microphone ones from Emacs'
+    point of view.
+    """
+
+    provider = "lipread"
+
+    def __init__(self, args, events=None, camera=None, tracker=None,
+                 recognizer=None, player=None, post_json=None):
+        super().__init__(events=events,
+                         player=player if player is not None else (
+                             Player(lipread.RATE) if args.tts_url else NullAudio()),
+                         rate=lipread.RATE)
+        self.args = args
+        self.model = lipread.ModelFiles(args.model_dir)
+        self.camera = camera
+        self.tracker = tracker
+        self.recognizer = recognizer
+        self.post_json = post_json or http_json
+        self.motion = lipread.MouthMotion(
+            fps=lipread.FPS, floor=args.motion_floor,
+            min_seconds=args.min_seconds, max_seconds=args.max_seconds)
+        self.state = lipread.CameraState("closed", device=args.device)
+        self.started = False
+        self.stopping = threading.Event()
+        self.jobs = queue.Queue()
+        self.results = queue.Queue()
+        self.speech_items = queue.Queue()
+        self.audio = queue.Queue()
+        self.workers = []
+        self.preroll = collections.deque(maxlen=PREROLL)
+        self.utterance = None
+        self.next_frame = 0.0
+        self.status_at = 0.0
+        self.no_face_since = None
+        self.no_face_said = False
+        self.commentary = []
+        self.said = []
+        self.ready = collections.deque()
+        self.hold_seq = 0
+        self.release_at = None
+        self.source_ended = False
+        self.ended_at = None
+
+    # -- lifecycle ---------------------------------------------------
+
+    def on_start(self):
+        """Open the model and the camera, or fail with one clear line."""
+        # A camera needs the person's grant for this session.  A recorded
+        # file does not: it is not a camera, and the person chose it.
+        if not self.args.camera_consent and not self.args.source:
+            self.fail("Camera permission · denied", camera="denied")
+            return
+        reason = self.model.reason()
+        if reason:
+            self.fail(reason)
+            return
+        if self.camera is None or self.tracker is None or self.recognizer is None:
+            reason = self.build_runtime()
+            if reason:
+                self.fail(reason)
+                return
+        self.state.set("opening")
+        self.announce_camera(force=True)
+        reason = self.camera.open(self.tracker.cv2 if self.tracker else None)
+        if reason:
+            self.fail(reason)
+            return
+        reason = self.tracker.open()
+        if reason:
+            self.fail(reason)
+            return
+        reason = self.recognizer.open()
+        if reason:
+            self.fail(reason)
+            return
+        self.stopping.clear()
+        self.started = True
+        self.next_frame = time.monotonic()
+        self.state.set("live")
+        self.announce_camera(force=True)
+        self.start_workers()
+
+    def build_runtime(self):
+        """Build the camera, tracker and recognizer, or say what is missing."""
+        try:
+            runtime = lipread.load_runtime()
+        except RuntimeError as error:
+            return str(error)
+        numpy, cv2 = runtime["numpy"], runtime["cv2"]
+        self.camera = lipread.Camera(device=self.args.device,
+                                     source=self.args.source)
+        self.tracker = lipread.MouthTracker(
+            self.model.path("face_detection_yunet_2023mar.onnx"),
+            numpy=numpy, cv2=cv2)
+        try:
+            tokens = self.model.tokens()
+        except ValueError as error:
+            return str(error)
+        self.recognizer = lipread.Recognizer(
+            self.model.path("lipread_ctc.int8.onnx"), tokens,
+            numpy=numpy, onnxruntime=runtime["onnxruntime"], threads=self.args.threads)
+        return None
+
+    def on_stop(self):
+        """Release the camera and every worker; say the device ended."""
+        self.stopping.set()
+        for work in (self.jobs, self.speech_items):
+            work.put(None)
+        for worker in self.workers:
+            worker.join(timeout=3)
+        self.workers = []
+        self.release_camera()
+        self.started = False
+        self.motion.reset()
+        self.preroll.clear()
+        self.utterance = None
+        self.release_at = None
+        self.state.set("ended")
+        self.announce_camera(force=True)
+        self.held = []
+        self.speech_active = False
+        self.clear_queues()
+
+    def release_camera(self):
+        """Close the device, if one is open, and forget the runtime.
+
+        It is safe wherever a session can end -- stop, an error, a mute,
+        a closed pipe -- and does nothing twice, so no path leaves the
+        camera open and none fails because it was already closed.
+        """
+        camera, self.camera = self.camera, None
+        if camera is not None and camera.opened():
+            camera.close()
+
+    def clear_queues(self):
+        """Drop every queued job, result and audio item."""
+        for work in (self.jobs, self.results, self.speech_items, self.audio):
+            while True:
+                try:
+                    work.get_nowait()
+                except queue.Empty:
+                    break
+        self.ready.clear()
+
+    def on_mute(self, muted):
+        """Pausing closes the camera; resuming opens it again."""
+        self.motion.reset()
+        self.preroll.clear()
+        self.utterance = None
+        self.speech_active = False
+        if muted:
+            if self.camera is not None:
+                self.camera.close()
+            self.state.set("paused")
+        elif self.started and self.camera is not None:
+            reason = self.camera.open(self.tracker.cv2 if self.tracker else None)
+            if reason:
+                self.state.set("failed", reason="unavailable")
+                self.notice(reason)
+            else:
+                self.state.set("live")
+                self.next_frame = time.monotonic()
+        if self.player:
+            self.player.stop()
+        self.announce_camera(force=True)
+
+    def fail(self, message, camera="failed"):
+        """Report a failure that ends the session, closing the camera first.
+
+        The device is released before the error goes out, so no failure
+        path leaves a camera open for a process Emacs is about to kill.
+        CAMERA is the camera state to report: ``denied`` when the person
+        never granted it, ``failed`` for every other cause.
+        """
+        if self.camera is not None:
+            self.release_camera()
+        self.state.set(camera, reason=message)
+        self.announce_camera(force=True)
+        self.events.send("error", message=message)
+        if self.loop is not None:
+            self.loop.stop(1)
+
+    def interrupt(self):
+        self.speech_active = False
+        super().interrupt()
+
+    # -- the camera --------------------------------------------------
+
+    def announce_camera(self, force=False):
+        """Report the camera's state, rate-limited unless FORCE."""
+        now = time.monotonic()
+        if not force and now - self.status_at < 0.25:
+            return
+        self.status_at = now
+        self.events.send("camera", **self.state.fields())
+
+    def announce_level(self, level):
+        """Report the mouth's movement, where a microphone reports a level."""
+        if level is not None:
+            self.events.send("level", input=round(float(level), 3))
+
+    def on_tick(self):
+        try:
+            self.tick()
+        except Exception as error:  # noqa: BLE001 - a loop must not die
+            log("lipread tick failed: %s: %s" % (type(error).__name__, error))
+            self.fail("Lip reading failed · %s" % error)
+
+    def tick(self):
+        """Read at most one frame, feed the gate, then drain the workers."""
+        if not self.started:
+            return
+        self.tick_playback()
+        self.drain_results()
+        self.drain_audio()
+        self.maybe_release()
+        if self.muted or self.camera is None:
+            return
+        now = time.monotonic()
+        # A camera is read at the model's rate.  A file source paces
+        # itself (`Camera.read'), so a replayed fixture arrives at 25 fps
+        # rather than at the speed the decoder happens to run.
+        if not self.args.source:
+            if now < self.next_frame:
+                return
+            self.next_frame = now + 1.0 / lipread.FPS
+        frame = self.camera.read()
+        if frame is None:
+            if self.args.source:
+                # A recording that reached its end is not a camera that
+                # died: the last utterance still needs its words, then
+                # the session ends the way a stop ends it.
+                self.source_ended = True
+                if self.ended_at is None:
+                    self.ended_at = now + SOURCE_TAIL
+                elif now >= self.ended_at:
+                    self.notice("Recording · ended")
+                    self.finish("recording ended")
+                return
+            self.fail("Camera unavailable · no frames")
+            return
+        track = self.tracker(frame)
+        self.announce_level(track.motion)
+        self.state.measure(faces=track.faces, fps=self.camera.fps)
+        self.face_notice(track)
+        self.announce_camera()
+        self.feed(track)
+
+    def face_notice(self, track):
+        """Say once when no face is in view, and clear it when one returns."""
+        if track.faces == 0:
+            if self.no_face_since is None:
+                self.no_face_since = time.monotonic()
+            if (not self.no_face_said
+                    and time.monotonic() - self.no_face_since >= NO_FACE_SECONDS):
+                self.no_face_said = True
+                self.notice("Camera · no face")
+                self.announce_segment("dropped", "face", reason="no face")
+        else:
+            self.no_face_since = None
+            self.no_face_said = False
+
+    def feed(self, track):
+        """Feed one tracked frame to the motion gate and the utterance."""
+        for event in self.motion.feed(track.motion):
+            kind = event[0]
+            if kind == "start":
+                uid = event[1]
+                crops = [crop for _motion, crop, reason in self.preroll
+                         if crop is not None and reason is None]
+                self.utterance = {"id": uid, "crops": crops, "bad": 0, "frames": 0}
+                self.speech_active = True
+                self.announce_speech(True, uid, "onset")
+                self.events.send("hearing", utterance=uid)
+                if self.player and self.player.busy():
+                    self.player.stop()
+            elif kind == "speech":
+                self.finish_utterance(event[1], event[2])
+            elif kind == "cancel":
+                uid = event[1]
+                self.speech_active = False
+                self.utterance = None
+                self.preroll.clear()
+                self.announce_segment("dropped", uid, reason=event[2])
+                self.events.send("listening", utterance=uid)
+                self.schedule_release(1.0)
+            elif kind == "end":
+                self.speech_active = False
+        if self.utterance is None:
+            self.preroll.append((track.motion, track.crop, track.reason))
+            return
+        usable = track.crop is not None and track.reason is None
+        self.utterance["frames"] += 1
+        if usable:
+            self.utterance["crops"].append(track.crop)
+        else:
+            self.utterance["bad"] += 1
+
+    def finish_utterance(self, uid, frames):
+        """Cut the utterance and hand it to the inference worker."""
+        utterance, self.utterance = self.utterance, None
+        self.preroll.clear()
+        self.speech_active = False
+        if self.player and self.player.busy():
+            self.player.stop()
+        if utterance is None:
+            self.events.send("listening", utterance=uid)
+            return
+        crops = utterance["crops"]
+        total = max(1, utterance["frames"])
+        seconds = frames / float(lipread.FPS)
+        if utterance["bad"] / float(total) > BAD_FRAME_LIMIT:
+            self.announce_segment("dropped", uid, seconds=seconds,
+                                  reason="unusable frames")
+            self.notice("Lip reading · unusable frames · not sent")
+            self.events.send("listening", utterance=uid)
+            return
+        if len(crops) < self.motion.min_frames:
+            self.announce_segment("dropped", uid, seconds=seconds, reason="too short")
+            self.events.send("listening", utterance=uid)
+            return
+        self.announce_segment("accepted", uid, seconds=seconds)
+        self.events.send("transcribing", utterance=uid)
+        self.jobs.put((uid, crops, frames))
+
+    # -- workers -----------------------------------------------------
+
+    def start_workers(self):
+        if self.workers:
+            return
+        for name, target in (("lipread", self.work), ("lipread-speech", self.synthesize_loop)):
+            worker = threading.Thread(target=target, name=name, daemon=True)
+            worker.start()
+            self.workers.append(worker)
+
+    def work(self):
+        """Run one utterance's inference at a time, in camera order."""
+        while not self.stopping.is_set():
+            job = self.jobs.get()
+            if job is None:
+                return
+            uid, crops, frames = job
+            try:
+                result = self.recognizer(crops)
+            except Exception as error:  # noqa: BLE001 - one utterance's failure
+                log("lipread inference failed: %s: %s" % (type(error).__name__, error))
+                self.results.put((uid, frames, None, str(error)))
+                continue
+            self.results.put((uid, frames, result, None))
+
+    def synthesize_loop(self):
+        """Synthesize one reply at a time, so a slow server holds no loop."""
+        while not self.stopping.is_set():
+            item = self.speech_items.get()
+            if item is None:
+                return
+            item_id, text = item
+            pcm = self.synthesize(text)
+            if pcm and not self.stopping.is_set():
+                self.audio.put((item_id, text, pcm))
+
+    def drain_results(self):
+        """Turn finished inferences into captions, in utterance order."""
+        while True:
+            try:
+                uid, frames, result, error = self.results.get_nowait()
+            except queue.Empty:
+                return
+            seconds = frames / float(lipread.FPS)
+            if error:
+                self.announce_segment("failed", uid, seconds=seconds)
+                self.notice("Lip reading failed · %s" % error)
+                self.events.send("listening", utterance=uid)
+                continue
+            text = (result.get("text") or "").strip()
+            band = lipread.certainty(result.get("confidence"), result.get("low"),
+                                     floor=self.args.min_confidence)
+            if not text:
+                self.announce_segment("dropped", uid, seconds=seconds, reason="no words")
+                self.events.send("listening", utterance=uid)
+                continue
+            if band == "rejected":
+                self.announce_segment("dropped", uid, seconds=seconds,
+                                      reason="low confidence")
+                self.notice("Lip reading · low confidence · not sent")
+                self.events.send("listening", utterance=uid)
+                continue
+            if band == "unsure":
+                # The words are shown as what they are, and never become a
+                # request: an unsure lip read is not the person's speech.
+                self.events.send("user_delta", text=text, final=True,
+                                 certainty="unsure", utterance=uid)
+                self.announce_segment("dropped", uid, seconds=seconds,
+                                      reason="uncertain")
+                self.notice("Lip reading · uncertain · not sent")
+                self.events.send("listening", utterance=uid)
+                continue
+            self.events.send("user_delta", text=text, final=True,
+                             certainty=band, utterance=uid)
+            self.announce_segment("transcribed", uid, seconds=seconds)
+            self.delegation(text, delegation_id="u-%d" % uid, utterance=uid,
+                            pending=self.take_pending(), certainty=band)
+
+    # -- replies -----------------------------------------------------
+
+    def speak(self, text, item_id=None):
+        """Speak TEXT, or hold it while the person speaks; no server, no voice.
+
+        Without a speech server the reply stays a caption: the provider is
+        visual input, and speaking is the harness's separate local speech
+        stack.
+        """
+        text = speakable((text or "").strip())
+        if not text or self.muted or not self.args.tts_url:
+            return
+        if self.gate_blocked():
+            self.hold(text, item_id)
+            return
+        if not item_id:
+            self.hold_seq += 1
+            item_id = "say-%d" % self.hold_seq
+        self.speech_items.put((item_id, text))
+
+    def gate_blocked(self):
+        """Non-nil while assistant audio must not start."""
+        return bool(self.muted or self.speech_active or self.utterance)
+
+    def synthesize(self, text):
+        """Return PCM16 for TEXT from the local speech server, or None."""
+        text = speakable(text)
+        if not text or not self.args.tts_url:
+            return None
+        try:
+            body = self.post_json(
+                self.args.tts_url,
+                {"model": self.args.tts_model, "voice": self.args.voice,
+                 "input": text, "response_format": "wav"},
+                timeout=120)
+        except Exception as error:  # noqa: BLE001 - shown in Emacs
+            self.notice("Local speech failed · %s" % error)
+            return None
+        data = body if isinstance(body, bytes) else b""
+        if not data.startswith(b"RIFF") and isinstance(body, dict):
+            raw = body.get("data") or b""
+            if isinstance(raw, bytes):
+                data = raw
+        if not data.startswith(b"RIFF"):
+            self.notice("Local speech · no audio")
+            return None
+        try:
+            return pcm_from_wav(data)
+        except (EOFError, ValueError) as error:
+            self.notice("Local speech · bad WAV · %s" % error)
+            return None
+
+    def drain_audio(self):
+        """Play ready PCM while the gate is open; hold everything else."""
+        if self.gate_blocked():
+            while self.ready:
+                item = self.ready.popleft()
+                self.hold(item[1], item[0])
+            while True:
+                try:
+                    item = self.audio.get_nowait()
+                except queue.Empty:
+                    break
+                self.hold(item[1], item[0])
+            return
+        if self.ready and not (self.player and self.player.busy()):
+            self.play_item(self.ready.popleft())
+        while not self.ready:
+            try:
+                item = self.audio.get_nowait()
+            except queue.Empty:
+                break
+            if self.gate_blocked():
+                self.hold(item[1], item[0])
+                continue
+            if self.player and self.player.busy():
+                self.ready.append(item)
+                break
+            self.play_item(item)
+
+    def play_item(self, item):
+        item_id, text, pcm = item
+        if self.play(pcm):
+            self.said.append(text)
+        else:
+            self.hold(text, item_id)
+
+    # -- held output -------------------------------------------------
+
+    def schedule_release(self, seconds):
+        """Release held output after SECONDS if no real utterance follows."""
+        if self.held:
+            self.release_at = time.monotonic() + seconds
+
+    def maybe_release(self):
+        """Let a false onset's held reply go, but only with no transcript."""
+        if (not self.release_at or self.gate_blocked()
+                or time.monotonic() < self.release_at):
+            return
+        pending, self.held = self.held, []
+        self.release_at = None
+        for item in pending:
+            self.speak(item.get("text") or "", item.get("id"))
+
+    def on_commentary(self, text, event=None):
+        self.commentary.append(text)
+        self.speak(text, (event or {}).get("id"))
+
+    def on_result(self, delegation_id, text, error):
+        if error:
+            return
+        remaining = self.unspoken(text)
+        self.commentary = []
+        if remaining:
+            self.speak(remaining, "result:%s" % (delegation_id or "voice"))
+
+    def on_held_result(self, delegation_id, text):
+        self.commentary = []
+
+    def unspoken(self, text):
+        """Return the sentences of TEXT that commentary has not covered."""
+
+        def normal(value):
+            import re
+            value = re.sub(r"!?\[([^\]\n]+)\]\([^)]*\)", r"\1", value or "")
+            value = re.sub(r"<[^>]+>", "", value)
+            value = re.sub(r"(?m)^[ \t]*[#>*-]+[ \t]*", "", value)
+            value = re.sub(r"[`*_]", "", value)
+            return re.sub(r"\s+", " ", value.strip().lower())
+
+        import re
+        said = normal(" ".join(self.commentary))
+        parts = re.split(r"(?<=[.!?])\s+", (text or "").strip())
+        return " ".join(part for part in parts
+                        if part and normal(part) not in said).strip()
+
+
+#; ------------------------------------------------------------------
+#; The command line
+#; ------------------------------------------------------------------
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        description="Webcam lip-reading sidecar for the harness")
+    parser.add_argument("--model-dir", default=lipread.default_model_dir())
+    parser.add_argument("--device", default="0", help="camera index or device path")
+    parser.add_argument("--camera-consent", action="store_true",
+                        help="the person granted this session the camera")
+    parser.add_argument("--source", default=None,
+                        help="read frames from a video file instead of a camera")
+    parser.add_argument("--motion-floor", type=float, default=lipread.MOTION_FLOOR)
+    parser.add_argument("--min-seconds", type=float, default=lipread.MIN_SECONDS)
+    parser.add_argument("--max-seconds", type=float, default=lipread.MAX_SECONDS)
+    parser.add_argument("--min-confidence", type=float,
+                        default=lipread.DEFAULT_FLOOR_CONFIDENCE)
+    parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--tts-url", default=None)
+    parser.add_argument("--tts-model", default="tts-1")
+    parser.add_argument("--voice", default="af_heart")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--check", action="store_true")
+    args = parser.parse_args(argv[1:])
+    try:
+        args.device = int(args.device)
+    except (TypeError, ValueError):
+        pass
+    return args
+
+
+def main(argv):
+    args = parse_args(argv)
+    if args.check:
+        return check(args)
+    if args.self_test:
+        return self_test(args)
+    sidecar = LipreadSidecar(args)
+    reason = sidecar.model.reason()
+    if reason:
+        sidecar.events.send("error", message=reason)
+        return 1
+    loop = Loop(sidecar.events, tick=0.02)
+    sidecar.loop = loop
+    try:
+        return loop.run(sidecar.handle, sidecar.on_tick)
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        if sidecar.camera is not None:
+            sidecar.camera.close()
+        if sidecar.player is not None:
+            sidecar.player.close()
+
+
+def check(args):
+    """Print what is installed and the licence, and exit with the verdict."""
+    problems = lipread.verify(args.model_dir)
+    print("model dir · %s" % args.model_dir)
+    print("model · Auto-AVSR LRS3 visual-only · int8 ONNX · English")
+    print("licence · code Apache-2.0 · weights research and non-commercial")
+    print("detector · OpenCV YuNet · Apache-2.0")
+    try:
+        lipread.load_runtime()
+        print("runtime · ready")
+    except RuntimeError as error:
+        problems.append(str(error))
+    for problem in problems:
+        print(problem)
+    if problems:
+        return 1
+    print("self-test ok · %s" % "harness-voice-live-lipread")
+    return 0
+
+
+def self_test(args):
+    """Hold the sidecar to its lifecycle and decisions without a camera."""
+    motions = ([0.001] * 8 + [0.05] * 30 + [0.001] * 12) * 2
+    tracks = lipread.scripted_tracks(motions)
+    camera = lipread.ScriptedCamera(frames=[object() for _ in range(len(tracks))])
+    tracker = lipread.ScriptedTracker(tracks)
+    recognizer = lipread.ScriptedRecognizer(results=[
+        {"text": "add a docstring", "confidence": 0.97, "low": 0.0,
+         "pieces": [], "seconds": 0.05},
+        {"text": "maybe the tests", "confidence": 0.82, "low": 0.4,
+         "pieces": [], "seconds": 0.05},
+    ])
+    args.model_dir = lipread.self_test_model_dir()
+    args.camera_consent = True
+    events = FakeEvents()
+    sidecar = LipreadSidecar(args, events=events, camera=camera, tracker=tracker,
+                             recognizer=recognizer, player=NullAudio())
+    try:
+        sidecar.start_session({"event": "start", "protocol": 1})
+        if "ready" not in events.names():
+            return self_test_failed("no ready event")
+        if "camera" not in events.names():
+            return self_test_failed("no camera event")
+        states = [e.get("state") for e in events.sent if e.get("event") == "camera"]
+        if "live" not in states:
+            return self_test_failed("camera not live")
+        if camera.calls[:1] != ["open"]:
+            return self_test_failed("camera not opened")
+
+        def pump(event, count=1, seconds=5.0):
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                sidecar.tick()
+                if len([e for e in events.sent if e.get("event") == event]) >= count:
+                    return True
+                time.sleep(0.005)
+            return False
+
+        if not pump("delegation"):
+            return self_test_failed("no delegation")
+        delegations = [e for e in events.sent if e.get("event") == "delegation"]
+        if delegations[0].get("text") != "add a docstring":
+            return self_test_failed("delegation text")
+        if delegations[0].get("certainty") != "sure":
+            return self_test_failed("delegation certainty")
+        # The second utterance is unsure: shown, never delegated.
+        if not pump("user_delta", 2):
+            return self_test_failed("no second caption")
+        captions = [e for e in events.sent if e.get("event") == "user_delta"]
+        if captions[1].get("certainty") != "unsure":
+            return self_test_failed("unsure caption")
+        if len([e for e in events.sent if e.get("event") == "delegation"]) != 1:
+            return self_test_failed("unsure text delegated")
+        if not any(e.get("event") == "notice"
+                   and "uncertain" in (e.get("message") or "")
+                   for e in events.sent):
+            return self_test_failed("no uncertainty notice")
+        # Pause closes the device; resuming opens it again.
+        sidecar.handle({"event": "mute", "on": True})
+        if camera.opened():
+            return self_test_failed("camera open while paused")
+        states = [e.get("state") for e in events.sent if e.get("event") == "camera"]
+        if states[-1] != "paused":
+            return self_test_failed("pause not reported")
+        sidecar.handle({"event": "mute", "on": False})
+        if not camera.opened():
+            return self_test_failed("camera not reopened")
+        if [e.get("state") for e in events.sent if e.get("event") == "camera"][-1] != "live":
+            return self_test_failed("resume not reported")
+        # Stop releases the device, and says it ended.
+        sidecar.handle({"event": "stop"})
+        if camera.opened():
+            return self_test_failed("camera open after stop")
+        if camera.calls[-1] != "close":
+            return self_test_failed("no close on stop")
+        if "closed" not in events.names():
+            return self_test_failed("no closed event")
+        if [e.get("state") for e in events.sent if e.get("event") == "camera"][-1] != "ended":
+            return self_test_failed("end not reported")
+    finally:
+        if sidecar.camera is not None:
+            sidecar.camera.close()
+    # No consent means no device: the refusal is the whole lifecycle.
+    denied_args = parse_args(["lipread", "--model-dir", args.model_dir])
+    denied = FakeEvents()
+    refused = LipreadSidecar(denied_args, events=denied,
+                             camera=lipread.ScriptedCamera([]),
+                             tracker=lipread.ScriptedTracker([]),
+                             recognizer=lipread.ScriptedRecognizer(),
+                             player=NullAudio())
+    refused_camera = refused.camera
+    refused.start_session({"event": "start", "protocol": 1})
+    if refused_camera.calls:
+        return self_test_failed("camera opened without consent")
+    if not any(e.get("event") == "error" and "permission" in (e.get("message") or "").lower()
+               for e in denied.sent):
+        return self_test_failed("denied camera not reported")
+    if [e.get("state") for e in denied.sent if e.get("event") == "camera"] != ["denied"]:
+        return self_test_failed("denied state not reported")
+    # A missing model directory fails before the camera is touched.
+    missing_args = parse_args(["lipread", "--model-dir", "/nonexistent/lipread",
+                               "--camera-consent"])
+    missing = FakeEvents()
+    broken = LipreadSidecar(missing_args, events=missing,
+                            camera=lipread.ScriptedCamera([]),
+                            tracker=lipread.ScriptedTracker([]),
+                            recognizer=lipread.ScriptedRecognizer(),
+                            player=NullAudio())
+    broken_camera = broken.camera
+    broken.start_session({"event": "start", "protocol": 1})
+    if broken_camera.calls:
+        return self_test_failed("camera opened with no model")
+    if not any(e.get("event") == "error" and "Model unavailable" in (e.get("message") or "")
+               for e in missing.sent):
+        return self_test_failed("missing model not reported")
+    # A camera that dies after the model is ready is a failure, not silence.
+    dead_args = parse_args(["lipread", "--model-dir", args.model_dir,
+                            "--camera-consent"])
+    dead_events = FakeEvents()
+    dead_camera = lipread.ScriptedCamera(frames=[], error="Camera unavailable · 0")
+    dead = LipreadSidecar(dead_args, events=dead_events, camera=dead_camera,
+                          tracker=lipread.ScriptedTracker([]),
+                          recognizer=lipread.ScriptedRecognizer(),
+                          player=NullAudio())
+    dead.start_session({"event": "start", "protocol": 1})
+    if dead_camera.opened_flag:
+        return self_test_failed("failed camera left open")
+    if "closed" in dead_events.names():
+        return self_test_failed("failed camera reported a close")
+    # A recording that reaches its end ends the session; it does not fail
+    # it, and it releases the file like a stop does.
+    end_args = parse_args(["lipread", "--model-dir", args.model_dir,
+                           "--source", "/nonexistent/face.mp4"])
+    end_events = FakeEvents()
+    end_camera = lipread.ScriptedCamera(frames=[])
+    end = LipreadSidecar(end_args, events=end_events, camera=end_camera,
+                         tracker=lipread.ScriptedTracker([]),
+                         recognizer=lipread.ScriptedRecognizer(),
+                         player=NullAudio())
+    end.loop = Loop(end_events, tick=0.01)
+    end.start_session({"event": "start", "protocol": 1})
+    deadline = time.monotonic() + SOURCE_TAIL + 2
+    while time.monotonic() < deadline and "closed" not in end_events.names():
+        end.tick()
+        time.sleep(0.01)
+    if "closed" not in end_events.names():
+        return self_test_failed("recording end did not close")
+    if end_camera.opened_flag:
+        return self_test_failed("recording end left the file open")
+    if any(e.get("event") == "error" for e in end_events.sent):
+        return self_test_failed("recording end reported an error")
+    # The decision helpers themselves.
+    if lipread.certainty(0.95) != "sure":
+        return self_test_failed("certainty sure")
+    if lipread.certainty(0.87) != "likely":
+        return self_test_failed("certainty likely")
+    if lipread.certainty(0.82) != "unsure":
+        return self_test_failed("certainty unsure")
+    if lipread.certainty(0.5) != "rejected":
+        return self_test_failed("certainty rejected")
+    if lipread.mouth_crop_geometry() != (81, 110, 96):
+        return self_test_failed("crop geometry")
+    # A complete directory passes the quick check; the sizes are what the
+    # self-test's empty files deliberately do not have, so check names only.
+    if lipread.ModelFiles(args.model_dir).reason():
+        return self_test_failed("model directory rejected")
+    if not lipread.verify("/nonexistent/lipread-model"):
+        return self_test_failed("missing model accepted")
+    return self_test_ok("harness-voice-live-lipread")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

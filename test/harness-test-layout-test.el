@@ -24,12 +24,14 @@
     "test/harness-test-layout-test.el"
     "test/harness-test-runner-test.el"
     "test/harness-update-test.el"
-    "test/harness-voice-gate-test.el")
+    "test/harness-voice-gate-test.el"
+    "test/harness-voice-lipread-test.el")
   "Suites that test the repository, not one of its modules.
 Each is in test/ because it belongs to no module file: the dev loop's
 frames, the README's pictures, this layout, the test runner itself,
-`harness-update' in harness.el, and the voice gate's Python suite.  A
-suite of a module does not belong here.")
+`harness-update' in harness.el, the voice gate's Python suite, and the
+lip-reading suite that runs its own Python tests beside the modules
+they cover.  A suite of a module does not belong here.")
 
 (defun harness-test-layout--suites-in (dir)
   "Return the suite files directly in DIR, absolute and sorted.

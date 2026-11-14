@@ -196,6 +196,7 @@ or a turn already answered.")
 
 (cl-defstruct (harness-voice-pipeline (:constructor harness-voice-pipeline--make))
   (generation 1)
+  (input 'mic)
   (capture 'off)
   (problem nil)
   (level 0.0)
@@ -213,9 +214,12 @@ or a turn already answered.")
   (ignored 0)
   (dirty nil))
 
-(defun harness-voice-pipeline-create (&optional capture)
-  "Return a new pipeline with microphone state CAPTURE."
-  (harness-voice-pipeline--make :capture (or capture 'off)))
+(defun harness-voice-pipeline-create (&optional capture input)
+  "Return a new pipeline with CAPTURE state, reading INPUT.
+INPUT is `mic' for a microphone, the default, or `camera' for a provider
+that reads a face: the words for the same facts differ, and a camera
+must never be called a microphone."
+  (harness-voice-pipeline--make :capture (or capture 'off) :input (or input 'mic)))
 
 (defun harness-voice-pipeline--changed (p)
   "Mark P as changed and return it."
@@ -226,13 +230,15 @@ or a turn already answered.")
   "Return non-nil when GENERATION is nil or is P's generation."
   (or (null generation) (eql generation (harness-voice-pipeline-generation p))))
 
-(defun harness-voice-pipeline-bump (p &optional capture)
-  "Begin a new conversation in P, with microphone state CAPTURE.
+(defun harness-voice-pipeline-bump (p &optional capture input)
+  "Begin a new conversation in P, with capture state CAPTURE.
 The generation is raised, so an event that names the last conversation
 changes nothing here.  The stored state is cleared first; CAPTURE is
-the new session's own state."
+the new session's own state, and INPUT the device it reads (`mic', the
+default, or `camera')."
   (cl-incf (harness-voice-pipeline-generation p))
   (setf (harness-voice-pipeline-capture p) (or capture 'connecting)
+        (harness-voice-pipeline-input p) (or input 'mic)
         (harness-voice-pipeline-problem p) nil
         (harness-voice-pipeline-level p) 0.0
         (harness-voice-pipeline-peak p) nil
@@ -531,10 +537,21 @@ never left: a late playback event cannot resurrect a reply."
   "Move every reply of P that could still be heard to STAGE with DETAIL."
   (harness-voice-pipeline--finish p stage detail generation))
 
+(defun harness-voice-pipeline-input-noun (p)
+  "Return the noun for P's input: `Mic' or `Camera'."
+  (if (eq (harness-voice-pipeline-input p) 'camera) "Camera" "Mic"))
+
+(defun harness-voice-pipeline-level-noun (p)
+  "Return the noun for P's level: `Level' or `Motion'.
+A camera has no microphone level; what it measures is how much the mouth
+moved, and the words say which measurement this is."
+  (if (eq (harness-voice-pipeline-input p) 'camera) "Motion" "Level"))
+
 (defun harness-voice-pipeline-capture-label (p)
-  "Return P's microphone label, a noun phrase such as `Mic · live'."
-  (concat "Mic · " (harness-voice-pipeline--capture-label
-                    (harness-voice-pipeline-capture p))))
+  "Return P's capture label, a noun phrase such as `Mic · live'."
+  (concat (harness-voice-pipeline-input-noun p) " · "
+          (harness-voice-pipeline--capture-label
+           (harness-voice-pipeline-capture p))))
 
 (defun harness-voice-pipeline--level-fraction (p)
   "Return P's level as the 0..1 the meter draws, or nil without one.
@@ -550,18 +567,21 @@ tenth; a path that sent only the linear level is drawn as it is."
       (harness-voice-pipeline-level p)))))
 
 (defun harness-voice-pipeline-level-label (p &optional now)
-  "Return P's level label: the measurement, or `Level · no data'.
-A closed microphone and a stale measurement both say they have no data,
-never 0%: an absent level must not read as a quiet room.  A decibel
+  "Return P's level label: the measurement, or the lack of one.
+A closed capture path and a stale measurement both say they have no
+data, never 0%: an absent level must not read as a quiet room.  A decibel
 reading is named in dBFS, the scale the meter draws; a path that sent
-only the linear level is named as a percentage of full scale."
-  (if (or (not (eq (harness-voice-pipeline-capture p) 'live))
-          (harness-voice-pipeline-level-stale-p p now))
-      "Level · no data"
-    (let ((dbfs (harness-voice-pipeline-dbfs p)))
-      (if (numberp dbfs)
-          (format "Level · %d dBFS" (round dbfs))
-        (format "Level · %d%%" (round (* 100.0 (harness-voice-pipeline-level p))))))))
+only the linear level is named as a percentage of full scale.  A camera
+measures the mouth's motion, and says so."
+  (let ((noun (harness-voice-pipeline-level-noun p)))
+    (if (or (not (eq (harness-voice-pipeline-capture p) 'live))
+            (harness-voice-pipeline-level-stale-p p now))
+        (concat noun " · no data")
+      (let ((dbfs (harness-voice-pipeline-dbfs p)))
+        (if (numberp dbfs)
+            (format "%s · %d dBFS" noun (round dbfs))
+          (format "%s · %d%%" noun
+                  (round (* 100.0 (harness-voice-pipeline-level p)))))))))
 
 (defun harness-voice-pipeline-level-detail (p)
   "Return P's raw measurement as one line of words, or nil without one.
@@ -596,8 +616,11 @@ measurement the capture path sent."
                                 (max 0 (1- (round (* 7 fill)))))))))))
 
 (defun harness-voice-pipeline-gate-label (p)
-  "Return P's speech gate label, or nil while the gate is quiet."
-  (when (harness-voice-pipeline-gate p) "Speech · heard"))
+  "Return P's gate label, or nil while the gate is quiet.
+A microphone hears speech; a camera sees a mouth move, which is the gate
+it has, and the words do not claim otherwise."
+  (when (harness-voice-pipeline-gate p)
+    (if (eq (harness-voice-pipeline-input p) 'camera) "Mouth · moving" "Speech · heard")))
 
 (defun harness-voice-pipeline-count-label (p)
   "Return P's counts as `2 accepted · 1 dropped', or nil."
@@ -765,7 +788,9 @@ a word; the glyph is a mark, never the only signal."
          (replies (length (plist-get turn :replies)))
          (columns
           (list
-           (list "Input" "Microphone level before the speech filter"
+           (list "Input" (if (eq (harness-voice-pipeline-input p) 'camera)
+                          "Mouth motion before the speech gate"
+                        "Microphone level before the speech filter")
                  (list (concat (propertize (harness-voice-pipeline-meter p 8 now)
                                            'face 'harness-success-face)
                                " " (harness-voice-pipeline--word
