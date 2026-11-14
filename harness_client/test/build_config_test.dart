@@ -51,6 +51,23 @@ void main() {
     );
   });
 
+  test('built-in Kotlin stays off until both plugins support it', () {
+    // Flutter's Gradle plugin warns that flutter_tts and flutter_webrtc apply
+    // the Kotlin Gradle Plugin themselves, and the tempting fix is to turn
+    // AGP 9's built-in Kotlin on.  flutter_tts 4.2.5 applies KGP
+    // unconditionally and sets kotlinOptions, which built-in Kotlin does not
+    // provide, so that build fails outright.  docs/flutter-build-performance.md
+    // has the measured failure and what has to change first.
+    expect(
+      properties()['android.builtInKotlin'],
+      'false',
+      reason:
+          'android.builtInKotlin must stay false while a pinned plugin applies '
+          'the Kotlin Gradle Plugin itself: with it true the build fails in '
+          'apply plugin: org.jetbrains.kotlin.android',
+    );
+  });
+
   test('the SDK components the build is pinned to are all named', () {
     // tool/client_toolchain.sh installs exactly these when the machine has no
     // Android SDK of its own, and the build reads them in android/build.gradle.

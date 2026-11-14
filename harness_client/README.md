@@ -2024,6 +2024,12 @@ The Android build in this checkout used JDK 21 and Android SDK 36; set
 debug signing config so they install for testing; replace it before publishing.
 The icon is generated from `assets/icon.png` with `dart run flutter_launcher_icons`.
 
+`tool/qr_install.sh` builds for the ABI of the phone that is connected already,
+so one phone costs a build of one ABI instead of three.  Where a release build's
+time goes, what the Kotlin Gradle Plugin warning about `flutter_tts` and
+`flutter_webrtc` means, and which Gradle settings were measured and rejected are
+in [../docs/flutter-build-performance.md](../docs/flutter-build-performance.md).
+
 A build that stops with
 
 ```

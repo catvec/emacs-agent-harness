@@ -41,6 +41,13 @@ want_qr=0
 want_code=0
 pair_code=""
 pair_address=""
+# The ABI the APK is built for with --target-abi (or, with one phone
+# connected, its own): one phone needs one, and a build for one costs a third
+# of a build for all three given.
+target_abi=""
+# The same ABI as Android names it (arm64-v8a, armeabi-v7a, x86_64), which is
+# what packaging reads.
+target_abi_android=""
 # Tests set this to a known mDNS pairing name; normally it is random.
 pair_name_override="${QR_INSTALL_PAIR_NAME:-}"
 # How long to wait for the phone's debugging port before saying how to skip the
@@ -78,6 +85,11 @@ Options:
   --debug          use and build the debug APK instead of the release one
   --apk PATH       install PATH (implies --no-build)
   --device SERIAL  install on an already connected device (its adb serial)
+  --target-abi ABI build only the APK one phone needs: arm64, arm or x86_64
+                   (default: every ABI the app supports, which is what an APK
+                   handed to a phone of unknown kind needs; one ABI builds in
+                   about a third of the time).  Two ABIs do not live in one
+                   app-release.apk: a build for other ABIs replaces it.
   --connect ADDR   connect to ADDR (IP:PORT, the "IP address & port" shown by
                    Wireless debugging) instead of pairing; also the way past a
                    wait for the phone's debugging port that does not end
@@ -154,6 +166,11 @@ while [ $# -gt 0 ]; do
       device="$2"
       shift
       ;;
+    --target-abi)
+      [ $# -ge 2 ] || die "--target-abi needs arm64, arm or x86_64"
+      target_abi="$2"
+      shift
+      ;;
     --connect)
       [ $# -ge 2 ] || die "--connect needs IP:PORT"
       connect_hint="$2"
@@ -215,6 +232,17 @@ if [ "$want_code" = 1 ] || [ -n "$pair_code" ] || [ -n "$pair_address" ]; then
   pair_mode=code
 fi
 
+# What --target-abi asks Flutter for: the platform names of Flutter's own
+# --target-platform, which the app's build reads to decide which ABIs to build.
+target_platform=""
+case "$target_abi" in
+  "") ;;
+  arm64|arm64-v8a) target_abi=arm64; target_platform=android-arm64; target_abi_android=arm64-v8a ;;
+  arm|armeabi-v7a) target_abi=arm; target_platform=android-arm; target_abi_android=armeabi-v7a ;;
+  x86_64|x64) target_abi=x86_64; target_platform=android-x64; target_abi_android=x86_64 ;;
+  *) die "--target-abi must be arm64, arm or x86_64" ;;
+esac
+
 if [ -z "$apk" ]; then
   apk="$project_dir/build/app/outputs/flutter-apk/app-$build_mode.apk"
 else
@@ -265,15 +293,131 @@ repair_pub_cache() {
   ! incomplete_packages
 }
 
-# Build the APK.  A pub cache that is already known to be damaged is repaired
-# first; one that only shows after the build failed is repaired then, and the
-# build is tried once more.
+# The adb this run drives: ADB, adb on PATH, or the SDK's own.
+find_adb() {
+  local candidate
+  if [ -n "${ADB:-}" ]; then
+    candidate="$(command -v "$ADB" 2>/dev/null || true)"
+    [ -n "$candidate" ] || die "ADB=$ADB is not an executable file"
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  for candidate in \
+    adb \
+    "${ANDROID_HOME:-}/platform-tools/adb" \
+    "${ANDROID_SDK_ROOT:-}/platform-tools/adb" \
+    "$HOME/Android/Sdk/platform-tools/adb" \
+    "$HOME/Library/Android/sdk/platform-tools/adb" \
+    /opt/android-sdk/platform-tools/adb \
+    /usr/lib/android-sdk/platform-tools/adb \
+    /usr/local/android-sdk/platform-tools/adb; do
+    [ -n "$candidate" ] || continue
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  die "adb not found; install Android SDK platform-tools, put adb on PATH, or set ADB (or use --serve to download the APK instead)"
+}
+
+# adb is found once, when something first needs it: the ABI check
+# before the build wants it, and --serve does not (it hands the APK out
+# without a phone), so finding it where nothing needs it would end a run that
+# works.
+adb=""
+resolve_adb() {
+  [ -n "$adb" ] || adb="$(find_adb)"
+}
+
+# Clear/status escapes need a real terminal, not a pipe or an Emacs comint
+# buffer (which sets TERM=dumb and shows control characters literally).
+tty_ok=0
+if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM}" != dumb ]; then
+  tty_ok=1
+fi
+
+# What adb prints is tab-separated -- "serial<TAB>state" for devices and
+# "name<TAB>type<TAB>ip:port" for mDNS services -- and the first field is free
+# text that can hold spaces.  Android renames a wireless debugging service whose
+# name is still taken to "adb-SERIAL-xxxxxx (2)", and adb lists a device it
+# found through mDNS under such a name too.  Splitting these lines at every
+# space (awk's default) turns that name into two fields and drops the row,
+# which is how the phone's live debugging port went unseen: only the old,
+# closed record under the plain name was left, and the installer retried it
+# until it timed out.  So split at tabs only, here and nowhere else.
+device_serials() {
+  "$adb" devices 2>/dev/null | awk -F '\t' '$2 == "device" { print $1 }'
+}
+
+device_rows() {
+  "$adb" devices 2>/dev/null | awk -F '\t' 'NF >= 2 { print $1 "\t" $2 }'
+}
+
+# What the phone's CPU is, as adb prints it (ro.product.cpu.abi, or the list
+# in ro.product.cpu.abilist when that is empty): arm64-v8a, armeabi-v7a and
+# x86_64 are the ones the app is built for.  Empty when adb cannot say.
+device_abi() { # SERIAL
+  local abi=""
+  abi="$("$adb" -s "$1" shell getprop ro.product.cpu.abi 2>/dev/null | tr -d '\r' | head -n 1 || true)"
+  if [ -z "$abi" ]; then
+    abi="$("$adb" -s "$1" shell getprop ro.product.cpu.abilist 2>/dev/null |
+      tr -d '\r' | cut -d, -f1 | head -n 1 || true)"
+  fi
+  printf '%s\n' "$abi"
+}
+
+# A phone that is connected already is one phone, and its ABI can be known
+# before the build: an APK built for that ABI alone installs the same and costs
+# about a third less.  The build happens before a phone is paired (pairing
+# shows a QR code, and the APK is worth building meanwhile), so this only looks
+# at a device that is connected now.  It is not narrowed when the APK is handed
+# to something else: --apk installs what it names, --serve downloads it to
+# whatever scans the code, and a debug build is the developer's own to run on
+# other devices.
+abis_of_built_apk=(arm64-v8a armeabi-v7a x86_64)
+narrow_abi_if_one_device() {
+  [ -z "$target_platform" ] || return 0
+  [ "$apk_explicit" = 0 ] && [ "$serve" = 0 ] || return 0
+  [ "$build_mode" = release ] || return 0
+  resolve_adb
+  local one="" count=0 line abi=""
+  if [ -n "$device" ]; then
+    one="$device"
+  else
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      case "$line" in emulator-*) continue ;; esac
+      count=$((count + 1))
+      one="$line"
+    done < <(device_serials)
+    [ "$count" -eq 1 ] || return 0
+  fi
+  abi="$(device_abi "$one")"
+  case " ${abis_of_built_apk[*]} " in
+    *" $abi "*) ;;
+    *) return 0 ;;
+  esac
+  case "$abi" in
+    arm64-v8a) target_abi=arm64; target_platform=android-arm64; target_abi_android=arm64-v8a ;;
+    armeabi-v7a) target_abi=arm; target_platform=android-arm; target_abi_android=armeabi-v7a ;;
+    x86_64) target_abi=x86_64; target_platform=android-x64; target_abi_android=x86_64 ;;
+  esac
+  note "Building for $abi only: 54s against 49s for one change, 262s against 168s from scratch."
+}
+
+# Build the APK, for the one ABI --target-abi named when it named one.  A pub
+# cache that is already known to be damaged is repaired first; one that only
+# shows after the build failed is repaired then, and the build is tried once
+# more.
 build_apk() {
-  local status=0
+  local status=0 args=()
+  [ -z "$target_platform" ] || args+=("--target-platform" "$target_platform")
+  [ -z "$target_abi" ] ||
+    args+=("--android-project-arg=harness.packageAbi=$target_abi_android")
   if incomplete_packages; then
     repair_pub_cache || note "Building anyway; the build says whether that matters."
   fi
-  "$flutter" build apk "--$build_mode" || status=$?
+  "$flutter" build apk "--$build_mode" "${args[@]+"${args[@]}"}" || status=$?
   [ "$status" -ne 0 ] || return 0
 
   # The build ran pub get, so the package configuration is current now.
@@ -281,7 +425,7 @@ build_apk() {
     if repair_pub_cache; then
       note "Building the $build_mode APK again ..."
       status=0
-      "$flutter" build apk "--$build_mode" || status=$?
+      "$flutter" build apk "--$build_mode" "${args[@]+"${args[@]}"}" || status=$?
       [ "$status" -ne 0 ] || return 0
     else
       note "The packages above are still incomplete: delete their directories," >&2
@@ -318,6 +462,14 @@ fi
 
 if [ -n "$build_reason" ]; then
   note "Building the $build_mode APK ($build_reason)..."
+  narrow_abi_if_one_device
+  if [ -z "$target_platform" ] && [ "$serve" = 0 ] && [ "$apk_explicit" = 0 ] &&
+    [ "$build_mode" = release ]; then
+    # One phone needs one ABI, and the APK holds only the ABIs it was built
+    # for, so this stays a suggestion until it is asked for: the same APK goes
+    # to a phone of any kind.
+    note "Tip: --target-abi arm64, or arm, for a build about a third shorter."
+  fi
   flutter="${FLUTTER:-$tool_dir/flutter}"
   if [ ! -x "$flutter" ]; then
     flutter="$(command -v flutter || true)"
@@ -326,6 +478,12 @@ if [ -n "$build_reason" ]; then
   build_apk
 fi
 [ -f "$apk" ] || die "APK not found: $apk (run without --no-build to build it)"
+
+# An APK built for one ABI is only for that one: whoever installs it another
+# way, or copies it, does not find out from the file.
+if [ -n "$target_abi" ] && [ "$apk_explicit" = 0 ]; then
+  note "Note: ${apk##*/}, $target_abi ABI only; without --target-abi, all three."
+fi
 
 # An explicit --no-build is allowed to install an old APK, but say so: the
 # app would then still run whatever code was last built.
@@ -343,57 +501,9 @@ if [ "$serve" = 1 ]; then
   exec python3 "$tool_dir/serve_apk.py" ${serve_args[@]+"${serve_args[@]}"} "$apk"
 fi
 
-find_adb() {
-  local candidate
-  if [ -n "${ADB:-}" ]; then
-    candidate="$(command -v "$ADB" 2>/dev/null || true)"
-    [ -n "$candidate" ] || die "ADB=$ADB is not an executable file"
-    printf '%s\n' "$candidate"
-    return 0
-  fi
-  for candidate in \
-    adb \
-    "${ANDROID_HOME:-}/platform-tools/adb" \
-    "${ANDROID_SDK_ROOT:-}/platform-tools/adb" \
-    "$HOME/Android/Sdk/platform-tools/adb" \
-    "$HOME/Library/Android/sdk/platform-tools/adb" \
-    /opt/android-sdk/platform-tools/adb \
-    /usr/lib/android-sdk/platform-tools/adb \
-    /usr/local/android-sdk/platform-tools/adb; do
-    [ -n "$candidate" ] || continue
-    if command -v "$candidate" >/dev/null 2>&1; then
-      command -v "$candidate"
-      return 0
-    fi
-  done
-  die "adb not found; install Android SDK platform-tools, put adb on PATH, or set ADB (or use --serve to download the APK instead)"
-}
-
-adb="$(find_adb)"
-
-# Clear/status escapes need a real terminal, not a pipe or an Emacs comint
-# buffer (which sets TERM=dumb and shows control characters literally).
-tty_ok=0
-if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM}" != dumb ]; then
-  tty_ok=1
-fi
-
-# What adb prints is tab-separated -- "serial<TAB>state" for devices and
-# "name<TAB>type<TAB>ip:port" for mDNS services -- and the first field is free
-# text that can hold spaces.  Android renames a wireless debugging service whose
-# name is still taken to "adb-SERIAL-xxxxxx (2)", and adb lists a device it
-# found through mDNS under such a name too.  Splitting these lines at every
-# space (awk's default) turns that name into two fields and drops the row,
-# which is how the phone's live debugging port went unseen: only the old,
-# closed record under the plain name was left, and the installer retried it
-# until it timed out.  So split at tabs only, here and nowhere else.
-device_serials() {
-  "$adb" devices 2>/dev/null | awk -F '\t' '$2 == "device" { print $1 }'
-}
-
-device_rows() {
-  "$adb" devices 2>/dev/null | awk -F '\t' 'NF >= 2 { print $1 "\t" $2 }'
-}
+# adb is needed from here on, and not for --serve, which hands the APK out
+# without a phone attached.
+resolve_adb
 
 # The wireless debugging services adb has seen: instance name, service type,
 # address.  The same tab-separated rows, so `read` with IFS=tab gets the name

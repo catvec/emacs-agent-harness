@@ -35,6 +35,19 @@ android {
         // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // Pack only the ABI named by harness.packageAbi, when one is named
+        // (tool/qr_install.sh names the ABI of a phone connected already).
+        // Flutter's plugin fills abiFilters with every ABI it supports before
+        // this block runs, and the manifest's native-code list is read from
+        // them, so leaving them at all three with one ABI's libraries packed
+        // would tell a phone of another ABI that the APK is for it.  Nothing
+        // is narrowed unless asked for: an APK built without this serves any
+        // phone.
+        val packedAbi = (project.findProperty("harness.packageAbi") ?: "").toString()
+        if (packedAbi.isNotEmpty()) {
+            ndk { abiFilters.clear(); abiFilters.add(packedAbi) }
+        }
     }
 
     buildTypes {

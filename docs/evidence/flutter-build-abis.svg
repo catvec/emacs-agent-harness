@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="372" viewBox="0 0 1000 372">
+<rect width="100%" height="100%" rx="8" fill="#16181d"/>
+<text x="22" y="38" fill="#7fb8ff" font-family="DejaVu Sans Mono" font-size="17">$ flutter build apk --release</text>
+<text x="22" y="64" fill="#5ad67d" font-family="DejaVu Sans Mono" font-size="17">✓ Built build/app/outputs/flutter-apk/app-release.apk (108.5MB)</text>
+<text x="22" y="90" fill="#e6e6e6" font-family="DejaVu Sans Mono" font-size="17"></text>
+<text x="22" y="116" fill="#7fb8ff" font-family="DejaVu Sans Mono" font-size="17">$ aapt2 dump badging app-release.apk | grep native-code</text>
+<text x="22" y="142" fill="#e6e6e6" font-family="DejaVu Sans Mono" font-size="17">native-code: 'arm64-v8a' 'armeabi-v7a' 'x86_64'</text>
+<text x="22" y="168" fill="#e6e6e6" font-family="DejaVu Sans Mono" font-size="17"></text>
+<text x="22" y="194" fill="#7fb8ff" font-family="DejaVu Sans Mono" font-size="17">$ flutter build apk --release --target-platform android-arm64 \</text>
+<text x="22" y="220" fill="#e6e6e6" font-family="DejaVu Sans Mono" font-size="17">    --android-project-arg=harness.packageAbi=arm64-v8a</text>
+<text x="22" y="246" fill="#5ad67d" font-family="DejaVu Sans Mono" font-size="17">✓ Built build/app/outputs/flutter-apk/app-release.apk (37.8MB)</text>
+<text x="22" y="272" fill="#e6e6e6" font-family="DejaVu Sans Mono" font-size="17"></text>
+<text x="22" y="298" fill="#7fb8ff" font-family="DejaVu Sans Mono" font-size="17">$ aapt2 dump badging app-release.apk | grep native-code</text>
+<text x="22" y="324" fill="#e6e6e6" font-family="DejaVu Sans Mono" font-size="17">native-code: 'arm64-v8a'</text>
+</svg>

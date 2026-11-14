@@ -435,6 +435,17 @@ elif args[0] == "-s" and len(args) >= 4 and args[2] == "install":
     print("Success")
 elif args[0] == "-s" and len(args) >= 5 and args[2] == "shell":
     assert args[1] == listed, args
+    if args[3] == "getprop":
+        # The CPU of the phone this pretends to be; tests set it.
+        prop = args[4]
+        value = ""
+        path = os.path.join(state, "prop-" + prop)
+        if os.path.exists(path):
+            with open(path) as f:
+                value = f.read().strip()
+        if value:
+            print(value)
+        sys.exit(0 if value else 1)
     touch("launched")
     print("Starting: Intent")
 else:
@@ -1051,6 +1062,142 @@ class BuildFreshnessTest(BuildFixture):
         self.assertEqual(result.returncode, 0)
         self.assertIn("up to date", result.stdout)
         self.assertIn("newer than it", result.stdout)
+
+    def device_cpu(self, abi, abilist=None):
+        """What adb will answer for the phone's CPU."""
+        with open(os.path.join(self.state, "prop-ro.product.cpu.abi"), "w") as f:
+            f.write(abi + "\n")
+        if abilist is not None:
+            with open(os.path.join(self.state, "prop-ro.product.cpu.abilist"),
+                      "w") as f:
+                f.write(abilist + "\n")
+
+    def test_a_connected_phone_is_built_for_its_own_abi(self):
+        # One phone needs one ABI; the APK holds only what it was built for,
+        # and all three take about a third longer to build.
+        self.device_cpu("arm64-v8a", "arm64-v8a,armeabi-v7a,armeabi")
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.builds(), [
+            "build apk --release --target-platform android-arm64 "
+            "--android-project-arg=harness.packageAbi=arm64-v8a"])
+        self.assertIn("Building for arm64-v8a only", result.stdout)
+
+    def test_the_narrowed_apk_says_it_holds_one_abi(self):
+        # The APK is the same file name either way, and whoever copies it
+        # elsewhere does not find out from the file that it fits one ABI.
+        self.device_cpu("arm64-v8a")
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("app-release.apk, arm64 ABI only", result.stdout)
+        self.assertIn("without --target-abi, all three", result.stdout)
+
+    def test_an_explicit_target_abi_says_it_holds_one_abi(self):
+        result = self.run_install("--target-abi", "x86_64")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.builds(), [
+            "build apk --release --target-platform android-x64 "
+            "--android-project-arg=harness.packageAbi=x86_64"])
+        self.assertIn("app-release.apk, x86_64 ABI only", result.stdout)
+
+    def test_a_phone_that_cannot_say_its_abi_is_not_told_to_narrow(self):
+        # No ro.product.cpu.abi, so every ABI is built and nothing claims
+        # otherwise: the tip about --target-abi is the only thing said.
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.builds(), ["build apk --release"])
+        self.assertIn("Tip: --target-abi arm64, or arm", result.stdout)
+        self.assertNotIn("ABI only", result.stdout)
+
+    def test_an_arm32_phone_is_built_for_arm32(self):
+        self.device_cpu("armeabi-v7a", "armeabi-v7a,armeabi")
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.builds(), [
+            "build apk --release --target-platform android-arm "
+            "--android-project-arg=harness.packageAbi=armeabi-v7a"])
+
+    def test_a_phone_that_cannot_say_its_abi_gets_every_abi(self):
+        # No ro.product.cpu.abi at all.
+        result = self.run_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.builds(), ["build apk --release"])
+
+    def test_serve_downloads_every_abi(self):
+        # The APK goes to whatever scans the QR code, so it must hold every ABI.
+        # serve_apk.py serves until it is interrupted, so stop it once it says
+        # what it serves, and read what was built for it.
+        self.device_cpu("arm64-v8a")
+        env = dict(os.environ)
+        env.update(ADB=self.adb, FAKE_ADB_STATE=self.state, FLUTTER=self.flutter,
+                   FAKE_FLUTTER_LOG=self.flutter_log,
+                   FAKE_PUB_CACHE=os.path.join(self.tmp, "pub-cache"), TERM="dumb")
+        process = subprocess.Popen(
+            [self.script, "--timeout", "10", "--no-launch", "--serve",
+             "--address", "127.0.0.1"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            env=env, stdin=subprocess.DEVNULL, start_new_session=True)
+        try:
+            deadline = time.time() + 25
+            output = ""
+            while time.time() < deadline:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                output += line
+                if "Serving" in output and "Harness.apk" in output:
+                    break
+        finally:
+            process.terminate()
+            try:
+                output += process.communicate(timeout=10)[0] or ""
+            except subprocess.TimeoutExpired:
+                process.kill()
+        self.assertIn("Serving", output)
+        self.assertEqual(self.builds(), ["build apk --release"])
+
+    def test_no_build_asks_for_nothing(self):
+        self.device_cpu("arm64-v8a")
+        result = self.run_install("--no-build")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("APK not found", result.stderr)
+        self.assertEqual(self.builds(), [])
+
+    def test_target_abi_is_asked_for_by_name(self):
+        for given, expected, android in (
+                ("arm64", "android-arm64", "arm64-v8a"),
+                ("arm", "android-arm", "armeabi-v7a"),
+                ("x86_64", "android-x64", "x86_64"),
+                ("arm64-v8a", "android-arm64", "arm64-v8a")):
+            with self.subTest(given=given):
+                for name in ("prop-ro.product.cpu.abi",):
+                    path = os.path.join(self.state, name)
+                    if os.path.exists(path):
+                        os.remove(path)
+                try:
+                    os.remove(self.apk)
+                except FileNotFoundError:
+                    pass
+                before = len(self.builds())
+                result = self.run_install("--target-abi", given)
+                self.assertEqual(result.returncode, 0,
+                                 result.stdout + result.stderr)
+                self.assertEqual(self.builds()[before:], [
+                    "build apk --release --target-platform " + expected +
+                    " --android-project-arg=harness.packageAbi=" + android])
+
+    def test_a_bad_target_abi_is_refused(self):
+        result = self.run_install("--target-abi", "mips")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--target-abi must be arm64, arm or x86_64", result.stderr)
+        self.assertEqual(self.builds(), [])
+
+    def test_help_names_the_abi_option(self):
+        result = subprocess.run([self.script, "--help"], capture_output=True,
+                                text=True, timeout=10)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--target-abi ABI", result.stdout)
+        self.assertIn("a third of the time", result.stdout)
 
 
 class PubCacheCheckTest(unittest.TestCase):
