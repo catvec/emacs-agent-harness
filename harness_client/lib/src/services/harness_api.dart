@@ -17,6 +17,8 @@ import '../models/usage.dart';
 import '../models/resources.dart';
 import '../models/review.dart';
 import '../models/workspace.dart';
+import '../models/workspace_speech.dart';
+import '../models/workspace_speech_claim.dart';
 
 class SessionPage {
   const SessionPage(this.sessions, this.nextCursor);
@@ -1345,6 +1347,87 @@ class HarnessApi {
         'purchase': purchase,
         'decision': allow ? 'allow' : 'deny',
       }),
+    );
+  }
+  // The workspace's speech floor: one record the harness keeps, so
+  // every client shows the same queue and the same solo.
+
+  Future<WorkspaceSpeech> workspaceSpeech(String id) async {
+    return WorkspaceSpeech.fromWire(
+      await extension('workspace/speech', {'id': id}),
+    );
+  }
+
+  Future<WorkspaceSpeech> workspaceSpeechSolo(String id, String thread) async {
+    return WorkspaceSpeech.fromWire(
+      await extension('workspace/speech/solo', {'id': id, 'thread': thread}),
+    );
+  }
+
+  Future<WorkspaceSpeech> workspaceSpeechUnsolo(String id) async {
+    return WorkspaceSpeech.fromWire(
+      await extension('workspace/speech/unsolo', {'id': id}),
+    );
+  }
+
+  Future<WorkspaceSpeech> workspaceSpeechHold(String id) async {
+    return WorkspaceSpeech.fromWire(
+      await extension('workspace/speech/hold', {'id': id}),
+    );
+  }
+
+  Future<WorkspaceSpeech> workspaceSpeechResume(String id) async {
+    return WorkspaceSpeech.fromWire(
+      await extension('workspace/speech/resume', {'id': id}),
+    );
+  }
+
+  /// Cancel [target]: an entry's id, a thread's id, or null for everything.
+  Future<WorkspaceSpeech> workspaceSpeechCancel(String id, {String? target}) async {
+    return WorkspaceSpeech.fromWire(
+      await extension('workspace/speech/cancel', {
+        'id': id,
+        if (target != null) 'target': target,
+      }),
+    );
+  }
+
+  /// Claim the speaking [entry] for [client].  The answer says whether
+  /// this client may say it: two clients in a room say it once.
+  Future<WorkspaceSpeechClaim> workspaceSpeechClaim(
+    String id,
+    String entry, {
+    required String client,
+  }) async {
+    final answer = await extension('workspace/speech/claim', {
+      'id': id,
+      'entry': entry,
+      'client': client,
+    });
+    return WorkspaceSpeechClaim.fromWire(answer);
+  }
+
+  /// Report what became of [entry]: `finished`, `failed` or `cancelled`.
+  /// The answer is the floor as it is after the report.
+  Future<WorkspaceSpeech> workspaceSpeechAdvance(
+    String id,
+    String entry, {
+    String outcome = 'finished',
+    String? why,
+  }) async {
+    final answer = await extension('workspace/speech/advance', {
+      'id': id,
+      'entry': entry,
+      'outcome': outcome,
+      if (why != null) 'why': why,
+    });
+    return WorkspaceSpeech.fromWire(asMap(answer['floor']));
+  }
+
+  /// Forget the finished entries this client showed.
+  Future<WorkspaceSpeech> workspaceSpeechClear(String id) async {
+    return WorkspaceSpeech.fromWire(
+      await extension('workspace/speech/clear', {'id': id}),
     );
   }
 }

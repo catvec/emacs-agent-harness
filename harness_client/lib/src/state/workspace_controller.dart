@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../acp/acp_client.dart';
 import '../acp/acp_message.dart';
 import '../models/workspace.dart';
+import '../models/workspace_speech.dart';
 import 'interaction.dart';
 import '../services/harness_api.dart';
 
@@ -22,6 +23,7 @@ class WorkspaceController extends ChangeNotifier {
     WorkspaceMemoryStatus? memory,
     WorkspaceComputerStatus computer = const WorkspaceComputerStatus(),
     List<InteractionRequest> pending = const [],
+    WorkspaceSpeech? speech,
   }) : _api = null,
        workspaces = [workspace],
        current = workspace,
@@ -30,6 +32,7 @@ class WorkspaceController extends ChangeNotifier {
        memory = memory,
        computer = computer,
        previewPending = pending,
+       speech = speech,
        selectedThread = workspace.active?.id {
     _learnThreads(threads);
     _learnTimeline(entries);
@@ -43,6 +46,10 @@ class WorkspaceController extends ChangeNotifier {
   List<WorkspaceEntry> entries = const [];
   WorkspaceMemoryStatus? memory;
   WorkspaceComputerStatus computer = const WorkspaceComputerStatus();
+
+  /// The workspace's speech floor, as the harness holds it: what speaks, the
+  /// queue in order, the solo and the hold.  Null until the harness answers.
+  WorkspaceSpeech? speech;
 
   String? selectedThread;
   String? selectedTag;
@@ -221,6 +228,8 @@ class WorkspaceController extends ChangeNotifier {
       if (overtaken()) return;
       final box = await api.workspaceComputer(chosen.id);
       if (overtaken()) return;
+      final floor = await api.workspaceSpeech(chosen.id);
+      if (overtaken()) return;
       final switched = current == null || current!.id != chosen.id;
       if (switched) {
         _episodeThreads.clear();
@@ -234,6 +243,7 @@ class WorkspaceController extends ChangeNotifier {
       _learnTimeline(entries);
       memory = notes;
       computer = box ?? const WorkspaceComputerStatus();
+      speech = WorkspaceSpeech.newer(speech, floor);
       _scheduleComputerPoll();
       final wanted = selectedThread;
       selectedThread = _hasThread(wanted) ? wanted : detail.active?.id;
@@ -428,6 +438,112 @@ class WorkspaceController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Take [floor] as the speech floor this client shows, when it is not
+  /// older than the copy in hand: an out-of-order answer never rolls the
+  /// panel back to a queue that has moved.
+  void _learnSpeech(WorkspaceSpeech? floor) {
+    final next = WorkspaceSpeech.newer(speech, floor);
+    if (identical(next, speech)) return;
+    speech = next;
+    notifyListeners();
+  }
+
+  /// Solo [thread]: only its speech starts, until [clearSolo].  The other
+  /// threads keep working and their words stay queued, marked held.
+  Future<void> soloSpeech(String thread) async {
+    final id = current?.id;
+    if (id == null) return;
+    final api = _api;
+    if (_preview || api == null) return;
+    try {
+      _learnSpeech(await api.workspaceSpeechSolo(id, thread));
+    } on AcpException catch (failure) {
+      error = failure.message;
+      notifyListeners();
+    }
+  }
+
+  /// Let every thread speak again.  A hold stays: it is the person's own
+  /// pause, and [resumeSpeech] lifts it.
+  Future<void> clearSolo() async {
+    final id = current?.id;
+    if (id == null) return;
+    final api = _api;
+    if (_preview || api == null) return;
+    try {
+      _learnSpeech(await api.workspaceSpeechUnsolo(id));
+    } on AcpException catch (failure) {
+      error = failure.message;
+      notifyListeners();
+    }
+  }
+
+  /// Hold all speech: the utterance playing keeps its place.
+  Future<void> holdSpeech() async {
+    final id = current?.id;
+    if (id == null) return;
+    final api = _api;
+    if (_preview || api == null) return;
+    try {
+      _learnSpeech(await api.workspaceSpeechHold(id));
+    } on AcpException catch (failure) {
+      error = failure.message;
+      notifyListeners();
+    }
+  }
+
+  /// Let the held floor speak again, one utterance at a time.
+  Future<void> resumeSpeech() async {
+    final id = current?.id;
+    if (id == null) return;
+    final api = _api;
+    if (_preview || api == null) return;
+    try {
+      _learnSpeech(await api.workspaceSpeechResume(id));
+    } on AcpException catch (failure) {
+      error = failure.message;
+      notifyListeners();
+    }
+  }
+
+  /// Skip what plays now, or the head of the queue.
+  Future<void> skipSpeech() async {
+    final id = current?.id;
+    final floor = speech;
+    if (id == null || floor == null) return;
+    final entry = floor.speaking?.id ?? (floor.waiting.isEmpty ? null : floor.waiting.first.id);
+    if (entry == null) return;
+    final api = _api;
+    if (_preview || api == null) return;
+    try {
+      _learnSpeech(
+        await api.workspaceSpeechAdvance(
+          id,
+          entry,
+          outcome: 'cancelled',
+          why: 'Skipped',
+        ),
+      );
+    } on AcpException catch (failure) {
+      error = failure.message;
+      notifyListeners();
+    }
+  }
+
+  /// Drop the waiting entries.  The hold, and what plays now, stay.
+  Future<void> clearSpeech() async {
+    final id = current?.id;
+    if (id == null) return;
+    final api = _api;
+    if (_preview || api == null) return;
+    try {
+      _learnSpeech(await api.workspaceSpeechCancel(id));
+    } on AcpException catch (failure) {
+      error = failure.message;
+      notifyListeners();
+    }
+  }
+
   /// A box that is starting is asked about until it is running or failed.
   void _scheduleComputerPoll() {
     _computerTimer?.cancel();
@@ -440,6 +556,14 @@ class WorkspaceController extends ChangeNotifier {
   /// Follow the harness's workspace events, quietly.  A burst of entries
   /// arriving from one turn is one read of the timeline, not one per node.
   void applyEvent(String event, List<Object?> args) {
+    if (event == 'workspace/speech-changed') {
+      final id = args.isEmpty ? null : args.first;
+      if (id is! String || (current != null && id != current!.id)) return;
+      final floor = args.length > 1 ? asMap(args[1]) : const <String, Object?>{};
+      if (floor.isEmpty) return;
+      _learnSpeech(WorkspaceSpeech.fromWire(floor));
+      return;
+    }
     if (!event.startsWith('workspace/')) return;
     final id = args.isEmpty ? null : args.first;
     if (id is String && current != null && id != current!.id) return;

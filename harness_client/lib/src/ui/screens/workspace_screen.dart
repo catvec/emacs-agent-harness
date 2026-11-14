@@ -27,6 +27,7 @@ import '../widgets/markdown_view.dart';
 import '../widgets/message_composer.dart';
 import '../widgets/quick_search_entry.dart';
 import '../widgets/workspace_buddy.dart';
+import '../widgets/workspace_speech_panel.dart';
 import '../widgets/vnc_takeover.dart';
 import '../widgets/workspace_graph.dart';
 import 'memory_screen.dart';
@@ -570,6 +571,11 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
           child: _timeline(context, controller),
         ),
         _pendingCard(context, controller),
+        WorkspaceSpeechPanel(
+          controller: controller,
+          compact: true,
+          onShowThread: (thread) => controller.selectThread(thread),
+        ),
         _composer(context, controller),
       ],
     );
@@ -772,6 +778,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
                 ),
               Expanded(child: _timeline(context, controller, maxWidth: 900)),
               _pendingCard(context, controller, maxWidth: 900),
+              _speechBand(context, controller, maxWidth: 900),
               _composer(context, controller, maxWidth: 900),
             ],
           ),
@@ -798,6 +805,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
             children: [
               Expanded(child: _timeline(context, controller, maxWidth: 920)),
               _pendingCard(context, controller, maxWidth: 920),
+              _speechBand(context, controller, maxWidth: 920),
               _composer(context, controller, maxWidth: 920),
             ],
           ),
@@ -1002,6 +1010,32 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxWidth),
         child: padded,
+      ),
+    );
+  }
+
+  /// The speech floor, between the conversation and the field.
+  ///
+  /// It is drawn here, not above the timeline, because it answers the same
+  /// question the composer does -- what this message joins: who is talking
+  /// and what waits behind them.  It keeps the composer's width so the band
+  /// and the field below it are one column, and it draws nothing at all when
+  /// the floor has nothing to say, so an idle workspace has no empty strip.
+  Widget _speechBand(
+    BuildContext context,
+    WorkspaceController controller, {
+    double? maxWidth,
+  }) {
+    final band = WorkspaceSpeechPanel(
+      controller: controller,
+      onShowThread: (thread) => controller.selectThread(thread),
+    );
+    if (maxWidth == null) return band;
+    return Align(
+      alignment: AlignmentDirectional.topCenter,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxWidth),
+        child: band,
       ),
     );
   }

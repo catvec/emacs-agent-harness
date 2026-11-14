@@ -20,6 +20,8 @@ import '../models/workspace.dart';
 import '../services/harness_api.dart';
 import '../services/device_name.dart';
 import '../services/voice_runtime.dart';
+import '../services/voice_audio_io.dart';
+import '../voice/workspace_speech_player.dart';
 import '../state/drafts.dart';
 import '../state/pictures.dart';
 import '../state/quota_controller.dart';
@@ -130,6 +132,16 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
   /// The desktop buddy's own window, where the platform has one.  A test
   /// passes a fake so no window is created.
   final BuddyWindowService buddyWindow;
+
+  /// What the workspace's speech floor is said through.  The app leaves it
+  /// null for the platform's speech engine, which is made only when there
+  /// are words to say; a test passes a script, so no platform channel is
+  /// loaded and no audio is played.
+  VoiceSpeech Function()? workspaceSpeechEngine;
+
+  /// This client's speaker for the workspace's speech floor.  One per
+  /// connection: it claims an entry, says it, and reports it back.
+  WorkspaceSpeechPlayer? workspaceSpeechPlayer;
 
   /// A tab the shell should select: the buddy window's workspace action
   /// brings the app forward and asks for the workspace page.
@@ -436,6 +448,61 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
   /// The buddy exists only while the workspace does.  It is created once,
   /// after the workspace is first built and after a reconnect that brings
   /// it back.
+  /// The speaker of the workspace's speech floor: the platform's own
+  /// speech engine, the same seam the clip voice provider speaks through.
+  /// It is built once per connection and listens to the workspace's floor,
+  /// so a change that makes an utterance eligible starts it here, and a
+  /// hold stops it without reporting the words cancelled.
+  void _ensureWorkspaceSpeech() {
+    final floor = workspace;
+    final api = this.api;
+    if (floor == null || api == null) return;
+    if (workspaceSpeechPlayer != null) {
+      _followWorkspaceSpeech();
+      return;
+    }
+    final engine = workspaceSpeechEngine;
+    workspaceSpeechPlayer = WorkspaceSpeechPlayer(
+      gateway: ApiWorkspaceSpeechGateway(api),
+      speech: engine ??
+          () => FlutterTtsVoiceSpeech(language: settings.voiceSettings.language),
+      client: deviceName(),
+    );
+    _followWorkspaceSpeech();
+  }
+
+  bool _speechListening = false;
+
+  void _followWorkspaceSpeech() {
+    final floor = workspace;
+    if (floor == null) return;
+    if (!_speechListening) {
+      _speechListening = true;
+      floor.addListener(_onWorkspaceSpeechChanged);
+    }
+    _onWorkspaceSpeechChanged();
+  }
+
+  void _onWorkspaceSpeechChanged() {
+    final floor = workspace;
+    final player = workspaceSpeechPlayer;
+    if (floor == null || player == null) return;
+    final speech = floor.speech;
+    if (speech == null) return;
+    unawaited(player.pump(speech));
+  }
+
+  void _disposeWorkspaceSpeech() {
+    final floor = workspace;
+    if (_speechListening && floor != null) {
+      floor.removeListener(_onWorkspaceSpeechChanged);
+    }
+    _speechListening = false;
+    final player = workspaceSpeechPlayer;
+    workspaceSpeechPlayer = null;
+    if (player != null) unawaited(player.dispose());
+  }
+
   void _ensureWorkspaceBuddy() {
     if (workspace == null || workspaceBuddy != null) return;
     workspaceBuddy = WorkspaceBuddyController(
@@ -778,6 +845,7 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     if (capabilities?.workspace == true) {
       workspace = WorkspaceController(api!);
       _ensureWorkspaceBuddy();
+      _ensureWorkspaceSpeech();
       unawaited(workspace!.load(showSpinner: false));
     }
     if (capabilities?.usage == true) {
@@ -1701,6 +1769,7 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
       workspace = WorkspaceController(service);
     }
     if (capabilities?.workspace == true) _ensureWorkspaceBuddy();
+    if (capabilities?.workspace == true) _ensureWorkspaceSpeech();
     if (capabilities?.usage == true && usage == null) {
       usage = UsageController(service);
     }
@@ -1858,6 +1927,7 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     tasks = null;
     workspaceBuddy?.dispose();
     workspaceBuddy = null;
+    _disposeWorkspaceSpeech();
     workspace = null;
     usage = null;
     _disposeReviews();

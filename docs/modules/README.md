@@ -67,6 +67,7 @@ and supervisor load only when they are named.
  ;;workspace          ; Persistent workspace chat: one timeline over topic threads and episodes.
  ;;workspace-box      ; The workspace's computer: a private desktop and a real VNC screen.
  ;;workspace-knowledge ; The workspace's Logseq knowledge graph: thread pages, journal…
+ ;;workspace-speech   ; The workspace's speech floor: one speaker, a visible queue and solo.
  :providers
  ;;bedrock            ; AWS Bedrock provider: the Converse API, signed with SigV4 or an API key.
  ;;copilot            ; GitHub Copilot CLI as a hosted-loop completion provider.
@@ -212,6 +213,7 @@ and supervisor load only when they are named.
 | [workspace](workspace.md) |  | [store](store.md), [session](session.md), [agent](agent.md), [project](project.md), [workspace-knowledge](workspace-knowledge.md) | Persistent workspace chat: one timeline over topic threads and episodes. |
 | [workspace-box](workspace-box.md) |  | [store](store.md) | The workspace's computer: a private desktop and a real VNC screen. |
 | [workspace-knowledge](workspace-knowledge.md) |  | [logseq](logseq.md), [session](session.md), [tools](tools.md) | The workspace's Logseq knowledge graph: thread pages, journal captures, retrieval and the knowledge tools. |
+| [workspace-speech](workspace-speech.md) |  | [store](store.md), [workspace](workspace.md) | The workspace's speech floor: one speaker, a visible queue and solo. |
 | [worktree](worktree.md) | by default | [project](project.md) | Git worktree listing, creation, locking, removal and status. |
 
 ## The UI
@@ -274,6 +276,7 @@ and supervisor load only when they are named.
 | [ui-voice](ui-voice.md) |  | [ui](ui.md), [ui-compose](ui-compose.md), [ui-media](ui-media.md) | WAV dictation or live voice through a provider, with ChatGPT Live, a local pipeline or a sidecar of your own. |
 | [ui-watches](ui-watches.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Event watches of a session, pinned above its compose box: what each watches and what it has seen. |
 | [ui-workspace](ui-workspace.md) |  | [ui](ui.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md) | The workspace chat: one timeline over threads, with a compose box. |
+| [ui-workspace-speech](ui-workspace-speech.md) |  | [ui](ui.md), [ui-workspace](ui-workspace.md) | The workspace speech floor: its panel, the solo and hold controls, and this client's speaker. |
 | [ui-worktree](ui-worktree.md) | by default | [ui](ui.md) | Git worktree list with create, remove, prune (stale records and merged worktrees), sessions and merges. |
 
 ## Events
@@ -321,7 +324,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `fallback/refused` | [fallback](fallback.md) | [fallback](fallback.md) |  |  |
 | `fallback/switched` | [fallback](fallback.md) | [fallback](fallback.md) | [ui-usage](ui-usage.md) | yes |
 | `handoff/done` | [handoff](handoff.md) | [handoff](handoff.md) |  |  |
-| `harness/reloaded` | `harness.el` | `harness.el` | [session](session.md), [ui-cache-warm](ui-cache-warm.md), [ui-decisions](ui-decisions.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md), [ui-voice](ui-voice.md), [version](version.md), [worktree](worktree.md) | yes |
+| `harness/reloaded` | `harness.el` | `harness.el` | [session](session.md), [ui-cache-warm](ui-cache-warm.md), [ui-decisions](ui-decisions.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md), [ui-voice](ui-voice.md), [ui-workspace-speech](ui-workspace-speech.md), [version](version.md), [worktree](worktree.md) | yes |
 | `harness/started` | `harness.el` | `harness.el` | [worktree](worktree.md) |  |
 | `harness/stopping` | `harness.el` | `harness.el` |  |  |
 | `memory/changed` | [memory](memory.md) | [memory](memory.md) | [ui-memory](ui-memory.md) | yes |
@@ -373,7 +376,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `session/head-moved` | [session](session.md) | [session](session.md) | [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-tree](ui-tree.md) | yes |
 | `session/moved` | [session](session.md) | [session](session.md) | [sandbox-session](sandbox-session.md), [tools-jobs](tools-jobs.md) | yes |
 | `session/node-added` | [session](session.md) | [session](session.md) | [acp](acp.md), [pet](pet.md), [session-search](session-search.md), [todo-sync](todo-sync.md), [tools-sessions](tools-sessions.md), [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md) |  |
-| `session/node-updated` | [session](session.md) | [session](session.md) | [acp](acp.md), [session-search](session-search.md), [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md) |  |
+| `session/node-updated` | [session](session.md) | [session](session.md) | [acp](acp.md), [session-search](session-search.md), [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md), [workspace-speech](workspace-speech.md) |  |
 | `session/nodes-removed` | [session](session.md) | [session](session.md) | [ui-chat](ui-chat.md) | yes |
 | `session/pending-changed` | [session](session.md) | [session](session.md) | [resilience](resilience.md), [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md), [ui-workspace](ui-workspace.md) | yes |
 | `session/pending-resolved` | [session](session.md) | [session](session.md) |  |  |
@@ -415,13 +418,14 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `usage/reported-changed` | [usage](usage.md) | [usage](usage.md) | [ui-usage](ui-usage.md), [usage](usage.md) | yes |
 | `version/checked` | [version](version.md) | [version](version.md) | [ui-version](ui-version.md) | yes |
 | `workspace/box-status` | [workspace-box](workspace-box.md) | [workspace-box](workspace-box.md) | [ui-workspace](ui-workspace.md) | yes |
-| `workspace/changed` | [workspace](workspace.md) | [workspace](workspace.md), [workspace-box](workspace-box.md) | [ui-workspace](ui-workspace.md) | yes |
+| `workspace/changed` | [workspace](workspace.md) | [workspace](workspace.md), [workspace-box](workspace-box.md) | [ui-workspace](ui-workspace.md), [ui-workspace-speech](ui-workspace-speech.md) | yes |
 | `workspace/context-built` | [workspace](workspace.md) |  |  | yes |
-| `workspace/deleted` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md), [workspace-box](workspace-box.md) | yes |
+| `workspace/deleted` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md), [workspace-box](workspace-box.md), [workspace-speech](workspace-speech.md) | yes |
 | `workspace/dream-finished` | [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md) | [workspace-knowledge](workspace-knowledge.md) |  | yes |
-| `workspace/episode-changed` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md) | yes |
+| `workspace/episode-changed` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md), [ui-workspace-speech](ui-workspace-speech.md) | yes |
 | `workspace/knowledge-changed` | [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md) | [workspace-knowledge](workspace-knowledge.md) | [ui-workspace](ui-workspace.md) | yes |
-| `workspace/thread-changed` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md) | yes |
+| `workspace/speech-changed` | [workspace-speech](workspace-speech.md) | [workspace-speech](workspace-speech.md) | [ui-workspace-speech](ui-workspace-speech.md) | yes |
+| `workspace/thread-changed` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md), [ui-workspace-speech](ui-workspace-speech.md), [workspace-speech](workspace-speech.md) | yes |
 | `workspace/timeline-appended` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md) | yes |
 | `worktree/created` | [worktree](worktree.md) | [worktree](worktree.md) | [ui-worktree](ui-worktree.md) | yes |
 | `worktree/locked` | [worktree](worktree.md) | [worktree](worktree.md) | [ui-worktree](ui-worktree.md) | yes |
@@ -511,9 +515,9 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-cache-warm-functions` | [ui-cache-warm](ui-cache-warm.md) |  |
 | `harness-ui-config-load-hooks` |  | [ui-chatgpt-plan](ui-chatgpt-plan.md) |
 | `harness-ui-config-sections-functions` | [ui-config](ui-config.md) | [ui-chatgpt-plan](ui-chatgpt-plan.md) |
-| `harness-ui-connected-hook` | [ui](ui.md) | [ui-access](ui-access.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-computers](ui-computers.md), [ui-decisions](ui-decisions.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-server](ui-server.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md), [ui-workspace](ui-workspace.md) |
+| `harness-ui-connected-hook` | [ui](ui.md) | [ui-access](ui-access.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-computers](ui-computers.md), [ui-decisions](ui-decisions.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-server](ui-server.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md), [ui-workspace](ui-workspace.md), [ui-workspace-speech](ui-workspace-speech.md) |
 | `harness-ui-decision-functions` | [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md) | [ui-chat](ui-chat.md) |
-| `harness-ui-event-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-priority](ui-priority.md), [ui-watches](ui-watches.md) | [ui-access](ui-access.md), [ui-acp-remote](ui-acp-remote.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-chatgpt-plan](ui-chatgpt-plan.md), [ui-children](ui-children.md), [ui-computers](ui-computers.md), [ui-config](ui-config.md), [ui-decisions](ui-decisions.md), [ui-memory](ui-memory.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-priority](ui-priority.md), [ui-provider-check](ui-provider-check.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-secrets](ui-secrets.md), [ui-server](ui-server.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-usage-history](ui-usage-history.md), [ui-version](ui-version.md), [ui-voice](ui-voice.md), [ui-watches](ui-watches.md), [ui-workspace](ui-workspace.md), [ui-worktree](ui-worktree.md) |
+| `harness-ui-event-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-priority](ui-priority.md), [ui-watches](ui-watches.md) | [ui-access](ui-access.md), [ui-acp-remote](ui-acp-remote.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-chatgpt-plan](ui-chatgpt-plan.md), [ui-children](ui-children.md), [ui-computers](ui-computers.md), [ui-config](ui-config.md), [ui-decisions](ui-decisions.md), [ui-memory](ui-memory.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-priority](ui-priority.md), [ui-provider-check](ui-provider-check.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-secrets](ui-secrets.md), [ui-server](ui-server.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-usage-history](ui-usage-history.md), [ui-version](ui-version.md), [ui-voice](ui-voice.md), [ui-watches](ui-watches.md), [ui-workspace](ui-workspace.md), [ui-workspace-speech](ui-workspace-speech.md), [ui-worktree](ui-worktree.md) |
 | `harness-ui-linking-context-functions` | [ui-linking](ui-linking.md), [ui-patch-review](ui-patch-review.md) | [ui-linking](ui-linking.md), [ui-patch-review](ui-patch-review.md) |
 | `harness-ui-live-functions` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-sessions](ui-sessions.md) |
 | `harness-ui-media-recording-blocked-p-functions` | [ui-media](ui-media.md) | [ui-voice](ui-voice.md) |
@@ -552,7 +556,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-update-hook` | [ui-version](ui-version.md), `harness.el` | [ui-version](ui-version.md) |
 | `harness-websearch-ready-functions` | [tools-web](tools-web.md) |  |
 | `kill-buffer-hook` |  | [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-popout](ui-popout.md), [ui-provider-check](ui-provider-check.md), [ui-server](ui-server.md), [ui-voice](ui-voice.md), [ui-workspace](ui-workspace.md) |
-| `kill-emacs-hook` |  | [agent](agent.md), [mcp](mcp.md), [pet](pet.md), [provider-demo](provider-demo.md), [sandbox-session](sandbox-session.md), [session](session.md), [speech](speech.md), [tasks](tasks.md), [tools-jobs](tools-jobs.md), [ui](ui.md), [ui-voice](ui-voice.md) |
+| `kill-emacs-hook` |  | [agent](agent.md), [mcp](mcp.md), [pet](pet.md), [provider-demo](provider-demo.md), [sandbox-session](sandbox-session.md), [session](session.md), [speech](speech.md), [tasks](tasks.md), [tools-jobs](tools-jobs.md), [ui](ui.md), [ui-voice](ui-voice.md), [ui-workspace-speech](ui-workspace-speech.md) |
 | `message-sent-hook` | `change-review-mail.el` | `change-review-mail.el` |
 | `post-command-hook` |  | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-patch-review](ui-patch-review.md), [ui-sticky-compose](ui-sticky-compose.md), `compose-quote.el`, `change-review-ui.el` |
 | `pre-command-hook` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md) |

@@ -8,6 +8,7 @@ The workspace chat: one timeline over threads, with a compose box.
 - **Source:** [lisp/ui/harness-ui-workspace.el](../../lisp/ui/harness-ui-workspace.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [ui](ui.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md)
+- **Required by:** [ui-workspace-speech](ui-workspace-speech.md)
 - **Brings along:** [workspace](workspace.md) (the rest of it), [acp](acp.md) (its file requires it)
 
 ## About

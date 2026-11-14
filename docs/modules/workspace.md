@@ -8,6 +8,7 @@ Persistent workspace chat: one timeline over topic threads and episodes.
 - **Source:** [lisp/modules/harness-workspace.el](../../lisp/modules/harness-workspace.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [store](store.md), [session](session.md), [agent](agent.md), [project](project.md), [workspace-knowledge](workspace-knowledge.md)
+- **Required by:** [workspace-speech](workspace-speech.md)
 - **Brings along:** [ui-workspace](ui-workspace.md) (its UI), [small](small.md) (its file requires it)
 
 ## About

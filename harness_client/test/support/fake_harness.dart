@@ -149,6 +149,15 @@ class FakeHarness {
           'workspace/prompt',
           'workspace/thread/create',
           'workspace/cancel',
+          'workspace/speech',
+          'workspace/speech/solo',
+          'workspace/speech/unsolo',
+          'workspace/speech/hold',
+          'workspace/speech/resume',
+          'workspace/speech/cancel',
+          'workspace/speech/claim',
+          'workspace/speech/advance',
+          'workspace/speech/clear',
           'memory/status',
           'memory/notes',
           'memory/search',
@@ -2269,6 +2278,10 @@ class FakeHarness {
         _respond(id, _computerFixture().first);
         return;
       }
+      if (method.startsWith('_harness/workspace/speech') &&
+          _answerWorkspaceSpeech(id, method, params)) {
+        return;
+      }
       if (method == '_harness/workspace/list') {
         _respond(id, [_workspaceFixture()]);
         return;
@@ -2966,6 +2979,230 @@ class FakeHarness {
 
   final List<String> workspacePrompts = <String>[];
   final List<Map<String, Object?>> workspaceUpdates = <Map<String, Object?>>[];
+
+  /// The workspace's speech floor, as the harness holds it: the one record
+  /// the queue, the solo and the hold are read from.
+  final Map<String, Object?> workspaceSpeechFloor = {
+    'workspace': 'w1',
+    'revision': 0,
+    'enabled': true,
+    'hold': false,
+    'solo': null,
+    'solo-title': null,
+    'speaking': null,
+    'waiting': <Map<String, Object?>>[],
+    'active': null,
+    'count': 0,
+    'recent': <Map<String, Object?>>[],
+  };
+
+  /// The claims the floor has given out, by entry.
+  final Map<String, String> workspaceSpeechClaims = <String, String>{};
+
+  /// Every claim this floor was asked for, in order.
+  final List<Map<String, Object?>> workspaceSpeechClaimCalls =
+      <Map<String, Object?>>[];
+
+  /// Every advance this floor was told of, in order.
+  final List<Map<String, Object?>> workspaceSpeechAdvances =
+      <Map<String, Object?>>[];
+
+  /// Put [entry] on the floor as waiting, as a finished turn does, and
+  /// announce the floor as it now is.
+  void enqueueWorkspaceSpeech(Map<String, Object?> entry) {
+    final waiting = workspaceSpeechFloor['waiting']! as List<Map<String, Object?>>;
+    waiting.add({
+      'workspace': 'w1',
+      'source': 'reply',
+      'state': 'queued',
+      ...entry,
+    });
+    _promoteWorkspaceSpeech();
+    announce('workspace/speech-changed', ['w1', _workspaceSpeechView()]);
+  }
+
+  /// Solo [thread] on the floor, as the person does.
+  void soloWorkspaceSpeech(String thread, {String? title}) {
+    workspaceSpeechFloor['solo'] = thread;
+    workspaceSpeechFloor['solo-title'] = title;
+    _reorderWorkspaceSpeech();
+    announce('workspace/speech-changed', ['w1', _workspaceSpeechView()]);
+  }
+
+  /// Let every thread speak again.
+  void unsoloWorkspaceSpeech() {
+    workspaceSpeechFloor['solo'] = null;
+    workspaceSpeechFloor['solo-title'] = null;
+    _reorderWorkspaceSpeech();
+    announce('workspace/speech-changed', ['w1', _workspaceSpeechView()]);
+  }
+
+  void _reorderWorkspaceSpeech() {
+    final solo = workspaceSpeechFloor['solo'];
+    final waiting = workspaceSpeechFloor['waiting']! as List<Map<String, Object?>>;
+    for (final entry in waiting) {
+      if (solo == null) {
+        entry.remove('held');
+      } else if (entry['thread'] == solo) {
+        entry.remove('held');
+      } else {
+        entry['held'] = 'Solo';
+      }
+    }
+    _promoteWorkspaceSpeech();
+  }
+
+  /// The first eligible waiting entry speaks, as the harness's floor does.
+  void _promoteWorkspaceSpeech() {
+    final speaking = workspaceSpeechFloor['speaking'];
+    if (speaking != null || workspaceSpeechFloor['hold'] == true) {
+      workspaceSpeechFloor['count'] = _workspaceSpeechWaiting().length;
+      return;
+    }
+    final solo = workspaceSpeechFloor['solo'];
+    final waiting = workspaceSpeechFloor['waiting']! as List<Map<String, Object?>>;
+    for (final entry in waiting) {
+      if (solo != null && entry['thread'] != solo) continue;
+      waiting.remove(entry);
+      workspaceSpeechFloor['speaking'] = {...entry, 'state': 'speaking'};
+      workspaceSpeechFloor['active'] = entry['thread'];
+      break;
+    }
+    workspaceSpeechFloor['count'] = waiting.length;
+  }
+
+  List<Map<String, Object?>> _workspaceSpeechWaiting() =>
+      workspaceSpeechFloor['waiting']! as List<Map<String, Object?>>;
+
+  Map<String, Object?> _workspaceSpeechView() => {
+    ...workspaceSpeechFloor,
+    'revision': (asInt(workspaceSpeechFloor['revision']) ?? 0) + 1,
+    'waiting': [
+      for (final entry in _workspaceSpeechWaiting()) {...entry},
+    ],
+  };
+
+  /// Answer the floor methods, as the harness's workspace-speech module does.
+  bool _answerWorkspaceSpeech(Object? id, String method, JsonMap params) {
+    final floor = workspaceSpeechFloor;
+    switch (method) {
+      case '_harness/workspace/speech':
+        _respond(id, _workspaceSpeechView());
+        return true;
+      case '_harness/workspace/speech/solo':
+        floor['solo'] = asString(params['thread']);
+        for (final thread in workspaceThreads) {
+          if (thread['id'] == params['thread']) {
+            floor['solo-title'] = thread['title'];
+          }
+        }
+        _reorderWorkspaceSpeech();
+        announce('workspace/speech-changed', ['w1', _workspaceSpeechView()]);
+        _respond(id, _workspaceSpeechView());
+        return true;
+      case '_harness/workspace/speech/unsolo':
+        floor['solo'] = null;
+        floor['solo-title'] = null;
+        _reorderWorkspaceSpeech();
+        announce('workspace/speech-changed', ['w1', _workspaceSpeechView()]);
+        _respond(id, _workspaceSpeechView());
+        return true;
+      case '_harness/workspace/speech/hold':
+        floor['hold'] = true;
+        final speaking = floor['speaking'];
+        if (speaking is Map<String, Object?>) {
+          speaking['state'] = 'held';
+        }
+        announce('workspace/speech-changed', ['w1', _workspaceSpeechView()]);
+        _respond(id, _workspaceSpeechView());
+        return true;
+      case '_harness/workspace/speech/resume':
+        floor['hold'] = false;
+        final speaking = floor['speaking'];
+        if (speaking is Map<String, Object?>) {
+          speaking['state'] = 'speaking';
+        }
+        _promoteWorkspaceSpeech();
+        announce('workspace/speech-changed', ['w1', _workspaceSpeechView()]);
+        _respond(id, _workspaceSpeechView());
+        return true;
+      case '_harness/workspace/speech/cancel':
+        final target = asString(params['target']);
+        final waiting = _workspaceSpeechWaiting();
+        final doomed = [
+          for (final entry in waiting)
+            if (target == null ||
+                entry['id'] == target ||
+                entry['thread'] == target)
+              entry,
+        ];
+        waiting.removeWhere(doomed.contains);
+        floor['count'] = waiting.length;
+        _promoteWorkspaceSpeech();
+        announce('workspace/speech-changed', ['w1', _workspaceSpeechView()]);
+        _respond(id, _workspaceSpeechView());
+        return true;
+      case '_harness/workspace/speech/claim':
+        workspaceSpeechClaimCalls.add(Map<String, Object?>.of(params));
+        final entry = asString(params['entry']);
+        final client = asString(params['client']);
+        final speaking = floor['speaking'];
+        if (floor['hold'] == true ||
+            speaking is! Map<String, Object?> ||
+            speaking['id'] != entry) {
+          _respond(id, {
+            'claimed': false,
+            'floor': _workspaceSpeechView(),
+          });
+          return true;
+        }
+        final holder = workspaceSpeechClaims[entry];
+        if (holder == null) {
+          workspaceSpeechClaims[entry!] = client ?? 'client';
+          _respond(id, {
+            'claimed': true,
+            'client': client,
+            'floor': _workspaceSpeechView(),
+          });
+          return true;
+        }
+        _respond(id, {
+          'claimed': holder == client,
+          'holder': holder,
+          'floor': _workspaceSpeechView(),
+        });
+        return true;
+      case '_harness/workspace/speech/advance':
+        workspaceSpeechAdvances.add(Map<String, Object?>.of(params));
+        final entry = asString(params['entry']);
+        final speaking = floor['speaking'];
+        if (speaking is Map<String, Object?> && speaking['id'] == entry) {
+          final recent = floor['recent']! as List<Map<String, Object?>>;
+          recent.insert(0, {
+            ...speaking,
+            'state': params['outcome'] == 'failed' ? 'failed' : 'cancelled',
+            'outcome': params['outcome'],
+            if (params['why'] != null) 'why': params['why'],
+          });
+          workspaceSpeechClaims.remove(entry);
+          floor['speaking'] = null;
+          floor['active'] = floor['solo'];
+          _promoteWorkspaceSpeech();
+        }
+        announce('workspace/speech-changed', ['w1', _workspaceSpeechView()]);
+        _respond(id, {
+          'applied': true,
+          'outcome': params['outcome'],
+          'floor': _workspaceSpeechView(),
+        });
+        return true;
+      case '_harness/workspace/speech/clear':
+        floor['recent'] = <Map<String, Object?>>[];
+        _respond(id, _workspaceSpeechView());
+        return true;
+    }
+    return false;
+  }
 
   /// The workspace's own defaults, as `workspace/update` changes them.
   String workspaceModel = 'claude:claude-fable-5-1';

@@ -65,6 +65,10 @@
 (defvar harness-ui-workspace--syncing-p nil
   "Non-nil while the pending store is being read, so no redraw loops.")
 
+(declare-function harness-workspace-speech "harness-ui-workspace-speech" (&optional id))
+(declare-function harness-workspace-speech--insert "harness-ui-workspace-speech" (floor &optional no-heading))
+(declare-function harness-workspace-speech--floor "harness-ui-workspace-speech" (&optional id))
+
 (defvar harness-ui-workspace-mode-map
   (let ((map (make-sparse-keymap)))
     ;; The compose box's keys (RET newline, C-c C-a, C-y pasting images).
@@ -81,6 +85,7 @@
     (define-key map (kbd "C-c w R") #'harness-ui-workspace-resources)
     (define-key map (kbd "C-c w b") #'harness-ui-workspace-open-board)
     (define-key map (kbd "C-c w s") #'harness-ui-workspace-stop)
+    (define-key map (kbd "C-c w v") #'harness-workspace-speech)
     (define-key map (kbd "C-c w q") #'harness-ui-bury)
     (define-key map (kbd "C-c w ?") #'harness-ui-menu)
     map)
@@ -357,6 +362,18 @@ cost.  The settings are buttons of the shared settings line
      "The browser, wallet and credentials of this workspace")
     (insert "\n")))
 
+(defun harness-ui-workspace--insert-speech ()
+  "Insert the workspace's speech floor into the chat.
+The optional speech module draws it; nothing here keeps a queue of its
+own, and a harness without the floor inserts nothing."
+  (when (fboundp 'harness-workspace-speech--insert)
+    (let ((floor (and (fboundp 'harness-workspace-speech--floor)
+                      (harness-workspace-speech--floor harness-ui-workspace--id))))
+      (when floor
+        (insert "\n")
+        (harness-workspace-speech--insert floor t)
+        (insert "\n")))))
+
 (defun harness-ui-workspace--insert-threads ()
   "Insert the thread list."
   (let ((threads (plist-get harness-ui-workspace--data :threads)))
@@ -575,6 +592,9 @@ them, so the answers and their tooltips are the ones every view has."
         (_
          (harness-ui-workspace--insert-header)
          (insert "\n")
+         ;; What the workspace has to say, before the threads: a waiting
+         ;; thread is what the person acts on first.
+         (harness-ui-workspace--insert-speech)
          (harness-ui-workspace--insert-threads)
          (insert "\n")
          (harness-ui-workspace--insert-timeline)
@@ -1073,7 +1093,8 @@ the one chat; the settings line under the box shows the model, thinking
 level, permission mode and the workspace's defaults.  Letters type in
 the compose box.
 \<harness-ui-workspace-mode-map>\[harness-ui-workspace-send] sends;
-the `C-c w' keys act on the workspace."
+the `C-c w' keys act on the workspace, and \[harness-workspace-speech]
+opens the speech panel beside it."
   (setq buffer-read-only nil)
   (setq-local truncate-lines nil
               word-wrap t
@@ -1105,6 +1126,7 @@ the `C-c w' keys act on the workspace."
         ("C-c w b" "Task board" harness-ui-workspace-open-board)
         ("C-c w s" "Stop" harness-ui-workspace-stop)
         ("C-c w g" "Refresh" harness-ui-workspace-refresh)
+        ("C-c w v" "Speech" harness-workspace-speech)
         ("C-c w R" "Resources" harness-ui-workspace-resources)
         ("C-c w q" "Previous buffer" harness-ui-bury)
         ("C-c C-c" "Send" harness-ui-workspace-send)
