@@ -384,7 +384,9 @@ SIZE is nil when PATH is not a regular file."
   "Return the supporting files of skill directory DIR, as relative names.
 They are sorted, no deeper than `harness-skills-scan-max-depth', dot
 files left out, and at most `harness-skills-scan-max-files' of them
-within `harness-skills-scan-max-files-bytes'.  The skill's own
+within `harness-skills-scan-max-files-bytes'.  The walk is by name,
+so a bound keeps the first names of a directory rather than an
+arbitrary subset of what the filesystem listed.  The skill's own
 `harness-skills-scan-file-name' is no supporting file and does not
 count against either bound.  Return (FILES . TRUNCATED) where TRUNCATED
 says the bounds cut the list."
@@ -400,7 +402,9 @@ says the bounds cut the list."
              (depth (cdr pair)))
         ;; Sort before applying the bounds: sorting only OUT would keep
         ;; a different subset for different filesystem enumeration orders.
-        (dolist (entry (ignore-errors (directory-files current t "\\`[^.]")))
+        (dolist (entry (sort (ignore-errors
+                               (directory-files current t "\\`[^.]"))
+                             #'string<))
           (unless truncated
             (cond
              ((member entry seen) nil)

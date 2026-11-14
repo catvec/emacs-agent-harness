@@ -213,6 +213,32 @@ listing that was cut says so; the SKILL.md is never among them."
           (should (equal (sort (copy-sequence (plist-get skill :files)) #'string<)
                          (plist-get skill :files))))))))
 
+(ert-deftest harness-skills-scan-the-bound-keeps-the-first-names-in-order ()
+  "A bound cuts the listing by name, not by the order a directory lists it.
+The walk reads a directory in whatever order the filesystem gives, so
+cutting there would keep an arbitrary subset: the files a scan reports,
+and the fingerprint it takes of them, would differ between two copies
+of one skill with the same bytes.  The listing is walked by name, so a
+bound always keeps the same first names."
+  (harness-skills-scan-test-with-root
+    (let* ((dir (expand-file-name "bare" root))
+           (entry (harness-skills-scan-test--entry root))
+           (names (mapcar (lambda (i) (format "file-%d.txt" i)) '(0 1 2 3 4 5))))
+      (dolist (name names)
+        (with-temp-file (expand-file-name name dir) (insert (make-string 8 ?x))))
+      ;; Whatever order the directory lists them in, the first three by name
+      ;; are the ones kept, and the rest are the ones the bound left out.
+      (let ((harness-skills-scan-max-files 3))
+        (let ((skill (harness-skills-scan-read dir entry)))
+          (should (equal (list "file-0.txt" "file-1.txt" "file-2.txt")
+                         (plist-get skill :files)))
+          (should (plist-get skill :files-truncated))))
+      ;; Every name the directory holds reaches the listing: nothing is lost
+      ;; before the bound is weighed.
+      (let ((harness-skills-scan-max-files 200))
+        (should (equal (sort (copy-sequence names) #'string<)
+                       (plist-get (harness-skills-scan-read dir entry) :files)))))))
+
 (ert-deftest harness-skills-scan-bounds-ignore-directory-enumeration-order ()
   "Count and byte bounds select the same files and fingerprint in either order."
   (harness-skills-scan-test-with-root

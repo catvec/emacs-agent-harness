@@ -11825,7 +11825,7 @@ window starts on, and when no message shows."
           (set-window-start (selected-window) start1 t)
           (funcall refresh)
           (should-not (harness-ui-chat-test-time-bar))
-          (should-not (string-search (harness-chat--time-label t1)
+          (should-not (string-search (harness-chat--time-clock t1)
                                      (substring-no-properties (harness-chat--header))))
           ;; Its body, its group's timestamp off screen: the line says when
           ;; the message at the top was sent, with the whole time in its tooltip.
@@ -11833,7 +11833,7 @@ window starts on, and when no message shows."
           (set-window-start (selected-window) (1+ (line-end-position)) t)
           (funcall refresh)
           (let* ((bar (harness-ui-chat-test-time-bar))
-                 (pos (string-search (harness-chat--time-label t1) bar)))
+                 (pos (string-search (harness-chat--time-clock t1) bar)))
             (should bar)
             (should pos)
             (should (memq 'harness-summary-face
@@ -11843,10 +11843,10 @@ window starts on, and when no message shows."
             (should (string-suffix-p "\n" bar))
             (should (string-search "─" bar))
             ;; The header itself has no time.
-            (should-not (string-search (harness-chat--time-label t1)
+            (should-not (string-search (harness-chat--time-clock t1)
                                        (substring-no-properties (harness-chat--header))))
             ;; A narrow window keeps the time, and shortens the rule.
-            (should (string-search (harness-chat--time-label t1)
+            (should (string-search (harness-chat--time-clock t1)
                                    (harness-chat--time-line t1 36)))
             ;; The overlay is the window's own, at the first whole line.
             (let ((ov (alist-get (selected-window) harness-chat--time-bars)))
@@ -11857,7 +11857,7 @@ window starts on, and when no message shows."
           ;; line gives the time of the message there.
           (set-window-start (selected-window) start2 t)
           (funcall refresh)
-          (should (string-search (harness-chat--time-label t2)
+          (should (string-search (harness-chat--time-clock t2)
                                  (harness-ui-chat-test-time-bar)))
           ;; A group's own timestamp at the top means no line.
           (set-window-start (selected-window) start3 t)
@@ -11904,6 +11904,59 @@ lines."
     (should-not (string-search (harness-chat--time-label this-year)
                                (harness-chat--time-line this-year 80)))))
 
+(ert-deftest harness-ui-chat-timestamps-the-pinned-line-is-the-clock-alone ()
+  "The line under the header shows the clock of a message from another day.
+The date stays on the sender line the transcript carries, and in the
+tooltip.  Both times are fixed: one is in 2020 and the other on the day
+before, so the two readings part whatever hour the suite runs at --
+including the half hour after midnight, where a message half an hour
+old is yesterday's and a line drawn with the dated label would fail."
+  (harness-ui-chat-test-with
+    (let* ((past (float-time (encode-time 0 48 23 13 11 2020)))
+           ;; Yesterday at a fixed hour: another day whatever time it is now.
+           (yesterday (float-time (encode-time 0 48 23
+                                              (1- (decoded-time-day (decode-time)))
+                                              (decoded-time-month (decode-time))
+                                              (decoded-time-year (decode-time)))))
+           (sid (harness-ui-chat-test-session))
+           (b1 (harness-ui-chat-test--append sid 'user "one" past))
+           (b2 (harness-ui-chat-test--append sid 'user "two" yesterday))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (set-window-buffer (selected-window) buf)
+        (cl-flet ((pin (block)
+                       "Put BLOCK's body at the top and return its time line."
+                       (goto-char (marker-position (harness-chat-block-start block)))
+                       (set-window-start (selected-window) (1+ (line-end-position)) t)
+                       (harness-chat--refresh-time-bar (selected-window))
+                       (harness-ui-chat-test-time-bar)))
+          (let* ((one (gethash b1 harness-chat--blocks))
+                 (bar (pin one))
+                 (label (harness-chat--time-label past))
+                 (clock (harness-chat--time-clock past)))
+            ;; The sender line names the day; the pinned line does not.
+            (should (equal (concat harness-chat-user-label "  " label)
+                           (harness-ui-chat-test--first-line one)))
+            (should-not (equal label clock))
+            (should (string-search clock bar))
+            (should-not (string-search label bar))
+            ;; The whole of it is in the tooltip, date and all.
+            (should (equal (format "First message on screen: %s"
+                                   (harness-chat--time-full past))
+                           (get-text-property (string-search clock bar)
+                                              'help-echo bar))))
+          ;; A message of another day: the clock alone in the line, the day
+          ;; on its sender line, as after midnight for one sent before it.
+          (let* ((two (gethash b2 harness-chat--blocks))
+                 (bar (pin two))
+                 (label (harness-chat--time-label yesterday))
+                 (clock (harness-chat--time-clock yesterday)))
+            (should (equal (concat harness-chat-user-label "  " label)
+                           (harness-ui-chat-test--first-line two)))
+            (should-not (equal label clock))
+            (should (string-search clock bar))
+            (should-not (string-search label bar))))))))
+
 (ert-deftest harness-ui-chat-timestamps-a-run-of-calls-keeps-its-first-time ()
   "A coalesced run of calls stands for its first call's time.
 The summary carries that time, shows it on the agent line when the run
@@ -11933,14 +11986,14 @@ that line scrolled away."
             (set-window-start (selected-window) (line-beginning-position) t)
             (harness-chat--refresh-time-bar (selected-window))
             (should-not (harness-ui-chat-test-time-bar))
-            (should-not (string-search (harness-chat--time-label t1)
+            (should-not (string-search (harness-chat--time-clock t1)
                                        (substring-no-properties (harness-chat--header))))
             ;; The summary line alone: the line under the header has the time.
             (set-window-start (selected-window) (1+ (line-end-position)) t)
             (harness-chat--refresh-time-bar (selected-window))
-            (should (string-search (harness-chat--time-label t1)
+            (should (string-search (harness-chat--time-clock t1)
                                    (harness-ui-chat-test-time-bar)))
-            (should-not (string-search (harness-chat--time-label t1)
+            (should-not (string-search (harness-chat--time-clock t1)
                                        (substring-no-properties (harness-chat--header))))))))))
 
 ;;;### Testing the time line's lifecycle
