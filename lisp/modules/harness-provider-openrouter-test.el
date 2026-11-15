@@ -2622,13 +2622,25 @@ is a new fetch, and it succeeds."
           ;; The in-flight entry is cleaned up, so the next call fetches.
           (should (= 0 (hash-table-count harness-openrouter--fetching)))
           (should (= 0 (hash-table-count harness-openrouter--catalogue)))
-          (let ((third (harness-openrouter--choose-now policy)))
-            (should (= 1 (length harness-openrouter-test--held-catalogues)))
-            (harness-openrouter-test--answer-catalogue)
-            (let ((reading (harness-await third 5)))
-              (should (numberp (plist-get reading :at)))
-              (should (= 2 (length (plist-get reading :endpoints))))
-              (should (= 1 (hash-table-count harness-openrouter--catalogue))))))))))
+          ;; The episode is live, so a caller asking now is answered the
+          ;; failure already found rather than adding a read to the outage:
+          ;; an outage costs one failed read, not one per caller
+          ;; (`harness-openrouter--reading-for').  The bounded background
+          ;; re-reads are the only ones that read again.
+          (should-error (harness-await (harness-openrouter--choose-now policy) 5))
+          (should (= 0 (length harness-openrouter-test--held-catalogues)))
+          (should (= 1 (harness-openrouter-test--catalogue-reads)))
+          ;; A background re-read that succeeds ends the episode, and the
+          ;; next lookup is answered from the reading it made.
+          (setq harness-openrouter-test--hold-catalogue nil)
+          (harness-openrouter--catalogue-retry harness-openrouter-test-model)
+          (harness-test-wait
+           (lambda () (zerop (hash-table-count harness-openrouter--fetching)))
+           5 "the background re-read to settle")
+          (let ((reading (harness-await (harness-openrouter--choose-now policy) 5)))
+            (should (numberp (plist-get reading :at)))
+            (should (= 2 (length (plist-get reading :endpoints))))
+            (should (= 1 (hash-table-count harness-openrouter--catalogue)))))))))
 
 (ert-deftest harness-provider-openrouter-cancelling-one-consumer-keeps-the-reading ()
   "Cancelling one session's wait does not cancel another's catalogue reading.
@@ -2815,5 +2827,776 @@ provider's answer alone."
               (should (eq 'rate-limit (plist-get done :error-kind)))
               (should-not (plist-get done :limit-scope)))))))))
 
+
+;;;; The catalogue is the model's, and an outage does not stop a session
+;;
+;; These are the behaviours the reported pause was about: a session stopped
+;; because a catalogue read failed while a perfectly usable reading of the
+;; same model was already in the process.  The reading is the model's, not a
+;; session's, and these tests hold it to that -- without ever letting a
+;; reading the policy does not admit decide a price.
+
+(ert-deftest harness-provider-openrouter-a-new-session-reuses-a-recent-reading ()
+  "A second session of the same model spends no catalogue request.
+The first session's reading is the model's, and a reading younger than
+`harness-openrouter-catalogue-ttl' answers the next session as it is.  The
+reported failure was the opposite: every new session forced a fetch, so a
+momentary failure stopped a session that had nothing to learn."
+  (let ((policy (harness-openrouter-test-policy))
+        (first (harness-openrouter-test--session "s-first"))
+        (second (harness-openrouter-test--session "s-second")))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--catalogue-response)
+                (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-session first
+          (let ((events (harness-openrouter-test--run (harness-openrouter-test--request first))))
+            (should (eq 'end-turn (plist-get (car (last events)) :stop-reason)))))
+        (should (= 1 (harness-openrouter-test--catalogue-reads)))
+        ;; The second session, started beside it, is answered from the same
+        ;; reading: no second request, and the same endpoint pinned.
+        (harness-openrouter-test-with-session second
+          (let ((events (harness-openrouter-test--run (harness-openrouter-test--request second))))
+            (should (eq 'end-turn (plist-get (car (last events)) :stop-reason)))
+            (should (= 1 (harness-openrouter-test--catalogue-reads)))
+            (should (equal "deepinfra/fp8" (plist-get harness-openrouter-test--stored :slug)))
+            ;; A reused reading is not a degraded one: nothing is said about
+            ;; a failed refresh that did not happen.
+            (should-not (cl-find-if (lambda (h) (string-match-p "degraded" h))
+                                    harness-openrouter-test--hints))))))))
+
+(ert-deftest harness-provider-openrouter-a-burst-of-new-sessions-reads-once ()
+  "Five sessions started together share one catalogue read.
+They are started while the fetch is genuinely in flight, so the assertion
+is about coalescing as well as about the reading that follows it: one
+request, five pins, five sends."
+  (let ((policy (harness-openrouter-test-policy))
+        (sessions (mapcar (lambda (n) (harness-openrouter-test--session (format "s-%d" n)))
+                          (number-sequence 1 5)))
+        (events nil))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-session (car sessions)
+          (setq harness-openrouter-test--hold-catalogue t)
+          (dolist (session sessions)
+            (harness-call 'provider/complete
+                          (plist-put (harness-openrouter-test--request session)
+                                     :on-event (lambda (e) (push e events)))))
+          (should (= 1 (length harness-openrouter-test--held-catalogues)))
+          (harness-openrouter-test--answer-catalogue)
+          (harness-test-wait (lambda () (= 5 (length (harness-openrouter-test--done-events events))))
+                             5 "five answers")
+          (should (= 1 (harness-openrouter-test--catalogue-reads)))
+          (should (= 5 (length (harness-openrouter-test--sent-completions)))))))))
+
+(ert-deftest harness-provider-openrouter-a-failed-refresh-uses-the-last-reading ()
+  "A refresh that fails serves the last reading, while the policy admits it.
+The reading is two minutes old and the policy allows five: past the shared
+refresh interval, so the first dispatch is served it while the catalogue
+is read again behind it.  That read answers a 503, and the next dispatch
+still runs -- on the older reading, which the hint and the degraded event
+name as such, with what the refresh said.  Before, the 503 stopped it."
+  (let* ((policy (harness-openrouter-test-policy :freshness 3600))
+         (first (harness-openrouter-test--session "s-first"))
+         (second (harness-openrouter-test--session "s-second")))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (cons (harness-openrouter-test--catalogue-url-regexp)
+                      '(:error (http-error 503 "upstream unavailable")))
+                (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-session first
+          (harness-openrouter-test--seed-reading 1000)
+          ;; Served at once, and the refresh starts behind the dispatch.
+          (let ((events (harness-openrouter-test--run
+                         (harness-openrouter-test--request first))))
+            (should (eq 'end-turn (plist-get (car (last events)) :stop-reason))))
+          (harness-test-wait
+           (lambda () (zerop (hash-table-count harness-openrouter--fetching)))
+           5 "the refresh to settle"))
+        (should (= 1 (harness-openrouter-test--catalogue-reads)))
+        (harness-openrouter-test-with-session second
+          (let ((events (harness-openrouter-test--run
+                         (harness-openrouter-test--request second))))
+            (should (eq 'end-turn (plist-get (car (last events)) :stop-reason)))
+            ;; No read of its own: the episode's re-reads own the next one.
+            (should (= 1 (harness-openrouter-test--catalogue-reads)))
+            (should (= 2 (length (harness-openrouter-test--sent-completions))))
+            ;; The hint says the reading is an older one, and says how old.
+            (should (cl-find-if
+                     (lambda (h) (string-match-p
+                                  "using the reading 1000 s old, inside the policy's freshness bound" h))
+                     harness-openrouter-test--hints))
+            ;; The dispatch says what failed, once, and does not pause.
+            (should (= 1 (length (harness-openrouter-test--degraded-notes))))
+            (should (string-match-p "HTTP 503: upstream unavailable"
+                                    (car (harness-openrouter-test--degraded-notes))))
+            (should-not (cl-find-if (lambda (h) (string-match-p "paused" h))
+                                    harness-openrouter-test--hints))))))))
+
+
+(ert-deftest harness-provider-openrouter-a-reading-inside-the-interval-spends-no-read ()
+  "A reading younger than the shared interval is answered with no request.
+Two sessions of the same model, one after the other: the second spends
+nothing, because the reading the first made is inside
+`harness-openrouter-catalogue-ttl'.  Nothing about the second session's
+send is degraded either -- no refresh was owed, so none failed."
+  (let ((policy (harness-openrouter-test-policy))
+        (first (harness-openrouter-test--session "s-first"))
+        (second (harness-openrouter-test--session "s-second")))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-session first
+          (harness-openrouter-test--seed-reading 5)
+          (let ((events (harness-openrouter-test--run
+                         (harness-openrouter-test--request first))))
+            (should (eq 'end-turn (plist-get (car (last events)) :stop-reason)))))
+        (harness-openrouter-test-with-session second
+          (let ((events (harness-openrouter-test--run
+                         (harness-openrouter-test--request second))))
+            (should (eq 'end-turn (plist-get (car (last events)) :stop-reason)))))
+        (should (= 0 (harness-openrouter-test--catalogue-reads)))
+        (should-not (harness-openrouter-test--degraded-notes))
+        (should-not (cl-find-if (lambda (h) (string-match-p "revalidating" h))
+                                harness-openrouter-test--hints))))))
+
+(ert-deftest harness-provider-openrouter-a-judge-within-the-interval-spends-no-read ()
+  "A permission judge started beside a session shares the session's reading.
+The judge is a one-off call (`:ephemeral'), and its budget is about the
+answer it asks for.  Within the interval it neither waits for a catalogue
+nor spends a request: it is answered from the reading the session just
+made, and its own answer goes out."
+  (let ((policy (harness-openrouter-test-policy))
+        (session (harness-openrouter-test--session "s-first"))
+        (judge (harness-openrouter-test--session "s-judge")))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-session session
+          (harness-openrouter-test--seed-reading 5)
+          (harness-openrouter-test--run (harness-openrouter-test--request session)))
+        (should (= 0 (harness-openrouter-test--catalogue-reads)))
+        (harness-openrouter-test-with-session judge
+          (let* ((request (plist-put (harness-openrouter-test--request judge)
+                                     :ephemeral t))
+                 (events (harness-openrouter-test--run request)))
+            (should (eq 'end-turn (plist-get (car (last events)) :stop-reason)))))
+        (should (= 0 (harness-openrouter-test--catalogue-reads)))
+        (should (= 2 (length (harness-openrouter-test--sent-completions))))))))
+
+(ert-deftest harness-provider-openrouter-many-sessions-and-judges-share-one-read ()
+  "Sessions and judges started together within the interval share one fetch.
+Five sessions and three one-off calls are started while a single
+catalogue fetch is genuinely in flight, then the fetch is answered.  All
+eight are answered, and the whole burst -- sessions and judges alike --
+spent one catalogue request, not eight.  A judge that started a read of
+its own would be the reported failure in its own right: the catalogue is
+read once per the shared interval, by whoever gets there first."
+  (let* ((policy (harness-openrouter-test-policy))
+         (sessions (mapcar (lambda (n) (harness-openrouter-test--session (format "s-%d" n)))
+                           (number-sequence 1 5)))
+         (judges (mapcar (lambda (n) (harness-openrouter-test--session (format "j-%d" n)))
+                         (number-sequence 1 3)))
+         (events nil))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-session (car sessions)
+          (setq harness-openrouter-test--hold-catalogue t)
+          (dolist (session (append sessions judges))
+            (harness-call 'provider/complete
+                          (plist-put (plist-put (harness-openrouter-test--request session)
+                                                :on-event (lambda (e) (push e events)))
+                                     :ephemeral (and (memq session judges) t))))
+          (should (= 1 (length harness-openrouter-test--held-catalogues)))
+          (harness-openrouter-test--answer-catalogue)
+          (harness-test-wait
+           (lambda () (= 8 (length (harness-openrouter-test--done-events events))))
+           10 "eight answers, sessions and judges")
+          (should (= 1 (harness-openrouter-test--catalogue-reads)))
+          (should (= 8 (length (harness-openrouter-test--sent-completions)))))))))
+
+(ert-deftest harness-provider-openrouter-a-reading-past-the-interval-is-served-while-revalidated ()
+  "A reading past the interval is answered at once, and revalidated behind it.
+The policy allows an hour and the reading is a quarter of an hour old: it
+is past the shared refresh interval but well inside the bound the
+operator set for a price decision, so the session does not wait for a
+read.  It sends on the reading in hand, the read is started behind it,
+and the dispatch says the catalogue is being brought up to date."
+  (let* ((policy (harness-openrouter-test-policy :freshness 3600))
+         (session (harness-openrouter-test--session "s-new"))
+         (events nil))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-session session
+          (harness-openrouter-test--seed-reading 900)
+          (setq harness-openrouter-test--hold-catalogue t)
+          (setq events (harness-openrouter-test--run
+                        (harness-openrouter-test--request session)))
+          (should (eq 'end-turn (plist-get (car (last events)) :stop-reason)))
+          ;; Answered from the reading, and the shared read was started.
+          (should (= 1 (length harness-openrouter-test--held-catalogues)))
+          (should (= 1 (length (harness-openrouter-test--sent-completions))))
+          (should (cl-find-if (lambda (h) (string-match-p "catalogue revalidating" h))
+                              harness-openrouter-test--hints))
+          (should-not (harness-openrouter-test--degraded-notes))
+          ;; The status says what it is: being read again, and still usable.
+          (let ((status (harness-openrouter-catalogue-status)))
+            (should (eq 'revalidating (plist-get status :state)))
+            (should (eq 'usable (plist-get status :reading))))
+          (harness-openrouter-test--answer-catalogue)
+          (harness-test-wait
+           (lambda () (eq 'fresh (plist-get (harness-openrouter-catalogue-status) :state)))
+           5 "the revalidating read to settle"))))))
+
+(ert-deftest harness-provider-openrouter-a-judge-does-not-start-a-revalidation ()
+  "A one-off call past the interval is answered without starting a read.
+The reading is the session's, and it is past the shared interval but
+inside the policy's bound.  A judge asking now is answered from it at
+once, and starts no read of its own: the catalogue is read by work that
+can wait for it, never by the judge whose budget is the call it is
+deciding."
+  (let ((policy (harness-openrouter-test-policy :freshness 3600))
+        (judge (harness-openrouter-test--session "s-judge")))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-session judge
+          (harness-openrouter-test--seed-reading 900)
+          (let* ((request (plist-put (harness-openrouter-test--request judge)
+                                     :ephemeral t))
+                 (events (harness-openrouter-test--run request)))
+            (should (eq 'end-turn (plist-get (car (last events)) :stop-reason)))))
+        (should (= 0 (harness-openrouter-test--catalogue-reads)))))))
+
+(ert-deftest harness-provider-openrouter-callers-past-the-interval-share-the-read ()
+  "Callers past the interval share the one read that brings the reading up to date.
+Two callers ask while the revalidating read is in flight: it is the same
+read, so the catalogue is read once for both of them, not once each."
+  (let ((policy (harness-openrouter-test-policy :freshness 3600)))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--catalogue-response))
+        (harness-openrouter-test--seed-reading 900)
+        (setq harness-openrouter-test--hold-catalogue t)
+        (let ((first (harness-openrouter--choose-now policy))
+              (second (harness-openrouter--choose-now policy)))
+          (should (= 1 (length harness-openrouter-test--held-catalogues)))
+          (harness-openrouter-test--answer-catalogue)
+          (harness-await first 5)
+          (harness-await second 5)
+          (should (= 1 (harness-openrouter-test--catalogue-reads))))))))
+
+(ert-deftest harness-provider-openrouter-an-outage-costs-one-read-not-one-per-session ()
+  "A second session during the same outage is answered without a new read.
+The first session's reading is outside the policy's bound, so its failed
+refresh pauses it; the second is started a moment later and is answered
+from the failure the first one left, without spending another failing
+request.  While an episode is live an ordinary lookup never adds a read:
+the bounded background re-reads are the only ones."
+  (let* ((policy (harness-openrouter-test-policy))
+         (first (harness-openrouter-test--session "s-first"))
+         (second (harness-openrouter-test--session "s-second")))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (cons (harness-openrouter-test--catalogue-url-regexp)
+                      '(:error (http-error 503 "upstream unavailable"))))
+        (harness-openrouter-test-with-session first
+          (harness-openrouter-test--seed-reading 3600)
+          (let ((events (harness-openrouter-test--run (harness-openrouter-test--request first))))
+            (should (eq 'catalogue-unavailable
+                        (plist-get (car (last events)) :error-kind)))))
+        (should (= 1 (harness-openrouter-test--catalogue-reads)))
+        (harness-openrouter-test-with-session second
+          (let ((events (harness-openrouter-test--run
+                         (harness-openrouter-test--request second))))
+            ;; Still one read: the episode is live, so the answer is the
+            ;; same pause without another request.
+            (should (= 1 (harness-openrouter-test--catalogue-reads)))
+            (should (eq 'catalogue-unavailable
+                        (plist-get (car (last events)) :error-kind)))
+            (should-not (harness-openrouter-test--sent-completions))))))))
+
+(ert-deftest harness-provider-openrouter-background-retries-are-a-burst-then-a-heartbeat ()
+  "A failure episode retries fast at first, then slowly, and never stops.
+The first `harness-openrouter-catalogue-retry-attempts' re-reads double
+from `harness-openrouter-catalogue-retry-delay' up to
+`harness-openrouter-catalogue-retry-max-delay'; after them the episode
+keeps one slow probe at that longest delay until a read settles, so a
+catalogue that was unreachable for an hour is read again by itself
+instead of staying broken until a person asks.  The bound is on the
+burst, not on the recovery."
+  (let* ((policy (harness-openrouter-test-policy :freshness 3600))
+         (harness-openrouter-catalogue-retry-attempts 2)
+         (harness-openrouter-catalogue-retry-delay 5)
+         (harness-openrouter-catalogue-retry-max-delay 300)
+         (session (harness-openrouter-test--session "s-first")))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (cons (harness-openrouter-test--catalogue-url-regexp)
+                      '(:error (http-error 503 "upstream unavailable"))))
+        (harness-openrouter-test-with-session session
+          ;; Past the shared interval, so the refresh really is attempted.
+          (harness-openrouter-test--seed-reading 1000)
+          (harness-openrouter-test--run (harness-openrouter-test--request session))
+          ;; The first failure schedules the burst's first re-read.
+          (should (= 0 (plist-get (harness-openrouter-catalogue-status) :attempts)))
+          (should (numberp (plist-get (harness-openrouter-catalogue-status) :next-at)))
+          ;; The burst, one re-read at a time, each settling before the next.
+          (dotimes (_ 3)
+            (harness-openrouter--catalogue-retry harness-openrouter-test-model)
+            (harness-test-wait (lambda () (zerop (hash-table-count
+                                                  harness-openrouter--fetching)))
+                               5 "the re-read to settle"))
+          ;; Every attempt of the episode is counted, the probes included,
+          ;; and the episode is still live: it has not given up.
+          (should (= 3 (plist-get (harness-openrouter-catalogue-status) :attempts)))
+          (should (numberp (plist-get (harness-openrouter-catalogue-status) :next-at)))
+          (should (= 4 (harness-openrouter-test--catalogue-reads)))
+          ;; A probe is still scheduled: the recovery is slow, not
+          ;; abandoned.  The wait grows with the attempts spent and is
+          ;; capped at `harness-openrouter-catalogue-retry-max-delay'.
+          (let* ((episode (gethash harness-openrouter-test-model
+                                   harness-openrouter--catalogue-failures))
+                 (next-at (plist-get episode :next-at))
+                 (wait (- next-at (float-time))))
+            (should (numberp next-at))
+            (should (<= 5 wait))
+            (should (<= wait harness-openrouter-catalogue-retry-max-delay))
+            (should (timerp (plist-get episode :timer)))))))))
+
+
+(ert-deftest harness-provider-openrouter-a-degraded-reading-keeps-every-limit ()
+  "An older reading still has to pass the price, provider and privacy checks.
+The reading is inside the policy's freshness bound and its refresh failed,
+so the session runs; what it may spend, whom it may use and what it must
+not disclose are the ones the policy named, unchanged by the reuse."
+  (let* ((policy (harness-openrouter-test-policy))
+         (session (harness-openrouter-test--session "s-new")))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (cons (harness-openrouter-test--catalogue-url-regexp)
+                      '(:error (http-error 503 "upstream unavailable")))
+                (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-session session
+          (harness-openrouter-test--seed-reading 120)
+          (harness-openrouter-test--run (harness-openrouter-test--request session))
+          (let* ((sent (car (harness-openrouter-test--sent-completions)))
+                 (body (plist-get sent :json))
+                 (provider (plist-get body :provider)))
+            (should sent)
+            (should (equal '("deepinfra/fp8") (append (plist-get provider :only) nil)))
+            (should (equal '("deepinfra/fp8") (append (plist-get provider :order) nil)))
+            (should (eq :false (plist-get provider :allow_fallbacks)))
+            (should (eq t (plist-get provider :require_parameters)))
+            (should (equal "deny" (plist-get provider :data_collection)))
+            (should (eq t (plist-get provider :zdr)))
+            (should (harness-openrouter-test--approx
+                     0.15 (plist-get (plist-get provider :max_price) :prompt)))
+            (should (harness-openrouter-test--approx
+                     0.60 (plist-get (plist-get provider :max_price) :completion)))
+            ;; The price recorded on the pin is the reading's, not a new one.
+            (should (harness-openrouter-test--approx
+                     0.098 (plist-get harness-openrouter-test--stored :prompt)))))))))
+
+(ert-deftest harness-provider-openrouter-a-degraded-read-refuses-a-dearer-old-price ()
+  "An older reading whose price is over the maximum refuses, as a fresh one would.
+Reuse does not relax the price rule: the reading is inside the freshness
+bound, so it may decide, and what it says is that the endpoint is dearer
+than the maximum.  Nothing is sent and nothing is reselected."
+  (let* ((policy (harness-openrouter-test-policy))
+         (session (harness-openrouter-test--session "s-new"))
+         (dearer (harness-openrouter-test--catalogue-json
+                  (harness-openrouter-test--endpoint-json
+                   "deepinfra/fp8" "DeepInfra"
+                   :pricing '(:prompt "0.00000035" :completion "0.0000014"
+                              :input_cache_read "0.0000000035" :discount 0))
+                  (harness-openrouter-test--endpoint-json
+                   "cohere/fp8" "Cohere"
+                   :pricing '(:prompt "0.00000015" :completion "0.0000005"
+                              :input_cache_read "0.000000003" :discount 0)))))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (cons (harness-openrouter-test--catalogue-url-regexp)
+                      '(:error (http-error 503 "upstream unavailable")))
+                (harness-openrouter-test--answer-from "Cohere"))
+        (harness-openrouter-test-with-session session
+          (puthash harness-openrouter-test-model
+                   (list :at (- (float-time) 120)
+                         :endpoints (harness-openrouter-parse-endpoints
+                                     (harness-json-parse dearer)))
+                   harness-openrouter--catalogue)
+          (let ((events (harness-openrouter-test--run
+                         (harness-openrouter-test--request session))))
+            ;; DeepInfra is now over the maximum, so Cohere is the cheaper
+            ;; endpoint that fits -- the ordinary price rule, on an older
+            ;; reading.  What matters here is that the reading was used and
+            ;; the rule still applied: the dear endpoint was not pinned.
+            (should (eq 'end-turn (plist-get (car (last events)) :stop-reason)))
+            (should (equal "cohere/fp8" (plist-get harness-openrouter-test--stored :slug)))
+            (let ((provider (plist-get (plist-get (car (harness-openrouter-test--sent-completions))
+                                                  :json)
+                                       :provider)))
+              (should (equal '("cohere/fp8") (append (plist-get provider :only) nil)))
+              (should (harness-openrouter-test--approx
+                       0.15 (plist-get harness-openrouter-test--stored :prompt))))))))))
+
+(ert-deftest harness-provider-openrouter-a-failed-refresh-retries-in-the-background ()
+  "A failed refresh schedules a re-read, and a good one ends the episode.
+The first session's read fails; the background re-read then succeeds, and
+the next session is answered from it without a read of its own.  The
+episode is over, so the status says fresh rather than stale."
+  (let* ((policy (harness-openrouter-test-policy :freshness 3600))
+         (first (harness-openrouter-test--session "s-first"))
+         (second (harness-openrouter-test--session "s-second")))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (cons (harness-openrouter-test--catalogue-url-regexp)
+                      '(:error (http-error 503 "upstream unavailable")))
+                (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-session first
+          ;; Past the shared interval, so the refresh is really attempted.
+          (harness-openrouter-test--seed-reading 1000)
+          (harness-openrouter-test--run (harness-openrouter-test--request first))
+          (harness-test-wait
+           (lambda () (zerop (hash-table-count harness-openrouter--fetching)))
+           5 "the failed refresh to settle")
+          (let ((status (harness-openrouter-catalogue-status)))
+            (should (eq 'stale (plist-get status :state)))
+            (should (string-match-p "HTTP 503" (plist-get status :error)))
+            (should (numberp (plist-get status :next-at)))))
+        ;; The re-read is due; the fake answers this one.
+        (setq harness-openrouter-test--responses
+              (list (harness-openrouter-test--catalogue-response)
+                    (harness-openrouter-test--completion-response)))
+        (harness-openrouter--catalogue-retry harness-openrouter-test-model)
+        (should (= 2 (harness-openrouter-test--catalogue-reads)))
+        (harness-test-wait (lambda () (eq 'fresh
+                                          (plist-get (harness-openrouter-catalogue-status) :state)))
+                           5 "the background re-read")
+        (harness-openrouter-test-with-session second
+          (let ((events (harness-openrouter-test--run
+                         (harness-openrouter-test--request second))))
+            (should (eq 'end-turn (plist-get (car (last events)) :stop-reason)))
+            (should (= 2 (harness-openrouter-test--catalogue-reads)))
+            (should-not (cl-find-if (lambda (h) (string-match-p "stale reading" h))
+                                    harness-openrouter-test--hints))))))))
+
+(ert-deftest harness-provider-openrouter-a-degraded-dispatch-that-is-cancelled-sends-nothing ()
+  "Cancelling a dispatch on an older reading sends no completion.
+The reading is served after a failed refresh, and the session is cancelled
+before the send: the degraded notice is not a licence to send a request
+the session no longer wants."
+  (let* ((policy (harness-openrouter-test-policy))
+         (session (harness-openrouter-test--session "s-new"))
+         (handle nil))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (cons (harness-openrouter-test--catalogue-url-regexp)
+                      '(:error (http-error 503 "upstream unavailable")))
+                (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-session session
+          ;; Past the interval, so the dispatch is served the reading and the
+          ;; refresh is started behind it: the send is waiting on nothing.
+          (harness-openrouter-test--seed-reading 1000)
+          (setq harness-openrouter-test--hold-catalogue t)
+          (setq handle (harness-call 'provider/complete
+                                     (plist-put (harness-openrouter-test--request session)
+                                                :on-event #'ignore)))
+          (should (= 1 (length harness-openrouter-test--held-catalogues)))
+          ;; Cancelled before the shared read settles: the failed refresh and
+          ;; the degraded reading it would leave are no licence to send.
+          (funcall (plist-get handle :cancel))
+          (harness-openrouter-test--fail-catalogue (list 'http-error 503 "upstream unavailable"))
+          (sit-for 0.05)
+          (should-not (harness-openrouter-test--sent-completions)))))))
+
+(ert-deftest harness-provider-openrouter-the-status-says-what-the-catalogue-is ()
+  "The status reports absent, fresh, stale and expired, and never decides.
+A reading inside the TTL is fresh; one whose refresh failed and is inside
+the policy's bound is stale; one outside it is expired; no reading at all
+is absent.  Each is what the catalogue is, not what a policy would do."
+  (let ((policy (harness-openrouter-test-policy)))
+    (harness-openrouter-test-with-policy policy
+      (should (eq 'absent (plist-get (harness-openrouter-catalogue-status) :state)))
+      (should-not (plist-get (harness-openrouter-catalogue-status) :at))
+      (harness-openrouter-test--seed-reading 5)
+      (let ((status (harness-openrouter-catalogue-status)))
+        (should (eq 'fresh (plist-get status :state)))
+        (should (= 2 (plist-get status :endpoints)))
+        (should (numberp (plist-get status :age))))
+      ;; A failure noted for a reading inside the bound reads as stale.
+      (puthash harness-openrouter-test-model
+               (list :at (float-time) :error '(http-error 503 "unavailable") :attempts 1)
+               harness-openrouter--catalogue-failures)
+      (should (eq 'stale (plist-get (harness-openrouter-catalogue-status) :state)))
+      (should (string-match-p "HTTP 503" (plist-get (harness-openrouter-catalogue-status) :error)))
+      ;; The same failure with a reading outside the bound reads as expired.
+      (harness-openrouter-test--seed-reading 3600)
+      (should (eq 'expired (plist-get (harness-openrouter-catalogue-status) :state)))
+      ;; The status reports the shared interval it is judged against.
+      (should (= harness-openrouter-catalogue-ttl
+                 (plist-get (harness-openrouter-catalogue-status) :ttl)))
+      (should (eq 'expired (plist-get (harness-openrouter-catalogue-status) :state))))))
+
+(ert-deftest harness-provider-openrouter-a-reused-reading-is-not-a-switch ()
+  "Reusing a reading keeps the pin, and never reselects or moves it.
+A pinned session whose reading is refreshed from the shared catalogue
+still sends to the same endpoint; the reading being shared does not make
+the choice again."
+  (let* ((policy (harness-openrouter-test-policy))
+         (route (harness-openrouter-test--route '(:catalogue-at 0.0)))
+         (session (harness-openrouter-test--session
+                   "s-pinned" (list :openrouter-route route))))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--catalogue-response)
+                (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-session session
+          (harness-openrouter-test--seed-reading 5)
+          (let ((events (harness-openrouter-test--run (harness-openrouter-test--request session))))
+            (should (eq 'end-turn (plist-get (car (last events)) :stop-reason)))
+            ;; The reading is recent, so no request of the session's own.
+            (should (= 0 (harness-openrouter-test--catalogue-reads)))
+            (should-not harness-openrouter-test--stored)
+            (let ((provider (plist-get (plist-get (car (harness-openrouter-test--sent-completions))
+                                                  :json)
+                                       :provider)))
+              (should (equal '("deepinfra/fp8") (append (plist-get provider :only) nil))))))))))
+
+(ert-deftest harness-provider-openrouter-a-watchdog-timeout-says-it-is-one ()
+  "`request timed out after 20s' is the harness's watchdog, not the server.
+The transport ends a request whose curl is alive and silent with that
+text, and when the response had begun the status is the last one received
+-- so a stalled transfer reads as \"HTTP 200: request timed out after
+20s\".  A catalogue read that ends so pauses with that reason, and the
+message does not pretend the server refused anything."
+  (let* ((policy (harness-openrouter-test-policy))
+         (session (harness-openrouter-test--session "s-new"))
+         (events nil))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (cons (harness-openrouter-test--catalogue-url-regexp)
+                      '(:error (http-error 200 (timeout "request timed out after 20s")))))
+        (harness-openrouter-test-with-session session
+          (setq events (harness-openrouter-test--run (harness-openrouter-test--request session)))
+          (should (eq 'error (plist-get (car (last events)) :stop-reason)))
+          (should (eq 'catalogue-unavailable (plist-get (car (last events)) :error-kind)))
+          (should (equal (concat "OpenRouter routing paused: the endpoint catalogue"
+                                 " could not be read: HTTP 200: request timed out after 20s")
+                         (plist-get (car (last events)) :error)))
+          (should-not (harness-openrouter-test--sent-completions))
+          ;; It is reported as a timeout, never as a refusal by the server.
+          (should-not (string-match-p "Invalid error symbol"
+                                      (plist-get (car (last events)) :error))))))))
+
+(ert-deftest harness-provider-openrouter-invalidation-forces-one-read-and-keeps-it ()
+  "An explicit invalidation drops the reading and reads it again at once.
+The reading is well inside the interval, so no ordinary lookup would read
+at all.  The invalidation is the one path that does: it drops what was in
+hand, spends exactly one request, and the reading that settles replaces
+the dropped one."
+  (let ((policy (harness-openrouter-test-policy)))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--catalogue-response))
+        (harness-openrouter-test--seed-reading 5)
+        (should (= 0 (harness-openrouter-test--catalogue-reads)))
+        (harness-openrouter-catalogue-invalidate harness-openrouter-test-model)
+        (harness-test-wait
+         (lambda () (zerop (hash-table-count harness-openrouter--fetching)))
+         5 "the invalidation's read to settle")
+        (should (= 1 (harness-openrouter-test--catalogue-reads)))
+        (should (= 1 (hash-table-count harness-openrouter--catalogue)))
+        ;; The reading is the new one, and it is usable again.
+        (should (< (harness-openrouter--reading-age
+                    (gethash harness-openrouter-test-model
+                             harness-openrouter--catalogue))
+                   60))
+        (should (eq 'fresh (plist-get (harness-openrouter-catalogue-status) :state)))))))
+
+(ert-deftest harness-provider-openrouter-a-slow-read-cannot-undo-an-invalidation ()
+  "A read that began before an invalidation does not overwrite what it asked for.
+A read is started, and the reading it was started against is invalidated
+while it is in flight: the invalidation starts its own read, which
+answers first.  The older read settling late answers its own callers and
+is not stored over the newer reading.
+"
+  (let ((policy (harness-openrouter-test-policy))
+        (old nil)
+        (new nil))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--catalogue-response))
+        (harness-openrouter-test--seed-reading 5)
+        (setq harness-openrouter-test--hold-catalogue t)
+        ;; A read begins, as a background revalidation would.
+        (setq old (harness-openrouter--reading-of harness-openrouter-test-model))
+        (should (= 1 (length harness-openrouter-test--held-catalogues)))
+        ;; The person invalidates while it is still in flight: a second read
+        ;; is started, because the one in flight is a reading of the
+        ;; catalogue that was replaced.
+        (harness-openrouter-catalogue-invalidate harness-openrouter-test-model)
+        (should (= 2 (length harness-openrouter-test--held-catalogues)))
+        ;; The read that began before the invalidation settles first, and is
+        ;; answered to its own caller -- but is not stored: it is a reading
+        ;; of the catalogue that was replaced.
+        (harness-openrouter-test--answer-catalogue)
+        (harness-await old 5)
+        (should (= 0 (hash-table-count harness-openrouter--catalogue)))
+        ;; The read the invalidation asked for settles, and is stored.
+        (harness-openrouter-test--answer-catalogue)
+        (harness-test-wait (lambda () (= 1 (hash-table-count harness-openrouter--catalogue)))
+                           5 "the invalidation's reading")
+        (setq new (gethash harness-openrouter-test-model harness-openrouter--catalogue))
+        (should (listp (plist-get new :endpoints)))))))
+
+(ert-deftest harness-provider-openrouter-invalidation-does-not-reset-the-retry-bound ()
+  "Invalidating during an outage does not make the re-reads unbounded.
+The episode has already spent its attempts; an invalidation adds one read
+and keeps the count, so the burst and heartbeat stay bounded however often
+a person asks for a fresh reading."
+  (let ((policy (harness-openrouter-test-policy :freshness 3600))
+        (harness-openrouter-catalogue-retry-attempts 2))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (cons (harness-openrouter-test--catalogue-url-regexp)
+                      '(:error (http-error 503 "upstream unavailable"))))
+        (harness-openrouter-test--seed-reading 1000)
+        (let ((session (harness-openrouter-test--session "s-first")))
+          (harness-openrouter-test-with-session session
+            (harness-openrouter-test--run (harness-openrouter-test--request session))))
+        (harness-test-wait
+         (lambda () (zerop (hash-table-count harness-openrouter--fetching)))
+         5 "the first failure")
+        (let ((spent (plist-get (harness-openrouter-catalogue-status) :attempts)))
+          (harness-openrouter-catalogue-invalidate harness-openrouter-test-model)
+          (harness-test-wait
+           (lambda () (zerop (hash-table-count harness-openrouter--fetching)))
+           5 "the invalidation's read")
+          ;; The invalidation spent one read of its own, and left the
+          ;; episode's count exactly where it was: it drops the reading,
+          ;; never the bound, so the burst and heartbeat stay bounded
+          ;; however often a person asks for a fresh reading.
+          (should (= spent (plist-get (harness-openrouter-catalogue-status)
+                                      :attempts)))
+          (should (= 2 (harness-openrouter-test--catalogue-reads)))
+          (should (<= (plist-get (harness-openrouter-catalogue-status) :attempts)
+                      harness-openrouter-catalogue-retry-attempts)))))))
+
+(ert-deftest harness-provider-openrouter-a-cold-start-reads-once-for-everyone ()
+  "With no cache at all, the first read is shared and stored for the rest.
+The reported first-run case: nothing in hand, so a read is needed.  Every
+caller that arrives while it is in flight shares it, and the reading it
+leaves answers the next caller with no request at all."
+  (let* ((policy (harness-openrouter-test-policy))
+         (sessions (mapcar (lambda (n) (harness-openrouter-test--session (format "s-%d" n)))
+                           (number-sequence 1 3)))
+         (events nil))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-session (car sessions)
+          (should (eq 'absent (plist-get (harness-openrouter-catalogue-status) :state)))
+          (setq harness-openrouter-test--hold-catalogue t)
+          (dolist (session sessions)
+            (harness-call 'provider/complete
+                          (plist-put (harness-openrouter-test--request session)
+                                     :on-event (lambda (e) (push e events)))))
+          (should (= 1 (length harness-openrouter-test--held-catalogues)))
+          (harness-openrouter-test--answer-catalogue)
+          (harness-test-wait
+           (lambda () (= 3 (length (harness-openrouter-test--done-events events))))
+           5 "three answers")
+          (should (= 1 (harness-openrouter-test--catalogue-reads)))
+          (should (= 1 (hash-table-count harness-openrouter--catalogue)))
+          ;; A fourth caller, cold-start over, spends nothing.
+          (harness-openrouter-test-with-session (harness-openrouter-test--session "s-4")
+            (harness-openrouter-test--run
+             (harness-openrouter-test--request (harness-openrouter-test--session "s-4"))))
+          (should (= 1 (harness-openrouter-test--catalogue-reads))))))))
+
+;;;; A one-off call does not spend its budget on the catalogue
+;;
+;; The reported cross-symptom: the permission judge reported
+;; \"no verdict\" after 30 s, and the session's log named a catalogue
+;; read that timed out.  The judge's budget is about the answer it asks
+;; for; a catalogue read that stalls can take longer than the whole of
+;; it (`harness-openrouter-catalogue-timeout' plus the transport's 5 s
+;; watchdog), so the judge was answered \"no verdict\" for something
+;; that was never about the call it was asked to decide.
+
+(ert-deftest harness-provider-openrouter-a-judge-call-does-not-wait-out-a-stalled-catalogue ()
+  "A one-off call is refused rather than spending its budget on a read.
+The catalogue read is held, as a stalled one is, and the judge's request
+carries `:ephemeral'.  It ends inside
+`harness-openrouter-catalogue-ephemeral-wait', with the catalogue
+refusal -- never by sending the call the judge was asked to decide, and
+never by waiting the read out."
+  (let* ((policy (harness-openrouter-test-policy))
+         (session (harness-openrouter-test--session "s-judge"))
+         (events nil)
+         (started (float-time)))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-session session
+          (setq harness-openrouter-test--hold-catalogue t)
+          (let ((request (harness-openrouter-test--request session)))
+            (setq request (plist-put request :ephemeral t))
+            (harness-call 'provider/complete
+                          (plist-put request :on-event
+                                     (lambda (e) (push e events))))
+            (should (= 1 (length harness-openrouter-test--held-catalogues)))
+            (harness-test-wait
+             (lambda () (harness-openrouter-test--done-events events))
+             (+ harness-openrouter-catalogue-ephemeral-wait 5)
+             "the one-off call to give up on the catalogue")
+            (should (< (- (float-time) started)
+                       (+ harness-openrouter-catalogue-ephemeral-wait 5)))
+            (let ((done (car (last events))))
+              (should (eq 'error (plist-get done :stop-reason)))
+              (should (eq 'catalogue-unavailable (plist-get done :error-kind)))
+              (should (string-match-p "still being read"
+                                      (plist-get done :error))))
+            ;; Nothing was sent to the endpoint the judge would have judged,
+            ;; and nothing was pinned: a refusal is not a permission.
+            (should-not (harness-openrouter-test--sent-completions))
+            (should-not harness-openrouter-test--stored)
+            ;; The read carries on, so the next caller is answered.
+            (harness-openrouter-test--answer-catalogue)
+            (harness-test-wait
+             (lambda () (zerop (hash-table-count harness-openrouter--fetching)))
+             5 "the shared read to settle")))))))
+
+(ert-deftest harness-provider-openrouter-a-step-still-waits-for-the-catalogue ()
+  "A step of a turn waits for the catalogue, as it always did.
+The one-off wait is for the harness's own small calls; a request
+without `:ephemeral' is a step, its catalogue read is part of preparing
+it, and it is answered from the reading when the read settles -- however
+long that takes, within the transport's own bounds."
+  (let* ((policy (harness-openrouter-test-policy))
+         (session (harness-openrouter-test--session "s-step"))
+         (events nil))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-session session
+          (setq harness-openrouter-test--hold-catalogue t)
+          (harness-call 'provider/complete
+                        (plist-put (harness-openrouter-test--request session)
+                                   :on-event (lambda (e) (push e events))))
+          (should (= 1 (length harness-openrouter-test--held-catalogues)))
+          ;; Held past the one-off wait: a step does not give up.
+          (sit-for (+ harness-openrouter-catalogue-ephemeral-wait 0.5))
+          (should-not (harness-openrouter-test--done-events events))
+          (harness-openrouter-test--answer-catalogue)
+          (harness-test-wait
+           (lambda () (harness-openrouter-test--done-events events))
+           5 "the step's answer")
+          (should (eq 'end-turn (plist-get (harness-openrouter-test--newest-done events)
+                                           :stop-reason))))))))
+
 (provide 'harness-provider-openrouter-test)
-;;; harness-provider-openrouter-test.el ends here

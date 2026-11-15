@@ -127,6 +127,8 @@ behaviour of filter-then-cheapest, not a special case.
 
 ### Events
 
+- `openrouter/catalogue-degraded` — (SESSION-ID READING DETAIL) when a dispatch uses a reading whose refresh failed.
+- `openrouter/catalogue-revalidating` — (SESSION-ID READING DETAIL) when a dispatch uses a reading a fresh one is being read beside.
 - `openrouter/response-mismatch` — (SESSION-ID DETAIL) when an answer came from another endpoint.
 - `openrouter/route-paused` — (SESSION-ID REASON DETAIL) when a pinned session may not send.
 - `openrouter/route-selected` — (SESSION-ID ROUTE) when a session is pinned to an endpoint.
@@ -137,14 +139,19 @@ behaviour of filter-then-cheapest, not a special case.
 
 ### Commands
 
+- `harness-openrouter-catalogue-invalidate` — Drop MODEL's shared catalogue reading, and read it again now.
 - `harness-openrouter-refresh` — Register the OpenRouter provider as this module's own, and return its id.
 
 ### Options
 
 - `harness-openrouter-api-key-env` — Environment variable that holds the OpenRouter key.
 - `harness-openrouter-base-url` — Base URL of OpenRouter's OpenAI-compatible API.
+- `harness-openrouter-catalogue-ephemeral-wait` — Seconds a one-off call waits for a catalogue reading it does not have.
+- `harness-openrouter-catalogue-retry-attempts` — Background re-reads of a catalogue whose refresh failed.
+- `harness-openrouter-catalogue-retry-delay` — Seconds before the first background re-read of a failed catalogue.
+- `harness-openrouter-catalogue-retry-max-delay` — Longest wait between background re-reads of a failed catalogue.
 - `harness-openrouter-catalogue-timeout` — Seconds a fetch of the endpoint catalogue may take.
-- `harness-openrouter-catalogue-ttl` — Seconds a fetched endpoint catalogue is reused.
+- `harness-openrouter-catalogue-ttl` — Seconds one shared reading of a model's endpoint catalogue is reused.
 - `harness-openrouter-list-models` — Whether this provider lists OpenRouter's model catalogue.
 - `harness-openrouter-routing` — Opt-in price-aware endpoint policy for one OpenRouter model; nil is off.
 
@@ -159,6 +166,8 @@ behaviour of filter-then-cheapest, not a special case.
 
 ### Events it emits
 
+- `openrouter/catalogue-degraded`
+- `openrouter/catalogue-revalidating`
 - `openrouter/response-mismatch`
 - `openrouter/route-paused`
 - `openrouter/route-selected`

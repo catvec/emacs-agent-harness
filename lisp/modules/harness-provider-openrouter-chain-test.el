@@ -93,6 +93,7 @@ whether the step was sent again."
                         :models (list harness-openrouter-test-model))))
            (harness-openrouter--catalogue (make-hash-table :test 'equal))
            (harness-openrouter--fetching (make-hash-table :test 'equal))
+           (harness-openrouter--catalogue-failures (make-hash-table :test 'equal))
            (harness-openrouter-test--requests nil)
            (harness-openrouter-test--responses nil))
        (harness-add-filter 'permission/decide

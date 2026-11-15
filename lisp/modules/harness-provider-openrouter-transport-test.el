@@ -216,7 +216,8 @@ bound as `wire', its URL as `url'."
                          :base-url url :api-key "test-key"
                          :models (list harness-openrouter-test-model))))
             (harness-openrouter--catalogue (make-hash-table :test 'equal))
-            (harness-openrouter--fetching (make-hash-table :test 'equal)))
+            (harness-openrouter--fetching (make-hash-table :test 'equal))
+           (harness-openrouter--catalogue-failures (make-hash-table :test 'equal)))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
        (harness-openrouter-refresh)
@@ -436,7 +437,11 @@ refusal is the price and not the refresh."
         (should (cl-some (lambda (h) (string-match-p "dearer than the maximum price" h))
                          (harness-openrouter-test--wire-hints sid)))))
     ;; The same stale pin, with a maximum that covers the current price:
-    ;; it is read again and sent, so the refusal above was the price.
+    ;; it is sent, so the refusal above was the price and not the refresh.
+    ;; The reading the first half made is the model's and is recent, so
+    ;; this dispatch is answered from it and spends no request of its own
+    ;; (`harness-openrouter--reading-for'): sharing a reading does not
+    ;; re-decide the pin, and the pin is still checked against it.
     (setq harness-openrouter-routing
           (harness-openrouter-test-policy
            :freshness 1
@@ -448,7 +453,7 @@ refusal is the price and not the refresh."
       (should (eq 'end-turn (plist-get (harness-test-await
                                         (harness-call 'agent/prompt sid "go") 30)
                                        :stop-reason)))
-      (should (= (1+ reads) (harness-openrouter-test--wire-reads wire)))
+      (should (= reads (harness-openrouter-test--wire-reads wire)))
       (should (= (1+ posts) (harness-openrouter-test--wire-posts wire))))))
 
 (ert-deftest harness-provider-openrouter-transport-cancel-during-a-backoff-sends-nothing ()

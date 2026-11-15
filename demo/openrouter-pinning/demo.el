@@ -246,6 +246,7 @@ count printed is what reached the transport."
   (let* ((harness-openrouter-routing (demo-policy))
          (harness-openrouter--catalogue (make-hash-table :test 'equal))
          (harness-openrouter--fetching (make-hash-table :test 'equal))
+           (harness-openrouter--catalogue-failures (make-hash-table :test 'equal))
          (session (list :id "demo-session" :name "demo-session" :kind 'main
                         :status 'idle
                         :model (format "openrouter:%s" demo-model)))

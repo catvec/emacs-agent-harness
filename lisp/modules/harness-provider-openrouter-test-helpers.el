@@ -237,18 +237,26 @@ wholesale."
     policy))
 
 (defmacro harness-openrouter-test-with-policy (policy &rest body)
-  "Run BODY with the routing POLICY in place and the module's cache empty."
+  "Run BODY with the routing POLICY in place and the module's cache empty.
+A background catalogue re-read the test scheduled is cancelled on the way
+out: it would otherwise fire into the next test's tables."
   (declare (indent 1))
   `(let ((harness-openrouter-routing ,policy)
          (harness-openrouter--catalogue (make-hash-table :test 'equal))
          (harness-openrouter--fetching (make-hash-table :test 'equal))
+         (harness-openrouter--catalogue-failures (make-hash-table :test 'equal))
          ;; The canonical slug is read once per model per process, so one
          ;; test's read would answer the next one's: a pin that is supposed
          ;; to have no slug yet would be completed without the request the
          ;; test is about.
          (harness-openrouter--canonical (make-hash-table :test 'equal))
          (harness-openai--models-cache (make-hash-table :test 'eq)))
-     ,@body))
+     (unwind-protect
+         (progn ,@body)
+       (maphash (lambda (_model episode)
+                  (when (timerp (plist-get episode :timer))
+                    (cancel-timer (plist-get episode :timer))))
+                harness-openrouter--catalogue-failures))))
 
 (defun harness-openrouter-test--chain-answer ()
   "Return the fake response of a successful OpenRouter answer."
@@ -289,6 +297,35 @@ OpenRouter's answers do."
 
 ;;;; Dispatch: a new session, an existing pin, and refusals
 
+;;;; The shared catalogue: readings, and how many reads were spent
+
+(defvar harness-openrouter-test--hints nil
+  "Hints a stubbed `session/hint' collected, newest first.")
+
+(defun harness-openrouter-test--catalogue-reads ()
+  "Return how many catalogue requests the fake has been asked for."
+  (length (cl-remove-if-not (lambda (r) (string-match-p "/endpoints\\'" (plist-get r :url)))
+                            harness-openrouter-test--requests)))
+
+(defun harness-openrouter-test--seed-reading (&optional age)
+  "Store a reading of this model's catalogue AGE seconds old, and return it.
+The reading is the fixture's endpoints, as a fetch would have stored them,
+so a test can start with a catalogue already read rather than answering a
+fetch of its own."
+  (let* ((records (harness-openrouter-parse-endpoints
+                   (harness-json-parse (harness-openrouter-test--catalogue-json))))
+         (reading (list :at (- (float-time) (or age 0)) :endpoints records)))
+    (puthash harness-openrouter-test-model reading harness-openrouter--catalogue)
+    reading))
+
+(defun harness-openrouter-test--degraded-notes ()
+  "Return the degraded hints collected so far, oldest first.
+A degraded dispatch leaves a hint on the session, which is what a person
+reading it sees; the same dispatch also emits `openrouter/catalogue-degraded'
+on the bus."
+  (nreverse (cl-remove-if-not (lambda (h) (string-match-p "catalogue degraded" h))
+                              harness-openrouter-test--hints)))
+
 (defmacro harness-openrouter-test-with-session (session &rest body)
   "Run BODY with the session bus answering for SESSION.
 `session/get' answers SESSION, `session/set-ext' records what was set in
@@ -319,9 +356,6 @@ bus, so `provider/complete' still works."
 
 (defvar harness-openrouter-test--stored nil
   "The route a stubbed `session/set-ext' last recorded.")
-
-(defvar harness-openrouter-test--hints nil
-  "Hints a stubbed `session/hint' collected, newest first.")
 
 (defvar harness-openrouter-test--session-value nil
   "The session a stubbed `session/get' answers.")

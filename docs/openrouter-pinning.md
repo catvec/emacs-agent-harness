@@ -222,7 +222,10 @@ of slipping through.  The checks are, in order:
    at the pinned tier, and its current prices must be inside the limits
    with no unpriceable component.  A refresh that yields an empty list
    is `catalogue-empty` — not "no refresh"; a fetch that fails is
-   `catalogue-unavailable`.  Neither dispatches.
+   `catalogue-unavailable`.  A fetch that fails while the last
+   reading is still inside `:freshness` does not stop the session: it
+   runs on that reading and says it did (section 5.1).  A reading outside
+   the bound, or no reading at all, still stops it.
 
    A `catalogue-unavailable` pause names what actually failed, because
    that is the reason the session stopped: the HTTP status and the
@@ -299,6 +302,169 @@ as unreadable, which blocks.  A float is read as the decimal it prints
 as, because that is the number the policy's author wrote.  A missing
 price stays nil — unknown, never zero, because a zero cache price would
 always look cheapest.
+
+### 5.1 One shared reading per model, refreshed about every 15 minutes
+
+The endpoint catalogue is read once per model, not once per session.  The
+reading -- its `:at` and its endpoint records -- is held in one table keyed
+by model id (`harness-openrouter--catalogue`), and every session of that
+model is answered from it:
+
+- a reading younger than `harness-openrouter-catalogue-ttl` (**900 s**,
+  fifteen minutes) answers a new session, a pinned session's
+  revalidation, a hand switch and the harness's own small calls -- the
+  permission judge above all -- without a request of their own;
+- a read that is already in flight is shared by every caller
+  (`harness-openrouter--fetching`), so a burst of sessions *and* judges
+  costs one request, not one each;
+- a reading that settles replaces the previous one, and a failed read
+  leaves the previous one in place.
+
+**Nothing a session does forces a read.**  The interval is the whole
+refresh policy for ordinary lookups: no session path passes a refresh
+flag, and `harness-openrouter--catalogue`'s REFRESH argument is the
+*explicit invalidation* path only.  What forces one is
+`harness-openrouter-catalogue-invalidate` (section 5.2), which a person
+calls when they know a price changed.
+
+**What sharing does not do is widen the freshness bound.**  The
+operator's `:freshness` is the tolerance for an old price, and a reading
+outside it is never used, however recently it was read.  The interval is
+a fetch-saving window; `:freshness` is the price-safety bound, and the
+two are separate on purpose.  A reading can be *fresh enough to reuse*
+(inside the interval) and still be *too old to decide from* when the
+policy's bound is shorter than the interval -- the policy is always asked
+separately.  A policy with a bound longer than the interval reuses
+readings for as long as its own bound allows, and the interval only
+decides when the catalogue is next read.
+
+**Served while revalidating.**  A reading past the interval is not a
+reason to make a caller wait.  When the reading is still inside
+`:freshness`:
+
+- the caller is answered at once from it, marked `:revalidating`, and the
+  shared read that brings it up to date is started *behind* the caller;
+- a step of a turn and a one-off judge are treated alike here: both are
+  answered from the reading in hand, and a judge starts no read of its
+  own, so a judge never spends its budget on the catalogue;
+- a step's dispatch says the price was not re-read for it -- an
+  `openrouter/catalogue-revalidating` event and a hint naming the age of
+  the reading used.  A judge starts no read, so it is not told one is
+  running: it is simply answered from the reading, and says nothing.  The
+  pin records the reading's own `:at`, so the next dispatch measures
+  freshness from the read that produced it.
+
+**Stale-while-revalidate.**  When that background read fails, the last
+reading stays in place and the next lookup is answered from it, marked
+`:stale`, while the failure episode is live:
+
+- while the reading is still inside `:freshness`, the session runs on it
+  and the dispatch says so -- an `openrouter/catalogue-degraded` event and
+  a hint naming the failed refresh and the age of the reading used;
+- when the reading is outside `:freshness`, or there is no reading at
+  all, the session pauses with `catalogue-unavailable` and what failed,
+  exactly as before.  There is no invented reading and no extended bound.
+
+**An outage costs one read, not one per caller.**  While a failure
+episode is live, an ordinary lookup never adds a read: it is answered
+from the reading in hand, or, with nothing inside the bound, from the
+failure already found.  The episode's own re-reads are the only reads.
+
+**The re-reads are a burst, then a heartbeat.**  A failed read schedules
+another in the background: the first
+`harness-openrouter-catalogue-retry-attempts` (5) double from
+`catalogue-retry-delay` (5 s) to `catalogue-retry-max-delay` (300 s), and
+after the burst one slow probe continues at 300 s until a read settles.
+A long outage therefore heals itself instead of staying broken until a
+person asks, and one request per 300 s is what keeps that probe from
+being a storm.  Every attempt of the episode is counted, the probes
+included; a read that settles ends the episode and cancels the pending
+timer; the timers are cancelled on module shutdown.  The re-reads never
+choose, send or answer a session.
+
+**What the sharing does not prove.**  A reused reading is a reading, not
+a statement about the price now.  Cached metadata is not evidence that a
+provider's current rate is unchanged: it says what the catalogue said at
+`:at`, and `:freshness` is the operator's statement of how old a price may
+be for a decision.  The wire `max_price` covers prompt and completion
+only (section 6), so a reused reading's cache-read price is compared here
+and is never assumed to be protected at the router.  No guarantee that a
+price is current is made anywhere in this document, and none is implied
+by the reuse: the freshness bound is the guarantee, and it is the
+operator's to set.
+
+**Status.**  `harness-openrouter-catalogue-status` reports what the
+catalogue is -- `absent`, `fresh`, `revalidating` (past the interval, a
+fresh one being read), `stale` (an older reading whose refresh failed) or
+`expired` (outside the policy's `:freshness`) -- with the reading's age,
+its endpoint count, the shared interval, the last failure's text, the
+attempts spent, when the next re-read is due and whether a dispatch may
+decide from the reading now (`:reading`, `none`/`usable`/`expired`).  It
+reports the catalogue, not a decision: whether a reading may be decided
+from is `:freshness`, always.
+
+**A one-off call does not spend its budget on the catalogue.**  The
+harness's own small calls -- the permission judge above all -- have a
+budget that is about the answer they ask for, and a catalogue read that
+stalls can outlast it: the transport's watchdog fires at the fetch
+timeout plus 5 s (25 s by default), while `harness-perms--auto-timeout'
+gives a judge 30 s for the whole call.  A judge that spent that budget
+waiting for a catalogue would report no verdict for a reason that was
+never about the call it was asked to decide -- and a non-interactive
+session denies a call with no verdict, which is how a stalled catalogue
+read became a denied tool call.
+
+So a request that carries `:ephemeral' (which `harness-small-ask' keeps
+as the caller wrote it) waits at most
+`harness-openrouter-catalogue-ephemeral-wait' (5 s) for a reading it
+does not already have, and starts no background read of its own.  Past
+that it ends with `catalogue-unavailable' and "the endpoint catalogue was
+still being read", the read carries on for the next caller, and the
+permission chain treats the refusal as it treats any judge that could not
+answer: the call stays undecided, and is asked of the user -- or denied
+when nobody is there.  Nothing is allowed by the timeout.  A step of a
+turn is not `:ephemeral' and waits for its reading as it always did.
+
+**The watchdog's wording is not an HTTP rejection.**  A request that
+prints `request timed out after 20s` was ended by the harness's own
+watchdog (`harness-http--timed-out`, scheduled at the timeout plus 5 s),
+not refused by the server.  When the response had already begun, the
+transport reports it as `HTTP 200: request timed out after 20s` -- the
+status is the last one received, and the text is the watchdog's.  It is
+read as what it is: the transfer stalled, and the catalogue was not read.
+A direct, unauthenticated `GET` of
+`https://openrouter.ai/api/v1/models/deepseek/deepseek-v4.1-flash-1017/endpoints`
+answering 200 with about 55 KB in about 0.1 s proves only that the
+endpoint was publicly reachable at that moment; it says nothing about an
+earlier attempt, an authenticated one, or one made from another host or
+network.
+
+### 5.2 Explicit invalidation is separate from every ordinary lookup
+
+`harness-openrouter-catalogue-invalidate` is the one path that forces a
+read.  It drops the model's shared reading, so nothing is decided from
+it, bumps a per-model generation, and starts a read at once rather than
+waiting for the interval to pass.  It is what a person asks for when they
+know a price changed.  With no MODEL it uses the configured policy's.
+
+Three things make it an invalidation and not a retry storm:
+
+- **It does not reset the bound.**  The read it starts is the next
+  attempt of the failure episode already running, and keeps the attempts
+  it has spent, so the background re-reads stay bounded by
+  `harness-openrouter-catalogue-retry-attempts` however often a person
+  calls it.
+- **A slow read cannot undo it.**  A read that began before the bump
+  answers its own callers and is *not* stored over the reading the
+  invalidation asked for; the generation is compared when the read
+  settles.
+- **It cancels a pending retry**, so the timer and the invalidation do not
+  both read.
+
+It returns a promise of the reading, which rejects with what failed.  A
+catalogue that stays unreachable leaves the episode's burst and heartbeat
+running; nothing about the invalidation makes that unbounded.
+
 
 ### 6. The pin on the wire
 
@@ -792,11 +958,16 @@ completion is dispatched after a cancellation.
    provider charges.
 
 2. **The freshness bound.** A policy value with no shipped default.  The
-   module's own defaults are mechanical only: a 60 s catalogue cache TTL
-   and a 20 s fetch timeout.  How often and how long a failed request is
-   tried again is not a policy value: it is the shared retry layer's
-   (`harness-retry-max-attempts` 3 and `harness-retry-max-seconds` nil
-   by default, with `harness-retry-delay`, `harness-retry-max-delay` and
+   module's own defaults are mechanical only: a **900 s** shared refresh
+   interval (how long one reading is reused without asking again, for
+   every session and every judge together), a 20 s fetch timeout, a 5 s
+   wait for a one-off call with no reading at all, and the background
+   re-read of a failed catalogue -- a burst of 5 doubling from 5 s to
+   300 s, then one 300 s probe until a read settles (section 5.1).  How
+   often and how long a failed *request* is tried again is not a policy
+   value: it is the shared retry layer's (`harness-retry-max-attempts` 3
+   and `harness-retry-max-seconds` nil by default, with
+   `harness-retry-delay`, `harness-retry-max-delay` and
    `harness-retry-jitter`), and a bound there applies to every provider.
 
 3. **An activation snippet, written but inactive.** See the

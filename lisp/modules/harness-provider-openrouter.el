@@ -216,29 +216,134 @@ with a hole blocks rather than guesses.  See
   :type '(choice (const :tag "Off" nil) (plist :tag "Policy"))
   :group 'harness)
 
-(defcustom harness-openrouter-catalogue-ttl 60
-  "Seconds a fetched endpoint catalogue is reused.
-A policy's `:freshness' decides whether a reading may be used at
-dispatch; this only keeps a burst of requests from fetching twice."
+(defcustom harness-openrouter-catalogue-ttl 900
+  "Seconds one shared reading of a model's endpoint catalogue is reused.
+The reading is the harness process's, not a session's: every session, a
+pinned session's revalidation, a hand switch and the harness's own small
+calls -- the permission judge above all -- are answered from it.  So the
+catalogue is read about once per this many seconds, not once per caller,
+and a lookup made while the reading is younger than this spends no
+request at all (`harness-openrouter--reading-for').
+
+This is not the bound on how old a reading may be when a price is
+decided from it: that is the policy's `:freshness', and nothing here
+extends it.  A reading past this is read again, once, by whichever
+caller asks first -- everyone who asks meanwhile shares that read
+\(`harness-openrouter--reading-of') -- and is served while it is read,
+when `:freshness' admits it.  A re-read that fails leaves the last
+reading in place; it may still decide a price only while `:freshness'
+admits it, and the dispatch that uses it says so.
+
+Nothing a session does forces a read.  An explicit invalidation
+\(`harness-openrouter-catalogue-invalidate') drops the reading and reads
+it now, which is what a person who knows a price changed asks for."
   :type 'integer :group 'harness)
 
 (defcustom harness-openrouter-catalogue-timeout 20
   "Seconds a fetch of the endpoint catalogue may take."
   :type 'integer :group 'harness)
 
+(defcustom harness-openrouter-catalogue-ephemeral-wait 5
+  "Seconds a one-off call waits for a catalogue reading it does not have.
+The harness's own small calls -- the permission judge, a summary, a
+title -- have a budget of their own, and that budget is about the model's
+answer, not about this module's bookkeeping.  A catalogue read that
+stalls can take `harness-openrouter-catalogue-timeout' plus the
+transport's watchdog, which is longer than a judge's whole budget: the
+judge would then report no verdict for a reason that is not the call it
+was asked about.
+
+So a one-off call (`:ephemeral') is answered from the reading in hand and
+waits at most this long for one it does not have.  Past it, the call is
+refused with `catalogue-unavailable' and the shared read carries on in the
+background, so the next call is answered.  Nothing is allowed by the
+refusal: the permission chain treats it as a call with no verdict, which
+is what it already does with a judge that could not answer."
+  :type 'number :group 'harness)
+
+(defcustom harness-openrouter-catalogue-retry-attempts 5
+  "Background re-reads of a catalogue whose refresh failed.
+After a failed refresh the catalogue is read again in the background, so
+the next session does not have to be the one that pays for it.  The
+re-reads stop after this many per failure episode, and a successful one
+ends the episode.  They never send a request, choose an endpoint or
+answer a session: a session is answered only when it asks."
+  :type 'integer :group 'harness)
+
+(defcustom harness-openrouter-catalogue-retry-delay 5
+  "Seconds before the first background re-read of a failed catalogue.
+It is also the window in which a session is answered from the last
+reading without trying the catalogue again: an outage costs one failed
+request, not one for every session that starts during it."
+  :type 'number :group 'harness)
+
+(defcustom harness-openrouter-catalogue-retry-max-delay 300
+  "Longest wait between background re-reads of a failed catalogue.
+Each re-read that fails waits twice as long as the one before, up to
+this, and the number of them is bounded by
+`harness-openrouter-catalogue-retry-attempts'."
+  :type 'number :group 'harness)
+
 ;;;; State
 
 (defconst harness-openrouter--route-key :openrouter-route
   "Key of the pinned route in a session's `ext'.")
 
+(defun harness-openrouter--reading-age (reading)
+  "Return how many seconds ago READING was read, or nil for no reading."
+  (when (and (listp reading) (numberp (plist-get reading :at)))
+    (max 0 (- (float-time) (plist-get reading :at)))))
+
+
 (defvar harness-openrouter--catalogue (make-hash-table :test 'equal)
-  "Model id -> (:at FLOAT :endpoints LIST).")
+  "Model id -> (:at FLOAT :endpoints LIST), the last reading of each catalogue.
+It is the process's, not a session's: every session of the model is
+answered from the same reading, and one reading is what a burst of new
+sessions and a pinned session's revalidation share.  A reading is stored
+only when a fetch settles, and it is replaced only by a later reading, so
+a failed refresh leaves the last usable one in place.")
 
 (defvar harness-openrouter--fetching (make-hash-table :test 'equal)
   "Model id -> promise of an in-flight catalogue reading.
 It is the reading promise every concurrent caller shares
 \(`harness-openrouter--reading-of'), not the bare fetch: a second caller
 must be answered with the same shape and the same `:at' as the first.")
+
+(defvar harness-openrouter--catalogue-failures (make-hash-table :test 'equal)
+  "Model id -> plist of the failure episode of its catalogue.
+`:at' when the last refresh failed, `:error' what it failed with,
+`:attempts' how many re-reads have been spent, `:next-at' when the next
+one is due, `:timer' the timer that will start it, and `:invalidated'
+when the episode began with an explicit invalidation rather than with a
+failed read.  A successful read removes the entry, which is what ends the
+episode.
+
+The episode is what keeps an outage from becoming a retry storm: while
+one is live, an ordinary lookup does not read the catalogue again -- it
+is answered from the last reading while `:freshness' admits it -- and
+the background re-reads are the only reads, bounded by
+`harness-openrouter-catalogue-retry-attempts' with a doubling delay.
+
+A read that fails while an episode is live keeps the attempts already
+spent, so an outage costs the same handful of requests however often a
+person invalidates a reading: an invalidation drops the *reading*, never
+the bound.")
+
+(defvar harness-openrouter--invalidations (make-hash-table :test 'equal)
+  "Model id -> the number of explicit invalidations it has had.
+`harness-openrouter-catalogue-invalidate' bumps it.  A read that began
+before the bump answers a reading of the old number and is not stored
+over the one the invalidation asked for, so a slow read started for a
+session cannot quietly undo an invalidation made meanwhile.")
+
+(defvar harness-openrouter--ephemeral nil
+  "Non-nil while a one-off call is being prepared.
+Bound around the dispatch of a request that carries `:ephemeral',
+which is the harness's own small call -- the permission judge, a
+summary, a title.  Such a call has a budget of its own that is about
+the model's answer, so it does not wait on this module's catalogue
+bookkeeping for longer than `harness-openrouter-catalogue-ephemeral-wait'
+(`harness-openrouter--patient-p').")
 
 (defvar harness-openrouter--sending nil
   "The checked routing policy of the request being built, or nil.
@@ -253,6 +358,10 @@ it.  Nothing a handler does meanwhile can change what it carries.")
                        "(SESSION-ID REASON DETAIL) when a pinned session may not send.")
 (harness-declare-event 'openrouter/response-mismatch
                        "(SESSION-ID DETAIL) when an answer came from another endpoint.")
+(harness-declare-event 'openrouter/catalogue-degraded
+                       "(SESSION-ID READING DETAIL) when a dispatch uses a reading whose refresh failed.")
+(harness-declare-event 'openrouter/catalogue-revalidating
+                       "(SESSION-ID READING DETAIL) when a dispatch uses a reading a fresh one is being read beside.")
 
 ;;;; Prices, exactly
 ;;
@@ -446,45 +555,213 @@ judged from."
            (harness-openrouter-parse-endpoints json)
          (error (harness-rejected err)))))))
 
+(defun harness-openrouter--catalogue-recovered (model)
+  "End MODEL's catalogue failure episode, if it had one.
+A reading that settled is the end of the episode: its timer is cancelled
+and its record dropped, so the next failure starts a fresh bound rather
+than inheriting the attempts of an outage that is over."
+  (let ((episode (gethash model harness-openrouter--catalogue-failures)))
+    (when episode
+      (when (timerp (plist-get episode :timer))
+        (cancel-timer (plist-get episode :timer)))
+      (remhash model harness-openrouter--catalogue-failures))))
+
+(defun harness-openrouter--invalidation (model)
+  "Return the number of explicit invalidations MODEL's catalogue has had."
+  (or (gethash model harness-openrouter--invalidations) 0))
+
 (defun harness-openrouter--reading-of (model)
   "Return a promise of one reading of MODEL's catalogue, fetching once.
 Every caller that asks while the fetch is in flight shares the same
 promise, so it is answered with the same shape -- `:at' and `:endpoints'
 -- and the same timestamp; the alternative is one caller getting a bare
-list of endpoint records and failing its checks for no reason.  A failed
-fetch rejects the shared promise for all of them, leaves no reading, and
-the next call fetches again.  A reading is stored only when it settles,
-so a fetch that answers immediately is never stored settled."
+list of endpoint records and failing its checks for no reason.  A reading
+that settles is stored for every session of the model, and ends any
+failure episode.  A failed fetch rejects the shared promise for all of
+them and is recorded as a failure episode with a bounded background
+re-read behind it; the last reading, if there is one, is left in place
+for a policy that still admits it (`harness-openrouter--reading-for').
+A reading is stored only when it settles, so a fetch that answers
+immediately is never stored settled."
   (or (gethash model harness-openrouter--fetching)
-      (let* ((fetch (harness-openrouter--fetch-catalogue model))
+      (let* ((generation (harness-openrouter--invalidation model))
+             (fetch (harness-openrouter--fetch-catalogue model))
              (reading (harness-then
                        fetch
                        (lambda (records)
                          (remhash model harness-openrouter--fetching)
                          (let ((reading (list :at (float-time) :endpoints records)))
-                           (puthash model reading harness-openrouter--catalogue)
+                           ;; A read that began before an invalidation is a
+                           ;; reading of the catalogue that was replaced: it
+                           ;; answers its own callers, and is not stored over
+                           ;; the one the invalidation asked for.
+                           (when (= generation (harness-openrouter--invalidation model))
+                             (puthash model reading harness-openrouter--catalogue)
+                             (harness-openrouter--catalogue-recovered model))
                            reading))
                        (lambda (err)
                          (remhash model harness-openrouter--fetching)
+                         (harness-openrouter--note-catalogue-failure model err)
                          (harness-resignal err)))))
         (unless (harness-promise-settled-p reading)
           (puthash model reading harness-openrouter--fetching))
         reading)))
 
+(defun harness-openrouter--catalogue-delay (attempts)
+  "Return the seconds to wait before background re-read ATTEMPTS.
+The first re-read waits `harness-openrouter-catalogue-retry-delay' and
+each one after it waits twice as long, up to
+`harness-openrouter-catalogue-retry-max-delay'.  The growth is bounded so
+an outage costs a handful of requests rather than one per tick."
+  (let ((delay (* (max 0 harness-openrouter-catalogue-retry-delay)
+                  (expt 2 (max 0 attempts)))))
+    (min (max 0 harness-openrouter-catalogue-retry-max-delay) delay)))
+
+(defun harness-openrouter--schedule-catalogue-retry (model)
+  "Schedule the next background re-read of MODEL's catalogue, if any is due.
+The re-reads are a burst and then a heartbeat.  The first
+`harness-openrouter-catalogue-retry-attempts' of an episode are the burst,
+at a doubling delay, so an outage that ends quickly is over within seconds
+of it.  After the burst the episode keeps one slow probe at
+`harness-openrouter-catalogue-retry-max-delay' until a read settles: a
+catalogue that was unreachable for an hour is read again by itself rather
+than staying broken until a person asks, and one request per interval is
+what keeps that probe from being a storm.
+
+One timer per model, always replacing the previous one, so a failure that
+arrives while another re-read is pending moves the schedule rather than
+adding to it.
+
+The timer carries the tables it was scheduled against.  A timer runs
+later, in whatever context is current then, and a re-read must write the
+catalogue it belongs to and count its attempts against the episode it
+belongs to -- never against a table that happens to be bound at that
+moment."
+  (let* ((episode (gethash model harness-openrouter--catalogue-failures))
+         (attempts (or (plist-get episode :attempts) 0))
+         (delay (harness-openrouter--catalogue-delay attempts))
+         (tables (list harness-openrouter--catalogue
+                       harness-openrouter--fetching
+                       harness-openrouter--catalogue-failures)))
+    (when episode
+      (when (timerp (plist-get episode :timer))
+        (cancel-timer (plist-get episode :timer)))
+      (puthash model
+               (plist-put (plist-put (copy-sequence episode) :next-at (+ (float-time) delay))
+                          :timer
+                          (run-at-time
+                           delay nil
+                           (lambda ()
+                             (let ((harness-openrouter--catalogue (nth 0 tables))
+                                   (harness-openrouter--fetching (nth 1 tables))
+                                   (harness-openrouter--catalogue-failures (nth 2 tables)))
+                               (harness-openrouter--catalogue-retry model)))))
+               harness-openrouter--catalogue-failures))))
+
+(defun harness-openrouter--catalogue-retry (model)
+  "Read MODEL's catalogue again in the background, and account for it.
+A reading that settles ends the failure episode
+\(`harness-openrouter--catalogue-recovered'); one that fails is noted by
+the same handler that notes a session's own failure, which schedules the
+next re-read.  Nothing is chosen, sent or announced to a session here:
+this only makes the next lookup more likely to find a reading.
+
+Every re-read of an episode is counted, the slow probes past the burst
+included: the count is what a status reports as the attempts spent, and
+what tells the burst from the probe."
+  (let ((episode (gethash model harness-openrouter--catalogue-failures)))
+    (when episode
+      (puthash model (plist-put (copy-sequence episode) :timer nil)
+               harness-openrouter--catalogue-failures)
+      (puthash model
+               (plist-put (gethash model harness-openrouter--catalogue-failures)
+                          :attempts (1+ (or (plist-get episode :attempts) 0)))
+               harness-openrouter--catalogue-failures)
+      (harness-then (harness-openrouter--reading-of model)
+                    (lambda (reading) reading)
+                    (lambda (_err) nil)))))
+
+(defun harness-openrouter--note-catalogue-failure (model err)
+  "Record that MODEL's catalogue could not be read, and plan a re-read.
+The last reading, if there is one, is left in place: whether it may still
+be used is the policy's `:freshness' question, not this function's.  The
+failure is remembered with what it was, so a status can say what is wrong
+and a session can be told why it is running on an older reading."
+  (let ((episode (gethash model harness-openrouter--catalogue-failures)))
+    (when (timerp (plist-get episode :timer))
+      (cancel-timer (plist-get episode :timer)))
+    (puthash model
+             (list :at (float-time)
+                   :error err
+                   :attempts (or (plist-get episode :attempts) 0)
+                   :timer nil)
+             harness-openrouter--catalogue-failures)
+    (harness-openrouter--schedule-catalogue-retry model)))
+
 (defun harness-openrouter--catalogue (model &optional refresh)
   "Return a promise of MODEL's endpoint catalogue, read at `:at'.
-A reading older than `harness-openrouter-catalogue-ttl' is fetched
-again; REFRESH always fetches.  A failed fetch rejects rather than
-answering an older reading: a stale reading is never evidence that a
-price changed.  A fetch already in flight is shared by every caller
-\(`harness-openrouter--reading-of'), REFRESH included: it is read now,
-which is what refresh asks for."
-  (let ((cached (gethash model harness-openrouter--catalogue)))
-    (if (and cached (not refresh)
-             (< (- (float-time) (or (plist-get cached :at) 0))
-                harness-openrouter-catalogue-ttl))
-        (harness-resolved cached)
-      (harness-openrouter--reading-of model))))
+A reading inside `harness-openrouter-catalogue-ttl' is answered as it is.
+REFRESH is the explicit invalidation this accessor offers its callers: it
+reads again now (`harness-openrouter-catalogue-invalidate' is the same,
+with the bookkeeping a person's call needs).  An ordinary lookup -- no
+REFRESH -- never forces a read, and never adds one to a live failure
+episode either: it is answered from the reading in hand, and the bounded
+background re-reads are what bring it up to date.
+
+A failed read rejects: this is the raw accessor, and a stale reading is
+never evidence that a price changed.  Whether a reading may still be used
+after a failed refresh is the policy's question and is decided in
+`harness-openrouter--reading-for', which knows the `:freshness' bound."
+  (let ((cached (gethash model harness-openrouter--catalogue))
+        (episode (gethash model harness-openrouter--catalogue-failures)))
+    (cond
+     ((and cached (not refresh) (not (harness-openrouter--reading-due-p cached)))
+      (harness-resolved cached))
+     ((and (not refresh) episode)
+      ;; The background re-reads own the next read, so an ordinary lookup
+      ;; does not add one to them.
+      (if cached
+          (harness-resolved cached)
+        (harness-rejected (plist-get episode :error))))
+     (t (harness-openrouter--reading-of model)))))
+
+(defun harness-openrouter-catalogue-invalidate (&optional model)
+  "Drop MODEL's shared catalogue reading, and read it again now.
+MODEL defaults to the configured policy's.  This is the one explicit
+invalidation this module offers, and what a person asks for when they know
+a price changed: the reading is dropped, so nothing is decided from it,
+and a read starts at once rather than waiting for
+`harness-openrouter-catalogue-ttl' to pass.  Nothing a session does forces
+a read, so this is the only path that does.
+
+It is not a retry storm.  While an outage lasts, the read it starts fails
+into the failure episode already running, which keeps the attempts it has
+spent: the background re-reads stay bounded by
+`harness-openrouter-catalogue-retry-attempts' however often this is
+called.  It returns a promise of the reading, which rejects with what
+failed.  A read that began before the call answers its own callers and is
+not stored over the reading this asked for."
+  (interactive)
+  (let* ((model (or model (plist-get harness-openrouter-routing :model)))
+         (episode (and model (gethash model harness-openrouter--catalogue-failures))))
+    (unless model
+      (error "No OpenRouter model to read the catalogue of"))
+    (remhash model harness-openrouter--catalogue)
+    (puthash model (1+ (harness-openrouter--invalidation model))
+             harness-openrouter--invalidations)
+    ;; The read this asks for is the next attempt of the episode it
+    ;; belongs to, not a new one, so its failures are bounded with the
+    ;; rest of the outage.
+    (when (timerp (plist-get episode :timer))
+      (cancel-timer (plist-get episode :timer))
+      (puthash model (plist-put (copy-sequence episode) :timer nil)
+               harness-openrouter--catalogue-failures))
+    ;; A read already in flight is a reading of the catalogue that was just
+    ;; replaced, so this does not adopt it: the invalidation starts a read
+    ;; of its own, and the older one is answered to its own callers without
+    ;; being stored (`harness-openrouter--reading-of').
+    (remhash model harness-openrouter--fetching)
+    (harness-openrouter--reading-of model)))
 
 ;;;; Policy validation
 
@@ -905,12 +1182,296 @@ Return nil, so no request is sent."
                             (format "OpenRouter routing paused (%s): %s" reason detail))
   nil)
 
+(defun harness-openrouter--degraded (session-id reading)
+  "Announce that SESSION-ID is sending on an older catalogue READING.
+Two readings are older ones, and both are inside the policy's `:freshness'
+-- they were admitted, not tolerated.  A reading whose refresh failed
+(`:stale') is the price evidence that could not be brought up to date: the
+dispatch says so, with what the refresh said.  A reading that is only past
+the shared refresh interval (`:revalidating') is being brought up to date
+behind this dispatch, and the dispatch says that instead.  Either way a
+person reading the session knows the price was not re-read for this send.
+
+Nothing is emitted for a reading that is current, so an ordinary dispatch
+says nothing about the catalogue at all."
+  (cond
+   ((plist-get reading :stale)
+    (let ((detail (format "the catalogue refresh failed (%s); using the reading %d s old, inside the policy's freshness bound"
+                          (or (plist-get reading :stale-error) "unknown")
+                          (round (or (harness-openrouter--reading-age reading) 0)))))
+      (harness-emit 'openrouter/catalogue-degraded session-id reading detail)
+      (harness-openrouter--hint
+       session-id (format "OpenRouter catalogue degraded: %s" detail))))
+   ((plist-get reading :revalidating)
+    (let ((detail (format "using the reading %d s old, inside the policy's freshness bound, while a fresh one is read"
+                          (round (or (harness-openrouter--reading-age reading) 0)))))
+      (harness-emit 'openrouter/catalogue-revalidating session-id reading detail)
+      (harness-openrouter--hint
+       session-id (format "OpenRouter catalogue revalidating: %s" detail))))))
+
+(defun harness-openrouter-catalogue-status (&optional model)
+  "Return the state of MODEL's shared endpoint catalogue reading.
+MODEL defaults to the configured policy's.  The value is a plist:
+
+  :model      the model asked about
+  :state      `fresh' -- read within `harness-openrouter-catalogue-ttl'
+              `revalidating' -- past the interval, a fresh one being read
+              `stale' -- an older reading whose refresh failed
+              `expired' -- a reading older than the policy's `:freshness'
+              `absent' -- no reading at all
+  :at         when the reading was made, or nil
+  :age        seconds since then, or nil
+  :ttl        the shared refresh interval, in seconds
+  :endpoints  how many the reading lists, or nil
+  :error      what the last refresh failed with, as text, or nil
+  :attempts   background re-reads spent on the current failure
+  :next-at    when the next one is due, or nil
+  :reading    whether a dispatch may decide from the reading now
+
+The state is what the catalogue is, not what a policy decides: `stale',
+`revalidating' and `expired' are all readings a read has left behind, and
+only `:freshness' says which of them may still be decided from -- which
+is what `:reading' reports, for the configured policy.  A reading that is
+`fresh' here can still be outside a policy's bound when the bound is
+shorter than the interval, and a reading that is `revalidating' or `stale'
+is inside the bound when `:reading' is `usable'."
+  (let* ((model (or model (plist-get harness-openrouter-routing :model)))
+         (reading (and model (gethash model harness-openrouter--catalogue)))
+         (episode (and model (gethash model harness-openrouter--catalogue-failures)))
+         (age (and reading (harness-openrouter--reading-age reading)))
+         (freshness (plist-get harness-openrouter-routing :freshness))
+         (due (and reading (harness-openrouter--reading-due-p reading)))
+         (admissible (and reading (numberp freshness) (numberp age)
+                          (not (> age freshness)))))
+    (list :model model
+          :state (cond
+                  ((null reading) 'absent)
+                  ((and (numberp freshness) (numberp age) (> age freshness))
+                   'expired)
+                  (episode 'stale)
+                  (due 'revalidating)
+                  (t 'fresh))
+          :at (plist-get reading :at)
+          :age age
+          :ttl harness-openrouter-catalogue-ttl
+          :endpoints (and (listp reading) (length (plist-get reading :endpoints)))
+          :error (and episode (harness-error-message (plist-get episode :error)))
+          :attempts (or (plist-get episode :attempts) 0)
+          :next-at (plist-get episode :next-at)
+          :reading (cond ((null reading) 'none)
+                         (admissible 'usable)
+                         (t 'expired)))))
+
+;;;; The reading a policy may decide from
+;;
+;; The catalogue is the model's, not a session's: one reading is shared by
+;; every session of it, and a session that starts while a recent reading
+;; exists is answered from it.  Sharing the reading is what keeps a burst
+;; of new sessions -- or a pinned session revalidating beside them, or the
+;; permission judge deciding a call beside them -- from spending a request
+;; each, and it is what lets a session run while the catalogue is briefly
+;; unreadable.
+;;
+;; The refresh interval is `harness-openrouter-catalogue-ttl': the
+;; catalogue is read about once per it, by whichever caller finds the
+;; reading past it, and every other caller is answered from the reading.
+;; A caller past the interval that its policy still admits is answered at
+;; once, with the read started behind it, so nothing waits on the
+;; catalogue for a decision the operator's bound already allows.
+;;
+;; What sharing never does is decide from a reading the policy does not
+;; admit.  The operator's `:freshness' is the tolerance for an old price,
+;; and a reading outside it is not used, however recently the catalogue
+;; was read.  A refresh that fails is therefore answered from the last
+;; reading only while `:freshness' still admits that reading, and that
+;; answer is marked `:stale' so the pin, the hint and the status say the
+;; price is an older reading rather than a fresh one.  With no reading
+;; inside the bound there is nothing to decide from: the session pauses
+;; with the failure, as it did before, and a bounded background re-read
+;; works on making the next one possible.
+;;
+;; Nothing here is evidence about a price now.  A reused reading says what
+;; the catalogue said at `:at'; `:freshness' is the operator's statement
+;; of how old that may be for a decision, and a session that runs on a
+;; reading whose refresh failed is told so.  There is no guarantee that a
+;; price is current, and none is implied by sharing a reading.
+
+(defun harness-openrouter--stale-reading (reading err)
+  "Return READING marked as served after a failed refresh, saying ERR.
+The reading keeps its own `:at': what is stale is the evidence, not the
+timestamp, and the freshness bound is measured from the read that
+produced it."
+  (when (listp reading)
+    (plist-put (plist-put (copy-sequence reading) :stale t)
+               :stale-error (harness-error-message err))))
+
+(defun harness-openrouter--fresh-reading-p (policy reading)
+  "Non-nil when POLICY's `:freshness' admits READING."
+  (and (listp reading)
+       (harness-openrouter--fresh-p policy (plist-get reading :at))))
+
+(defun harness-openrouter--patient-p ()
+  "Non-nil when the request being prepared may wait for a catalogue read.
+A step of a turn may: the read is part of preparing it, and its
+bounds are the turn's.  A one-off call may not for long
+(`harness-openrouter-catalogue-ephemeral-wait'): its budget is about the
+answer it asks for, and a stalled read would spend the whole of it.
+
+The flag is bound by `harness-openrouter--complete' from the request's
+`:ephemeral', which `harness-small-ask' keeps as the caller wrote it."
+  (not harness-openrouter--ephemeral))
+
+(defun harness-openrouter--within (promise seconds fallback)
+  "Return a promise settled by PROMISE, or by FALLBACK after SECONDS.
+FALLBACK is called when PROMISE has not settled in time; PROMISE is
+not cancelled, and its own result is dropped when it comes late."
+  (let ((result (harness-make-promise))
+        (settled nil)
+        (timer nil))
+    (let ((finish (lambda (settle value)
+                    (unless settled
+                      (setq settled t)
+                      (when timer (cancel-timer timer))
+                      (funcall settle result value)))))
+      (harness-then promise
+                    (lambda (value) (funcall finish #'harness-resolve value) nil)
+                    (lambda (err) (funcall finish #'harness-reject err) nil))
+      (unless settled
+        (setq timer
+              (run-at-time seconds nil
+                           (lambda ()
+                             (condition-case err
+                                 (funcall finish #'harness-resolve (funcall fallback))
+                               (error (funcall finish #'harness-reject err))))))))
+    result))
+
+(defun harness-openrouter--reading-due-p (reading)
+  "Non-nil when READING is older than the shared refresh interval.
+The interval is `harness-openrouter-catalogue-ttl': the catalogue is read
+about once per it, for every caller of the model together, and a reading
+inside it answers without a request."
+  (let ((age (harness-openrouter--reading-age reading)))
+    (and (numberp age) (>= age harness-openrouter-catalogue-ttl))))
+
+(defun harness-openrouter--revalidate (model)
+  "Start the shared background read of MODEL's catalogue, if one is due.
+One read serves every caller (`harness-openrouter--reading-of'), so a
+burst of callers starts one request, not one each, and a failure is
+recorded and retried by the same handlers a session's own read uses.  Its
+result is dropped here: whoever is waiting for a reading is waiting for
+the one already in hand, and the reading that settles answers the next
+lookup.  Nothing is sent, chosen or announced."
+  (harness-then (harness-openrouter--reading-of model)
+                (lambda (reading) reading)
+                (lambda (_err) nil)))
+
+(defun harness-openrouter--reading-for (policy)
+  "Return a promise of the catalogue reading POLICY may decide from now.
+The reading is the model's, shared by every caller in this process, and
+this function decides only whether the one in hand may be used:
+
+- a reading inside `harness-openrouter-catalogue-ttl' is answered as it
+  is, with no request: this is what a new session, a pinned session's
+  revalidation, a hand switch and the harness's own small calls are all
+  answered from, so the catalogue is read about once per the interval
+  rather than once per caller;
+- a reading past the interval but still inside POLICY's `:freshness' is
+  answered at once as well, and the shared read that brings it up to date
+  is started in the background.  The reading is inside the bound the
+  operator set for a price decision, so waiting for the read would make a
+  session wait for something its policy already allows -- which is what a
+  stalled catalogue read did to the permission judge;
+- a reading past the interval whose refresh has failed is answered
+  marked `:stale' with the failure, while the bounded background re-reads
+  work on the next one.  No ordinary lookup reads the catalogue during
+  that episode: an outage costs one failed read, not one per caller;
+- with no reading inside `:freshness' -- the first run, or a reading the
+  bound no longer admits -- the catalogue is read now.  A step of a turn
+  waits for it; a one-off call (`:ephemeral') waits at most
+  `harness-openrouter-catalogue-ephemeral-wait' and is then refused, so
+  the judge's budget is spent on the call it was asked to decide.
+
+A failure is never answered from a reading outside `:freshness', and a
+reading is never invented: a first run with no catalogue pauses."
+  (let* ((model (plist-get policy :model))
+         (cached (gethash model harness-openrouter--catalogue))
+         (episode (gethash model harness-openrouter--catalogue-failures))
+         (admissible (harness-openrouter--fresh-reading-p policy cached)))
+    (cond
+     ;; The shared reading, still inside its refresh interval.
+     ((and cached (not episode) (not (harness-openrouter--reading-due-p cached)))
+      (harness-resolved cached))
+     ;; Past the interval, inside the policy's bound, and no refresh has
+     ;; failed: answer now and bring the reading up to date behind the
+     ;; caller.  A one-off call does not start it -- the catalogue is read
+     ;; once per interval, by the work that can wait for it, never by a
+     ;; judge.
+     ((and admissible (not episode))
+      ;; A one-off call starts no read, so it is not told one is running:
+      ;; `:revalidating' says what the catalogue is, and for a judge that
+      ;; asked and did not wait it is simply the reading it was given.
+      (if harness-openrouter--ephemeral
+          (harness-resolved cached)
+        (harness-openrouter--revalidate model)
+        (harness-resolved (plist-put (copy-sequence cached) :revalidating t))))
+     ;; The last refresh failed.  Answer from the reading the policy still
+     ;; admits, saying what failed, and leave the next read to the bounded
+     ;; background re-reads: an outage costs one failed read, not one per
+     ;; caller.
+     ((and admissible episode)
+      (harness-resolved
+       (harness-openrouter--stale-reading cached (plist-get episode :error))))
+     ;; The refresh failed and nothing it left is inside the policy's
+     ;; bound: answer the failure already found rather than spending a
+     ;; request every caller would fail the same way.  The episode's own
+     ;; re-reads -- the burst, then the slow probe -- are what read again.
+     (episode
+      (harness-rejected (plist-get episode :error)))
+     (t
+      (let ((read (harness-openrouter--reading-of model)))
+        (if (harness-openrouter--patient-p)
+            (harness-then
+             read
+             (lambda (reading) reading)
+             (lambda (err)
+               (if (harness-openrouter--fresh-reading-p policy cached)
+                   (harness-openrouter--stale-reading cached err)
+                 (harness-resignal err))))
+          ;; A one-off call does not wait on this module's bookkeeping
+          ;; for longer than `harness-openrouter-catalogue-ephemeral-wait':
+          ;; its own budget is about the answer, and a stalled read would
+          ;; spend all of it.  The read is not cancelled -- the next
+          ;; caller and the background retry still get it -- and the
+          ;; refusal is one the chain already reads as no verdict.
+          (harness-openrouter--within
+           read harness-openrouter-catalogue-ephemeral-wait
+           (lambda ()
+             (if (harness-openrouter--fresh-reading-p policy cached)
+                 (harness-resolved
+                  (harness-openrouter--stale-reading
+                   cached (list 'timeout "still being read")))
+               (harness-rejected
+                (list 'http-error nil
+                      (list 'timeout
+                            (format "the endpoint catalogue was still being read after %ss"
+                                    harness-openrouter-catalogue-ephemeral-wait)))))))))))))
+
 (defun harness-openrouter--choose-now (policy)
-  "Fetch the catalogue of POLICY's model and choose for it; return a promise.
-The promise resolves to the reading (`:at', `:endpoints') of the
-catalogue; `harness-openrouter-select' then decides from it.  A fetch
-that fails rejects."
-  (harness-openrouter--catalogue (plist-get policy :model) t))
+  "Return a promise of the reading POLICY may choose from now.
+The reading is the model's shared one: a recent reading is answered as it
+is, so a session that starts while another has just read the catalogue
+spends no request of its own.  A reading older than
+`harness-openrouter-catalogue-ttl' is read again, and a read that fails
+answers the last reading *only while POLICY's `:freshness' admits it*,
+marked `:stale' with the failure in `:error'.  A reading outside that
+bound is never used: the policy's freshness is the operator's tolerance
+for an old price, and this function does not widen it.
+
+So the promise resolves to the reading (`:at', `:endpoints', and
+`:stale' when it is one served after a failed refresh), and rejects when
+there is no reading the policy may decide from -- the first run with no
+reading at all, or a failure with nothing inside the bound."
+  (harness-openrouter--reading-for policy))
 
 (defun harness-openrouter--select-decision (policy records read-at)
   "Return POLICY's decision for a brand new session from RECORDS read at READ-AT.
@@ -1821,7 +2382,8 @@ model, providers, the pin's recorded identity and price, the maximum
 and the catalogue -- and refused with a stop reason when the check
 fails.  Nothing is switched: a switch is the user's
 \(`harness-openrouter-switch')."
-  (let* ((on-event (or (plist-get request :on-event) #'ignore))
+  (let* ((harness-openrouter--ephemeral (and (plist-get request :ephemeral) t))
+         (on-event (or (plist-get request :on-event) #'ignore))
          (policy harness-openrouter-routing)
          (session (plist-get request :session))
          (session-id (plist-get session :id))
@@ -1944,9 +2506,11 @@ request that worked."
                                     in-force route reading))))
                  (if refusal
                      (harness-openrouter--refuse session-id on-event refusal)
-                   (harness-openrouter--start-pinned
-                    state (list :policy in-force :route route :reading reading)
-                    request on-event))))))
+                   (progn
+                     (harness-openrouter--degraded session-id reading)
+                     (harness-openrouter--start-pinned
+                      state (list :policy in-force :route route :reading reading)
+                      request on-event)))))))
          (lambda (err)
            (unless (harness-openrouter--cancelled-p state)
              (harness-openrouter--catalogue-failure session-id on-event err)))))))
@@ -1978,6 +2542,9 @@ Nothing is sent until the pin exists."
          ;; the catalogue: a session must not be pinned by a policy the
          ;; operator has replaced, and the pin, the limits and the privacy
          ;; fields must all come from the one policy that authorised it.
+         ;; The reading may be an older one whose refresh failed
+         ;; (`harness-openrouter--reading-for'); it is inside the policy's
+         ;; freshness bound, and the dispatch says so before it sends.
          (let* ((in-force harness-openrouter-routing)
                 (refusal (or (harness-openrouter--not-routing-refusal in-force)
                              (harness-openrouter--policy-changed-refusal
@@ -1998,6 +2565,7 @@ Nothing is sent until the pin exists."
                             session-id (harness-openrouter--route-plist
                                         decision (plist-get reading :canonical-slug))))
                     (snapshot (list :policy in-force :route route)))
+               (harness-openrouter--degraded session-id reading)
                (harness-openrouter--hint
                 session-id
                 (format "OpenRouter endpoint %s pinned for this session (cache cold)"
@@ -2303,8 +2871,14 @@ endpoint however it failed."
   "Drop what this module added and its cached catalogues."
   (remove-hook 'harness-retry-policy-functions #'harness-openrouter--retry-policy)
   (remove-hook 'harness-fallback-guard-functions #'harness-openrouter--guard)
+  (maphash (lambda (_model episode)
+             (when (timerp (plist-get episode :timer))
+               (cancel-timer (plist-get episode :timer))))
+           harness-openrouter--catalogue-failures)
   (clrhash harness-openrouter--catalogue)
-  (clrhash harness-openrouter--fetching))
+  (clrhash harness-openrouter--fetching)
+  (clrhash harness-openrouter--catalogue-failures)
+  (clrhash harness-openrouter--invalidations))
 
 (harness-defmethod openrouter/route (session-id)
   "Return SESSION-ID's pinned OpenRouter route, or nil."

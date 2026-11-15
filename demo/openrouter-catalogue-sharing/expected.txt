@@ -1,0 +1,69 @@
+
+One shared catalogue, refreshed about every 15 minutes
+The shared interval is 900 s.
+
+=== 1. Five sessions and three judges inside the interval: no read
+  outcome: SEND, restricted to deepinfra/fp8 (the stub transport does not answer)
+  outcome: SEND, restricted to deepinfra/fp8 (the stub transport does not answer)
+  outcome: SEND, restricted to deepinfra/fp8 (the stub transport does not answer)
+  outcome: SEND, restricted to deepinfra/fp8 (the stub transport does not answer)
+  outcome: SEND, restricted to deepinfra/fp8 (the stub transport does not answer)
+  outcome: SEND, restricted to deepinfra/fp8 (the stub transport does not answer)
+  hint: OpenRouter endpoint deepinfra/fp8 pinned for this session (cache cold)
+  outcome: SEND, restricted to deepinfra/fp8 (the stub transport does not answer)
+  hint: OpenRouter endpoint deepinfra/fp8 pinned for this session (cache cold)
+  outcome: SEND, restricted to deepinfra/fp8 (the stub transport does not answer)
+  hint: OpenRouter endpoint deepinfra/fp8 pinned for this session (cache cold)
+  catalogue reads: 0 after 5 sessions, 0 after 3 judges
+  catalogue status: fresh, 50 s old, usable
+
+=== 2. Past the interval, inside the bound: served while it is read
+  outcome: SEND, restricted to deepinfra/fp8 (the stub transport does not answer)
+  hint: OpenRouter catalogue revalidating: using the reading 1000 s old, inside the policy's freshness bound, while a fresh one is read
+  hint: OpenRouter endpoint deepinfra/fp8 pinned for this session (cache cold)
+  shared reads started behind the dispatch: 1
+  catalogue status: revalidating, 1005 s old, usable
+  after the read settles: fresh, 0 s old, usable
+
+=== 3. A judge past the interval: answered, and it starts no read
+  outcome: SEND, restricted to deepinfra/fp8 (the stub transport does not answer)
+  hint: OpenRouter endpoint deepinfra/fp8 pinned for this session (cache cold)
+  catalogue reads: 0
+  catalogue status: revalidating, 1005 s old, usable
+
+=== 4. A failed refresh inside the bound: still sends, and says so
+  outcome: SEND, restricted to deepinfra/fp8 (the stub transport does not answer)
+  hint: OpenRouter catalogue revalidating: using the reading 1000 s old, inside the policy's freshness bound, while a fresh one is read
+  hint: OpenRouter endpoint deepinfra/fp8 pinned for this session (cache cold)
+  catalogue status: stale, 1005 s old, usable
+  outcome: SEND, restricted to deepinfra/fp8 (the stub transport does not answer)
+  hint: OpenRouter catalogue degraded: the catalogue refresh failed (HTTP 503: upstream unavailable); using the reading 1005 s old, inside the policy's freshness bound
+  hint: OpenRouter endpoint deepinfra/fp8 pinned for this session (cache cold)
+
+=== 5. A failed refresh outside the bound: stops, as before
+  outcome: STOP (catalogue-unavailable): OpenRouter routing paused: the endpoint catalogue could not be read: HTTP 200: request timed out after 20s
+  hint: OpenRouter routing paused (catalogue-unavailable): the endpoint catalogue could not be read: HTTP 200: request timed out after 20s
+  catalogue status: expired, 3600 s old, expired to decide from
+
+=== 6. No reading at all: stops, and nothing is invented
+  outcome: STOP (catalogue-unavailable): OpenRouter routing paused: the endpoint catalogue could not be read: HTTP 200: request timed out after 20s
+  hint: OpenRouter routing paused (catalogue-unavailable): the endpoint catalogue could not be read: HTTP 200: request timed out after 20s
+  catalogue status: absent, no reading, none to decide from
+
+=== 7. Explicit invalidation: the one path that forces a read
+  reads the invalidation spent: 1
+  catalogue status: fresh, 0 s old, usable
+
+A reading is never used outside the policy's freshness bound, a
+reading is never invented, and the price rule still decides from
+whatever reading is used.  A reused reading is not evidence that a
+price is current now: the bound is the guarantee.
+
+Background re-reads after a failure: a burst, then a heartbeat.
+  burst 1: in 5 s
+  burst 2: in 10 s
+  burst 3: in 20 s
+  burst 4: in 40 s
+  burst 5: in 80 s
+  after the burst: one probe every 300 s until a read settles
+
