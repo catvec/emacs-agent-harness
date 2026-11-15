@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
+import '../media/media_capture.dart';
 import '../voice/voice_backend.dart';
 
 /// A live WebRTC session: the microphone in, the provider's voice out, and a
@@ -21,7 +22,7 @@ import '../voice/voice_backend.dart';
 /// Audio is never mixed in Dart: WebRTC's own echo cancellation keeps the
 /// microphone open while the provider speaks, and the remote audio track is
 /// played by the platform.
-class WebRtcLiveConnection implements LiveVoiceConnection {
+class WebRtcLiveConnection implements LiveVoiceConnection, LiveMediaConnection {
   WebRtcLiveConnection({
     http.Client? client,
     this.gatheringTimeout = const Duration(seconds: 4),
@@ -47,6 +48,17 @@ class WebRtcLiveConnection implements LiveVoiceConnection {
   bool _closed = false;
   bool _openAi = false;
   String? _ephemeral;
+  RTCRtpTransceiver? _cameraTransceiver;
+  RTCRtpTransceiver? _screenTransceiver;
+  Map<String, Object?>? _answerMedia;
+  MediaDelivery _delivery = const MediaDelivery.none(
+    tracksReason: 'not-connected',
+    framesReason: 'not-connected',
+  );
+  int _frameSequence = 0;
+
+  @override
+  MediaDelivery get mediaDelivery => _delivery;
 
   @override
   Stream<Map<String, Object?>> get messages => _messages.stream;
@@ -58,6 +70,16 @@ class WebRtcLiveConnection implements LiveVoiceConnection {
       throw const FormatException('Live voice endpoint is not a URL.');
     }
     _openAi = uri.host.endsWith('openai.com') || uri.path.contains('/realtime');
+    if (_openAi) {
+      final images = _openAiTakesImages(config.model);
+      _delivery = MediaDelivery(
+        tracks: false,
+        frames: images,
+        tracksReason: 'realtime-api-carries-images-not-video-tracks',
+        framesReason: images ? null : 'model-without-image-input',
+        maxFps: 1,
+      );
+    }
     final peer = await createPeerConnection(<String, Object?>{
       'iceServers': iceServers,
       'sdpSemantics': 'unified-plan',
@@ -87,6 +109,22 @@ class WebRtcLiveConnection implements LiveVoiceConnection {
       await peer.addTrack(track, microphone);
     }
 
+    // Two sendonly video transceivers are offered to a generic harness
+    // endpoint.  Whether either is accepted is the provider's answer, not
+    // ours: a rejected m-line is reported as no video track, and no capture
+    // is attached to it.  OpenAI's realtime call is not offered video
+    // tracks; its image input is the data channel below.
+    if (!_openAi) {
+      _cameraTransceiver = await peer.addTransceiver(
+        kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+        init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendOnly),
+      );
+      _screenTransceiver = await peer.addTransceiver(
+        kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+        init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendOnly),
+      );
+    }
+
     final channel = await peer.createDataChannel(
       _openAi ? 'oai-events' : 'harness-voice',
       RTCDataChannelInit()..ordered = true,
@@ -109,6 +147,94 @@ class WebRtcLiveConnection implements LiveVoiceConnection {
     }
     final answer = await _exchange(config, uri, local.sdp!);
     await peer.setRemoteDescription(RTCSessionDescription(answer, 'answer'));
+    if (!_openAi) {
+      final camera = await _accepted(_cameraTransceiver);
+      final screen = await _accepted(_screenTransceiver);
+      final tracks = camera || screen;
+      final frames = _answerMedia?['frames'] == true;
+      _delivery = MediaDelivery(
+        tracks: tracks,
+        frames: frames,
+        tracksReason: tracks ? null : 'provider-without-video',
+        framesReason: frames ? null : 'provider-without-frame-input',
+        maxFps: frames ? 1 : 0,
+      );
+    }
+  }
+
+  bool _openAiTakesImages(String model) => openAiTakesImages(model);
+
+  Future<bool> _accepted(RTCRtpTransceiver? transceiver) async {
+    if (transceiver == null) return false;
+    try {
+      final direction = await transceiver.getCurrentDirection();
+      return direction == TransceiverDirection.SendOnly ||
+          direction == TransceiverDirection.SendRecv;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
+  Future<void> attachVideo(CaptureSource source, Object track) async {
+    if (track is! MediaStreamTrack) {
+      throw const FormatException('Not a MediaStreamTrack.');
+    }
+    final transceiver = switch (source) {
+      CaptureSource.camera => _cameraTransceiver,
+      CaptureSource.screen => _screenTransceiver,
+      CaptureSource.microphone => null,
+    };
+    if (transceiver == null) {
+      throw const VoiceLiveException(
+        'This provider carries no video track for that source.',
+      );
+    }
+    if (!await _accepted(transceiver)) {
+      throw VoiceLiveException('The provider did not accept ${source.label}.');
+    }
+    await transceiver.sender.replaceTrack(track);
+  }
+
+  @override
+  Future<void> detachVideo(CaptureSource source) async {
+    final transceiver = switch (source) {
+      CaptureSource.camera => _cameraTransceiver,
+      CaptureSource.screen => _screenTransceiver,
+      CaptureSource.microphone => null,
+    };
+    try {
+      await transceiver?.sender.replaceTrack(null);
+    } catch (_) {
+      // The peer may already be gone.
+    }
+  }
+
+  @override
+  Future<void> sendFrame(CapturedFrame frame) async {
+    if (!_delivery.frames) {
+      throw const VoiceLiveException('provider takes no frames');
+    }
+    // The data channel's own send queue is the only backpressure there is.
+    // One frame is a base64 expansion of its PNG; when the channel is
+    // already behind, drop this frame rather than grow a queue of them.
+    int? buffered;
+    try {
+      buffered = _channel?.bufferedAmount;
+    } catch (_) {
+      // A platform that does not report it has no say here.
+    }
+    if (!liveFrameFitsBackpressure(buffered, frame.png.length * 4 ~/ 3 + 256)) {
+      throw const VoiceLiveException('channel busy');
+    }
+    if (_openAi) {
+      // The Realtime API takes an image as a content part.  No
+      // `response.create` follows: the frame is context for the next
+      // answer, not an automatic model turn.
+      await send(openAiFrameMessage(frame));
+      return;
+    }
+    await send(harnessFrameMessage(frame, ++_frameSequence));
   }
 
   Future<void> _gatherIce(RTCPeerConnection peer) async {
@@ -196,6 +322,10 @@ class WebRtcLiveConnection implements LiveVoiceConnection {
     }
     final decoded = body.startsWith('{') ? jsonDecode(body) : null;
     if (decoded is Map) {
+      final media = decoded['media'];
+      if (media is Map) {
+        _answerMedia = Map<String, Object?>.from(media);
+      }
       final direct = decoded['sdp'];
       if (direct is String && direct.isNotEmpty) return direct;
       final answer = decoded['answer'];
@@ -444,3 +574,52 @@ class VoiceLiveException implements Exception {
     return line.isEmpty ? '$message$suffix' : '$message$suffix · $line';
   }
 }
+
+/// The most the live data channel's send queue may hold before a frame is
+/// dropped.  WebRTC's SCTP data channel buffers on the sending side; a frame
+/// that would push it past this is a frame the far end is not keeping up
+/// with.  Two mebibytes hold several bounded 180 KiB PNGs after base64
+/// (about 240 KiB each), so the queue can absorb a burst without growing
+/// without limit.
+const int liveFrameBackpressureBytes = 2 * 1024 * 1024;
+
+/// Whether one frame fits in the data channel's send queue.
+bool liveFrameFitsBackpressure(int? bufferedAmount, int frameBytes) =>
+    (bufferedAmount ?? 0) + frameBytes <= liveFrameBackpressureBytes;
+
+/// Whether a Realtime model documents image input.  GPT-Live-1 documents
+/// image and video as unsupported, so it is not one of these.
+bool openAiTakesImages(String model) {
+  final name = model.trim().toLowerCase();
+  return name.startsWith('gpt-realtime') || name.startsWith('gpt-4o-realtime');
+}
+
+/// The Realtime API's one image content part.  No `response.create` follows:
+/// a frame is context for the next answer, not an automatic model turn.
+Map<String, Object?> openAiFrameMessage(CapturedFrame frame) => {
+  'type': 'conversation.item.create',
+  'item': {
+    'type': 'message',
+    'role': 'user',
+    'content': [
+      {
+        'type': 'input_image',
+        'image_url': 'data:${frame.mimeType};base64,${base64Encode(frame.png)}',
+      },
+    ],
+  },
+};
+
+/// The generic harness endpoint's frame message: a documented JSON data
+/// channel object.  A server that has not negotiated frames never sees one.
+Map<String, Object?> harnessFrameMessage(CapturedFrame frame, int sequence) => {
+  'type': 'frame',
+  'protocol': 1,
+  'source': frame.source.name,
+  'mimeType': frame.mimeType,
+  'data': base64Encode(frame.png),
+  'width': frame.width,
+  'height': frame.height,
+  'capturedAt': frame.capturedAt.toUtc().toIso8601String(),
+  'sequence': sequence,
+};

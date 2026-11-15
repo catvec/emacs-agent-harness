@@ -7,6 +7,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:harness_client/src/media/media_capture.dart';
 import 'package:harness_client/src/state/app_controller.dart';
 import 'package:harness_client/src/state/session_controller.dart';
 import 'package:harness_client/src/state/settings_controller.dart';
@@ -459,5 +460,50 @@ void main() {
       expect(_prompts(rig), isEmpty);
       await _settle(tester);
     });
+  });
+
+  testWidgets('a frame is one ACP image block and never an audio block', (
+    tester,
+  ) async {
+    final rig = await _rig();
+    addTearDown(rig.app.dispose);
+    await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+    final controller = rig.app.openSession('s1');
+    for (var i = 0; i < 30 && controller.loading; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+
+    final loading = controller.loadMediaCapabilities();
+    await tester.pump();
+    final media = await loading;
+    expect(media, isNotNull);
+    expect(media!.frames, isTrue);
+    expect(media.realtime, isFalse);
+
+    final sending = controller.sendFrame(
+      CapturedFrame(
+        source: CaptureSource.camera,
+        png: Uint8List.fromList(const [1, 2, 3, 4]),
+        width: 64,
+        height: 36,
+        capturedAt: DateTime.utc(2026, 11, 8),
+      ),
+    );
+    for (var i = 0; i < 60 && controller.voicePromptInFlight; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    await sending;
+    final prompts = _prompts(rig);
+    expect(prompts, hasLength(1));
+    final blocks = prompts.single;
+    expect(blocks, hasLength(2));
+    expect((blocks.first as Map)['type'], 'text');
+    expect((blocks.first as Map)['text'], 'Camera frame');
+    final image = blocks.last as Map;
+    expect(image['type'], 'image');
+    expect(image['mimeType'], 'image/png');
+    expect(image['data'], base64Encode(const [1, 2, 3, 4]));
+    expect((image['_harness'] as Map)['label'], 'Camera frame');
+    await _settle(tester);
   });
 }

@@ -16,6 +16,8 @@ import '../models/server_info.dart';
 import '../models/session.dart';
 import '../models/task.dart';
 import '../desktop/buddy_window.dart';
+import '../media/media_capture.dart';
+import '../media/media_capture_webrtc.dart';
 import '../models/workspace.dart';
 import '../services/harness_api.dart';
 import '../services/device_name.dart';
@@ -104,13 +106,22 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     this.probeTimeout = const Duration(seconds: 5),
     this.workspaceBuddyBackendFactory,
     BuddyWindowService? buddyWindow,
+    MediaCaptureSession? media,
   }) : _connector = connector,
        _openUrl = urlOpener ?? _launchInBrowser,
+       _media = media,
        buddyWindow = buddyWindow ?? createBuddyWindowService();
 
   final SettingsController settings;
   final AcpConnector? _connector;
   final UrlOpener _openUrl;
+  MediaCaptureSession? _media;
+
+  /// The app's one capture session: camera or phone screen, bounded frames,
+  /// and the state a computer endpoint advertises.  It is made on first use
+  /// so a test that never captures never loads a platform channel.
+  MediaCaptureSession get media =>
+      _media ??= MediaCaptureSession(platform: WebRtcMediaCapturePlatform());
 
   /// The waits between attempts to connect again: see
   /// [defaultReconnectDelays].
@@ -508,6 +519,7 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     workspaceBuddy = WorkspaceBuddyController(
       host: this,
       backendFactory: workspaceBuddyBackendFactory ?? createVoiceBackend,
+      media: media,
     );
   }
 
@@ -1993,6 +2005,8 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     _degradedSubscription?.cancel();
     buddyWindow.destroy();
     buddyWindow.dispose();
+    _media?.dispose();
+    _media = null;
     workspaceBuddy?.dispose();
     workspaceBuddy = null;
     windowActive.dispose();

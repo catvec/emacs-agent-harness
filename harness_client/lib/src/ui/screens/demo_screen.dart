@@ -138,6 +138,7 @@ class _DemoScreenState extends State<DemoScreen> {
           widget.voiceBackendFactory ??
           (settings, address) => createVoiceBackend(settings, address, bridge),
       onSettingsChanged: app.settings.setVoiceSettings,
+      capture: app.media,
     );
     voice.addListener(_voiceChanged);
     // The presenter narrates the demo from the moment the run starts, before

@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../state/session_controller.dart';
+import '../media/media_capture.dart';
+import '../models/session_media.dart';
 import 'voice_backend.dart';
 import 'voice_conversation.dart';
 import 'voice_media_buttons.dart';
@@ -63,6 +65,14 @@ class SessionVoiceBridge implements VoiceSessionBridge {
   );
 
   @override
+  Future<SessionMediaCapabilities?> loadMediaCapabilities() =>
+      controller.loadMediaCapabilities();
+
+  @override
+  Future<void> sendFrame(CapturedFrame frame, {String? note}) =>
+      controller.sendFrame(frame, note: note);
+
+  @override
   void addReplyListener(void Function(String text) listener) {
     if (!_following) {
       _following = true;
@@ -119,6 +129,21 @@ typedef VoiceBackendFactory = VoiceBackend Function(
   String harnessAddress,
 );
 
+/// How a live capture is delivered, if at all.
+enum MediaMode {
+  none,
+
+  /// A real WebRTC video track in the call.
+  tracks,
+
+  /// Still frames sampled into the live conversation.
+  frames,
+
+  /// Capture stays on this device: a preview and one frame at a time to the
+  /// session.  This is the workspace provider's mode, never called live video.
+  local,
+}
+
 /// One running voice screen: the state machine between a backend, the
 /// session and the widgets.
 ///
@@ -132,6 +157,7 @@ class VoiceController extends ChangeNotifier {
     required VoiceBackendFactory backendFactory,
     required this.onSettingsChanged,
     VoiceMediaButtons? mediaButtons,
+    MediaCaptureSession? capture,
     VoiceConversation? conversation,
     this.pendingReleaseDelay = const Duration(milliseconds: 1500),
     this.turnCompletionDelay = const Duration(milliseconds: 1200),
@@ -141,7 +167,10 @@ class VoiceController extends ChangeNotifier {
        _settings = settings,
        _harnessAddress = harnessAddress,
        _backendFactory = backendFactory,
-       _mediaButtons = mediaButtons ?? defaultVoiceMediaButtons();
+       _mediaButtons = mediaButtons ?? defaultVoiceMediaButtons(),
+       _capture = capture {
+    _captureStates = _capture?.states.listen(_onCaptureStatus);
+  }
 
   VoiceSessionBridge _bridge;
   VoiceSessionBridge get bridge => _bridge;
@@ -168,6 +197,8 @@ class VoiceController extends ChangeNotifier {
   final VoiceBackendFactory _backendFactory;
   final VoiceMediaButtons _mediaButtons;
   final Future<void> Function(VoiceSettings settings) onSettingsChanged;
+  final MediaCaptureSession? _capture;
+  StreamSubscription<CaptureStatus>? _captureStates;
 
   VoiceSettings _settings;
   VoiceSettings get settings => _settings;
@@ -180,6 +211,30 @@ class VoiceController extends ChangeNotifier {
   bool speechActive = false;
   bool paused = false;
   final List<VoiceCaption> captions = <VoiceCaption>[];
+
+  /// What the provider accepts and what the session can receive from a frame.
+  MediaDelivery mediaDelivery = const MediaDelivery.none(
+    tracksReason: 'not-connected',
+    framesReason: 'not-connected',
+  );
+  SessionMediaCapabilities? sessionMedia;
+  Map<CaptureSource, CaptureCapability> mediaCapabilities =
+      const <CaptureSource, CaptureCapability>{};
+  CaptureStatus mediaStatus = const CaptureStatus();
+  MediaPreview? mediaPreview;
+  bool mediaLoading = false;
+  bool mediaSending = false;
+  bool mediaFrameSending = false;
+  String? mediaProblem;
+  String? frameProblem;
+  int framesSent = 0;
+  DateTime? lastFrameAt;
+  MediaMode _mediaMode = MediaMode.none;
+  Timer? _sampleTimer;
+  Timer? _previewTimer;
+  bool _sampling = false;
+  final List<DateTime> _frameTimes = <DateTime>[];
+  bool _disposed = false;
 
   /// Replies that arrived while speech or a pause owned the floor.  They are
   /// attached to the next transcript as explicit context, or released when
@@ -238,7 +293,6 @@ class VoiceController extends ChangeNotifier {
   VoiceBackend? _backend;
   StreamSubscription<VoiceBackendEvent>? _events;
   bool _followSession = false;
-  bool _disposed = false;
   bool _stopping = false;
   bool _stopInProgress = false;
   bool _replacingBackend = false;
@@ -290,6 +344,67 @@ class VoiceController extends ChangeNotifier {
       pendingSpeech.isNotEmpty ||
       phase == VoicePhase.hearing ||
       phase == VoicePhase.transcribing;
+
+  /// The provider's video delivery, and what a camera or screen can do here.
+  bool get hasCapture => _capture != null;
+
+  CaptureCapability? capabilityFor(CaptureSource source) =>
+      mediaCapabilities[source];
+
+  bool get cameraAvailable =>
+      capabilityFor(CaptureSource.camera)?.usable == true;
+
+  bool get screenAvailable =>
+      capabilityFor(CaptureSource.screen)?.usable == true;
+
+  /// Whether a frame can go to the session now.  Unknown vision is offered
+  /// with `Vision unconfirmed`; a provider that says no is not offered.
+  bool get canFrameToChat =>
+      _capture != null &&
+      sessionMedia?.frames == true &&
+      mediaStatus.state.active;
+
+  /// Whether the provider accepts a continuous track.
+  bool get canCarryTrack => mediaDelivery.tracks;
+
+  /// Whether the provider accepts sampled still frames.
+  bool get canCarryFrames => mediaDelivery.frames;
+
+  /// The one-step stop, named for the source that is live.
+  String get mediaStopLabel => mediaStatus.source == CaptureSource.screen
+      ? 'Stop screen share'
+      : 'Stop camera';
+
+  /// The label for the current source's state, in the app's nouns.
+  String get mediaStateLabel {
+    final source = mediaStatus.source;
+    if (source == null) return 'Camera and screen off';
+    final state = mediaStatus.state;
+    if (state == CaptureState.live) {
+      if (_mediaMode == MediaMode.tracks) return '${source.label} live';
+      if (_mediaMode == MediaMode.frames) {
+        return '${source.label} frames · 1/s';
+      }
+      return '${source.label} preview';
+    }
+    if (state == CaptureState.paused) return '${source.label} paused';
+    if (state == CaptureState.suspended) return '${source.label} suspended';
+    if (state == CaptureState.starting) return '${source.label} starting';
+    if (state == CaptureState.foregroundOnly) {
+      return '${source.label} foreground only';
+    }
+    if (state == CaptureState.denied) {
+      return '${source.label} permission denied';
+    }
+    if (state == CaptureState.revoked) {
+      return '${source.label} permission revoked';
+    }
+    if (state == CaptureState.unavailable) {
+      return '${source.label} unavailable';
+    }
+    if (state == CaptureState.error) return '${source.label} failed';
+    return '${source.label} off';
+  }
 
   String get _captionText {
     final captions = _captionDraft.entries.toList()
@@ -409,6 +524,7 @@ class VoiceController extends ChangeNotifier {
       return;
     }
     follow();
+    unawaited(prepareMedia());
     _setPhase(VoicePhase.connecting);
     _syncPipeline();
     if (!_mediaButtonsStarted) {
@@ -435,6 +551,7 @@ class VoiceController extends ChangeNotifier {
     _backend = backend;
     _backendTurnHeld = false;
     _events = events;
+    mediaDelivery = backend.mediaDelivery;
     try {
       await backend.start();
     } catch (error) {
@@ -467,6 +584,261 @@ class VoiceController extends ChangeNotifier {
     } catch (_) {
       // The backend that was superseded is already gone; it is still stopped.
     }
+  }
+
+  /// Learn what the provider and the session accept.  It is safe to call
+  /// before or after [start]; the answer may arrive later and is kept.
+  Future<void> prepareMedia() async {
+    if (_disposed || _capture == null) return;
+    mediaLoading = true;
+    notifyListeners();
+    try {
+      final caps = await _capture.capabilities();
+      final session = await bridge.loadMediaCapabilities();
+      if (_disposed) return;
+      mediaCapabilities = caps;
+      sessionMedia = session;
+    } catch (_) {
+      if (_disposed) return;
+      mediaProblem = 'Capture unavailable';
+    } finally {
+      if (!_disposed) {
+        mediaLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  /// Turn [source] on, or off when it is already the live source.  This is
+  /// the one control a person presses; nothing starts by itself.
+  Future<void> toggleMedia(CaptureSource source) async {
+    if (_disposed || _capture == null) return;
+    if (mediaStatus.state.active && mediaStatus.source == source) {
+      await stopMedia();
+    } else {
+      await startMedia(source);
+    }
+  }
+
+  Future<void> startMedia(CaptureSource source) async {
+    final capture = _capture;
+    if (_disposed || capture == null) return;
+    if (mediaStatus.state.active && mediaStatus.source == source) return;
+    mediaProblem = null;
+    frameProblem = null;
+    mediaSending = true;
+    notifyListeners();
+    try {
+      await capture.start(source);
+      if (_disposed) return;
+      mediaStatus = capture.status;
+      await _syncMedia(capture.status);
+      if (!_disposed) mediaStatus = capture.status;
+    } catch (_) {
+      if (_disposed) return;
+      // The capture session already emitted the state -- permission denied,
+      // revoked, unavailable or failed -- and the status line names it.  A
+      // second, identical note would only repeat it.
+      mediaStatus = capture.status;
+      if (!capture.status.state.failed) {
+        mediaProblem = '${source.label} unavailable';
+      }
+      mediaFrameSending = false;
+    } finally {
+      if (!_disposed) {
+        mediaSending = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  /// Stop the live source: one step, from any surface.
+  Future<void> stopMedia() async {
+    if (_disposed || _capture == null) return;
+    _stopSampling();
+    _stopPreview();
+    final backend = _backend;
+    if (backend != null) await backend.detachCapture();
+    await _capture.stop();
+    mediaStatus = _capture.status;
+    _mediaMode = MediaMode.none;
+    mediaPreview = null;
+    mediaProblem = null;
+    frameProblem = null;
+    if (!_disposed) notifyListeners();
+  }
+
+  /// One still frame to the session.  Only a press calls it; it is never a
+  /// sampling loop over a paid turn.
+  Future<void> sendFrameToChat() async {
+    final capture = _capture;
+    final media = sessionMedia;
+    if (_disposed || capture == null || media == null || !media.frames) return;
+    if (!mediaStatus.state.active) return;
+    mediaFrameSending = true;
+    frameProblem = null;
+    notifyListeners();
+    try {
+      final frame = await capture.captureFrame();
+      if (frame == null) {
+        frameProblem = 'Frame not sent · no live frame';
+        return;
+      }
+      await bridge.sendFrame(frame);
+      if (_disposed) return;
+      framesSent++;
+      lastFrameAt = DateTime.now();
+    } catch (error) {
+      if (!_disposed) frameProblem = 'Frame not sent · $error';
+    } finally {
+      if (!_disposed) {
+        mediaFrameSending = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  void _onCaptureStatus(CaptureStatus status) {
+    if (_disposed) return;
+    mediaStatus = status;
+    unawaited(_syncMedia(status));
+    notifyListeners();
+  }
+
+  Future<void> _syncMedia(CaptureStatus status) async {
+    if (_disposed) return;
+    final capture = _capture;
+    if (capture == null) return;
+    mediaStatus = capture.status;
+    if (status.state == CaptureState.paused) {
+      _stopSampling();
+      _stopPreview();
+      _mediaMode = mediaDelivery.tracks ? MediaMode.tracks : _mediaMode;
+      unawaited(capture.setTransmitting(mediaDelivery.tracks));
+      notifyListeners();
+      return;
+    }
+    if (!status.state.active || status.source == null) {
+      _stopSampling();
+      _stopPreview();
+      _mediaMode = MediaMode.none;
+      unawaited(_backend?.detachCapture());
+      notifyListeners();
+      return;
+    }
+    final source = status.source!;
+    if (mediaDelivery.tracks) {
+      _mediaMode = MediaMode.tracks;
+      _stopSampling();
+      _stopPreview();
+      final backend = _backend;
+      final attached =
+          backend == null ||
+          await backend.attachCapture(source, capture.videoTrack);
+      if (_disposed) return;
+      if (!attached) {
+        // The answer accepted the m-line, but the sender took no track.  Do
+        // not leave a camera on and a `live` label over nothing.
+        await capture.stop();
+        if (_disposed) return;
+        _mediaMode = MediaMode.none;
+        mediaProblem = 'No video · track refused';
+        notifyListeners();
+        return;
+      }
+      unawaited(capture.setTransmitting(true));
+      notifyListeners();
+      return;
+    }
+    if (mediaDelivery.frames) {
+      _mediaMode = MediaMode.frames;
+      _stopPreview();
+      unawaited(capture.setTransmitting(true));
+      _startSampling();
+      notifyListeners();
+      return;
+    }
+    if (sessionMedia?.frames == true) {
+      _mediaMode = MediaMode.local;
+      _stopSampling();
+      unawaited(capture.setTransmitting(false));
+      _startPreview();
+      notifyListeners();
+      return;
+    }
+    // No provider takes a track or a frame, and the session does not take
+    // images either: do not leave a camera on for a control that promises
+    // nothing.
+    await capture.stop();
+    if (_disposed) return;
+    _mediaMode = MediaMode.none;
+    mediaProblem = 'No video · voice model';
+    notifyListeners();
+  }
+
+  void _startSampling() {
+    if (_sampleTimer != null) return;
+    final interval =
+        _capture?.bounds.sampleInterval ?? const Duration(seconds: 1);
+    _sampleTimer = Timer.periodic(interval, (_) => unawaited(_sampleOnce()));
+  }
+
+  Future<void> _sampleOnce() async {
+    if (_disposed || _sampling) return;
+    final capture = _capture;
+    final backend = _backend;
+    if (capture == null || backend == null) return;
+    if (mediaStatus.state != CaptureState.live) return;
+    if (_mediaMode != MediaMode.frames) return;
+    final now = DateTime.now();
+    _frameTimes.removeWhere(
+      (at) => now.difference(at) > const Duration(minutes: 1),
+    );
+    final limit = capture.bounds.maxFramesPerMinute;
+    if (_frameTimes.length >= limit) {
+      frameProblem = 'Frame limit · 1 minute';
+      notifyListeners();
+      return;
+    }
+    _sampling = true;
+    try {
+      final frame = await capture.captureFrame();
+      if (_disposed || frame == null) return;
+      _frameTimes.add(now);
+      mediaPreview = MediaPreview(frame.png, now);
+      await backend.sendCapturedFrame(frame);
+    } finally {
+      _sampling = false;
+    }
+  }
+
+  void _stopSampling() {
+    _sampleTimer?.cancel();
+    _sampleTimer = null;
+    _frameTimes.clear();
+  }
+
+  void _startPreview() {
+    if (_previewTimer != null) return;
+    _previewTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      unawaited(_previewOnce());
+    });
+  }
+
+  Future<void> _previewOnce() async {
+    final capture = _capture;
+    if (_disposed || capture == null) return;
+    if (mediaStatus.state != CaptureState.live) return;
+    if (_mediaMode != MediaMode.local && _mediaMode != MediaMode.tracks) return;
+    final frame = await capture.captureFrame(preview: true);
+    if (frame == null || _disposed) return;
+    mediaPreview = MediaPreview(frame.png, DateTime.now());
+    if (!_disposed) notifyListeners();
+  }
+
+  void _stopPreview() {
+    _previewTimer?.cancel();
+    _previewTimer = null;
   }
 
   void _onEvent(VoiceBackendEvent event) {
@@ -604,6 +976,19 @@ class VoiceController extends ChangeNotifier {
         // Even a prompt with no words goes through: the segment it names
         // is then dropped with a reason instead of waiting forever.
         _receivePrompt(prompt);
+      case VoiceMediaDeliveryEvent(:final delivery):
+        mediaDelivery = delivery;
+        unawaited(_syncMedia(mediaStatus));
+      case VoiceMediaFrameEvent(:final sent, :final error):
+        if (sent) {
+          framesSent++;
+          lastFrameAt = DateTime.now();
+          frameProblem = null;
+        } else {
+          frameProblem = error == null
+              ? 'Frame not sent'
+              : 'Frame not sent · $error';
+        }
       case VoiceFailureEvent(:final problem):
         _setProblem(problem);
         pipeline.problem(problem);
@@ -1140,6 +1525,9 @@ class VoiceController extends ChangeNotifier {
     _setPhase(VoicePhase.paused);
     final backend = _backend;
     if (backend != null) await backend.pause();
+    await _capture?.pause();
+    if (_capture != null) mediaStatus = _capture.status;
+    _setPhase(VoicePhase.paused);
     _syncPipeline();
     notifyListeners();
   }
@@ -1150,6 +1538,8 @@ class VoiceController extends ChangeNotifier {
     paused = false;
     final backend = _backend;
     if (backend != null) await backend.resume();
+    await _capture?.resume();
+    if (_capture != null) mediaStatus = _capture.status;
     _setPhase(muted ? VoicePhase.muted : VoicePhase.listening);
     _syncPipeline();
     notifyListeners();
@@ -1181,6 +1571,7 @@ class VoiceController extends ChangeNotifier {
     _openTurns.clear();
     speechActive = false;
     paused = false;
+    await stopMedia();
     _cancelPending();
     await _closeBackend();
     pipeline.end(state: VoiceInputState.off);
@@ -1282,6 +1673,7 @@ class VoiceController extends ChangeNotifier {
       bridge.removeSessionListener(_sessionChanged);
     }
     _stopMediaButtons();
+    await stopMedia();
     _cancelPending();
     await _closeBackend();
     pipeline.end();
@@ -1311,6 +1703,11 @@ class VoiceController extends ChangeNotifier {
       bridge.removeSessionListener(_sessionChanged);
     }
     _stopMediaButtons();
+    _stopSampling();
+    _stopPreview();
+    unawaited(_captureStates?.cancel());
+    _captureStates = null;
+    unawaited(_capture?.stop());
     conversation.clear();
     pipeline.end();
     unawaited(_closeBackend());

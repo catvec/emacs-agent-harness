@@ -51,6 +51,36 @@ void main() {
     );
   });
 
+  /// The `android:name` of every `uses-permission` the app's own
+  /// manifest declares.
+  Set<String> declaredPermissions() {
+    final manifest = File(
+      'android/app/src/main/AndroidManifest.xml',
+    ).readAsStringSync();
+    return RegExp(
+      r'<uses-permission\s+android:name="([^"]+)"',
+    ).allMatches(manifest).map((match) => match.group(1)!).toSet();
+  }
+
+  test('the permissions libwebrtc reads at runtime are declared', () {
+    // libwebrtc's NetworkMonitor asks ConnectivityManager for the
+    // active network as a peer connection starts.  Without
+    // ACCESS_NETWORK_STATE the call throws a SecurityException inside
+    // the network thread, and libwebrtc's JNI does not catch it: it
+    // aborts the process (`jvm.cc` `Check failed: false`), so voice
+    // mode kills the app the moment it offers a call.  No test that
+    // does not start a peer connection can see it, so the manifest is
+    // checked instead.
+    expect(
+      declaredPermissions(),
+      contains('android.permission.ACCESS_NETWORK_STATE'),
+      reason:
+          'android/app/src/main/AndroidManifest.xml must declare '
+          'ACCESS_NETWORK_STATE: libwebrtc aborts the process when '
+          'ConnectivityManager refuses it',
+    );
+  });
+
   test('built-in Kotlin stays off until both plugins support it', () {
     // Flutter's Gradle plugin warns that flutter_tts and flutter_webrtc apply
     // the Kotlin Gradle Plugin themselves, and the tempting fix is to turn

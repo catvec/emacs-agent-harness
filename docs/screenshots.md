@@ -190,6 +190,9 @@ directory:
 ```sh
 cd harness_client
 HARNESS_SHOTS=screenshots flutter test test/voice_screenshots_test.dart
+HARNESS_SHOTS=screenshots flutter test test/media_screenshots_test.dart
+# or, with the toolchain found for you:
+harness_client/tool/media_screenshots.sh
 HARNESS_SHOTS=/tmp/shots flutter test test/workspace_screenshots_test.dart
 HARNESS_SHOTS=/tmp/shots flutter test test/resources_screenshots_test.dart
 ```

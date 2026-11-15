@@ -52,6 +52,9 @@ dependencies:
   record: ^7.1.2
   flutter_tts: ^4.2.5
   flutter_webrtc: ^1.6.3
+  # Reading and removing the PNG flutter_webrtc writes for a captured
+  # frame, so no raw media stays in the cache after a capture.
+  path_provider: ^2.1.6
   http: ^1.6.0
   intl: ^0.20.3
   image_picker: ^1.2.4

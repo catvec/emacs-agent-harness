@@ -111,6 +111,7 @@ class FakeHarness {
       methods.addAll({
         'session/list',
         'session/get',
+        'session/media',
         'session/nodes',
         'session/update',
         'session/fork',
@@ -615,6 +616,11 @@ class FakeHarness {
 
   /// Every request the client made, with its params, in order.
   final List<(String, JsonMap)> requests = [];
+
+  /// Called with every request the client makes, for a run that watches the
+  /// protocol from outside (tool/mock_harness_server.dart --trace).  A test
+  /// that does not set it behaves as before.
+  void Function(String method, JsonMap params)? onRequest;
   final Map<String, Completer<Map<String, Object?>>> _serverRequests = {};
   final Map<String, Map<String, Object?>> _serverRequestParams = {};
   void Function(String message)? writer;
@@ -1648,7 +1654,9 @@ class FakeHarness {
         _notification(method, asMap(message['params']));
       } else {
         requestsByClient.add(method);
-        requests.add((method, asMap(message['params'])));
+        final params = asMap(message['params']);
+        requests.add((method, params));
+        onRequest?.call(method, params);
         unawaited(_request(method, asMap(message['params']), id));
       }
       return;
@@ -1931,6 +1939,27 @@ class FakeHarness {
       if (method == '_harness/session/get') {
         final sid = asString(params['id']);
         _respond(id, sessions[sid] ?? const <String, Object?>{});
+        return;
+      }
+      if (method == '_harness/session/media') {
+        final sid = asString(params['id']);
+        _respond(id, <String, Object?>{
+          'session': sid,
+          'endpoint': 'session/prompt',
+          'images': true,
+          'realtime': false,
+          'realtime-reason': 'no-media-sink',
+          'frames': <String, Object?>{
+            'supported': true,
+            'max-bytes': 184320,
+            'max-width': 640,
+            'max-height': 360,
+            'max-per-minute': 30,
+            'mime-types': ['image/png', 'image/jpeg'],
+          },
+          'model': (sessions[sid] as Map?)?['model'],
+          'vision': true,
+        });
         return;
       }
       if (method == '_harness/session/nodes') {

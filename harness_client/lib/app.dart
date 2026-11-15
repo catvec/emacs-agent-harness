@@ -119,6 +119,7 @@ class _HarnessAppState extends State<HarnessApp> with WidgetsBindingObserver {
     // in-call bar for one that is.  A phone or browser reports the same
     // states; the buddy is only built at a desktop width.
     _app.windowActive.value = state == AppLifecycleState.resumed;
+    unawaited(_app.media.handleLifecycle(state));
     switch (state) {
       case AppLifecycleState.resumed:
         unawaited(_app.resumed());

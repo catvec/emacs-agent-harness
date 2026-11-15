@@ -86,6 +86,9 @@ Future<void> _pump(
   VoidCallback? onEnd,
   VoidCallback? onRetry,
   VoidCallback? onOpenCallView,
+  VoidCallback? onStopMedia,
+  String? mediaLabel,
+  String? mediaStopLabel,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -112,6 +115,9 @@ Future<void> _pump(
                 onEnd: onEnd ?? () {},
                 onRetry: onRetry ?? () {},
                 onOpenCallView: onOpenCallView,
+                onStopMedia: onStopMedia,
+                mediaLabel: mediaLabel,
+                mediaStopLabel: mediaStopLabel,
               ),
             ),
           ),
@@ -442,5 +448,25 @@ void main() {
     await settle();
     expect(visible(), isFalse);
     rig.controller.dispose();
+  });
+
+  testWidgets('a live source has one step to stop, named for it', (
+    tester,
+  ) async {
+    var stopped = 0;
+    await _pump(
+      tester,
+      _model(),
+      onStopMedia: () => stopped++,
+      mediaLabel: 'Camera live',
+      mediaStopLabel: 'Stop camera',
+    );
+    expect(find.bySemanticsLabel('Stop camera'), findsOneWidget);
+    expect(
+      tester.getSemantics(find.byKey(const Key('call-bar-media'))).tooltip,
+      'Camera live',
+    );
+    await tester.tap(find.byKey(const Key('call-bar-media')));
+    expect(stopped, 1);
   });
 }

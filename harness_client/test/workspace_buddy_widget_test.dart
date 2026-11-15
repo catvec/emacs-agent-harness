@@ -113,6 +113,9 @@ Future<void> _pump(
   VoidCallback? onOff,
   VoidCallback? onOpenWorkspace,
   VoidCallback? onOpenSettings,
+  VoidCallback? onStopMedia,
+  String? mediaLabel,
+  String? mediaStopLabel,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -146,6 +149,9 @@ Future<void> _pump(
                   onOff: onOff ?? () {},
                   onOpenWorkspace: onOpenWorkspace ?? () {},
                   onOpenSettings: onOpenSettings ?? () {},
+                  onStopMedia: onStopMedia,
+                  mediaLabel: mediaLabel,
+                  mediaStopLabel: mediaStopLabel,
                 ),
               ),
             ),
@@ -829,6 +835,24 @@ void main() {
     await tester.runAsync(() => rig.controller.end());
     rig.controller.dispose();
     await tester.pump();
+  });
+
+  testWidgets('a live source shows a stop named for it', (tester) async {
+    var stopped = 0;
+    await _pump(
+      tester,
+      buddyModel(),
+      onStopMedia: () => stopped++,
+      mediaLabel: 'Camera live',
+      mediaStopLabel: 'Stop camera',
+    );
+    // The live source's stop is one step away with the rest of the detail:
+    // the glance keeps only Mute, End and the disclosure.
+    await _openDetails(tester);
+    expect(find.text('Stop camera'), findsOneWidget);
+    expect(find.byTooltip('Camera live'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('buddy-media')));
+    expect(stopped, 1);
   });
 
   testWidgets('opting in draws no card until a call starts', (tester) async {

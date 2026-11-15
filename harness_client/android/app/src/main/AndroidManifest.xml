@@ -1,11 +1,26 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- The client speaks ACP over WebSocket or TCP to a harness on your network. -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- libwebrtc's NetworkMonitor asks ConnectivityManager for the
+         active network as the peer connection starts, and its JNI
+         aborts the whole process on the SecurityException a missing
+         permission raises.  Voice mode needs it as much as a video
+         track does: without it the app dies the moment it offers a
+         call.  A normal permission, granted at install. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <!-- Voice mode: the microphone, and the audio route a hands-free session
          uses.  Recording is only started by the voice screen. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <!-- Live camera video, only while the person has turned Camera on. -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <!-- Phone screen sharing: MediaProjection consent plus the foreground
+         service Android 10+ requires around it.  The service captures
+         nothing itself and stops with the share. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
     <application
         android:label="Harness"
         android:usesCleartextTraffic="true"
@@ -33,6 +48,12 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Android 10+ requires this around a MediaProjection; the app starts
+             it before getDisplayMedia and stops it with the share. -->
+        <service
+            android:name=".ScreenShareService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection"/>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

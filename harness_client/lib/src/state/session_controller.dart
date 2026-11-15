@@ -8,9 +8,11 @@ import '../acp/acp_message.dart';
 import '../models/activity.dart';
 import '../models/chat_thread.dart';
 import '../models/session.dart';
+import '../models/session_media.dart';
 import '../models/session_modes.dart';
 import '../models/tool_catalogue.dart';
 import '../models/transcript.dart';
+import '../media/media_capture.dart';
 import '../services/harness_api.dart';
 import 'drafts.dart';
 import 'interaction.dart';
@@ -536,6 +538,80 @@ class SessionController extends ChangeNotifier {
         : 'The connection was lost before the images were sent.';
   }
 
+  /// What this session can receive from a camera or screen capture, asked
+  /// once and kept.  [refresh] asks the harness again after a model change.
+  Future<SessionMediaCapabilities?> loadMediaCapabilities({
+    bool refresh = false,
+  }) async {
+    if (_mediaLoaded && !refresh) return mediaCapabilities;
+    try {
+      final wire = await api.sessionMedia(sessionId);
+      mediaCapabilities = SessionMediaCapabilities.fromWire(wire);
+    } catch (_) {
+      // A harness without the extension has no frame endpoint to promise.
+      mediaCapabilities = null;
+    }
+    _mediaLoaded = true;
+    _notify();
+    return mediaCapabilities;
+  }
+
+  /// Send one captured frame to the conversation as an ACP image block.
+  ///
+  /// This is a still, not a video track.  It is only called by a person's
+  /// action (`Frame to chat`), so the turn it may start is never automatic.
+  Future<void> sendFrame(CapturedFrame frame, {String? note}) async {
+    if (!canSend) {
+      error = 'Not connected to the harness: the frame was not sent.';
+      _notify();
+      return;
+    }
+    final shown = note?.trim().isNotEmpty == true ? note!.trim() : frame.label;
+    error = null;
+    voicePromptInFlight = true;
+    final echo = transcript.addLocalUser(shown);
+    _notify();
+    final blocks = <Map<String, Object?>>[
+      textBlock(shown),
+      <String, Object?>{
+        'type': 'image',
+        'mimeType': frame.mimeType,
+        'data': base64Encode(frame.png),
+        '_harness': {'label': frame.label},
+      },
+    ];
+    try {
+      final result = await api.prompt(sessionId, blocks);
+      final stop = asString(result['stopReason']);
+      if (stop == 'refusal' || stop == 'max_tokens') {
+        error = switch (stop) {
+          'max_tokens' => 'The turn stopped at the model’s output limit.',
+          _ => 'The agent refused the prompt.',
+        };
+      }
+    } on AcpException catch (failure) {
+      if (failure.isTransport) {
+        transcript.removeLocalEcho(echo);
+        error = 'The connection was lost before the frame was sent.';
+      } else {
+        error = _friendlyError(failure);
+      }
+    } catch (failure) {
+      error = '$failure';
+    } finally {
+      voicePromptInFlight = false;
+      transcript.finish();
+      _notify();
+      unawaited(refreshInfo());
+      unawaited(_refreshActivity());
+    }
+  }
+
+  /// The session's frame capability, once loaded.
+  SessionMediaCapabilities? mediaCapabilities;
+  bool _mediaLoaded = false;
+
+  /// Cancel the running turn.
   Future<void> cancel() async {
     if (!promptInFlight && summary?.isRunning != true) return;
     cancelling = true;

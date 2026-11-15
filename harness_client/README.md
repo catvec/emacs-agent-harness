@@ -1337,6 +1337,62 @@ the limits.
 |---|---|
 | ![The voice screen on a live provider: Live at the top, the call listening](screenshots/voice-live.png) | ![The voice screen on a wide screen: the orb, the transcript and the controls in one column](screenshots/voice-wide.png) |
 
+### Camera and screen
+
+`Camera` and `Screen` sit beside the call and turn on one visual source at a
+time.  Which states are honest depends on three separate answers: what the
+device can capture, what the live provider's own SDP answer accepts, and what
+the session says it can receive.  A provider that takes neither a track nor a
+frame gets a disabled control and the reason, never a `live` label.
+
+- `Camera preview` / `Screen preview` is a local preview only: no continuous
+  sender took the track.  `Frame to chat` sends **one still**, by a person's
+  press, as an ACP `session/prompt` image block; it is never a timer over a
+  paid turn.
+- `Camera live` / `Screen live` appears only when the answer accepted the
+  sendonly video m-line.  `Camera frames · 1/s` / `Screen frames · 1/s` is the
+  still path to a realtime provider that documents image input (OpenAI
+  `gpt-realtime*`); nothing is sampled for GPT-Live-1, whose model page lists
+  image and video as unsupported.
+- `Camera paused`, `Camera permission denied`, `Camera permission revoked`,
+  `Camera suspended`, `Camera unavailable`, `Camera failed`, `Camera
+  foreground only`, and `Camera and screen off` are the other states the bar
+  says in words.  `Vision unconfirmed` warns when the harness does not know
+  whether the model reads images; `No video · voice model` says it does not.
+- `Stop camera` and `Stop screen share` stop in one step from the voice screen,
+  and the in-call bar and desktop buddy keep a `Stop camera` or
+  `Stop screen share` control while a source is live.  End, Minimize, a new call, a permission taken back, and the
+  app going to the background all stop it too; nothing starts again by itself.
+- Android screen sharing asks for the system MediaProjection consent and runs
+  this app's own `Screen share` foreground notification; the camera asks for
+  the camera permission.  iOS offers the camera only (screen needs a broadcast
+  extension); macOS offers both with the camera entitlement; the web build
+  offers neither, because flutter_webrtc's frame capture is native only.
+- A sent frame is at most 640 × 360 and 180 KiB, sampled at most once a second
+  and 30 times a minute; the preview is 320 × 180 and never leaves memory.
+  The frame size bound keeps the base64 JSON under 256 KiB for a portable
+  WebRTC data channel.  No raw frame is written to storage: the one PNG
+  flutter_webrtc writes for a capture is deleted at once.
+
+Pictures are fixtures: a scripted capture platform, a scripted backend and
+synthetic pixels, drawn by `test/media_screenshots_test.dart`.
+
+| Camera preview, one frame to chat | A provider that accepted the track |
+|---|---|
+| ![The voice screen on a phone: Stop camera, Screen, Frame to chat, Camera preview, a small preview, and the call controls](screenshots/media/phone-camera-ready.png) | ![The voice screen on a phone with a live track: Stop camera, Camera live](screenshots/media/phone-camera-live.png) |
+
+| Paused | No video, voice model |
+|---|---|
+| ![The voice screen on a phone: Stop camera, Frame to chat, Camera paused, the call paused](screenshots/media/phone-camera-paused.png) | ![The voice screen on a phone: disabled Frame to chat, Camera off, No video · voice model](screenshots/media/phone-vision-unsupported.png) |
+
+| Screen frames on a wide screen |
+|---|
+| ![The voice screen on a desktop: Camera, Stop screen share, Frame to chat, Screen frames · 1/s](screenshots/media/desktop-screen-frames.png) |
+
+[docs/live-video-screen-share.md](../docs/live-video-screen-share.md) has the
+transport comparison, the compatibility matrix, the measurements and the
+remaining limitations.
+
 ## Workspace
 The `Workspace` tab has a `Graph` page beside `Memory`: it reads the
 current thread's Logseq page through `knowledge/graph`, shows its
@@ -1692,6 +1748,16 @@ The widget tests drive the real `AcpClient` against an in-memory ACP server
   open, and one that is a line long stays on its line; a hint of a line or
   two is whole, a long one, or a long line, is cut
   and opens and cuts again (pictures written where `HARNESS_SHOTS` says)
+- live camera and screen sharing (`test/media_capture_test.dart`,
+  `voice_media_test.dart`, `voice_media_bar_test.dart`,
+  `session_media_test.dart`, `media_frame_protocol_test.dart`,
+  `voice_live_media_test.dart`, `media_screenshots_test.dart`,
+  `media_benchmark_test.dart`): permission denial, pause and lifecycle stop,
+  one source at a time and the frame bounds; track, sampled-frame and
+  one-press delivery; every state and tooltip in the bar, exactly; the ACP
+  image block a frame becomes; the OpenAI image part and the absence of
+  `response.create`; backpressure arithmetic; and pictures and timings of the
+  real widget with synthetic pixels
 - voice mode (`test/voice_audio_test.dart`, `voice_settings_test.dart`,
   `voice_transcription_test.dart`, `voice_live_protocol_test.dart`,
   `voice_controller_test.dart`, `voice_conversation_test.dart`,

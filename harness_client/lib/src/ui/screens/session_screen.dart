@@ -425,6 +425,7 @@ class _SessionScreenState extends State<SessionScreen> {
           widget.voiceBackendFactory ??
           (settings, address) => createVoiceBackend(settings, address, bridge),
       onSettingsChanged: _app.settings.setVoiceSettings,
+      capture: _app.media,
     );
     try {
       await Navigator.of(context).push(

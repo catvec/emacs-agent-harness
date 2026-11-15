@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../media/media_capture.dart';
 import '../models/workspace.dart';
 import '../voice/voice_backend.dart';
 import '../voice/voice_buddy.dart';
@@ -62,8 +63,10 @@ class WorkspaceBuddyController extends ChangeNotifier {
     required this.host,
     required WorkspaceBuddyBackendFactory backendFactory,
     VoiceMediaButtons? mediaButtons,
+    MediaCaptureSession? media,
   }) : _backendFactory = backendFactory,
-       _mediaButtons = mediaButtons {
+       _mediaButtons = mediaButtons,
+       _media = media {
     host.addListener(_hostChanged);
     _context = host.buddyContextListenable;
     _context?.addListener(_hostChanged);
@@ -72,6 +75,7 @@ class WorkspaceBuddyController extends ChangeNotifier {
   final WorkspaceBuddyHost host;
   final WorkspaceBuddyBackendFactory _backendFactory;
   final VoiceMediaButtons? _mediaButtons;
+  final MediaCaptureSession? _media;
 
   Listenable? _context;
   VoiceController? _voice;
@@ -153,10 +157,7 @@ class WorkspaceBuddyController extends ChangeNotifier {
   /// Whether End has something to clear: a call opening, running, or failed
   /// with the controller still held, so a fatal problem can be dismissed
   /// without opening another call.
-  bool get canEnd =>
-      !_disposed &&
-      !_ending &&
-      (_starting || _voice != null);
+  bool get canEnd => !_disposed && !_ending && (_starting || _voice != null);
 
   bool get canMute =>
       _voice != null && !_voice!.phase.finished && !_voice!.paused;
@@ -327,6 +328,7 @@ class WorkspaceBuddyController extends ChangeNotifier {
           _backendFactory(settings, address, bridge!),
       onSettingsChanged: host.saveBuddyVoiceSettings,
       mediaButtons: _mediaButtons,
+      capture: _media,
     );
     voice.addListener(_voiceChanged);
     _voice = voice;

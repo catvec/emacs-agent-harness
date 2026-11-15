@@ -4143,5 +4143,69 @@ path, and an error comes back as the words it carries."
         (should (string-match-p "shows no file" (nth 1 triplet)))))))
 
 
+(defvar harness-providers)
+(declare-function harness-provider--forget "harness-provider")
+
+(defun harness-session-test--media-provider ()
+  "Define `test-media', with a vision model and a text-only model."
+  (harness-define-provider 'test-media
+    :complete #'ignore
+    :capabilities '(:thinking t)
+    :models (lambda ()
+              (harness-resolved
+               (list (list :name "sees" :capabilities '(:vision t))
+                     (list :name "text"))))))
+
+(ert-deftest harness-session-media-answers-the-frame-endpoint-and-bounds ()
+  "A client learns where frames go, the bounds, and what the model reads.
+`session/media' never calls a model: it reports the session's endpoint,
+the image block `session/prompt' takes, the frame limits, and whether
+the catalogue says the model reads images."
+  (harness-session-test-with
+    (unwind-protect
+        (progn
+          (harness-session-test--media-provider)
+          (let* ((cwd (harness-test-temp-dir))
+                 (sees (plist-get (harness-call 'session/create :cwd cwd
+                                                 :model "test-media:sees") :id))
+                 (text (plist-get (harness-call 'session/create :cwd cwd
+                                                 :model "test-media:text") :id))
+                 (unknown (plist-get (harness-call 'session/create :cwd cwd
+                                                    :model "nobody:model") :id))
+                 (answer (harness-call 'session/media sees)))
+            (should (equal "session/prompt" (plist-get answer :endpoint)))
+            (should (eq t (plist-get answer :images)))
+            (should-not (plist-get answer :realtime))
+            (should (equal "no-media-sink" (plist-get answer :realtime-reason)))
+            (should (equal "test-media:sees" (plist-get answer :model)))
+            (should (eq t (plist-get answer :vision)))
+            (should-not (plist-get answer :reason))
+            (should (eq t (plist-get (plist-get answer :frames) :supported)))
+            (should (= 184320 (plist-get (plist-get answer :frames) :max-bytes)))
+            (should (= 640 (plist-get (plist-get answer :frames) :max-width)))
+            (should (= 360 (plist-get (plist-get answer :frames) :max-height)))
+            (should (= 30 (plist-get (plist-get answer :frames) :max-per-minute)))
+            (should (equal '("image/png" "image/jpeg")
+                           (plist-get (plist-get answer :frames) :mime-types)))
+            (let ((text-answer (harness-call 'session/media text)))
+              (should-not (plist-get text-answer :vision))
+              (should (equal "model-without-vision" (plist-get text-answer :reason))))
+            (let ((unknown-answer (harness-call 'session/media unknown)))
+              (should (eq 'unknown (plist-get unknown-answer :vision)))
+              (should (equal "vision-unknown" (plist-get unknown-answer :reason))))))
+      (remhash 'test-media harness-providers)
+      (harness-provider--forget 'test-media))))
+
+(ert-deftest harness-session-media-is-an-acp-extension-method ()
+  "A client reaches it as `_harness/session/media', as the other extensions."
+  (harness-session-test-with
+    (harness-test-load-module 'acp)
+    (should (member "session/media" (harness-acp--extension-methods)))
+    (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id)))
+      (should (equal "session/prompt"
+                     (plist-get (harness-acp--call-extension
+                                 "session/media" (list :id id))
+                                :endpoint))))))
+
 (provide 'harness-session-test)
 ;;; harness-session-test.el ends here

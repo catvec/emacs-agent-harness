@@ -176,7 +176,8 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
   void _changed() {
     if (!mounted) return;
     _syncPending(_controller?.activeThread?.live);
-    final nearBottom = _scroll.hasClients &&
+    final nearBottom =
+        _scroll.hasClients &&
         (_scroll.position.maxScrollExtent - _scroll.position.pixels) < 80;
     final entries = _controller?.visibleEntries ?? const <WorkspaceEntry>[];
     final pending = _pending?.currentInteraction ?? _controller?.previewRequest;
@@ -286,9 +287,8 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
           ?.showSnackBar(const SnackBar(content: Text('Last reply copied')));
       return;
     }
-    ScaffoldMessenger.maybeOf(
-      context,
-    )?.showSnackBar(const SnackBar(content: Text('Nothing to copy')));
+    ScaffoldMessenger.maybeOf(context)
+        ?.showSnackBar(const SnackBar(content: Text('Nothing to copy')));
   }
 
   Future<void> _newThread() async {
@@ -353,6 +353,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
       backendFactory: (settings, address) =>
           createVoiceBackend(settings, address, bridge),
       onSettingsChanged: widget.app.settings.setVoiceSettings,
+      capture: widget.app.media,
     );
     if (!mounted) return;
     await Navigator.of(
@@ -567,9 +568,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
         // what it is doing above its chat instead, where it cannot fall off.
         if (thread != null && thread.live != null)
           _compactStatus(context, thread),
-        Expanded(
-          child: _timeline(context, controller),
-        ),
+        Expanded(child: _timeline(context, controller)),
         _pendingCard(context, controller),
         WorkspaceSpeechPanel(
           controller: controller,
@@ -621,9 +620,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
   /// The model the active thread's episode runs on: the live session's own
   /// when it has one, the workspace's resolved default before that.
   String? _modelOf(WorkspaceThread? thread) =>
-      _pending?.summary?.model ??
-      thread?.model ??
-      _controller?.current?.model;
+      _pending?.summary?.model ?? thread?.model ?? _controller?.current?.model;
 
   /// What the active thread's running turn does now, as the session says
   /// it, else as the last workspace view did.
@@ -742,9 +739,8 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
   }
 
   void _say(String text) {
-    ScaffoldMessenger.maybeOf(
-      context,
-    )?.showSnackBar(SnackBar(content: Text(text)));
+    ScaffoldMessenger.maybeOf(context)
+        ?.showSnackBar(SnackBar(content: Text(text)));
   }
 
   /// A column of the desktop layout, wider when the text is larger: a font
@@ -882,7 +878,7 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
             key: ValueKey(
               entry.node.isEmpty
                   ? '${entry.kind}:${entry.thread}:'
-                      '${entry.at?.toIso8601String() ?? 'at-$index'}'
+                        '${entry.at?.toIso8601String() ?? 'at-$index'}'
                   : '${entry.kind}:${entry.thread}:${entry.node}',
             ),
             child: _TimelineEntry(
@@ -987,7 +983,8 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
     // A request may be answered on any size; the card scrolls inside this
     // room rather than push the composer out of the window or under the
     // keyboard.
-    final room = MediaQuery.sizeOf(context).height -
+    final room =
+        MediaQuery.sizeOf(context).height -
         MediaQuery.viewInsetsOf(context).bottom;
     final padded = Padding(
       padding: const EdgeInsets.fromLTRB(
@@ -997,11 +994,10 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
         0,
       ),
       child: ConstrainedBox(
-        constraints: BoxConstraints(maxHeight: (room * 0.34).clamp(140.0, 340.0)),
-        child: Align(
-          alignment: AlignmentDirectional.topCenter,
-          child: card,
+        constraints: BoxConstraints(
+          maxHeight: (room * 0.34).clamp(140.0, 340.0),
         ),
+        child: Align(alignment: AlignmentDirectional.topCenter, child: card),
       ),
     );
     if (maxWidth == null) return padded;
@@ -1111,7 +1107,8 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
       children: [
         if (running || activity != null)
           ActivityBar(
-            activity: activity ??
+            activity:
+                activity ??
                 (controller.sending
                     ? const TurnActivity(phase: 'waiting')
                     : null),
@@ -1121,7 +1118,9 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
           ),
         if (controller.error != null && _failed != null)
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: HarnessSpace.gutter),
+            padding: const EdgeInsets.symmetric(
+              horizontal: HarnessSpace.gutter,
+            ),
             child: Row(
               children: [
                 Expanded(
@@ -1131,9 +1130,8 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
                       'Send failure · ${_threadTitle(controller, _failed!.thread)}',
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: HarnessText.caption(context).copyWith(
-                        color: Theme.of(context).colorScheme.error,
-                      ),
+                      style: HarnessText.caption(context)
+                          .copyWith(color: Theme.of(context).colorScheme.error),
                     ),
                   ),
                 ),
@@ -1468,10 +1466,8 @@ class _ThreadTile extends StatelessWidget {
                       thread.statusWord,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: HarnessText.meta(context).copyWith(
-                        fontSize: 10.5,
-                        color: color,
-                      ),
+                      style: HarnessText.meta(context)
+                          .copyWith(fontSize: 10.5, color: color),
                     ),
                   ),
                 if (thread.pinned)
@@ -1898,11 +1894,7 @@ class _TimelineEntry extends StatelessWidget {
     }
     final agent = entry.isAgent;
     final label = agent ? 'Agent' : 'You';
-    final body = HarnessMarkdown(
-      text: entry.text,
-      compact: true,
-      tight: true,
-    );
+    final body = HarnessMarkdown(text: entry.text, compact: true, tight: true);
     final bubble = Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(14, 11, 14, 12),
@@ -2185,9 +2177,9 @@ class _ComputerSheet extends StatelessWidget {
                     ),
                     Text(
                       _computerStateLabel(computer),
-                      style: HarnessText.meta(context).copyWith(
-                        color: _computerStateColor(context, computer),
-                      ),
+                      style: HarnessText.meta(
+                        context,
+                      ).copyWith(color: _computerStateColor(context, computer)),
                     ),
                   ],
                 ),
@@ -2276,9 +2268,9 @@ class _ComputerDetailsSheet extends StatelessWidget {
                     ),
                     Text(
                       _computerStateLabel(computer),
-                      style: HarnessText.meta(context).copyWith(
-                        color: _computerStateColor(context, computer),
-                      ),
+                      style: HarnessText.meta(
+                        context,
+                      ).copyWith(color: _computerStateColor(context, computer)),
                     ),
                   ],
                 ),

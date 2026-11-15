@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:harness_client/src/media/media_capture.dart';
+import 'package:harness_client/src/models/session_media.dart';
 import 'package:harness_client/src/voice/voice_audition.dart';
 import 'package:harness_client/src/voice/voice_backend.dart';
 import 'package:harness_client/src/voice/voice_controller.dart';
@@ -9,7 +11,7 @@ import 'package:harness_client/src/voice/voice_media_buttons.dart';
 import 'package:harness_client/src/voice/voice_models.dart';
 import 'package:harness_client/src/voice/voice_settings.dart';
 
-class FakeSession implements VoiceSessionBridge {
+class FakeSession extends VoiceSessionBridge {
   @override
   bool working = false;
   @override
@@ -74,6 +76,17 @@ class FakeSession implements VoiceSessionBridge {
   void removeSessionListener(void Function() listener) =>
       sessions.remove(listener);
 
+  SessionMediaCapabilities? media;
+  final List<CapturedFrame> frames = <CapturedFrame>[];
+
+  @override
+  Future<SessionMediaCapabilities?> loadMediaCapabilities() async => media;
+
+  @override
+  Future<void> sendFrame(CapturedFrame frame, {String? note}) async {
+    frames.add(frame);
+  }
+
   void reply(String text) {
     for (final listener in List.of(replies)) {
       listener(text);
@@ -98,6 +111,37 @@ class FakeBackend implements VoiceBackend, VoiceTurnControl, VoiceTurnSources {
   Completer<void>? stopGate;
 
   final _events = StreamController<VoiceBackendEvent>.broadcast();
+  MediaDelivery delivery = const MediaDelivery.none();
+  CaptureSource? attachedSource;
+  Object? attachedTrack;
+  int detachCalls = 0;
+  bool attachFails = false;
+  final List<CapturedFrame> framesSent = <CapturedFrame>[];
+
+  @override
+  MediaDelivery get mediaDelivery => delivery;
+
+  @override
+  Future<bool> attachCapture(CaptureSource source, Object? track) async {
+    if (attachFails) return false;
+    attachedSource = source;
+    attachedTrack = track;
+    return true;
+  }
+
+  @override
+  Future<void> detachCapture() async {
+    detachCalls++;
+    attachedSource = null;
+    attachedTrack = null;
+  }
+
+  @override
+  Future<void> sendCapturedFrame(CapturedFrame frame) async {
+    framesSent.add(frame);
+    _events.add(VoiceMediaFrameEvent(sent: true, bytes: frame.byteLength));
+  }
+
   bool started = false;
   bool stopped = false;
   bool muted = false;

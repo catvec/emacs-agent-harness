@@ -1420,6 +1420,54 @@ some for a session (see `session/set-ext'), a plist."
   "Return the public plist of session ID."
   (harness-session-plist (harness-session--get id)))
 
+(defconst harness-session-media-frame-limits
+  '(:max-bytes 184320        ; 180 KiB of encoded image
+    :max-width 640
+    :max-height 360
+    :max-per-minute 30
+    :mime-types ("image/png" "image/jpeg"))
+  "The bounds `session/media' publishes for one captured frame.
+They are what a client may send to `session/prompt' without inventing a
+second, larger path into a model.  A frame is a still, not a video
+track: the harness has no realtime media sink, and says so.")
+
+(harness-defmethod session/media (id)
+  "Return what session ID can receive from a live camera or screen capture.
+This is the capability a client asks before it offers a capture control.
+The receiving endpoint is `session/prompt' with an ACP image content
+block; there is no video-track endpoint here, so `:realtime' is nil even
+when the model accepts images.  `:vision' is t when the session's model
+says it reads images, nil when the provider says it does not, and
+`unknown' when no provider module or no capability answer is available.
+No frame is sent and no model is called by this method."
+  (let* ((session (harness-call 'session/get id))
+         (model (plist-get session :model))
+         (caps (and model
+                    (harness-method-exists-p 'provider/capabilities)
+                    (condition-case err
+                        (harness-call 'provider/capabilities model)
+                      (error
+                       (harness-log 'debug "session: no media capabilities for %s: %S"
+                                    model err)
+                       nil))))
+         (vision (cond
+                  ((null caps) 'unknown)
+                  ((harness-json-true-p (plist-get caps :vision)) t)
+                  (t nil))))
+    (list :session id
+          :endpoint "session/prompt"
+          :images t
+          :realtime nil
+          :realtime-reason "no-media-sink"
+          :frames (append (list :supported t)
+                          (copy-sequence harness-session-media-frame-limits))
+          :model model
+          :vision vision
+          :reason (pcase vision
+                    ('t nil)
+                    ('nil "model-without-vision")
+                    (_ "vision-unknown")))))
+
 (harness-defmethod session/exists-p (id)
   "Non-nil when session ID is known."
   (and (gethash id harness-sessions) t))

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../media/media_capture.dart';
 import '../../state/app_controller.dart';
 import '../../state/workspace_buddy_controller.dart';
 import '../../voice/voice_buddy.dart';
@@ -172,6 +173,11 @@ class WorkspaceCallBar extends StatelessWidget {
           onEnd: () => unawaited(controller.end()),
           onRetry: () => unawaited(controller.retry()),
           onOpenCallView: voice == null ? null : onOpenCallView,
+          onStopMedia: voice?.mediaStatus.state.active == true
+              ? () => unawaited(voice!.stopMedia())
+              : null,
+          mediaLabel: voice?.mediaStateLabel,
+          mediaStopLabel: voice?.mediaStopLabel,
           pendingSpeech: voice == null || voice.pendingSpeech.isEmpty
               ? null
               : VoicePendingSpeech(controller: voice, compact: true),
@@ -191,6 +197,9 @@ class WorkspaceCallBarView extends StatelessWidget {
     required this.onEnd,
     required this.onRetry,
     this.onOpenCallView,
+    this.onStopMedia,
+    this.mediaLabel,
+    this.mediaStopLabel,
     this.pendingSpeech,
   });
 
@@ -198,6 +207,16 @@ class WorkspaceCallBarView extends StatelessWidget {
   final VoidCallback onMute;
   final VoidCallback onEnd;
   final VoidCallback onRetry;
+
+  /// Stop the live camera or screen share in one step while a call runs.
+  /// Null when no source is live.
+  final VoidCallback? onStopMedia;
+
+  /// What the source is doing (`Camera live`, `Screen paused`, …).
+  final String? mediaLabel;
+
+  /// The one-step stop's own words (`Stop camera`, `Stop screen share`).
+  final String? mediaStopLabel;
 
   /// Open the full call view.  Null while the call has no controller to
   /// show, such as the first moment of Starting or a start that failed.
@@ -287,6 +306,17 @@ class WorkspaceCallBarView extends StatelessWidget {
                           label: 'Retry',
                           tooltip: 'Call · retry',
                           onPressed: onRetry,
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ],
+                      if (onStopMedia != null) ...[
+                        const SizedBox(width: 4),
+                        _BarIcon(
+                          key: const Key('call-bar-media'),
+                          icon: Icons.videocam_off_rounded,
+                          label: mediaStopLabel ?? 'Stop camera',
+                          tooltip: mediaLabel ?? 'Live video',
+                          onPressed: onStopMedia,
                           color: theme.colorScheme.onSurfaceVariant,
                         ),
                       ],

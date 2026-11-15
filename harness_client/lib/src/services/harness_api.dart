@@ -284,6 +284,11 @@ class HarnessApi {
   Future<JsonMap> sessionGet(String sessionId) =>
       extension('session/get', {'id': sessionId});
 
+  /// What [sessionId] can receive from a camera or screen capture: its
+  /// image endpoint, frame bounds and whether its model reads images.
+  Future<JsonMap> sessionMedia(String sessionId) =>
+      extension('session/media', {'id': sessionId});
+
   Future<JsonMap?> agentActivity(String sessionId) async {
     if (!can('agent/activity')) return null;
     final value = await extensionRaw('agent/activity', {
@@ -567,10 +572,9 @@ class HarnessApi {
 
   /// The files task [id]'s review marks viewed and approved
   /// (`patch-review/viewed`).
-  Future<ReviewViewed> reviewViewed(String id) async =>
-      ReviewViewed.fromWire(await extension('patch-review/viewed', {
-        'task-id': id,
-      }));
+  Future<ReviewViewed> reviewViewed(String id) async => ReviewViewed.fromWire(
+    await extension('patch-review/viewed', {'task-id': id}),
+  );
 
   /// Mark [files] viewed, or approved, in task [id]'s review, or take the
   /// mark off (`patch-review/set-viewed`).  Approving views a file too, and

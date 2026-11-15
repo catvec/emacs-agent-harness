@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../../media/media_capture.dart';
 import '../../state/workspace_buddy_controller.dart';
 import '../../voice/voice_buddy.dart';
 import '../adaptive/adaptive_widgets.dart';
@@ -206,6 +207,11 @@ class WorkspaceBuddy extends StatelessWidget {
           onDragUpdate: onDragUpdate,
           onDragStart: onDragStart,
           maxHeight: maxHeight,
+          mediaLabel: voice?.mediaStateLabel,
+          mediaStopLabel: voice?.mediaStopLabel,
+          onStopMedia: voice?.mediaStatus.state.active == true
+              ? () => unawaited(voice!.stopMedia())
+              : null,
           pendingSpeech: voice == null || voice.pendingSpeech.isEmpty
               ? null
               : VoicePendingSpeech(controller: voice, compact: true),
@@ -239,6 +245,9 @@ class WorkspaceBuddyView extends StatefulWidget {
     this.onDragUpdate,
     this.onDragStart,
     this.maxHeight,
+    this.mediaLabel,
+    this.mediaStopLabel,
+    this.onStopMedia,
     this.pendingSpeech,
   });
 
@@ -256,6 +265,11 @@ class WorkspaceBuddyView extends StatefulWidget {
   final ValueChanged<Offset>? onDragUpdate;
   final VoidCallback? onDragStart;
   final double? maxHeight;
+
+  /// The live camera or screen, and one-step stop, when a source is on.
+  final String? mediaLabel;
+  final String? mediaStopLabel;
+  final VoidCallback? onStopMedia;
 
   /// A pending conversational turn stays in the glance, never behind Details.
   final Widget? pendingSpeech;
@@ -673,6 +687,14 @@ class _WorkspaceBuddyViewState extends State<WorkspaceBuddyView> {
               icon: Icons.stop_rounded,
               onPressed: model.canInterrupt ? onInterrupt : null,
             ),
+            if (widget.onStopMedia != null)
+              _SmallControl(
+                key: const Key('buddy-media'),
+                label: widget.mediaStopLabel ?? 'Stop camera',
+                tooltip: widget.mediaLabel ?? 'Live video',
+                icon: Icons.videocam_off_rounded,
+                onPressed: widget.onStopMedia,
+              ),
             _SmallControl(
               key: const Key('buddy-settings'),
               label: 'Voice settings',

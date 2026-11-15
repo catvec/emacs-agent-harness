@@ -6,6 +6,7 @@
 //                                          [--token hs1_SECRET]
 //                                          [--approve-after 3] [--tools]
 //                                          [--task-sessions] [--workspace]
+//                                          [--trace FILE]
 //
 // The client connects to ws://127.0.0.1:PORT/acp.  With --token the server
 // behaves like the real harness's listener for other devices: an upgrade that
@@ -19,11 +20,15 @@
 // has done some work, with its tool calls of every kind, a failed one, a
 // refused one and the `hand_in` call that handed the work in, whose
 // screenshots the server gives on request (they are the app's own, from
-// screenshots/).  With --task-sessions the tasks that the seed leaves without
-// a conversation have one (the task in review has the showcase session's), as
-// every task of the real harness does: a task is handled in its conversation.
+// screenshots/).  With --trace FILE every request the client makes is
+// appended to FILE as one JSON object a line, with an image block's base64
+// kept: what a run needs to prove which bytes a device sent.  With
+// --task-sessions the tasks that the seed leaves without a conversation have
+// one (the task in review has the showcase session's), as every task of the
+// real harness does: a task is handled in its conversation.
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import '../test/support/fake_harness.dart';
@@ -35,6 +40,7 @@ Future<void> main(List<String> arguments) async {
   var tools = false;
   var taskSessions = false;
   var workspace = false;
+  String? trace;
   String? token;
   for (var index = 0; index < arguments.length; index++) {
     final argument = arguments[index];
@@ -52,15 +58,20 @@ Future<void> main(List<String> arguments) async {
       taskSessions = true;
     } else if (argument == '--workspace') {
       workspace = true;
+    } else if (argument == '--trace' && index + 1 < arguments.length) {
+      trace = arguments[++index];
     } else if (argument == '--help' || argument == '-h') {
       stdout.writeln(
         'usage: dart run tool/mock_harness_server.dart '
         '[--port 4277] [--standard] [--token hs1_SECRET] [--approve-after 3] '
-        '[--tools] [--task-sessions] [--workspace]',
+        '[--tools] [--task-sessions] [--workspace] [--trace FILE]',
       );
       return;
     }
   }
+  final traceFile = trace == null
+      ? null
+      : File(trace).openSync(mode: FileMode.append);
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
   stdout.writeln(
     'mock harness (${enhanced ? 'harness extensions' : 'standard ACP'}) '
@@ -105,6 +116,12 @@ Future<void> main(List<String> arguments) async {
     }
     harness.authenticated = token == null || presented;
     harness.writer = socket.add;
+    if (traceFile != null) {
+      harness.onRequest = (method, params) {
+        traceFile.writeStringSync('${jsonEncode(_traced(method, params))}\n');
+        traceFile.flushSync();
+      };
+    }
     socket.listen(
       (data) {
         if (data is! String) return;
@@ -123,6 +140,15 @@ Future<void> main(List<String> arguments) async {
     stdout.writeln('client connected${presented ? ' with its secret' : ''}');
   }
 }
+
+/// A request as the trace keeps it: the time, the method and every parameter,
+/// so a run can show exactly what the device sent -- an image block's base64
+/// included, which is what proves the frame's bytes.
+Map<String, Object?> _traced(String method, Map<String, Object?> params) => {
+  'at': DateTime.now().toUtc().toIso8601String(),
+  'method': method,
+  'params': params,
+};
 
 /// Whether [request] carries the session secret in any of the three places
 /// the real harness reads it.

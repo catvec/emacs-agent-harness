@@ -22,6 +22,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/src/foundation/_features.dart' show isWindowingEnabled;
 import 'package:harness_client/src/desktop/buddy_window.dart';
+import 'package:harness_client/src/media/media_capture.dart';
+import 'package:harness_client/src/models/session_media.dart';
 import 'package:harness_client/src/models/workspace.dart';
 import 'package:harness_client/src/state/workspace_buddy_controller.dart';
 import 'package:harness_client/src/ui/theme/harness_theme.dart';
@@ -250,6 +252,10 @@ class _ProbeBridge implements VoiceSessionBridge {
   @override
   Future<void> send(VoicePrompt prompt) async {}
   @override
+  Future<SessionMediaCapabilities?> loadMediaCapabilities() async => null;
+  @override
+  Future<void> sendFrame(CapturedFrame frame, {String? note}) async {}
+  @override
   void addReplyListener(void Function(String text) listener) {}
   @override
   void removeReplyListener(void Function(String text) listener) {}
@@ -264,6 +270,19 @@ class _ProbeBackend implements VoiceBackend {
 
   @override
   Stream<VoiceBackendEvent> get events => _events.stream;
+
+  @override
+  MediaDelivery get mediaDelivery => const MediaDelivery.none();
+
+  @override
+  Future<bool> attachCapture(CaptureSource source, Object? track) async =>
+      false;
+
+  @override
+  Future<void> detachCapture() async {}
+
+  @override
+  Future<void> sendCapturedFrame(CapturedFrame frame) async {}
 
   @override
   Future<void> start() async {

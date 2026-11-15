@@ -8,6 +8,7 @@ import '../../voice/voice_controller.dart';
 import '../../voice/voice_models.dart';
 import '../../voice/voice_settings.dart';
 import '../theme/harness_theme.dart';
+import '../widgets/voice_media_bar.dart';
 import '../widgets/voice_orb.dart';
 import '../widgets/voice_pending_speech.dart';
 import '../widgets/voice_pipeline.dart';
@@ -54,6 +55,9 @@ class _VoiceScreenState extends State<VoiceScreen> {
   void initState() {
     super.initState();
     _controller.addListener(_changed);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_controller.prepareMedia());
+    });
     if (widget.attached) {
       _started = true;
       return;
@@ -263,19 +267,37 @@ class _VoiceScreenState extends State<VoiceScreen> {
                                           final reserved =
                                               10.0 +
                                               24.0 * scaler +
+                                              104.0 +
                                               (phase == VoicePhase.approval
                                                   ? 44.0 * scaler
                                                   : 0.0) +
                                               (_controller.problem != null
                                                   ? 40.0 * scaler
                                                   : 0.0);
+                                          // The orb is what is left after the
+                                          // status and the notices, and it
+                                          // must fit what is left rather than
+                                          // a floor of its own: a call with a
+                                          // problem notice, or a pending turn
+                                          // above it, leaves less than 56 px
+                                          // on a phone, and a floor there
+                                          // overflows the column.
+                                          final roomForOrb =
+                                              (room.maxHeight - reserved) *
+                                                  0.92;
+                                          final smallestOrb =
+                                              roomForOrb < 56.0
+                                              ? roomForOrb
+                                              : 56.0;
                                           final orb = math
                                               .min(
                                                 room.maxWidth * 0.62,
-                                                (room.maxHeight - reserved) *
-                                                    0.92,
+                                                roomForOrb,
                                               )
-                                              .clamp(56.0, 228.0);
+                                              .clamp(
+                                                smallestOrb,
+                                                228.0,
+                                              );
                                           return Column(
                                             mainAxisAlignment:
                                                 MainAxisAlignment.center,
@@ -329,6 +351,17 @@ class _VoiceScreenState extends State<VoiceScreen> {
                                         captions: _controller.captions,
                                         scroll: _captions,
                                         color: color,
+                                      ),
+                                    ),
+                                    Padding(
+                                      padding: const EdgeInsets.fromLTRB(
+                                        18,
+                                        0,
+                                        18,
+                                        4,
+                                      ),
+                                      child: VoiceMediaBar(
+                                        controller: _controller,
                                       ),
                                     ),
                                   ],

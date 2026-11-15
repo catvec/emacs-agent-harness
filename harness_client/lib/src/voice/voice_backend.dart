@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import '../models/session.dart';
+import '../models/session_media.dart';
+import '../media/media_capture.dart';
 import 'voice_models.dart';
 
 /// What a voice backend says to the screen.
@@ -12,6 +14,24 @@ sealed class VoiceBackendEvent {
 class VoicePhaseEvent extends VoiceBackendEvent {
   const VoicePhaseEvent(this.phase);
   final VoicePhase phase;
+}
+
+/// What the live provider accepts from a camera or screen capture, learned
+/// when its answer arrives.  A provider that accepts neither is never drawn
+/// as carrying live video.
+class VoiceMediaDeliveryEvent extends VoiceBackendEvent {
+  const VoiceMediaDeliveryEvent(this.delivery);
+  final MediaDelivery delivery;
+}
+
+/// One sampled frame was handed to the provider, or was refused.  It is a
+/// still, not a track.
+class VoiceMediaFrameEvent extends VoiceBackendEvent {
+  const VoiceMediaFrameEvent({required this.sent, this.bytes = 0, this.error});
+
+  final bool sent;
+  final int bytes;
+  final String? error;
 }
 
 class VoiceLevelEvent extends VoiceBackendEvent {
@@ -204,6 +224,26 @@ class VoiceReplyHandedEvent extends VoiceBackendEvent {
 abstract class VoiceBackend {
   Stream<VoiceBackendEvent> get events;
 
+  /// What this provider accepts from a live camera or screen capture.  A
+  /// provider with neither offers no video; a test or a backend that has not
+  /// connected yet says none, not a guess.
+  MediaDelivery get mediaDelivery => const MediaDelivery.none();
+
+  /// Attach [track] (a `MediaStreamTrack`) to the live call for [source].
+  /// A backend that carries no video, or whose provider refuses the track,
+  /// returns false; the capture session still owns the track and stops it.
+  Future<bool> attachCapture(CaptureSource source, Object? track) async =>
+      false;
+
+  /// Detach and release the video the live call carries.  The capture
+  /// session stops the track itself; this only clears the sender.
+  Future<void> detachCapture() async {}
+
+  /// Send one bounded still frame into the live conversation.  A provider
+  /// that takes images answers with provider-specific data-channel events;
+  /// it never starts a response by itself.
+  Future<void> sendCapturedFrame(CapturedFrame frame) async {}
+
   Future<void> start();
 
   Future<void> setMuted(bool muted);
@@ -355,6 +395,27 @@ abstract class LiveVoiceConnection {
   Future<void> dispose();
 }
 
+/// A live connection that can also carry video.  It is separate from
+/// [LiveVoiceConnection] so a scripted audio-only test keeps working.
+///
+/// [mediaDelivery] is what the provider's own answer allows: a real video
+/// track, sampled still frames, neither, or both.  A connection never
+/// invents a track the answer did not accept.
+abstract class LiveMediaConnection {
+  MediaDelivery get mediaDelivery;
+
+  /// Attach [track], a `MediaStreamTrack`, to the sendonly transceiver the
+  /// answer accepted for [source].
+  Future<void> attachVideo(CaptureSource source, Object track);
+
+  /// Detach the track for [source]; the capture session stops it.
+  Future<void> detachVideo(CaptureSource source);
+
+  /// Send one bounded still frame into the conversation without asking the
+  /// model to answer.
+  Future<void> sendFrame(CapturedFrame frame);
+}
+
 /// A session the voice screen can send to and hear from.
 abstract class VoiceSessionBridge {
   /// Whether the agent is working now.
@@ -378,6 +439,15 @@ abstract class VoiceSessionBridge {
   List<String> get history;
 
   Future<void> send(VoicePrompt prompt);
+
+  /// What the session can receive from a camera or screen capture.  Null
+  /// when the harness has no `session/media` answer.
+  Future<SessionMediaCapabilities?> loadMediaCapabilities() async => null;
+
+  /// Send one still frame to the session.  Only a person's action calls it.
+  Future<void> sendFrame(CapturedFrame frame, {String? note}) async {
+    throw UnsupportedError('this conversation takes no frames');
+  }
 
   /// Called once for every assistant reply that completes while listening.
   void addReplyListener(void Function(String text) listener);

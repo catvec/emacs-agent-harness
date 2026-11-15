@@ -1,5 +1,8 @@
 import 'dart:async';
 
+import 'package:flutter_webrtc/flutter_webrtc.dart' show MediaStreamTrack;
+
+import '../media/media_capture.dart';
 import 'voice_backend.dart';
 import 'voice_android_audio.dart';
 import 'voice_models.dart';
@@ -31,6 +34,72 @@ class LiveVoiceBackend
   /// life of the call and given back on [stop]; on a platform that is not
   /// Android every call is a no-op.
   final VoiceAndroidAudio androidAudio;
+
+  CaptureSource? _attachedSource;
+
+  @override
+  MediaDelivery get mediaDelivery {
+    final live = connection is LiveMediaConnection
+        ? connection as LiveMediaConnection
+        : null;
+    if (live != null) return live.mediaDelivery;
+    return const MediaDelivery.none(
+      tracksReason: 'audio-only-provider',
+      framesReason: 'audio-only-provider',
+    );
+  }
+
+  @override
+  Future<bool> attachCapture(CaptureSource source, Object? track) async {
+    final live = connection is LiveMediaConnection
+        ? connection as LiveMediaConnection
+        : null;
+    if (live == null || track is! MediaStreamTrack) return false;
+    try {
+      await live.attachVideo(source, track);
+      _attachedSource = source;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
+  Future<void> detachCapture() async {
+    final source = _attachedSource;
+    _attachedSource = null;
+    final live = connection is LiveMediaConnection
+        ? connection as LiveMediaConnection
+        : null;
+    if (source == null || live == null) return;
+    try {
+      await live.detachVideo(source);
+    } catch (_) {
+      // The sender may already be gone with the connection.
+    }
+  }
+
+  @override
+  Future<void> sendCapturedFrame(CapturedFrame frame) async {
+    final live = connection is LiveMediaConnection
+        ? connection as LiveMediaConnection
+        : null;
+    if (live == null || !live.mediaDelivery.frames) {
+      _emit(
+        const VoiceMediaFrameEvent(
+          sent: false,
+          error: 'provider-takes-no-frames',
+        ),
+      );
+      return;
+    }
+    try {
+      await live.sendFrame(frame);
+      _emit(VoiceMediaFrameEvent(sent: true, bytes: frame.byteLength));
+    } catch (error) {
+      _emit(VoiceMediaFrameEvent(sent: false, error: '$error'));
+    }
+  }
 
   final _events = StreamController<VoiceBackendEvent>.broadcast();
   final List<String> _pendingCalls = <String>[];
@@ -84,6 +153,9 @@ class LiveVoiceBackend
       );
       final update = protocol.sessionUpdate(config);
       if (update != null) await connection.send(update);
+      if (connection is LiveMediaConnection) {
+        _emit(VoiceMediaDeliveryEvent(mediaDelivery));
+      }
       if (_audioHeld) await _setRemoteAudioEnabled(false);
       _emit(const VoicePhaseEvent(VoicePhase.listening));
     } catch (error) {
@@ -655,6 +727,7 @@ class LiveVoiceBackend
     _committedCalls.clear();
     _audioBack?.cancel();
     _audioBack = null;
+    await detachCapture();
     await _messages?.cancel();
     _messages = null;
     try {

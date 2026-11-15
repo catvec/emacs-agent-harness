@@ -14,7 +14,7 @@ import 'voice_settings.dart';
 /// This is the half-duplex path.  The microphone is open while the agent
 /// works, so a correction can be started at any time; the agent's reply is
 /// spoken by [VoiceSpeech], and starting to talk while it speaks stops it.
-class ClipVoiceBackend implements VoiceBackend {
+class ClipVoiceBackend extends VoiceBackend {
   ClipVoiceBackend({
     required this.microphone,
     required this.transcriber,

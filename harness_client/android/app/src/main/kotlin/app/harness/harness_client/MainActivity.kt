@@ -1,5 +1,6 @@
 package app.harness.harness_client
 
+import android.content.Intent
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.os.Bundle
@@ -22,6 +23,7 @@ class MainActivity : FlutterActivity() {
     private var channel: MethodChannel? = null
     private var voiceAudio: MethodChannel? = null
     private var mediaSession: MediaSession? = null
+    private var screenShareChannel: MethodChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -43,12 +45,50 @@ class MainActivity : FlutterActivity() {
             }
         }
         channel = methodChannel
+        val screenChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "app.harness/screen_share",
+        )
+        screenChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "start" -> result.success(startScreenShareService())
+                "stop" -> {
+                    stopScreenShareService()
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
+        screenShareChannel = screenChannel
         // The volume control the keys follow, and the audio state a call holds.
         voiceAudio = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             VoiceAudioChannel.CHANNEL,
         )
         voiceAudio?.setMethodCallHandler(VoiceAudioChannel(this))
+    }
+
+    /** Start the mediaProjection foreground service before getDisplayMedia. */
+    private fun startScreenShareService(): Boolean {
+        return try {
+            val intent = Intent(this, ScreenShareService::class.java)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun stopScreenShareService() {
+        try {
+            stopService(Intent(this, ScreenShareService::class.java))
+        } catch (_: Exception) {
+            // Already gone.
+        }
     }
 
     private fun startMediaButtons() {

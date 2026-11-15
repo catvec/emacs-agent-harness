@@ -12,6 +12,7 @@ import 'package:flutter/src/foundation/_features.dart' show isWindowingEnabled;
 
 import 'app.dart';
 import 'src/state/settings_controller.dart';
+import 'src/voice/voice_settings.dart';
 
 Future<void> main() async {
   // The windowing owner is made when the binding starts, so the feature must
@@ -34,5 +35,34 @@ Future<void> main() async {
   // that does not answer must not keep the app from starting: after a moment
   // the form shows, and what is remembered arrives when the store does.
   await settings.load().timeout(const Duration(seconds: 1), onTimeout: () {});
+  await _seedForEndToEndRun(settings);
   runApp(HarnessApp(settings: settings));
 }
+
+/// Point the app at a local peer, for the on-device media run only.
+///
+/// `--dart-define=E2E=true` is the same seam the screenshot run uses; the
+/// addresses come from two more defines, and nothing here runs in a
+/// build without them.  The alternative is typing an address and a
+/// realtime endpoint into the app's forms through the emulator's
+/// accessibility service, which on a software-emulated guest takes
+/// minutes per field and is not what the media run is testing.  The
+/// app's own connect screen, session list, voice screen and capture
+/// path are the same either way.
+Future<void> _seedForEndToEndRun(SettingsController settings) async {
+  const acp = String.fromEnvironment('E2E_ACP');
+  const realtime = String.fromEnvironment('E2E_REALTIME');
+  if (acp.isEmpty || realtime.isEmpty) return;
+  await settings.rememberConnectionDetails(acp, '');
+  await settings.setVoiceSettings(
+    settings.voiceSettings.copyWith(
+      provider: VoiceProvider.live,
+      realtimeEndpoint: realtime,
+      realtimeModel: const String.fromEnvironment(
+        'E2E_REALTIME_MODEL',
+        defaultValue: 'local-test-receiver',
+      ),
+    ),
+  );
+}
+
