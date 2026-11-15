@@ -34,6 +34,18 @@
 ;; made it: a session, a task, the auto-mode judge, naming or
 ;; compaction.  The catalogue clients get (`provider/models') lists
 ;; only the models allowed, and a tier's model is chosen among them.
+;;
+;; A provider may narrow itself further with `:allow-models', the same
+;; glob patterns over model ids, which an endpoint definition states
+;; once (see `harness-define-provider' and
+;; `harness-openai-endpoints').  It is the answer to a provider that
+;; lists far more than anyone wants to pick from -- OpenRouter's
+;; several hundred models -- without a harness-wide allowlist that
+;; would constrain every other provider too.  The filtering happens
+;; where a provider's models are settled, so the catalogue, the model
+;; index, tier selection, price ranking and every picker see one
+;; narrowed set; a request for a model it leaves out is refused before
+;; the provider is asked, naming the setting and its patterns.
 
 ;;; Code:
 
@@ -150,7 +162,7 @@ reads besides those of every model."
                     ,@options)))
 
 (cl-defstruct (harness-provider (:copier nil))
-  id label doc models-fn complete-fn fork-fn quota-fn capabilities tiers)
+  id label doc models-fn complete-fn fork-fn quota-fn capabilities tiers allow-models)
 
 (defvar harness-providers (make-hash-table :test 'eq)
   "Provider id -> `harness-provider'.")
@@ -237,31 +249,70 @@ set this (see docs/policy.md)."
   :type '(repeat (string :tag "Provider, model or pattern" :names (provider model)))
   :group 'harness)
 
+(defun harness-provider--pattern-matches-p (pattern model-id)
+  "Non-nil when PATTERN, a glob of model ids, matches MODEL-ID.
+A pattern with a colon matches the whole \"provider:name\" id; one
+without names providers, so \"claude\" is \"claude:*\"."
+  (and (stringp pattern)
+       (stringp model-id)
+       (let ((provider (car (harness-provider-parse-model model-id)))
+             (case-fold-search nil))
+         (if (string-search ":" pattern)
+             (string-match-p (wildcard-to-regexp pattern) model-id)
+           (and provider
+                (string-match-p (wildcard-to-regexp pattern)
+                                (symbol-name provider)))))))
+
 (defun harness-provider-model-allowed-p (model-id)
   "Non-nil when `harness-allowed-models' lets the harness use MODEL-ID."
   (let ((patterns (default-value 'harness-allowed-models)))
     (or (null patterns)
-        (and (stringp model-id)
-             (let ((provider (car (harness-provider-parse-model model-id)))
-                   (case-fold-search nil))
-               (cl-some (lambda (pattern)
-                          (and (stringp pattern)
-                               (if (string-search ":" pattern)
-                                   (string-match-p (wildcard-to-regexp pattern) model-id)
-                                 (and provider
-                                      (string-match-p (wildcard-to-regexp pattern)
-                                                      (symbol-name provider))))))
-                        patterns))))))
+        (cl-some (lambda (pattern) (harness-provider--pattern-matches-p pattern model-id))
+                 patterns))))
+
+(defun harness-provider--allow-models (provider)
+  "Return PROVIDER's own `:allow-models' patterns, or nil for every model.
+These narrow what one provider offers; they never widen what
+`harness-allowed-models' allows, and both apply."
+  (and provider (harness-provider-allow-models provider)))
+
+(defun harness-provider--offered-p (provider model-id)
+  "Non-nil when PROVIDER's own `:allow-models' offers MODEL-ID.
+A provider that names no patterns offers every model it lists."
+  (let ((patterns (harness-provider--allow-models provider)))
+    (or (null patterns)
+        (cl-some (lambda (pattern) (harness-provider--pattern-matches-p pattern model-id))
+                 patterns))))
+
+(defun harness-provider--offered (provider models)
+  "Return those of MODELS, model plists, that PROVIDER's `:allow-models' offers."
+  (if (harness-provider--allow-models provider)
+      (cl-remove-if-not (lambda (m) (harness-provider--offered-p provider (plist-get m :id)))
+                        models)
+    models))
 
 (defun harness-provider-model-refusal (model-id)
-  "Return why the harness may not use MODEL-ID, or nil when it may."
-  (unless (harness-provider-model-allowed-p model-id)
+  "Return why the harness may not use MODEL-ID, or nil when it may.
+Both allowlists are checked: the harness-wide `harness-allowed-models',
+then the `:allow-models' of the provider MODEL-ID names, which narrows
+that one provider only."
+  (cond
+   ((not (harness-provider-model-allowed-p model-id))
     (format "Model %s is not allowed: harness-allowed-models%s allows only %s"
             (or model-id "(none)")
             (if (harness-policy-pinned-p 'harness-allowed-models)
                 (format ", set by policy (%s)," (harness-policy-file-name))
               "")
-            (mapconcat (lambda (p) (format "%s" p)) (default-value 'harness-allowed-models) ", "))))
+            (mapconcat (lambda (p) (format "%s" p)) (default-value 'harness-allowed-models) ", ")))
+   ((let* ((pid (and (stringp model-id) (car (harness-provider-parse-model model-id))))
+           (provider (and pid (harness-provider-get pid))))
+      (and provider (not (harness-provider--offered-p provider model-id))))
+    (let* ((pid (car (harness-provider-parse-model model-id)))
+           (provider (harness-provider-get pid)))
+      (format "Model %s is not allowed: %s's :allow-models allows only %s"
+              model-id pid
+              (mapconcat (lambda (p) (format "%s" p))
+                         (harness-provider--allow-models provider) ", "))))))
 
 (defun harness-provider--allowed (models)
   "Return those of MODELS, model plists, that `harness-allowed-models' allows."
@@ -308,16 +359,20 @@ after a change.")
 (defun harness-provider--rebuild-cache ()
   "Rebuild `harness-provider--models' and its index from the cached listings.
 A model without a window gets its estimate here, from every listing
-cached now (see `harness-provider--estimate')."
+cached now (see `harness-provider--estimate').  A provider's own
+`:allow-models' narrows what it contributes, so the catalogue, the
+model index, tier selection and price ranking all see the same set."
   (setq harness-provider--estimate-index nil)
   (clrhash harness-provider--lookups)
   (clrhash harness-provider--catalogue)
   (let (all)
     (maphash (lambda (id models)
-               (when (gethash id harness-providers)
-                 (let ((filled (harness-provider--fill-windows id models)))
-                   (puthash id filled harness-provider--catalogue)
-                   (setq all (append all filled)))))
+               (when-let* ((provider (gethash id harness-providers)))
+                 (let* ((filled (harness-provider--fill-windows id models))
+                        (offered (harness-provider--offered provider filled)))
+                   (harness-provider--note-empty-allowlist provider filled offered)
+                   (puthash id offered harness-provider--catalogue)
+                   (setq all (append all offered)))))
              harness-provider--models-by-provider)
     (setq harness-provider--models all)
     (clrhash harness-provider--model-index)
@@ -325,6 +380,22 @@ cached now (see `harness-provider--estimate')."
       (let ((id (plist-get m :id)))
         (unless (gethash id harness-provider--model-index)
           (puthash id m harness-provider--model-index))))))
+
+(defun harness-provider--note-empty-allowlist (provider listed offered)
+  "Log once when PROVIDER's `:allow-models' offers none of its LISTED models.
+OFFERED is what it offers.  A provider whose patterns match nothing
+offers nothing, which a picker shows as no models rather than as a
+provider that failed; the log says which patterns did it."
+  (when (and (harness-provider--allow-models provider) listed (null offered))
+    (let ((key (list 'allow-models (harness-provider-id provider)
+                     (harness-provider--allow-models provider))))
+      (unless (gethash key harness-provider--warned)
+        (puthash key t harness-provider--warned)
+        (harness-log 'warn "provider %s: :allow-models (%s) matches none of its %d models; it offers nothing"
+                     (harness-provider-id provider)
+                     (mapconcat (lambda (p) (format "%s" p))
+                                (harness-provider--allow-models provider) ", ")
+                     (length listed))))))
 
 ;;;; Estimated context windows
 
@@ -498,7 +569,8 @@ These are the hooks `harness-define-provider' got, kept beside the
 provider records rather than in them, so records made before a reload
 need no slots they lack.")
 
-(cl-defun harness-define-provider (id &key label doc models complete fork quota capabilities tiers
+(cl-defun harness-define-provider (id &key label doc models complete fork quota
+                                      capabilities tiers allow-models
                                       warm close resolve embed)
   "Register provider ID.
 LABEL and DOC describe it.  MODELS is a function returning a promise of
@@ -514,10 +586,17 @@ quota information \(see `provider/quota').  CAPABILITIES is the static
 capability plist.  TIERS names a model, and perhaps the thinking level
 it runs at, per tier (see `harness-model-tiers',
 `harness-provider-tiers-type' and `harness-provider-tier-model') so the
-harness can pick a model on its own.  WARM, when given, takes a request plist
-without messages and prepares what such a request will need, a process
-say, so it answers sooner (`provider/warm'); CLOSE takes a session id
-and frees what the provider keeps for it (`provider/close').  RESOLVE,
+harness can pick a model on its own.  ALLOW-MODELS, when given, is a
+list of glob patterns of model ids (the same ones
+`harness-allowed-models' takes) naming the models this provider offers:
+only those are listed, offered and chosen for a tier, and a request for
+any other is refused before the provider sees it.  Nil, the default,
+offers every model the provider lists.  It narrows this provider only
+and never widens `harness-allowed-models'; both apply.  WARM, when
+given, takes a request plist without messages and prepares what such a
+request will need, a process say, so it answers sooner
+\(`provider/warm'); CLOSE takes a session id and frees what the
+provider keeps for it (`provider/close').  RESOLVE,
 when given, takes a model NAME its listing lacks (an alias, a variant,
 a model it knows another way) and the provider's listed models, and
 returns a model plist for it or nil (see `provider/model').  EMBED, when
@@ -530,7 +609,8 @@ again when needed; other providers' models stay cached."
   (puthash id (make-harness-provider :id id :label (or label (symbol-name id)) :doc doc
                                      :models-fn models :complete-fn complete
                                      :fork-fn fork :quota-fn quota
-                                     :capabilities capabilities :tiers tiers)
+                                     :capabilities capabilities :tiers tiers
+                                     :allow-models allow-models)
            harness-providers)
   (puthash id (list :warm warm :close close :resolve resolve :embed embed) harness-provider--lifecycle)
   (harness-provider--forget id)
@@ -678,7 +758,8 @@ is passed on to the providers whose models function takes it.  A
 provider that fails is logged and skipped.  Every model has a
 `:context-window'; one its provider does not size has an estimate,
 flagged `:context-window-estimated' (see `harness-provider--estimate').
-Only the models `harness-allowed-models' allows are listed."
+Only the models `harness-allowed-models' allows are listed, and of
+those only the ones each provider's own `:allow-models' offers."
   (cond
    ((and (not refresh) (harness-provider--complete-p))
     (harness-resolved (harness-provider--allowed harness-provider--models)))
@@ -715,7 +796,9 @@ is logged and counts as nothing said."
 P is the provider, nil when none is registered.  What P's `:resolve'
 says of NAME comes first; a window still missing is estimated, and an
 estimate for a model of a provider that has listed its models is
-logged once, as it may well be wrong."
+logged once, as it may well be wrong.  A model P's own `:allow-models'
+leaves out is not logged that way: it is not missing from the
+catalogue, it is one the provider does not offer."
   (let* ((resolved (and p (harness-provider--resolve p name)))
          (m (if p
                 (harness-provider--normalise-model
@@ -725,6 +808,7 @@ logged once, as it may well be wrong."
          (m (harness-provider--with-estimate pid m)))
     (when (and (plist-get m :context-window-estimated)
                (or (null p) (harness-provider--listed-p pid))
+               (harness-provider--offered-p p model-id)
                (not (gethash model-id harness-provider--warned)))
       (puthash model-id t harness-provider--warned)
       (harness-log 'warn "provider/model: %s is %s; assuming a context window of %d tokens (from %s)"
@@ -1380,10 +1464,11 @@ provider that keeps a process per session (the Claude CLI) starts it
 now, so a request that comes later with the same settings is answered
 sooner; one with nothing to prepare does nothing.  A failure is
 logged, never signalled: warming is only ever a head start.  A model
-`harness-allowed-models' does not allow is not warmed."
+either allowlist refuses (`harness-provider-model-refusal') is not
+warmed."
   (pcase-let* ((`(,pid . ,_) (harness-provider-parse-model (plist-get request :model)))
                (warm (and pid (harness-provider-get pid)
-                          (harness-provider-model-allowed-p (plist-get request :model))
+                          (not (harness-provider-model-refusal (plist-get request :model)))
                           (harness-provider--hook pid :warm))))
     (when warm
       (condition-case err
@@ -1402,8 +1487,9 @@ It resolves to (:vectors VECTORS :usage (:input N)): one vector per
 text, in order, each a list of numbers, and the tokens the request
 took when the provider says.  OPTS is a plist: `:dimensions' asks a
 model that can shorten its vectors for that many.  It rejects when
-`harness-allowed-models' does not allow MODEL-ID, which no provider is
-then asked for, and when MODEL-ID's provider does not embed text."
+either allowlist refuses MODEL-ID (`harness-provider-model-refusal'),
+which no provider is then asked for, and when MODEL-ID's provider does
+not embed text."
   (pcase-let* ((`(,pid . ,name) (harness-provider-parse-model model-id))
                (embed (and pid (harness-provider-get pid) (harness-provider--hook pid :embed)))
                (refusal (harness-provider-model-refusal model-id)))

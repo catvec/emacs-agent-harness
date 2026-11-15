@@ -48,6 +48,15 @@ whether a provider is usable. The providers decide:
 - **Bedrock, DeepSeek and the subscription ChatGPT provider** already
   listed what their configuration allows.
 
+A provider can also narrow itself: an endpoint definition's
+`:allow-models` names the only models it offers, as glob patterns of
+model ids, and the core filters where a provider's models are settled,
+so the picker, `provider/models`, tier selection and price ranking all
+see the same narrowed set.  That is how an OpenRouter endpoint offers
+three of its several hundred models without a harness-wide
+`harness-allowed-models` that would constrain every other provider; see
+[the design](design/provider-model-allowlist.md).
+
 The default picker asks for a refresh when it opens
 (`harness-ui-refresh-models` takes `REFRESH` as its third argument), so
 removing a key or logging out is reflected the next time it opens

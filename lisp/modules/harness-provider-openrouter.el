@@ -922,7 +922,7 @@ before this: `select' sees only the endpoints of the named providers."
 
 (defconst harness-openrouter--legacy-fields
   '(:label :base-url :api-key :api-key-env :headers
-    :models :tiers :default-context :capabilities)
+    :models :tiers :default-context :capabilities :allow-models)
   "Fields an `harness-openai-endpoints' entry of OpenRouter keeps here.
 Before this module existed, an OpenRouter entry in that option was a
 generic endpoint like any other, and every field it documented was read:
@@ -930,9 +930,12 @@ its label, URL, key, key variable and headers, and also its static
 `models', its `tiers', its `default-context' and its `capabilities'.  All
 of them are still honoured after the move to this module, so a
 configuration made before it keeps working -- those four included, which
-a static listing or a fixed tier set depends on.  Only the dialect, the
-models function and the completion function are this module's: they are
-what makes it OpenRouter's provider rather than the generic one.")
+a static listing or a fixed tier set depends on.  `:allow-models' is
+here for the same reason and for the case it was written for: OpenRouter
+lists several hundred models, and an entry that names the few it wants
+offered keeps that narrowing.  Only the dialect, the models function and
+the completion function are this module's: they are what makes it
+OpenRouter's provider rather than the generic one.")
 
 (defun harness-openrouter--legacy-value (configured key)
   "Return CONFIGURED's KEY, the key itself when it is unset."
@@ -958,6 +961,7 @@ the dialect is this module's whatever that entry says."
           :tiers (plist-get configured :tiers)
           :default-context (plist-get configured :default-context)
           :capabilities (plist-get configured :capabilities)
+          :allow-models (plist-get configured :allow-models)
           :flavor 'openrouter
           :dialect (harness-openrouter--dialect)
           :models-fn #'harness-openrouter--models

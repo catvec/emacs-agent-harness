@@ -458,6 +458,40 @@ ALL opens on the flat list, as the ranked picker does."
             (apply #'append (mapcar (lambda (step) (append (car step) (cadr step)))
                                     (nth 1 result))))))
 
+(ert-deftest harness-ui-model-picker-draws-the-catalogue-it-is-given ()
+  "A provider narrowed by its own `:allow-models' reaches the picker as
+the catalogue the harness settled: the picker offers only those models,
+counts only them, and says there are none when the narrowing leaves
+nothing, rather than looking broken."
+  (let* ((narrowed '((:id "openrouter:deepseek/deepseek-v4.1-flash" :label "DeepSeek V4.1 Flash"
+                           :provider-label "OpenRouter" :context-window 163840)
+                     (:id "openrouter:qwen/qwen-4-72b" :label "Qwen 4 72B"
+                           :provider-label "OpenRouter" :context-window 131072)))
+         (result (harness-ui-model-picker-test--walk
+                  '(("Model provider: " "OpenRouter")
+                    ("Model · OpenRouter: " "DeepSeek V4\\.1 Flash"))
+                  narrowed))
+         (steps (nth 1 result)))
+    ;; One provider, and it counts the two models the narrowing left.
+    (should (equal '("OpenRouter" "All models") (car (nth 0 steps))))
+    (should (equal '("  2 models" "  All providers") (cadr (nth 0 steps))))
+    ;; Each family holds one model, so neither is a level of its own:
+    ;; the provider offers the two models the narrowing left, and no
+    ;; other model of OpenRouter's several hundred.
+    (should (equal '("DeepSeek V4.1 Flash (OpenRouter)  [openrouter:deepseek/deepseek-v4.1-flash]"
+                     "Qwen 4 72B (OpenRouter)  [openrouter:qwen/qwen-4-72b]"
+                     "Back")
+                   (car (nth 1 steps))))
+    (should (equal '("openrouter:deepseek/deepseek-v4.1-flash" "DeepSeek V4.1 Flash (OpenRouter)")
+                   (nth 2 result)))
+    ;; A narrowing that matches nothing is an empty catalogue, which the
+    ;; picker says in nouns.
+    (let ((said nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format-string &rest args) (push (apply #'format format-string args) said))))
+        (harness-ui-read-model nil #'ignore))
+      (should (equal '("No available models") said)))))
+
 (ert-deftest harness-ui-model-picker-copy-is-nouns-and-noun-phrases ()
   "The picker's prompts, entries and annotations are exactly the listed
 nouns and noun phrases: no sentence grows in."

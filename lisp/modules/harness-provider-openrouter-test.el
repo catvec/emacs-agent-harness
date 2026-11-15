@@ -1777,6 +1777,7 @@ configuration that listed models or set a tier by hand still gets them."
             :models ("my-model" "other-model")
             :tiers (:medium "my-model" :hard "other-model")
             :default-context 200000
+            :allow-models ("openrouter:my-*")
             :capabilities (:vision t :thinking nil :pricing dynamic)))))
     (let ((endpoint (harness-openrouter--endpoint)))
       (should (equal "Mine" (plist-get endpoint :label)))
@@ -1788,6 +1789,9 @@ configuration that listed models or set a tier by hand still gets them."
       (should (equal '("my-model" "other-model") (plist-get endpoint :models)))
       (should (equal '(:medium "my-model" :hard "other-model") (plist-get endpoint :tiers)))
       (should (equal 200000 (plist-get endpoint :default-context)))
+      ;; The narrowing an entry states is kept too: OpenRouter lists
+      ;; several hundred models, and this is the case it is for.
+      (should (equal '("openrouter:my-*") (plist-get endpoint :allow-models)))
       (should (equal '(:vision t :thinking nil :pricing dynamic)
                      (plist-get endpoint :capabilities)))
       ;; And the transport reads them: a static listing is offered without

@@ -32,6 +32,13 @@
 ;; `:default-context'.  Endpoints without a /models route can list
 ;; their models statically with `:models'.
 ;;
+;; An endpoint that lists far more than anyone wants to pick from --
+;; OpenRouter's several hundred -- narrows itself with `:allow-models',
+;; the same glob patterns `harness-allowed-models' takes.  The
+;; provider module filters, where a provider's models are settled, so
+;; the catalogue, tier selection and every picker see one narrowed set
+;; and a request for a model left out is refused before it is sent.
+;;
 ;; A hosted service with no credential offers no models, however
 ;; public its /models is (`harness-openai--key-needed-hosts'): an
 ;; endpoint with no key, no static models and no headers lists
@@ -121,6 +128,13 @@ auth-source is searched for the URL's host and the user \"apikey\"."))
                       (choice :tag "Model" :value "model-name"
                               (string :tag "Name")
                               ,(harness-provider-model-type))))
+     (:allow-models (repeat :tag "Allowed models"
+                            :doc "Only these models of the endpoint are offered, as glob patterns
+of model ids: * for any run of characters, ? for one, and a pattern
+with a colon matches the whole ID:MODEL id while one without names
+providers.  Empty offers every model the endpoint lists.  It narrows
+this endpoint only; `harness-allowed-models' still applies."
+                            (string :tag "Model or pattern")))
      (:default-context (integer :tag "Default context" :value 128000
                                 :doc "Context window of the models the server does not size.  Without
 it such a model's window is estimated: the same model's at another
@@ -166,6 +180,11 @@ Every entry is a plist with these keys:
   :headers         extra request headers, an alist of (NAME . VALUE)
   :models          static list of model names or model plists, for servers
                    without a /models route
+  :allow-models    glob patterns of model ids naming the only models this
+                   endpoint offers, e.g. (\"openrouter:deepseek/*\");
+                   empty or absent offers every model it lists.  It
+                   narrows this endpoint alone and never widens
+                   `harness-allowed-models', which still applies
   :default-context context window used for models that do not report one;
                    without it their window is an estimate (see
                    `harness-provider-fallback-context-window')
@@ -1532,7 +1551,8 @@ flag and returns a promise of model plists, as the models function of
       :quota (lambda (&optional refresh) (harness-openai--quota endpoint refresh))
       :embed (lambda (name texts opts) (harness-openai--embed endpoint name texts opts))
       :capabilities (harness-openai--capabilities endpoint)
-      :tiers (plist-get endpoint :tiers))
+      :tiers (plist-get endpoint :tiers)
+      :allow-models (plist-get endpoint :allow-models))
     id))
 
 (defun harness-openai--register (endpoint)

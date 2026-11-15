@@ -832,6 +832,176 @@ one of them."
       (should (= 3 (length (harness-test-await (harness-call 'provider/models)))))
       (should (equal "test-allowed:small" (harness-call 'provider/tier-model "test-allowed" :simple))))))
 
+;;;; A provider's own allowlist
+
+(defun harness-provider-test-narrow (id allow &optional models)
+  "Define provider ID offering MODELS, narrowed by ALLOW.
+MODELS defaults to three models of different prices, so a tier's choice
+says which of them the narrowing left."
+  (harness-define-provider id
+    :complete #'ignore
+    :allow-models allow
+    :models (lambda ()
+              (harness-resolved
+               (or models
+                   (list (list :name "cheap" :context-window 100000
+                               :pricing '(:input 0.1 :output 0.2))
+                         (list :name "middle" :context-window 200000
+                               :pricing '(:input 1.0 :output 2.0))
+                         (list :name "dear" :context-window 300000
+                               :pricing '(:input 10.0 :output 20.0))))))))
+
+(defun harness-provider-test-catalogue-ids ()
+  "Return the ids of the whole catalogue, in order."
+  (mapcar (lambda (m) (plist-get m :id))
+          (harness-test-await (harness-call 'provider/models))))
+
+(ert-deftest harness-provider-allow-models-narrows-one-provider ()
+  "A provider's `:allow-models' offers only the models its patterns match.
+No patterns offers every model it lists, one pattern offers what it
+matches, several offer the union, and a pattern with a colon matches the
+whole id while one without names providers."
+  (harness-provider-test-with (test-narrow test-open)
+    (harness-provider-test-narrow 'test-narrow nil)
+    (harness-provider-test-static 'test-open '(("m" . 100000)))
+    (should (equal '("test-narrow:cheap" "test-narrow:middle" "test-narrow:dear" "test-open:m")
+                   (harness-provider-test-catalogue-ids)))
+    ;; One pattern.
+    (harness-provider-test-narrow 'test-narrow '("test-narrow:middle"))
+    (should (equal '("test-narrow:middle" "test-open:m")
+                   (harness-provider-test-catalogue-ids)))
+    ;; Several, and a glob.
+    (harness-provider-test-narrow 'test-narrow '("test-narrow:cheap" "test-narrow:de*"))
+    (should (equal '("test-narrow:cheap" "test-narrow:dear" "test-open:m")
+                   (harness-provider-test-catalogue-ids)))
+    ;; A pattern without a colon names providers, so it matches every
+    ;; model of this one and leaves the other provider alone.
+    (harness-provider-test-narrow 'test-narrow '("test-narrow"))
+    (should (equal '("test-narrow:cheap" "test-narrow:middle" "test-narrow:dear" "test-open:m")
+                   (harness-provider-test-catalogue-ids)))
+    ;; A pattern naming another provider offers nothing of this one.
+    (harness-provider-test-narrow 'test-narrow '("test-open"))
+    (should (equal '("test-open:m") (harness-provider-test-catalogue-ids)))
+    (should-not (harness-call 'provider/cached-models 'test-narrow))))
+
+(ert-deftest harness-provider-allow-models-narrows-a-static-listing ()
+  "A provider with a static `:models' list is narrowed the same way."
+  (harness-provider-test-with (test-static-narrow)
+    (harness-provider-test-narrow
+     'test-static-narrow '("test-static-narrow:qwen*")
+     '((:name "qwen-3" :context-window 32000 :pricing (:input 0.1 :output 0.2))
+       (:name "qwen-4" :context-window 64000 :pricing (:input 1.0 :output 2.0))
+       (:name "llama-4" :context-window 128000 :pricing (:input 0.01 :output 0.02))))
+    (should (equal '("test-static-narrow:qwen-3" "test-static-narrow:qwen-4")
+                   (harness-provider-test-catalogue-ids)))
+    (should (equal "test-static-narrow:qwen-3"
+                   (harness-call 'provider/tier-model "test-static-narrow" :simple)))))
+
+(ert-deftest harness-provider-allow-models-that-match-nothing-offers-nothing ()
+  "A provider whose patterns match none of its models offers nothing.
+The catalogue holds none of its models, a tier finds none, and the log
+says once which patterns did it rather than leaving a picker to look
+broken."
+  (harness-provider-test-with (test-empty test-open)
+    (harness-provider-test-static 'test-open '(("m" . 100000)))
+    (let ((logged nil))
+      (cl-letf (((symbol-function 'harness-log)
+                 (lambda (level format-string &rest args)
+                   (when (eq level 'warn)
+                     (push (apply #'format format-string args) logged)))))
+        (harness-provider-test-narrow 'test-empty '("test-empty:nothing-*"))
+        (should (equal '("test-open:m") (harness-provider-test-catalogue-ids)))
+        ;; Asked again, it says so once, not on every rebuild.
+        (harness-provider-relist 'test-empty)
+        (harness-test-await (harness-call 'provider/models))
+        (should (= 1 (length (cl-remove-if-not
+                              (lambda (line) (string-match-p ":allow-models" line))
+                              logged))))
+        (should (string-match-p "test-empty:nothing-\\*" (car logged)))))
+    (should-not (harness-call 'provider/cached-models 'test-empty))
+    (should (equal '(nil . unlisted)
+                   (harness-call 'provider/tier-model-info "test-empty" :simple)))))
+
+(ert-deftest harness-provider-allow-models-refuses-a-request-it-excludes ()
+  "A request for a model the provider's own allowlist leaves out is
+refused before the provider is asked, naming the setting and its
+patterns; one it offers goes through."
+  (harness-provider-test-with (test-narrow)
+    (let ((completed nil) (warmed nil))
+      (harness-define-provider 'test-narrow
+        :complete (lambda (request) (push (plist-get request :model) completed) (list :cancel #'ignore))
+        :warm (lambda (request) (push (plist-get request :model) warmed) t)
+        :allow-models '("test-narrow:cheap" "test-narrow:middle")
+        :models (lambda () (harness-resolved
+                            (list (list :name "cheap" :context-window 1000)
+                                  (list :name "middle" :context-window 2000)
+                                  (list :name "dear" :context-window 3000)))))
+      (let ((events nil))
+        (harness-call 'provider/complete
+                      (list :model "test-narrow:dear" :on-event (lambda (e) (push e events))))
+        (should-not completed)
+        (should (= 1 (length events)))
+        (should (eq 'done (plist-get (car events) :type)))
+        (should (eq 'error (plist-get (car events) :stop-reason)))
+        (should (equal "Model test-narrow:dear is not allowed: test-narrow's :allow-models allows only test-narrow:cheap, test-narrow:middle"
+                       (plist-get (car events) :error))))
+      (harness-call 'provider/complete (list :model "test-narrow:cheap" :on-event #'ignore))
+      (should (equal '("test-narrow:cheap") completed))
+      (should-not (harness-call 'provider/warm (list :model "test-narrow:dear")))
+      (should (harness-call 'provider/warm (list :model "test-narrow:middle")))
+      (should (equal '("test-narrow:middle") warmed))
+      ;; Embedding is refused the same way.
+      (should (string-match-p ":allow-models"
+                              (condition-case err
+                                  (progn (harness-test-await
+                                          (harness-call 'provider/embed "test-narrow:dear" '("x")))
+                                         "")
+                                (error (harness-error-message err))))))))
+
+(ert-deftest harness-provider-allow-models-and-the-global-one-both-apply ()
+  "A model must pass both allowlists: the provider's own narrows what it
+offers, and `harness-allowed-models' still refuses what it leaves out.
+Neither widens the other."
+  (harness-provider-test-with (test-narrow test-open)
+    (harness-provider-test-narrow 'test-narrow '("test-narrow:cheap" "test-narrow:middle"))
+    (harness-provider-test-static 'test-open '(("m" . 100000)))
+    (let ((harness-allowed-models '("test-narrow:middle" "test-open")))
+      ;; The provider offers cheap and middle; the global list keeps middle.
+      (should (equal '("test-narrow:middle" "test-open:m")
+                     (harness-provider-test-catalogue-ids)))
+      (should-not (harness-provider-model-refusal "test-narrow:middle"))
+      ;; The global list refuses both of the others, and it is the one
+      ;; that answers first: it is the wider of the two.
+      (should (string-match-p "harness-allowed-models"
+                              (harness-provider-model-refusal "test-narrow:cheap")))
+      (should (string-match-p "harness-allowed-models"
+                              (harness-provider-model-refusal "test-narrow:dear"))))
+    ;; A global list that allows everything the provider offers still
+    ;; leaves the provider's own narrowing in force.
+    (let ((harness-allowed-models '("test-narrow" "test-open")))
+      (should (equal '("test-narrow:cheap" "test-narrow:middle" "test-open:m")
+                     (harness-provider-test-catalogue-ids)))
+      (should (string-match-p ":allow-models"
+                              (harness-provider-model-refusal "test-narrow:dear"))))))
+
+(ert-deftest harness-provider-allow-models-reaches-every-surface ()
+  "The narrowing is settled once, so the catalogue, the model index, tier
+selection and price ranking all see the same set."
+  (harness-provider-test-with (test-narrow)
+    ;; The cheapest model is left out, so a price-ranked tier must not
+    ;; pick it, and the dearest is left out too.
+    (harness-provider-test-narrow 'test-narrow '("test-narrow:middle"))
+    (should (equal "test-narrow:middle"
+                   (harness-call 'provider/tier-model "test-narrow" :simple)))
+    (should (equal "test-narrow:middle"
+                   (harness-call 'provider/tier-model "test-narrow" :frontier)))
+    (should (equal "test-narrow:middle"
+                   (plist-get (harness-call 'provider/model "test-narrow:middle") :id)))
+    ;; A model the narrowing left out is not in the catalogue's index,
+    ;; so a lookup makes one for it rather than finding the listed one.
+    (should-not (gethash "test-narrow:cheap" harness-provider--model-index))
+    (should (gethash "test-narrow:middle" harness-provider--model-index))))
+
 ;;;; Internal calls
 
 (defvar harness-sessions)

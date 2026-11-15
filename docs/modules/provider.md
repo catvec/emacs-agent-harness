@@ -45,6 +45,18 @@ made it: a session, a task, the auto-mode judge, naming or
 compaction.  The catalogue clients get (`provider/models`) lists
 only the models allowed, and a tier's model is chosen among them.
 
+A provider may narrow itself further with `:allow-models`, the same
+glob patterns over model ids, which an endpoint definition states
+once (see `harness-define-provider` and
+`harness-openai-endpoints`).  It is the answer to a provider that
+lists far more than anyone wants to pick from -- OpenRouter's
+several hundred models -- without a harness-wide allowlist that
+would constrain every other provider too.  The filtering happens
+where a provider's models are settled, so the catalogue, the model
+index, tier selection, price ranking and every picker see one
+narrowed set; a request for a model it leaves out is refused before
+the provider is asked, naming the setting and its patterns.
+
 ## Provides
 
 ### Methods

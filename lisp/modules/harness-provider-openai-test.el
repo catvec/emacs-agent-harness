@@ -140,6 +140,36 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
       (setq harness-openai-endpoints saved)
       (harness-openai--register-all))))
 
+(ert-deftest harness-provider-openai-endpoint-allow-models-narrows-what-it-offers ()
+  "An endpoint's `:allow-models' reaches the provider it registers, so
+only the models it names are listed and offered, and a request for
+another is refused before it is sent."
+  (let ((saved harness-openai-endpoints))
+    (unwind-protect
+        (progn
+          (harness-openai-add-endpoint
+           :id 'narrowed :label "Narrowed" :base-url "http://localhost:8080/v1"
+           :models '("llama-4" "qwen-3" "qwen-4")
+           :allow-models '("narrowed:qwen*"))
+          (should (equal '("narrowed:qwen*")
+                         (harness-provider-allow-models (harness-provider-get 'narrowed))))
+          (should (equal '("narrowed:qwen-3" "narrowed:qwen-4")
+                         (mapcar (lambda (m) (plist-get m :id))
+                                 (harness-test-await (harness-call 'provider/models)))))
+          (should (string-match-p ":allow-models"
+                                  (harness-provider-model-refusal "narrowed:llama-4")))
+          (should-not (harness-provider-model-refusal "narrowed:qwen-3"))
+          ;; An endpoint that names none offers everything it lists.
+          (harness-openai-add-endpoint
+           :id 'wide :label "Wide" :base-url "http://localhost:8081/v1"
+           :models '("llama-4" "qwen-3"))
+          (should-not (harness-provider-allow-models (harness-provider-get 'wide)))
+          (should (equal '("wide:llama-4" "wide:qwen-3")
+                         (mapcar (lambda (m) (plist-get m :id))
+                                 (harness-call 'provider/cached-models 'wide)))))
+      (setq harness-openai-endpoints saved)
+      (harness-openai--register-all))))
+
 (ert-deftest harness-provider-openai-api-key-resolution ()
   (let ((auth-sources nil))
     (should (equal "lit" (harness-openai--api-key '(:id x :base-url "https://h.example/v1" :api-key "lit"
