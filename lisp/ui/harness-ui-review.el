@@ -4,9 +4,9 @@
 
 ;; A task waiting for review shows a banner wherever its work is looked
 ;; at: that the work is done and waits for the user, and the buttons that
-;; act on it -- [Verification], which accepts the work and merges its branch,
-;; [Return], which sends it back with the feedback in the box, and
-;; [Working phase], which takes it out of review into the working phase
+;; act on it -- [Verify], which accepts the work and merges its branch,
+;; [Send back], which sends it with the feedback in the box, and
+;; [Keep working], which takes it out of review into the working phase
 ;; (`harness-tasks-working-phase'): the agent goes on with the task, the
 ;; report kept for its next hand-in, and no feedback is recorded.  It is
 ;; the board's Ready for review: the same mark and the same wording, so
@@ -74,9 +74,9 @@
 ;; shows: the rest of the time the buffer's own keys stand, C-c C-v
 ;; attaching the clipboard.  The banner disappears when the task leaves
 ;; review, whoever moved it -- verified, sent back, taken back to work by
-;; its [Working phase], or put back at work by `task/force-review' -- and
+;; its [Keep working], or put back at work by `task/force-review' -- and
 ;; its keys with it.  A task put in review by hand, without `hand_in'
-;; (`task/force-review', the board's [Manual review]), shows the banner
+;; (`task/force-review', the board's [Put in review]), shows the banner
 ;; with the report it handed in last, or says that none came if it
 ;; handed none in.
 
@@ -441,8 +441,8 @@ then, the report being the window it is drawn in."
                                        (harness-ui-report-task))))
          (title (harness-ui-tasks--title task))
          (merges (and (plist-get task :worktree) (not (harness-json-true-p (plist-get task :merged)))))
-         (verify-help (if merges "acceptance of the work and its branch merge"
-                        "acceptance of the work")))
+         (verify-help (if merges "accept the work; its branch merges"
+                        "accept the work")))
     (concat
      " " (propertize (concat (harness-ui-icon 'harness-icon-task-review) " Ready for review")
                     'face 'harness-task-review-face)
@@ -452,15 +452,15 @@ then, the report being the window it is drawn in."
      (if (harness-string-blank-p report) "" (concat "\n" report "\n"))
      (if (harness-string-blank-p changes) "" (concat "\n" changes "\n"))
      "   "
-     (harness-ui-review--button "[Verification]" #'harness-ui-review-verify verify-help)
+     (harness-ui-review--button "[Verify]" #'harness-ui-review-verify verify-help)
      (harness-ui-review--key #'harness-ui-review-verify)
      "   "
-     (harness-ui-review--button "[Return]" #'harness-ui-review-reject
-                                "feedback in the box, then C-c C-c")
+     (harness-ui-review--button "[Send back]" #'harness-ui-review-reject
+                                "send it back with the feedback in the box, then C-c C-c")
      (harness-ui-review--key #'harness-ui-review-reject)
      "   "
-     (harness-ui-review--button "[Working phase]" #'harness-ui-review-keep-working
-                                "task out of review, the work continuing")
+     (harness-ui-review--button "[Keep working]" #'harness-ui-review-keep-working
+                                "keep the task at work, out of review")
      (harness-ui-review--key #'harness-ui-review-keep-working)
      ;; A round that handed none in has nothing for [Review Changes] to
      ;; pop out that the session does not show already.  [Review Changes]
@@ -505,9 +505,9 @@ own (C-c C-v attaches the clipboard to the box).
 (put 'harness-ui-review-minor-mode 'harness-menu-group
      '("Review"
        ["Task in review"
-        ("C-c C-v" "Verification" harness-ui-review-verify)
-        ("C-c C-x" "Return with feedback" harness-ui-review-reject)
-        ("C-c C-g" "Working phase" harness-ui-review-keep-working)]))
+        ("C-c C-v" "Verify (accept)" harness-ui-review-verify)
+        ("C-c C-x" "Send back with feedback" harness-ui-review-reject)
+        ("C-c C-g" "Keep working (leave review)" harness-ui-review-keep-working)]))
 
 ;; The banner's keys once sat in the chat's own map, so they acted in
 ;; every session: C-c C-v hid the box's attach-the-clipboard, and C-c C-R,

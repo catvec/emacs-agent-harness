@@ -311,26 +311,26 @@ class _ThisPhoneCard extends StatelessWidget {
             children: [
               if (!controller.registered)
                 HarnessPrimaryButton(
-                  label: 'Registration',
+                  label: 'Register',
                   onPressed: controller.busy ? null : controller.register,
                 )
               else ...[
                 if (!controller.connected)
                   HarnessSecondaryButton(
-                    label: 'Reconnection',
+                    label: 'Reconnect',
                     onPressed: controller.busy ? null : controller.attach,
                   ),
                 HarnessSecondaryButton(
-                  label: 'Disconnection',
+                  label: 'Disconnect',
                   onPressed: controller.busy ? null : controller.disconnect,
                 ),
                 HarnessSecondaryButton(
-                  label: 'Revocation',
+                  label: 'Revoke',
                   onPressed: controller.busy ? null : controller.revoke,
                 ),
               ],
               HarnessSecondaryButton(
-                label: 'File import',
+                label: 'Import file',
                 onPressed: controller.busy ? null : controller.importFile,
               ),
             ],
@@ -594,7 +594,7 @@ class _ComputerCard extends StatelessWidget {
                 if (access != null)
                   if (access.allowed)
                     HarnessSecondaryButton(
-                      label: 'Revocation',
+                      label: 'Revoke',
                       onPressed: controller.canManage
                           ? () => unawaited(controller.revoke(computer))
                           : null,
@@ -608,7 +608,7 @@ class _ComputerCard extends StatelessWidget {
                     ),
                 if (access != null)
                   HarnessTextButton(
-                    label: 'Preference',
+                    label: 'Prefer',
                     onPressed:
                         controller.canManage &&
                             controller.access?.preferred != computer.id

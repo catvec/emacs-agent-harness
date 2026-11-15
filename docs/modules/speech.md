@@ -43,9 +43,25 @@ Clients reach the pipeline over ACP:
   `speech/start`       start it; the answer is the state as it is
   `speech/stop`        stop it
   `speech/transcribe`  {audio: BASE64 WAV} -> (:text TEXT)
-  `speech/synthesize`  {text: TEXT} -> (:audio BASE64 WAV)
+  `speech/synthesize`  {text: TEXT, voice: NAME, params: {...}}
+                       -> (:audio BASE64 WAV)
+  `speech/voices`      the voices the text-to-speech service reports
+                       and the parameters it declares, so a client
+                       offers what the service really has instead of
+                       a list of its own
   `speech/log`         the exact command the stack last ran, where,
                        its exit status and its whole output, as text
+
+Which voices exist is the service's answer, never a list made up by a
+client: Kokoro-FastAPI's `/v1/audio/voices` route names them, and
+`speech/voices` passes that answer on with the state that says why
+there is none (stopped, unsupported by the endpoint, failed).  Which
+parameters are supported is a declaration beside that route, for the
+one service this module starts itself (Kokoro-FastAPI v0.8.2:
+`speed` 0.25 to 4.0).  A service of your own declares nothing here,
+so no parameter is sent to it: `speech/synthesize` refuses a
+parameter the selected service does not declare, as it refuses one
+out of its range, rather than post a value the service ignores.
 
 A stack that fails says so in `speech/status`: `:detail` and
 `:reason` name the exit status and the provider's own reason, and
@@ -69,8 +85,9 @@ sidecar does.  `speech/changed` carries the state whenever it moves.
 - `speech/start` — Start the local pipeline and return its status; `speech/changed` follows.
 - `speech/status` — Return the local pipeline's status plist.
 - `speech/stop` — Stop the local pipeline and return its status; `speech/changed` follows.
-- `speech/synthesize` (text &optional voice) — Speak TEXT and return a promise of (:audio BASE64 :mime "audio/wav").
+- `speech/synthesize` (text &optional voice params) — Speak TEXT and return a promise of (:audio BASE64 :mime "audio/wav").
 - `speech/transcribe` (audio &optional format language) — Transcribe AUDIO, a base64 WAV, and return a promise of (:text TEXT).
+- `speech/voices` (&optional refresh) — Return a promise of the text-to-speech voices and their parameters.
 
 ### Events
 
@@ -92,6 +109,7 @@ sidecar does.  `speech/changed` carries the state whenever it moves.
 - `harness-speech-local-voice` — The voice the local pipeline speaks with.
 - `harness-speech-local-whisper` — The whisper.cpp model file the bundled stack transcribes with.
 - `harness-speech-request-timeout` — Seconds one transcription or synthesis request may take.
+- `harness-speech-voices-ttl` — Seconds a service's voice list is kept before it is asked for again.
 
 ## Uses
 

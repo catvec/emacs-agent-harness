@@ -104,8 +104,8 @@ void main() {
     expect(find.text('Connected'), findsWidgets);
     expect(find.text('View'), findsWidgets);
     expect(find.text('Control'), findsWidgets);
-    expect(find.text('Revocation'), findsOneWidget);
-    expect(find.text('Preference'), findsWidgets);
+    expect(find.text('Revoke'), findsOneWidget);
+    expect(find.text('Prefer'), findsWidgets);
     expect(find.textContaining('1 resource'), findsWidgets);
     await tester.drag(find.byType(ListView), const Offset(0, -700));
     await tester.pump();
@@ -140,8 +140,11 @@ void main() {
     for (var i = 0; i < 8; i++) {
       await tester.pump(const Duration(milliseconds: 80));
     }
+    // Scroll until the card itself is built, not until its heading shows:
+    // the list builds its last child only once it is near the viewport, and
+    // a heading at the top of the screen does not bring the card under it.
     for (var i = 0;
-        i < 12 && find.text('THIS CLIENT').evaluate().isEmpty;
+        i < 12 && find.text('Import file').evaluate().isEmpty;
         i++) {
       await tester.drag(find.byType(ListView), const Offset(0, -400));
       await tester.pump();
@@ -149,8 +152,8 @@ void main() {
     expect(find.text('THIS CLIENT'), findsOneWidget);
     expect(find.text('This phone'), findsOneWidget);
     expect(find.text('Not registered'), findsOneWidget);
-    expect(find.text('Registration'), findsOneWidget);
-    expect(find.text('File import'), findsOneWidget);
+    expect(find.text('Register'), findsOneWidget);
+    expect(find.text('Import file'), findsOneWidget);
     expect(find.text('Screen'), findsOneWidget);
     expect(find.text('Camera'), findsOneWidget);
     expect(find.text('Microphone'), findsOneWidget);

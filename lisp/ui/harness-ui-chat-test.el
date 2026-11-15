@@ -9842,7 +9842,7 @@ buttons in it work.  Clearing the hook takes the panel away again."
         (add-hook 'harness-chat-panel-functions
                   (lambda ()
                     (concat " review banner  "
-                            (propertize "[Verification]" 'harness-chat-action (lambda () (setq clicked t)))
+                            (propertize "[Verify]" 'harness-chat-action (lambda () (setq clicked t)))
                             "\n"))
                   nil t)
         (harness-chat--render-tail)
@@ -9851,7 +9851,7 @@ buttons in it work.  Clearing the hook takes the panel away again."
           (should (< pos harness-compose-start))
           (should (harness-ui-chat-test-face-at pos 'harness-chat-panel-face))
           (should (get-text-property pos 'read-only))
-          (goto-char (1- (harness-ui-chat-test-find buf "[Verification]")))
+          (goto-char (1- (harness-ui-chat-test-find buf "[Verify]")))
           (harness-chat-push))
         (should clicked)
         (setq-local harness-chat-panel-functions nil)

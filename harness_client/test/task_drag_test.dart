@@ -246,13 +246,13 @@ void main() {
       // The drop opens the words the work is sent back with; nothing is sent
       // until they are written.  The sheet's title and its button say the same
       // noun, so the button is the one that sends.
-      expect(find.text('Return'), findsWidgets);
+      expect(find.text('Send back'), findsWidgets);
       expect(rig.harness.calls('_harness/task/reject'), isEmpty);
       await tester.enterText(
         find.byType(TextField).last,
         'Name the files that changed.',
       );
-      await tester.tap(find.widgetWithText(FilledButton, 'Return'));
+      await tester.tap(find.widgetWithText(FilledButton, 'Send back'));
       await _settle(tester, 8);
       expect(
         rig.harness.calls('_harness/task/reject').last['feedback'],

@@ -428,27 +428,27 @@ is the page's to show."
             (harness-ui-server--render)
             (should (equal
                      (append (list (cdr case) "Connection" "Status connected")
-                             (when address (list (concat "Address " address " [Address copy]")))
-                             '("Round trip 2.0 ms [Measurement]"
+                             (when address (list (concat "Address " address " [Copy address]")))
+                             '("Round trip 2.0 ms [Measure]"
                                "Harness" "Version 3.2.1" "Emacs 31.1" "Protocol 1"
                                "Sessions" "Sessions 5 total 1 running 1 waiting 2 idle 1 inactive [Session list]"
                                "Modules" "Modules 3 ready 1 failed [Module list]"
                                ;; ACP data, not authored interface copy.
                                "broken: its requirements are not ready")
                              (list (if address
-                                       "[Connection…] [Reconnection] [Local harness] [Module reload]"
-                                     "[Connection…] [Module reload]")))
+                                       "[Connection…] [Reconnect] [Use local harness] [Reload modules]"
+                                     "[Connection…] [Reload modules]")))
                      (harness-ui-server-test-copy-lines (buffer-string))))
             (should (equal (list (concat "Server " (or address "local harness") " connected"))
                            (harness-ui-server-test-copy-lines (harness-ui-server-test-header))))
             (should (equal
                      (seq-sort #'string<
-                               (append '("Round-trip measurement (g)" "Session list" "Module list"
+                               (append '("measure the round trip again (g)" "Session list" "Module list"
                                          "Server address and token (c)")
                                        (if address
-                                           '("Address copy (w)" "Reconnection (r)" "Local harness (L)"
-                                             "Server module reload (l)")
-                                         '("Local module reload (l)"))))
+                                           '("copy the address (w)" "reconnect to the server (r)" "use the local harness (L)"
+                                             "reload the server's modules (l)")
+                                         '("reload the local modules (l)"))))
                      (harness-ui-server-test-help-echoes (current-buffer))))))))))
 
 (ert-deftest harness-ui-server-page-loading-and-empty-copy-inventory ()
@@ -460,12 +460,12 @@ is the page's to show."
       (harness-ui-server--render)
       (should (equal '("remote server · server.example.org:4276"
                        "Connection" "Status not connected"
-                       "Address server.example.org:4276 [Address copy]"
-                       "Round trip … [Measurement]"
+                       "Address server.example.org:4276 [Copy address]"
+                       "Round trip … [Measure]"
                        "Harness" "Version …" "Emacs …" "Protocol …"
                        "Sessions" "Sessions … [Session list]"
                        "Modules" "Modules … [Module list]"
-                       "[Connection…] [Reconnection] [Local harness] [Module reload]")
+                       "[Connection…] [Reconnect] [Use local harness] [Reload modules]")
                      (harness-ui-server-test-copy-lines (buffer-string))))
       (should (equal " Server server.example.org:4276  not connected"
                      (harness-ui-server-test-header)))
@@ -492,7 +492,7 @@ is the page's to show."
             (harness-ui-server-reconnect)
             (should (equal "Harness: connection · server.example.org:4276" echo))
             (harness-ui-server-copy-address)
-            (should (equal "Address copy: server.example.org:4276" echo)))
+            (should (equal "Copy address: server.example.org:4276" echo)))
           (harness-ui-server-test-set 'address "server.example.org:4276")
           (harness-ui-server-connect-copy)
           (should (equal "Init file copy · before harness-start" echo))))
@@ -519,13 +519,13 @@ is the page's to show."
   "Menus have the same noun labels as the views."
   (should (equal '("Server"
                    ["Page"
-                    (". g" "Details refresh" harness-ui-server-refresh)
-                    (". r" "Reconnection" harness-ui-server-reconnect)
+                    (". g" "Refresh details" harness-ui-server-refresh)
+                    (". r" "Reconnect" harness-ui-server-reconnect)
                     (". c" "Server connection…" harness-connect-server)
                     (". m" "Modules" harness-ui-server-open-modules)
-                    (". w" "Address copy" harness-ui-server-copy-address)
-                    (". l" "Module reload" harness-ui-server-reload)
-                    (". L" "Local harness" harness-ui-server-use-local)])
+                    (". w" "Copy address" harness-ui-server-copy-address)
+                    (". l" "Reload modules" harness-ui-server-reload)
+                    (". L" "Use local harness" harness-ui-server-use-local)])
                  (get 'harness-ui-server-mode 'harness-menu-group)))
   (should (equal '("Connection"
                    ["Form"

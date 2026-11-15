@@ -368,7 +368,7 @@ names it, and [Undo] gives each task the priority it had."
       (harness-ui-tasks-search-test--wait-text board "Verification of .*Fix the flaky test")
       (with-current-buffer board
         (should (plist-get harness-ui-tasks-search--state :proposed))
-        (should (string-match-p "\\[Verification\\]" (harness-ui-tasks-search--banner)))
+        (should (string-match-p "\\[Verify\\]" (harness-ui-tasks-search--banner)))
         (should (string-match-p "\\[Skip\\]" (harness-ui-tasks-search--banner))))
       ;; Nothing happened yet.
       (should-not (plist-get (harness-call 'task/get id) :verified))

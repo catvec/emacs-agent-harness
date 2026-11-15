@@ -1285,8 +1285,13 @@ the unrecorded ones too.  The promise resolves to the sockets stopped."
 Before UI changes, read CLAUDE.md and docs/ui-guide.md. UI copy is nouns,
 noun phrases and adjectives, never full sentences: headings, buttons,
 labels, notes, tooltips, forms, headers, menus, statuses and echo-area
-errors. Prose belongs only in explicit help or setting descriptions;
-leave user/model output and other data unchanged.
+errors. A control that acts takes its imperative verb -- [Verify],
+[Register], [Revoke], [Send back], [Start] -- while nouns stay for
+navigation, headings, categories, field labels, objects and states;
+never nominalize an action to fit the noun rule ([Verification],
+[Registration], [Working phase] were that regression). Prose belongs
+only in explicit help or setting descriptions; leave user/model output
+and other data unchanged.
 
 Use a copy-first checkpoint in your plan: inventory the intended labels,
 tooltips, headers, menus, empty/loading states, success and error text

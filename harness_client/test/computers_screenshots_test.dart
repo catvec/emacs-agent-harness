@@ -101,9 +101,9 @@ void main() {
     expect(find.text('Connected'), findsWidgets);
     expect(find.text('View'), findsWidgets);
     expect(find.text('Control'), findsWidgets);
-    expect(find.text('Revocation'), findsWidgets);
+    expect(find.text('Revoke'), findsWidgets);
     expect(find.text('Grant'), findsOneWidget);
-    expect(find.text('Preference'), findsWidgets);
+    expect(find.text('Prefer'), findsWidgets);
     expect(controller.canManage, isFalse);
     expect(tester.takeException(), isNull);
     if (shots != null) {
@@ -175,8 +175,11 @@ void main() {
 
   testWidgets('this client', (tester) async {
     final (boundary, _) = await _show(tester, width: 390, height: 844);
+    // Scroll until the card itself is built, not until its heading shows:
+    // the list builds its last child only once it is near the viewport, and
+    // a heading at the top of the screen does not bring the card under it.
     for (var i = 0;
-        i < 12 && find.text('THIS CLIENT').evaluate().isEmpty;
+        i < 12 && find.text('Import file').evaluate().isEmpty;
         i++) {
       await tester.drag(find.byType(ListView), const Offset(0, -400));
       await tester.pump();
@@ -184,8 +187,8 @@ void main() {
     expect(find.text('THIS CLIENT'), findsOneWidget);
     expect(find.text('This phone'), findsOneWidget);
     expect(find.text('Not registered'), findsOneWidget);
-    expect(find.text('Registration'), findsOneWidget);
-    expect(find.text('File import'), findsOneWidget);
+    expect(find.text('Register'), findsOneWidget);
+    expect(find.text('Import file'), findsOneWidget);
     expect(find.text('Capture only · no pointer or keyboard control'), findsOneWidget);
     expect(tester.takeException(), isNull);
     if (shots != null) {

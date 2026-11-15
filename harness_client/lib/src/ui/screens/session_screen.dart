@@ -384,7 +384,7 @@ class _SessionScreenState extends State<SessionScreen> {
       title: 'Session deletion',
       message:
           'Transcript and temporary files removed · irreversible',
-      confirmLabel: 'Deletion',
+      confirmLabel: 'Delete',
       cancelLabel: 'Cancel',
       destructive: true,
     );

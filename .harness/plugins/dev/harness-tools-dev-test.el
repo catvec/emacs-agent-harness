@@ -214,8 +214,11 @@ is the harness's rule for every tool of a project's plugin
     (let ((prompt (harness-run-filter 'agent/system-prompt "Base" '(:id "here" :kind main))))
       (dolist (text '("read CLAUDE.md and docs/ui-guide.md"
                       "nouns,\nnoun phrases and adjectives, never full sentences"
-                      "Prose belongs only in explicit help or setting descriptions"
-                      "leave user/model output and other data unchanged"
+                      "A control that acts takes its imperative verb"
+                      "never nominalize an action to fit the noun rule"
+                      "[Verification],\n[Registration], [Working phase] were that regression"
+                      "regression). Prose belongs\nonly in explicit help or setting descriptions"
+                      "leave user/model output\nand other data unchanged"
                       "copy-first checkpoint in your plan"
                       "inventory the intended labels"
                       "before implementation"

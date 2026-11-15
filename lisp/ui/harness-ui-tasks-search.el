@@ -208,10 +208,10 @@ Failures follow, each saying why: \"could not retry “C”: it is working alrea
         "Do it"
       (pcase (car (car groups))
         ("archive" "Archive")
-        ("verify" "Verification")
-        ("complete" "Completion")
+        ("verify" "Verify")
+        ("complete" "Mark done")
         ("message" "Message")
-        ("reject" "Return")
+        ("reject" "Send back")
         (name (capitalize name))))))
 
 (defun harness-ui-tasks-search--short (proposed)

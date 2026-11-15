@@ -146,7 +146,7 @@ class SettingsScreen extends StatelessWidget {
                                 title: 'Disconnection',
                                 message:
                                     'Conversations stay on the harness · no automatic reconnection',
-                                confirmLabel: 'Disconnection',
+                                confirmLabel: 'Disconnect',
                                 cancelLabel: 'Stay',
                               );
                               if (confirmed == true) await app.disconnect();

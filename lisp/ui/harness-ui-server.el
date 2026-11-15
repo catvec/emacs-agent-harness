@@ -191,8 +191,8 @@ That is its window's, never less than MINIMUM, 40 by default."
                             (propertize address 'face 'harness-server-address-face)
                             "   "
                             (lambda ()
-                              (harness-ui-button "[Address copy]" #'harness-ui-server-copy-address
-                                                 :help "Address copy (w)"))))
+                              (harness-ui-button "[Copy address]" #'harness-ui-server-copy-address
+                                                 :help "copy the address (w)"))))
   (when-let* ((since (and (harness-ui-connected-p) harness-ui-connected-since)))
     (harness-ui-server--row "Connected"
                             (format "%s (%s)"
@@ -204,8 +204,8 @@ That is its window's, never less than MINIMUM, 40 by default."
                             (propertize "…" 'face 'harness-dim-face))
                           "   "
                           (lambda ()
-                            (harness-ui-button "[Measurement]" #'harness-ui-server-refresh
-                                               :help "Round-trip measurement (g)"))))
+                            (harness-ui-button "[Measure]" #'harness-ui-server-refresh
+                                               :help "measure the round trip again (g)"))))
 
 (defun harness-ui-server--insert-harness (width)
   "Insert the harness section, ruled to WIDTH."
@@ -285,16 +285,16 @@ That is its window's, never less than MINIMUM, 40 by default."
                      :help "Server address and token (c)")
   (insert "  ")
   (if (harness-ui-server--local-p)
-      (harness-ui-button "[Module reload]" #'harness-reload
-                         :help "Local module reload (l)")
-    (harness-ui-button "[Reconnection]" #'harness-ui-server-reconnect
-                       :help "Reconnection (r)")
+      (harness-ui-button "[Reload modules]" #'harness-reload
+                         :help "reload the local modules (l)")
+    (harness-ui-button "[Reconnect]" #'harness-ui-server-reconnect
+                       :help "reconnect to the server (r)")
     (insert "  ")
-    (harness-ui-button "[Local harness]" #'harness-ui-server-use-local
-                       :help "Local harness (L)")
+    (harness-ui-button "[Use local harness]" #'harness-ui-server-use-local
+                       :help "use the local harness (L)")
     (insert "  ")
-    (harness-ui-button "[Module reload]" #'harness-ui-server-reload
-                       :help "Server module reload (l)"))
+    (harness-ui-button "[Reload modules]" #'harness-ui-server-reload
+                       :help "reload the server's modules (l)"))
   (insert "\n"))
 
 (defun harness-ui-server--header ()
@@ -424,7 +424,7 @@ harness sends it."
   (let ((address (harness-ui-server--address)))
     (unless address (user-error "Local harness: no address"))
     (kill-new address)
-    (message "Address copy: %s" address)))
+    (message "Copy address: %s" address)))
 
 (defun harness-ui-server-open-sessions ()
   "Show the sessions of the harness the UI talks to."
@@ -730,13 +730,13 @@ Before the form is drawn, they are the connection's own."
 (put 'harness-ui-server-mode 'harness-menu-group
      '("Server"
        ["Page"
-        (". g" "Details refresh" harness-ui-server-refresh)
-        (". r" "Reconnection" harness-ui-server-reconnect)
+        (". g" "Refresh details" harness-ui-server-refresh)
+        (". r" "Reconnect" harness-ui-server-reconnect)
         (". c" "Server connection…" harness-connect-server)
         (". m" "Modules" harness-ui-server-open-modules)
-        (". w" "Address copy" harness-ui-server-copy-address)
-        (". l" "Module reload" harness-ui-server-reload)
-        (". L" "Local harness" harness-ui-server-use-local)]))
+        (". w" "Copy address" harness-ui-server-copy-address)
+        (". l" "Reload modules" harness-ui-server-reload)
+        (". L" "Use local harness" harness-ui-server-use-local)]))
 
 (defvar harness-ui-server-connect-mode-map
   (let ((map (make-sparse-keymap)))

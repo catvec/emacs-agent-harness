@@ -412,7 +412,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
       ],
     );
     final action = _action(
-      'Deletion…',
+      'Delete…',
       enabled: _controller.canManageBrowser,
       reason: _controller.preview ? 'Preview' : 'Computer off',
       onPressed: _confirmClearProfile,
@@ -581,7 +581,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
             ),
           ),
           _action(
-            'Removal',
+            'Remove',
             enabled: _controller.canManageBrowser,
             reason: _controller.preview ? 'Preview' : 'Computer off',
             onPressed: () => _confirmForget(login),
@@ -1172,7 +1172,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
           ),
           const SizedBox(width: 4),
           _action(
-            'Revocation',
+            'Revoke',
             enabled: revocable,
             reason: _controller.preview ? 'Preview' : 'Later stage',
             onPressed: () => _confirmRevoke(grant),
@@ -1210,7 +1210,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     final ok = await _confirm(
       'Browser data deletion',
       'Profile · ${browser?.profile.label ?? 'default'} · $sites sites · irreversible',
-      'Deletion',
+      'Delete',
     );
     if (!ok || !mounted) return;
     await _controller.clearProfile();
@@ -1221,7 +1221,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     final ok = await _confirm(
       'Login removal',
       'Site · ${login.host} · session ends · cookies cleared',
-      'Removal',
+      'Remove',
     );
     if (!ok || !mounted) return;
     await _controller.forgetLogin(login.id);
@@ -1232,7 +1232,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     final ok = await _confirm(
       'Authorization revocation',
       '${grant.label} · agent access ends',
-      'Revocation',
+      'Revoke',
     );
     if (!ok || !mounted) return;
     final id = _authorizationId(grant);
@@ -1414,7 +1414,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
           Text(value, style: HarnessText.meta(context)),
           const SizedBox(width: 8),
           _action(
-            'Deletion',
+            'Delete',
             enabled: _controller.canManageBrowser,
             reason: _controller.preview ? 'Preview' : 'Later stage',
             onPressed: clear,
@@ -1437,7 +1437,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
         _ => 'Permission deletion',
       },
       'Site · ${site.host} · ${kind == 'cookies' ? '${site.cookies} cookies' : 'irreversible'}',
-      'Deletion',
+      'Delete',
     );
     if (!ok || !mounted) return;
     await _controller.clearSite(site.origin, [kind]);
@@ -1449,7 +1449,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     final ok = await _confirm(
       'Site data deletion',
       'Site · ${site.host} · cookies · storage · cache · permissions',
-      'Deletion',
+      'Delete',
     );
     if (!ok || !mounted) return;
     await _controller.clearSite(site.origin, const [
@@ -1466,7 +1466,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
     final ok = await _confirm(
       'Login removal',
       'Site · ${login.host} · session ends · cookies cleared',
-      'Removal',
+      'Remove',
     );
     if (!ok || !mounted) return;
     await _controller.forgetLogin(login.id);
@@ -1562,7 +1562,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
             Align(
               alignment: AlignmentDirectional.centerStart,
               child: _action(
-                'Revocation…',
+                'Revoke…',
                 enabled:
                     _controller.canManageWallet &&
                     authorization.status == 'active',
@@ -1574,7 +1574,7 @@ class _ResourcesScreenState extends State<ResourcesScreen> {
                   final ok = await _confirm(
                     'Authorization revocation',
                     '${_money(authorization.amount, authorization.currency)} · ${authorization.scopeLabel} · agent access ends',
-                    'Revocation',
+                    'Revoke',
                   );
                   if (!ok || !mounted) return;
                   await _controller.revokeAuthorization(authorization.id);

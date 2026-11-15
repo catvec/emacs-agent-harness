@@ -25,14 +25,14 @@ project, one section per column, most urgent first:
                         merges it, or send it back with feedback (R);
                         by priority, then the last to finish first.
                         A task at work reaches it by handing in, or by
-                        hand (H, or [Manual review] in its menu); K, or
-                        [Working phase], takes it back out, into the
+                        hand (H, or [Put in review] in its menu); K, or
+                        [Keep working], takes it back out, into the
                         working phase
   Merging               in the merge queue, in the order it takes them:
                         queued, merging, or resolving the conflicts
   In progress           working, with its current todo and progress,
                         in the working phase between hand-ins: put it
-                        in review by hand (H, or [Manual review] in its
+                        in review by hand (H, or [Put in review] in its
                         menu) if it does not hand in itself; by
                         priority, then the last to start first
   Pending               waiting for a slot, so it starts on its own
@@ -120,8 +120,8 @@ it stops it and starts the task with the write-up it has when the
 turn has ended.
 
 A task is handled in its session, whatever its state.  In review it
-has the review banner (harness-ui-review.el: [Verification], [Return],
-[Working phase], the report and the changes); in the backlog, the
+has the review banner (harness-ui-review.el: [Verify], [Send back],
+[Keep working], the report and the changes); in the backlog, the
 banner above.  In every other state its session's settings line says
 where the task stands, in the board's words, with the buttons that
 move it through the queue -- [Start], [Pause] and [Resume] -- and

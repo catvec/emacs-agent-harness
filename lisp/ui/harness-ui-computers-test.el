@@ -163,7 +163,7 @@ LABEL is matched as it is written: [view] is not [View]."
         (should (string-match-p "\\[View\\]" text))
         (should (string-match-p "\\[Control\\]" text))
         (should (string-match-p "\\[Return\\]" text))
-        (should (string-match-p "\\[Unregistration\\]" text))
+        (should (string-match-p "\\[Unregister\\]" text))
         ;; Session access.
         (should (string-match-p "Session      Session one" text))
         (should (string-match-p "Policy       auto" text))
@@ -171,9 +171,9 @@ LABEL is matched as it is written: [view] is not [View]."
         (should (string-match-p "workstation       allowed (the client's computer)" text))
         (should (string-match-p "box               not allowed" text))
         (should (string-match-p "\\[view\\]" text))
-        (should (string-match-p "\\[Revocation\\]" text))
+        (should (string-match-p "\\[Revoke\\]" text))
         (should (string-match-p "\\[Grant\\]" text))
-        (should (string-match-p "\\[Preference\\]" text))
+        (should (string-match-p "\\[Prefer\\]" text))
         ;; Resources.
         (should (string-match-p "git-repo  app               box         /srv/app" text))
         (should (string-match-p
@@ -243,26 +243,26 @@ LABEL is matched as it is written: [view] is not [View]."
                         (harness-ui-computers-test-computer "cmp-box" "box" :control "user"))
        :access (harness-ui-computers-test-session-answer)
        :session "sid-1")
-      (should (equal "registration of this computer with the harness (r)"
-                     (harness-ui-computers-test-help "[Registration]")))
-      (should (equal "resources of this computer reported again (R)"
-                     (harness-ui-computers-test-help "[Resource refresh]")))
-      (should (equal "computer list refresh (g)"
-                     (harness-ui-computers-test-help "[Computer list]")))
-      (should (equal "screen view of the computer at point (V)"
+      (should (equal "register this computer with the harness (r)"
+                     (harness-ui-computers-test-help "[Register]")))
+      (should (equal "report the resources of this computer again (R)"
+                     (harness-ui-computers-test-help "[Refresh resources]")))
+      (should (equal "refresh the computer list (g)"
+                     (harness-ui-computers-test-help "[Refresh list]")))
+      (should (equal "view the screen of the computer at point (V)"
                      (harness-ui-computers-test-help "[View]")))
-      (should (equal "control of the computer at point (c)"
+      (should (equal "take control of the computer at point (c)"
                      (harness-ui-computers-test-help "[Control]")))
-      (should (equal "control return of the computer at point (C)"
+      (should (equal "return control of the computer at point (C)"
                      (harness-ui-computers-test-help "[Return]")))
-      (should (equal "unregistration of the computer at point (u)"
-                     (harness-ui-computers-test-help "[Unregistration]")))
-      (should (equal "grant of the computer at point to this session (a)"
+      (should (equal "unregister the computer at point (u)"
+                     (harness-ui-computers-test-help "[Unregister]")))
+      (should (equal "grant the computer at point to this session (a)"
                      (harness-ui-computers-test-help "[Grant]")))
-      (should (equal "revocation of the computer at point from this session (x)"
-                     (harness-ui-computers-test-help "[Revocation]")))
-      (should (equal "preferred computer of this session (s)"
-                     (harness-ui-computers-test-help "[Preference]")))
+      (should (equal "revoke the computer at point from this session (x)"
+                     (harness-ui-computers-test-help "[Revoke]")))
+      (should (equal "make it the preferred computer of this session (s)"
+                     (harness-ui-computers-test-help "[Prefer]")))
       (should (equal "use of view on this computer by this session (click to toggle)"
                      (harness-ui-computers-test-help "[view]"))))))
 
@@ -279,15 +279,15 @@ LABEL is matched as it is written: [view] is not [View]."
                      (mapcar (lambda (column) (aref column 0)) columns)))
       (should (equal '(". r" ". R" ". g" ". u" ". V" ". c" ". C" ". a" ". s")
                      (mapcar #'car entries)))
-      (should (equal '("Registration of this computer"
-                       "Resource refresh of this computer"
-                       "Computer list"
-                       "Unregistration of the computer at point"
-                       "Screen view of the computer at point"
-                       "Control of the computer at point"
-                       "Control return of the computer at point"
-                       "Grant of the computer at point to this session"
-                       "Preferred computer of this session")
+      (should (equal '("Register this computer"
+                       "Refresh this computer's resources"
+                       "Refresh the computer list"
+                       "Unregister the computer at point"
+                       "View the screen of the computer at point"
+                       "Take control of the computer at point"
+                       "Return control of the computer at point"
+                       "Grant the computer at point to this session"
+                       "Make it the preferred computer of this session")
                      (mapcar #'cadr entries)))
       (dolist (entry entries)
         (should (fboundp (nth 2 entry)))

@@ -138,11 +138,11 @@ class TaskActionRunner {
       case TaskAction.sendBack:
         final feedback = await showHarnessTextPrompt(
           context: context,
-          title: 'Return',
+          title: 'Send back',
           message: 'Feedback · task session',
           hint: 'Feedback',
           multiline: true,
-          confirmLabel: 'Return',
+          confirmLabel: 'Send back',
         );
         if (feedback != null && feedback.trim().isNotEmpty) {
           await controller.reject(id, feedback.trim());
@@ -174,7 +174,7 @@ class TaskActionRunner {
           context,
           title: 'Task completion',
           message: 'Work accepted · no merge wait',
-          confirm: 'Completion',
+          confirm: 'Mark done',
           cancel: 'Cancel',
           destructive: false,
         )) {
@@ -285,7 +285,7 @@ class TaskActionRunner {
           ],
         ),
       ),
-      confirmLabel: 'Deletion',
+      confirmLabel: 'Delete',
       cancelLabel: 'Cancel',
       destructive: true,
     );

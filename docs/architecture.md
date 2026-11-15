@@ -12868,12 +12868,13 @@ talks ACP only: `_harness/computer/list` with the page's session,
 computer this client runs on (its endpoint's name, capabilities and
 registration state, from the client's own endpoint, not from the
 harness), the registered computers, the session's grants and the
-resources, with a button for every action: `[Registration]`, `[Refresh]`,
-`[Computer list]`, `[View]`, `[Control]`/`[Give back]`,
-`[Unregistration]`, a capability toggle per capability, `[Grant]`,
-`[Revocation]` and `[Preference]`.  `[View]` opens the VNC URL a computer
+resources, with a button for every action: `[Register]`, `[Refresh
+resources]`, `[Refresh list]`, `[View]`, `[Control]`/`[Give back]`,
+`[Unregister]`, a capability toggle per capability, `[Grant]`,
+`[Revoke]` and `[Prefer]`.  `[View]` opens the VNC URL a computer
 offers; it is not a session permission.  Its copy is nouns and noun
-phrases, and `lisp/ui/harness-ui-computers-test.el` checks the exact
+phrases, with the imperative for a button that acts, and
+`lisp/ui/harness-ui-computers-test.el` checks the exact
 rendered words and tooltips.
 
 Pending requests (`harness-ui-pending`): the permission prompts and
@@ -14025,7 +14026,7 @@ its own under `harness-state-directory/clips/` deduplicated by the
 SHA-1 of the bytes, which `M-y` goes back through and
 `C-u M-x harness-compose-attach-clipboard` picks from; `yank-media`
 attaches them too (`harness-compose-yank-media`).  The box binds no
-`C-c C-v`: in a chat that is the review banner's [Verification], so the two
+`C-c C-v`: in a chat that is the review banner's [Verify], so the two
 never fight, and other MIME types are chosen from with
 `M-x harness-compose-attach-clipboard`.
 Inline chips and tokens: an attachment gets a token in the text, where
@@ -14962,7 +14963,7 @@ the [cancel] beside it), shows the message icon and names where it
 sends ("Message to session “X”", "Refine “X” with feedback",
 "Answer “…”", "Send back “X” with feedback");
 composing a task, new or edited, keeps the plain box.  A task in
-review shows [Verification] and [Return]: `v`
+review shows [Verify] and [Send back]: `v`
 accepts the work (its branch then merges), `R` sends it back to its
 session with the feedback written in the compose box (`C-u R` reads it
 in the minibuffer); `m`, a message, opens the same box, since any
@@ -14972,8 +14973,8 @@ resolving the conflicts -- saying so on its card until the branch is in
 and it moves to completed.  A card of a task that handed a report in
 also shows [Review], popping the report out; it is one of the items
 `harness-ui-popout-at-point-functions' offers.  While the task waits
-for review, the report ends with the banner of its session, [Verification]
-and [Return], and a box for the feedback.  Ready for review's
+for review, the report ends with the banner of its session, [Verify]
+and [Send back], and a box for the feedback.  Ready for review's
 heading counts the tasks to review, as each column's heading counts its
 own, and `task/review` says in the echo area that one is ready
 (`harness-ui-tasks--notify-review`).  The mode line notifier counts
@@ -16334,7 +16335,7 @@ and its lines; a demo is evidence with [Open demo], [Run demo] or
 with the report's brief, voice on where the voice module is loaded), the changes the task made (what
 `harness-ui-review-changes-functions` draw for it, indented as the
 banner's text: the review module's tree of the files and the threads
-below it), then [Verification] (`C-c C-v`), [Return] (`C-c C-x`) and
+below it), then [Verify] (`C-c C-v`), [Send back] (`C-c C-x`) and
 [Review] -- shown above the compose box of the task's session, a chat
 panel (`harness-chat-panel-functions`), and at the end of its report
 popout (`harness-ui-report-panel-functions`); the merge queue of a
@@ -16392,7 +16393,7 @@ the panel is decoration, so one that fails to draw leaves the tail as
 it was); the session's box sends
 as always and the harness takes any message the user sends the task's
 session for the feedback that sends it back (`harness-tasks--on-message'), so
-[Return] only points at the box, while
+[Send back] only points at the box, while
 `harness-ui-report-compose-functions` gives the report box's text to
 `task/reject` as the feedback; `harness-ui-review-minor-mode` puts
 those two keys over the buffer's own, only for as long as it shows; it
@@ -16842,7 +16843,7 @@ set draws every surface through the library's own refresh):
 - the review banner of the task's session: `ui-review` has a hook of its
   own, `harness-ui-review-changes-functions`, called in the chat buffer on
   every draw of the banner's tail with the task, whose strings go between
-  the report the task handed in and [Verification], indented as the banner's
+  the report the task handed in and [Verify], indented as the banner's
   text (a function that fails says so in a line and the banner stays);
   the module's function (`harness-ui-patch-review--banner-panel`) draws
   the changes of a task in review that has a branch, remembers the chat
@@ -16881,7 +16882,7 @@ its older definition made wrong -- the slots after the new one are shifted
 by one, and the last ones lie past the end -- so the report failed with
 `args-out-of-range`, whose message printed the whole review (the task, its
 hand-in, the files with their patches); the panel's failure took the
-panels after it, the review banner with [Verification] and [Return], out of
+panels after it, the review banner with [Verify] and [Send back], out of
 the report; and the module's listener of `task/changed` and `task/review`,
 ahead of the review banner's own in `harness-ui-event-functions`, failed
 on the task's events and kept the banner from hearing the task was handed

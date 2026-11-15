@@ -3595,7 +3595,7 @@ subject: \"1 tool call: Read file x.el\"."
              "  "
              (harness-chat--button (if (harness-chat-group-expanded group) "[collapse]" "[expand]")
                                    (lambda () (harness-chat-toggle-group gid))
-                                   :help "tool call display")
+                                   :help "show or hide the tool calls")
              "\n")))))
 
 (defun harness-chat--mark-thread-cards (text)

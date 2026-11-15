@@ -12,7 +12,7 @@ Settings page: every harness setting, edited globally or for the project.
 
 ## About
 
-`harness-settings` (C-c h S) shows every setting of the harness on
+`harness-settings` (C-c h O S) shows every setting of the harness on
 one page, like a customize buffer, with a scope toggle at the top:
 
   Global   the customize value, used everywhere unless a project

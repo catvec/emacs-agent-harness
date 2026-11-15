@@ -593,7 +593,7 @@ menu is unharmed."
       (should (string-match-p "C-c C-q +Next-turn queue" text))
       (should (string-match-p "C-c C-k +Turn cancellation" text))
       (should (string-match-p "C-c C-a +File or task attachment" text))
-      ;; Pasting is C-y; C-c C-v is the review banner's [Verification].
+      ;; Pasting is C-y; C-c C-v is the review banner's [Verify].
       (should (string-match-p "C-y +Paste (image attachment)" text))
       (should (string-match-p "C-c > +Thread reply" text))
       ;; A key of a panel above the box, which types there, and the box's own M-< and M->.
@@ -746,8 +746,8 @@ redraws.  With the banner gone, C-c C-v is nothing: the box pastes with C-y."
     (should (eq 'harness-chat-redraw (key-binding (kbd "C-c C-r"))))
     (let ((text (harness-ui-test-menu)))
       (should (string-match-p "^Chat .* Review$" text))
-      (should (string-match-p "C-c C-v +Verification" text))
-      (should (string-match-p "C-c C-x +Return with feedback" text))
+      (should (string-match-p "C-c C-v +Verify (accept)" text))
+      (should (string-match-p "C-c C-x +Send back with feedback" text))
       (should (string-match-p "C-c C-r +Redraw" text))
       (should-not (string-match-p "Attach clipboard" text)))
     (harness-ui-review-minor-mode -1)

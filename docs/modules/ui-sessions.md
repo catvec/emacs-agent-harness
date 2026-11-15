@@ -70,7 +70,7 @@ conversations asks once how to hand them over.  The marks stay, so
 several settings can be given to the same sessions.  The list binds no
 key to these commands, its m, T, p and i being others, so its menu
 group does not list them.  The menu's own Session settings column
-(`harness-menu`) lists all but supervisor mode, and runs them here.
+(`harness-ui-menu`) lists all but supervisor mode, and runs them here.
 
 T lists only the sessions that work on a task, with the sub-agents,
 forks and BTW conversations under them

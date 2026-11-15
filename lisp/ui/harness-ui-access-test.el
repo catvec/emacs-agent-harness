@@ -154,7 +154,7 @@ revocation, and give the working directory up for reading only and back."
       (should (string-match-p "rw +.*working directory" (harness-ui-access-test-row cwd)))
       (should (string-match-p "temporary directory" (harness-ui-access-test-row tmp)))
       (should (string-match-p "\\[Give up\\] \\[Read only\\]" (harness-ui-access-test-row cwd)))
-      ;; A grant shows, and its revocation takes it out.
+      ;; A grant shows, and its revoke takes it out.
       (harness-ui-access-allow-dir extra)
       (harness-ui-access-test-wait-text "granted to this session")
       (should (member extra (harness-call 'permission/allowed-dirs sid)))
@@ -194,16 +194,16 @@ change."
         (dolist (dir (list home host sub))
           (harness-ui-access-allow-dir dir)
           (harness-ui-access-test-wait-text (concat (regexp-quote dir) " +granted to this session")))
-        (should (string-match-p "\\`  rw +/ssh:box.example.invalid:~/ +granted to this session +\\[Revocation\\] \\[Read only\\]"
+        (should (string-match-p "\\`  rw +/ssh:box.example.invalid:~/ +granted to this session +\\[Revoke\\] \\[Read only\\]"
                                 (harness-ui-access-test-row home)))
-        (should (string-match-p "\\`  rw +/ssh:box.example.invalid:/ +granted to this session +\\[Revocation\\]"
+        (should (string-match-p "\\`  rw +/ssh:box.example.invalid:/ +granted to this session +\\[Revoke\\]"
                                 (harness-ui-access-test-row host)))
         (should (string-match-p "\\`  rw +/ssh:box.example.invalid:~/projects/x/ +granted to this session"
                                 (harness-ui-access-test-row sub)))
         ;; The buttons' tooltips name the directory as it is.
         (goto-char (harness-ui-access--find-anchor (cons 'dir home)))
-        (let ((revoke (progn (search-forward "[Revocation]") (get-text-property (1- (point)) 'help-echo))))
-          (should (string-match-p (concat "grant revocation · " (regexp-quote home)) revoke)))
+        (let ((revoke (progn (search-forward "[Revoke]") (get-text-property (1- (point)) 'help-echo))))
+          (should (string-match-p (concat "revoke the grant · " (regexp-quote home)) revoke)))
         ;; One only read, from the view, on another host: one inside a home directory granted is writable already.
         (should (string-match-p "already readable and writable"
                                 (harness-call 'access/add-read-dir sid "/ssh:box.example.invalid:~/notes/")))
@@ -222,7 +222,7 @@ change."
             (harness-ui-access-remove-read-dir notes)
             (harness-ui-access-test-wait-text (regexp-quote notes) t)
             (harness-test-wait (lambda () (member (concat "Read access removed: " notes) messages)) 5 "the message"))
-          (should (member (concat "Revocation · " sub) messages)))
+          (should (member (concat "Revoke · " sub) messages)))
         (should-not (member sub (harness-call 'permission/allowed-dirs sid)))
         ;; The ones left are drawn still.
         (should (string-match-p "rw +/ssh:box.example.invalid:~/ " (harness-ui-access-test-row home)))))))
@@ -328,7 +328,7 @@ the turn's end takes it out again."
       (harness-ui-access-test-wait-text "granted to this session")
       (harness-perms--grant-for-turn sid turn)
       (harness-ui-access-test-wait-text "granted for this turn")
-      (should (string-match-p "\\[Revocation\\]" (harness-ui-access-test-row turn)))
+      (should (string-match-p "\\[Revoke\\]" (harness-ui-access-test-row turn)))
       (harness-emit 'agent/turn-ended sid 'end-turn)
       (harness-ui-access-test-wait-text "granted for this turn" t))))
 
@@ -1492,11 +1492,11 @@ the buttons go on a line under the path; a wide window keeps them in one row."
         (harness-ui-access-test-wait-text "granted to this session")
         (harness-ui-access-test-fit 110 'setting 'dir 'detail 'section)
         (let ((row (harness-ui-access-test-row long)))
-          (should (string-match-p "^  rw  /tmp/harness-tmp-[^ ]*…[^ ]*again/project/ +granted to this session +\\[Revocation\\] \\[Read only\\]" row))))
+          (should (string-match-p "^  rw  /tmp/harness-tmp-[^ ]*…[^ ]*again/project/ +granted to this session +\\[Revoke\\] \\[Read only\\]" row))))
       ;; Narrow: the path has a line, and the source and the buttons the next.
       (let ((harness-ui-access-test-width 56))
         (harness-ui-access-refresh)
-        (harness-ui-access-test-wait-text "^      granted to this session  \\[Revocation\\] \\[Read only\\]$")
+        (harness-ui-access-test-wait-text "^      granted to this session  \\[Revoke\\] \\[Read only\\]$")
         (harness-ui-access-test-fit 56 'setting 'dir 'detail 'section)
         (let ((row (harness-ui-access-test-row long)))
           (should (string-match-p "^  rw  /tmp/[^ ]*…[^ ]*again/project/$" row))

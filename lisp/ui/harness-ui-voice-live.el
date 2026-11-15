@@ -883,9 +883,9 @@ which is the meter's rate, not the transcript's."
    (when harness-voice-live--pending
      (list (harness-voice-live--pending-line width)))
    (list (harness-ui-action-button
-          (if harness-voice-live--pipeline-details "[Hide details]" "[Pipeline details]")
+          (if harness-voice-live--pipeline-details "[Hide details]" "[Show details]")
           #'harness-voice-live-pipeline-details
-          :help "Pipeline details"))
+          :help "show the pipeline details"))
    (when harness-voice-live--pipeline-details
      (append (list "")
              (list (propertize "Pipeline details" 'face 'harness-label-face))

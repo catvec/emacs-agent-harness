@@ -1672,7 +1672,7 @@ a speech server answers with no audio at all."
              :reason "too short"))
       (harness-voice-live--pipeline-turn-sent "d-1")
       (let ((strip (harness-ui-voice-live-test--strip)))
-        (should (string-search "[Pipeline details]" strip))
+        (should (string-search "[Show details]" strip))
         (should-not (string-search "u-2 · dropped" strip)))
       (with-current-buffer harness-voice-live--transcript
         (harness-voice-live-pipeline-details))

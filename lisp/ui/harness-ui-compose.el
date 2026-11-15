@@ -306,7 +306,7 @@ a string, already fitted to the window, or nil.")
   (define-key map (kbd "M->") #'harness-compose-end-of-buffer)
   (define-key map [remap beginning-of-buffer] #'harness-compose-beginning-of-buffer)
   (define-key map [remap end-of-buffer] #'harness-compose-end-of-buffer)
-  ;; C-c C-v, the clipboard's key once, is the review banner's [Verification]
+  ;; C-c C-v, the clipboard's key once, is the review banner's [Verify]
   ;; in a chat; unbound here so a reload frees it there too.  Other
   ;; MIME types are chosen from with M-x harness-compose-attach-clipboard.
   (define-key map (kbd "C-c C-v") nil t)

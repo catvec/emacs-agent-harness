@@ -876,8 +876,8 @@ give one and take them away.  Nothing is drawn when D has no
                                       (lambda () (harness-ui-access-revoke dir t))
                                       (format "Take %s out of the directories every session may reach" shown))))))
       ((or "session" "turn")
-       (list (harness-ui-access--button "[Revocation]" (lambda () (harness-ui-access-revoke dir nil))
-                                        (format "grant revocation · %s" shown))
+       (list (harness-ui-access--button "[Revoke]" (lambda () (harness-ui-access-revoke dir nil))
+                                        (format "revoke the grant · %s" shown))
              (funcall give-up t)))
       ("read" (list (harness-ui-access--button "[Remove]" (lambda () (harness-ui-access-remove-read-dir dir))
                                                (format "read removal · %s" shown))
@@ -1941,9 +1941,9 @@ offered."
 EVERYWHERE says DIR is one every session may reach: it is taken out of
 `harness-allowed-directories', after you confirm."
   (when (or (not everywhere)
-            (y-or-n-p (format "Revocation · every session · %s" (harness-abbreviate-file-name dir))))
+            (y-or-n-p (format "Revoke for every session · %s" (harness-abbreviate-file-name dir))))
     (harness-ui-call "_harness/permission/revoke-dir" (list :session-id (harness-ui-access--session) :dir dir)
-                     (harness-ui-access--after (format "Revocation · %s" (harness-abbreviate-file-name dir))))))
+                     (harness-ui-access--after (format "Revoke · %s" (harness-abbreviate-file-name dir))))))
 
 (defun harness-ui-access-remove-read-dir (dir)
   "Stop this buffer's session reading DIR."

@@ -1675,10 +1675,10 @@ two-element list, because JSON has no pair."
     (insert " ")
     (when harness-ui-workspace-graph--stack
       (harness-ui-button "Back" #'harness-ui-workspace-graph-back
-                         :help "The node or page before this one")
+                         :help "go back to the node or page before this one")
       (insert " "))
     (harness-ui-button "Workspace" #'harness-ui-workspace-graph-workspace
-                       :help "The workspace chat")
+                       :help "open the workspace chat")
     (insert "\n")))
 
 
@@ -2021,29 +2021,29 @@ draws a screenshot the box took.
     (harness-ui-workspace-computer--line
      "Socket" (or (plist-get data :socket) "—"))
     (insert "  ")
-    (harness-ui-button "Startup" #'harness-ui-workspace-computer-start
-                       :help "workspace computer startup")
+    (harness-ui-button "Start" #'harness-ui-workspace-computer-start
+                       :help "start the workspace computer (s)")
     (insert "  ")
     (harness-ui-button "Stop" #'harness-ui-workspace-computer-stop
-                       :help "workspace computer stop")
+                       :help "stop the workspace computer (S)")
     (insert "  ")
     (harness-ui-button "Restart" #'harness-ui-workspace-computer-restart
-                       :help "workspace computer restart")
+                       :help "restart the workspace computer (R)")
     (insert "  ")
-    (harness-ui-button "Takeover" #'harness-ui-workspace-computer-take-over
-                       :help "reviewer control")
+    (harness-ui-button "Take over" #'harness-ui-workspace-computer-take-over
+                       :help "take control from the agent (t)")
     (insert "  ")
-    (harness-ui-button "Control return" #'harness-ui-workspace-computer-return-control
-                       :help "agent control")
+    (harness-ui-button "Return control" #'harness-ui-workspace-computer-return-control
+                       :help "return control to the agent (T)")
     (insert "  ")
-    (harness-ui-button "VNC page" #'harness-ui-workspace-computer-open-vnc
-                       :help "noVNC page")
+    (harness-ui-button "Open VNC page" #'harness-ui-workspace-computer-open-vnc
+                       :help "open the noVNC page in a browser (o)")
     (insert "  ")
     (harness-ui-button "Screenshot" #'harness-ui-workspace-computer-screenshot
-                       :help "current screen picture")
+                       :help "take a picture of the screen (p)")
     (insert "  ")
     (harness-ui-button "Refresh" #'harness-ui-workspace-computer-refresh
-                       :help "computer refresh")
+                       :help "refresh the computer's state (r)")
     (insert "\n")
     (when (and harness-ui-workspace-computer--shot
                (file-readable-p harness-ui-workspace-computer--shot))
@@ -2052,11 +2052,11 @@ draws a screenshot the box took.
                     "[Screenshot]")
       (insert "\n"))
     (insert "\n"
-            (propertize "s · startup" 'face 'harness-hint-face) "   "
+            (propertize "s · start" 'face 'harness-hint-face) "   "
             (propertize "S · stop" 'face 'harness-hint-face) "   "
-            (propertize "t · takeover" 'face 'harness-hint-face) "   "
-            (propertize "T · control return" 'face 'harness-hint-face) "   "
-            (propertize "o · VNC page" 'face 'harness-hint-face) "   "
+            (propertize "t · take over" 'face 'harness-hint-face) "   "
+            (propertize "T · return control" 'face 'harness-hint-face) "   "
+            (propertize "o · open VNC page" 'face 'harness-hint-face) "   "
             (propertize "p · screenshot" 'face 'harness-hint-face) "   "
             (propertize "r · refresh" 'face 'harness-hint-face) "   "
             (propertize "q · bury" 'face 'harness-hint-face) "\n")

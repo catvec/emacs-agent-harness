@@ -4772,7 +4772,7 @@ sends it as the message the agent answers in the thread it starts."
 
 (ert-deftest harness-ui-patch-review-shows-the-changes-in-the-banner ()
   "The review banner of the task's session shows the changes -- the tree and the
-threads -- between the report and [Verification], with no click on [Review Changes]:
+threads -- between the report and [Verify], with no click on [Review Changes]:
 its rows have the keys of the report's, and it follows what happens to the
 review, an approval or a thread."
   (harness-ui-patch-review-test-with-task
@@ -4786,7 +4786,7 @@ review, an approval or a thread."
                  (string-match "^    M  a\\.el +\\+2 −2$" text)
                  (string-match "^▾ Threads  \\[open 0\\]" text)
                  (string-match "No open threads" text)
-                 (string-match "\\[Verification\\]" text)))
+                 (string-match "\\[Verify\\]" text)))
       (should (string-match-p "^▸   docs/  1 file  \\+1 −0$" text))
       (should (string-match-p "^  \\[✓\\] Skip approved s +\\[✓\\] Auto-approve u +\\[✓\\] Tree t +\\[Expand all\\] \\[Collapse all\\]$" text))
       ;; The rows, drawn with the banner's text, keep the keys they have in the report.
@@ -5212,7 +5212,7 @@ as one of the review's own does."
   "An update of the harness reloads it with the reviews it holds, and one an older
 layout made is read wrong: the report that showed the changes failed with an
 `args-out-of-range' that printed the whole review, the task's hand-in with it,
-and the review banner with [Verification] and [Return] went with it.  The new
+and the review banner with [Verify] and [Send back] went with it.  The new
 definitions drop the review, and the report and the banner, drawn again, make a
 new one: the changes, the threads and the buttons are there."
   (harness-ui-patch-review-test-with-task
@@ -5235,12 +5235,12 @@ new one: the changes, the threads and the buttons are there."
         (let ((text (harness-ui-patch-review-test--text popout)))
           (should-not (string-search "Could not draw" text))
           (should-not (string-search "could not be drawn" text))
-          (should (string-search "[Verification]" text))
-          (should (string-search "[Return]" text))))
+          (should (string-search "[Verify]" text))
+          (should (string-search "[Send back]" text))))
       (harness-ui-patch-review-test--wait-text chat "^▾ Changes (6)")
       (let ((tail (harness-ui-patch-review-test--text chat)))
         (should-not (string-search "could not be drawn" tail))
-        (should (string-search "[Verification]  C-c C-v" tail))
+        (should (string-search "[Verify]  C-c C-v" tail))
         (should (string-search "[Review Changes]" tail)))
       ;; A new review, of this layout, that the surfaces show.
       (let ((new (gethash id harness-ui-patch-review--reviews)))
@@ -5271,7 +5271,7 @@ that signalled on it would keep the others from hearing the task's events."
       (harness-ui-patch-review-test--wait-text popout "^    M  a\\.el")
       (let ((text (harness-ui-patch-review-test--text popout)))
         (should-not (string-search "Could not draw" text))
-        (should (string-search "[Verification]" text)))
+        (should (string-search "[Verify]" text)))
       (should-not (harness-ui-patch-review--stale-p (gethash id harness-ui-patch-review--reviews)))
       ;; And the banner.
       (puthash id (harness-ui-patch-review-test--older-review
@@ -5285,7 +5285,7 @@ that signalled on it would keep the others from hearing the task's events."
 (ert-deftest harness-ui-patch-review-says-short-when-the-changes-fail-and-tries-again ()
   "Changes that cannot be drawn say so in one short line with a [Try again] -- the
 error may carry the review, the task's whole hand-in with it -- and the report
-goes on, [Verification] and [Return] with it.  [Try again] makes the review again."
+goes on, [Verify] and [Send back] with it.  [Try again] makes the review again."
   (harness-ui-patch-review-test-with-task
     (harness-ui-patch-review-test--give-branch board id)
     (let ((fail t))
@@ -5300,8 +5300,8 @@ goes on, [Verification] and [Return] with it.  [Try again] makes the review agai
           (should (string-match-p "Changes   could not be drawn: Args out of range: \"#<harness-ui-patch-review-test--review>\", 33  \\[Try again\\]$"
                                   text))
           (should-not (string-search "xxxxxxxxxx" text))
-          (should (string-search "[Verification]" text))
-          (should (string-search "[Return]" text))
+          (should (string-search "[Verify]" text))
+          (should (string-search "[Send back]" text))
           ;; Try again, with what failed fixed: the review is made anew.
           (setq fail nil)
           (let ((before (gethash id harness-ui-patch-review--reviews)))

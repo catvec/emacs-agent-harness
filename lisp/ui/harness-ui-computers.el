@@ -195,16 +195,16 @@ line of their own, its buttons on the next: every line fits WIDTH."
               rest))
     (insert "\n ")
     (harness-ui-button "[View]" (lambda () (harness-ui-computers-view computer))
-                       :help "screen view of the computer at point (V)")
+                       :help "view the screen of the computer at point (V)")
     (insert " ")
     (if control
         (harness-ui-button "[Return]" (lambda () (harness-ui-computers-release computer))
-                           :help "control return of the computer at point (C)")
+                           :help "return control of the computer at point (C)")
       (harness-ui-button "[Control]" (lambda () (harness-ui-computers-control computer))
-                         :help "control of the computer at point (c)"))
+                         :help "take control of the computer at point (c)"))
     (insert " ")
-    (harness-ui-button "[Unregistration]" (lambda () (harness-ui-computers-unregister computer))
-                       :help "unregistration of the computer at point (u)")
+    (harness-ui-button "[Unregister]" (lambda () (harness-ui-computers-unregister computer))
+                       :help "unregister the computer at point (u)")
     (insert "\n")
     (put-text-property start (point) 'harness-ui-computers-id (plist-get computer :id))))
 
@@ -276,14 +276,14 @@ line of their own, its buttons on the next: every line fits WIDTH."
               (insert (or (and held (string-join held ", "))
                           (propertize "none" 'face 'harness-dim-face)))))
           (insert "\n ")
-          (harness-ui-button (if (plist-get entry :allowed) "[Revocation]" "[Grant]")
+          (harness-ui-button (if (plist-get entry :allowed) "[Revoke]" "[Grant]")
                              (lambda () (harness-ui-computers-toggle computer))
                              :help (if (plist-get entry :allowed)
-                                       "revocation of the computer at point from this session (x)"
-                                     "grant of the computer at point to this session (a)"))
+                                       "revoke the computer at point from this session (x)"
+                                     "grant the computer at point to this session (a)"))
           (insert " ")
-          (harness-ui-button "[Preference]" (lambda () (harness-ui-computers-use computer))
-                             :help "preferred computer of this session (s)")
+          (harness-ui-button "[Prefer]" (lambda () (harness-ui-computers-use computer))
+                             :help "make it the preferred computer of this session (s)")
           (insert "\n"))))))
 
 (defun harness-ui-computers--insert-resources (width)
@@ -327,14 +327,14 @@ A path longer than the room left is elided in the middle."
      (or (and capabilities (string-join capabilities ", "))
          (propertize "none" 'face 'harness-dim-face))))
   (insert " ")
-  (harness-ui-button "[Registration]" #'harness-ui-computers-register
-                     :help "registration of this computer with the harness (r)")
+  (harness-ui-button "[Register]" #'harness-ui-computers-register
+                     :help "register this computer with the harness (r)")
   (insert "  ")
-  (harness-ui-button "[Resource refresh]" #'harness-ui-computers-refresh-resources
-                     :help "resources of this computer reported again (R)")
+  (harness-ui-button "[Refresh resources]" #'harness-ui-computers-refresh-resources
+                     :help "report the resources of this computer again (R)")
   (insert "  ")
-  (harness-ui-button "[Computer list]" #'harness-ui-computers-refresh
-                     :help "computer list refresh (g)")
+  (harness-ui-button "[Refresh list]" #'harness-ui-computers-refresh
+                     :help "refresh the computer list (g)")
   (insert "\n"))
 
 (defun harness-ui-computers--header ()
@@ -437,7 +437,7 @@ A path longer than the room left is elided in the middle."
 A harness that restarted reads the record back without a client; this
 client presents the secret it kept, and the harness binds it again.
 Nothing is registered here: a computer the harness does not know is left
-for `[Registration]'."
+for `[Register]'."
   (when (and (harness-ui-connected-p)
              (file-exists-p harness-computer-endpoint-secret-file)
              (file-exists-p harness-computer-endpoint-id-file))
@@ -456,10 +456,10 @@ for `[Registration]'."
     (harness-computer-endpoint-register
      #'harness-ui-request
      (lambda (_record)
-       (message "Harness: registration")
+       (message "Harness: registered")
        (harness-ui-computers-refresh))
      (lambda (err)
-       (message "Harness: registration failure: %s" (harness-error-message err))
+       (message "Harness: registration failed: %s" (harness-error-message err))
        (harness-ui-computers--render))))
   nil)
 
@@ -498,12 +498,12 @@ for `[Registration]'."
   (let ((computer (or computer (harness-ui-computers--computer-at-point))))
     (cond
      ((null computer) (message "Harness: no computer at point"))
-     ((not (y-or-n-p (format "Harness: unregistration of %s " (plist-get computer :name))))
+     ((not (y-or-n-p (format "Harness: unregister %s " (plist-get computer :name))))
       nil)
      (t
       (harness-ui-computers--call
        "_harness/computer/unregister" (list :id (plist-get computer :id))
-       (format "unregistration: %s" (plist-get computer :name))))))
+       (format "unregister: %s" (plist-get computer :name))))))
   nil)
 
 (defun harness-ui-computers-toggle (computer)
@@ -627,17 +627,17 @@ for `[Registration]'."
 (put 'harness-ui-computers-mode 'harness-menu-group
      '("Computers"
        ["This client"
-        (". r" "Registration of this computer" harness-ui-computers-register)
-        (". R" "Resource refresh of this computer" harness-ui-computers-refresh-resources)]
+        (". r" "Register this computer" harness-ui-computers-register)
+        (". R" "Refresh this computer's resources" harness-ui-computers-refresh-resources)]
        ["Computers"
-        (". g" "Computer list" harness-ui-computers-refresh)
-        (". u" "Unregistration of the computer at point" harness-ui-computers-unregister)
-        (". V" "Screen view of the computer at point" harness-ui-computers-view)
-        (". c" "Control of the computer at point" harness-ui-computers-control)
-        (". C" "Control return of the computer at point" harness-ui-computers-release)]
+        (". g" "Refresh the computer list" harness-ui-computers-refresh)
+        (". u" "Unregister the computer at point" harness-ui-computers-unregister)
+        (". V" "View the screen of the computer at point" harness-ui-computers-view)
+        (". c" "Take control of the computer at point" harness-ui-computers-control)
+        (". C" "Return control of the computer at point" harness-ui-computers-release)]
        ["Session access"
-        (". a" "Grant of the computer at point to this session" harness-ui-computers-toggle)
-        (". s" "Preferred computer of this session" harness-ui-computers-use)]))
+        (". a" "Grant the computer at point to this session" harness-ui-computers-toggle)
+        (". s" "Make it the preferred computer of this session" harness-ui-computers-use)]))
 
 ;;;###autoload
 (defun harness-computers ()

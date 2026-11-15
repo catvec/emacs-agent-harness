@@ -7,7 +7,7 @@
 ;; chip with their progress, web pages go in as text, data: links and
 ;; dropped text land in the box, images and videos show thumbnails, and
 ;; yanking takes images and copied files off the clipboard into the
-;; media ring, and C-c C-v is no longer the box's, so a chat's [Verification]
+;; media ring, and C-c C-v is no longer the box's, so a chat's [Verify]
 ;; keeps it.  Typing outside the box goes into it (the keys go through
 ;; the real command loop), except the keys that are commands where they
 ;; are typed.  C-c . presses a key on a panel above the box from the
@@ -1931,7 +1931,7 @@ Point starts after the box, where a command loop's hooks move it from."
 (ert-deftest harness-ui-compose-c-c-c-v-is-not-the-boxes ()
   "C-c C-v is not the box's key: pasting is C-y, and Verify keeps C-c C-v.
 The box leaves C-c C-v unbound, so in a chat the review banner's
-[Verification] owns it and nothing shadows it."
+[Verify] owns it and nothing shadows it."
   (harness-ui-compose-test-with
     (should-not (lookup-key harness-compose-map (kbd "C-c C-v")))
     (should-not (key-binding (kbd "C-c C-v")))

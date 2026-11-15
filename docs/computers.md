@@ -43,7 +43,7 @@ programs](#sidecars-and-programs).
 A machine becomes a computer only when a client running on it registers
 it, and that is the same explicit act on the server's own machine as on a
 phone or a laptop across the network: the computers page's
-`[Registration]`, a client's own integration, or `computer/register`.
+`[Register]`, a client's own integration, or `computer/register`.
 Nothing is registered on a client's behalf, and a client that says where
 it runs in `initialize` only records a fact about itself.
 
@@ -65,7 +65,7 @@ there:
 1. The client authenticates to the harness like any ACP client (token,
    remote sign-in, or the local transport).
 2. The user asks for registration (the computers page's
-   `[Registration]`, `harness-register-computer`, or its own
+   `[Register]`, `harness-register-computer`, or its own
    integration).
 3. The client sends `_harness/computer/register` with its description of
    the computer (`:computer`, including `:vnc` and `:vnc-socket` when it
@@ -400,17 +400,17 @@ machine or another, the same way.
 It has four sections:
 
 - **This client**: the computer this client runs on, its id, whether it
-  is registered, its capabilities, and `[Registration]`, `[Resource refresh]`
-  (resources reported again) and `[Computer list]` (the page fetched
+  is registered, its capabilities, and `[Register]`, `[Refresh resources]`
+  (resources reported again) and `[Refresh list]` (the page fetched
   again).
 - **Computers**: one row per computer -- name, id, kind, state
   (connected, registered, not connected), capabilities, resources, who
   has control -- with `[View]`, `[Control]`/`[Return]` and
-  `[Unregistration]`.
+  `[Unregister]`.
 - **Session access**: the page's session, its policy and preferred
   computer, and for each computer whether it is allowed and why, with a
   button per capability (`[view]`, `[pointer]`, …) that grants or revokes
-  it, `[Grant]`/`[Revocation]` and `[Preference]`.
+  it, `[Grant]`/`[Revoke]` and `[Prefer]`.
 - **Resources**: the resources of the computers, with their computer and
   path.
 
@@ -422,7 +422,7 @@ and failure states are words: "no computer registered", "no session",
 "no resource", "…", "registration", and
 "registration failure: REASON" in the echo area.  Every word is a noun
 phrase or an adjective, the menu's included: its entries say what they
-are for (`Registration of this computer`, `Screen view of the computer
+are for (`Register this computer`, `View the screen of the computer
 at point`), never a sentence.  `harness-ui-computers-test` asserts the
 rendered words and tooltips, and the menu entries with them.
 
@@ -444,8 +444,8 @@ the keyboard back.  A computer with only a `vnc` page says `No screen
 socket` and shows the page's address; the app never pretends a page is a
 stream.  The route is under Server -> Computers, and the page's copy is
 noun phrases like the Emacs page's: `Computers`, `Session`, `Machines`,
-`Resources`, `View`, `Control`, `Return`, `Grant`, `Revocation`,
-`Preference`, `No computers`, `No resources`, `No session`, `No screen
+`Resources`, `View`, `Control`, `Return`, `Grant`, `Revoke`,
+`Prefer`, `No computers`, `No resources`, `No session`, `No screen
 socket`, `View only`, `Screen lost`.  `harness_client/test/computers_test.dart`
 asserts them, and `test/computers_screenshots_test.dart` takes the
 pictures.
@@ -453,8 +453,8 @@ pictures.
 The app is a computer too.  `MobileComputerController` and
 `MobileComputerEndpoint` (`harness_client/lib/src/computer/`) make an
 identity and a 256-bit secret for the installation and register this
-device with `computer/register` when the person presses `[Registration]`
-on the page; `[Reconnection]` presents the same secret to a restarted
+device with `computer/register` when the person presses `[Register]`
+on the page; `[Reconnect]` presents the same secret to a restarted
 harness with `computer/attach`.  The app runs its MCP servers in the app
 process, not as separate programs: the `computer` server offers screen,
 camera, microphone, clipboard and information tools, and the `files`

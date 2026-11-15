@@ -51,7 +51,7 @@
 ;; (`clientCapabilities._harness.computer'), which records where the
 ;; client is without registering anything.  The client registers its
 ;; computer only when the user asks it to (the computers page's
-;; `[Registration]', or the client's own integration), sending the
+;; `[Register]', or the client's own integration), sending the
 ;; secret this file keeps (mode 600) and getting back a token that binds
 ;; the MCP session; `_harness/computer/attach' presents the secret again
 ;; after a reconnect.  Nothing of the harness's state is kept here, and

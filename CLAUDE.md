@@ -9,6 +9,18 @@
   punctuation is not a fix. Prose belongs only in explicit help or
   setting descriptions, not on an ordinary page or form. User/model
   messages, logs and server error payloads are data, not interface copy.
+- **A control that acts takes an imperative verb**, not a noun naming its
+  category: `[Verify]`, `[Register]`, `[Revoke]`, `[Reconnect]`,
+  `[Send back]`, `[Keep working]`, `[Start]`, `[Stop]`. Nouns stay for
+  what a control names rather than does: navigation and the page it
+  opens, a heading, a category, a field's label, an object, a state
+  (`[Computers]`, `[Review Changes]`, `[Settings]`, `connected`). Never
+  nominalize an action to fit the noun rule -- `[Verification]`,
+  `[Registration]`, `[Revocation]`, `[Reconnection]`, `[Working phase]`
+  were a regression of exactly that. The same split holds in menus and
+  tooltips: a menu entry names its command as a verb when the command
+  acts (`Verify (accept)`), a noun phrase when it names a page or a
+  setting (`Session switch`).
 - **Before implementation:** read [docs/ui-guide.md](docs/ui-guide.md)
   and inventory the planned labels, tooltips, headers, menus and status
   messages, including empty, loading, success, validation and failure

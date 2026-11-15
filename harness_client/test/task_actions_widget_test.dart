@@ -353,11 +353,15 @@ void main() {
       await _open(tester, 'Review the emulator screenshots');
       await _menu(tester, 'Mark complete');
       expect(find.text('Task completion'), findsOneWidget);
+      // The confirm names the act, not the category: [Completion] was the
+      // noun-only copy pass's regression.
+      expect(find.text('Mark done'), findsOneWidget);
+      expect(find.text('Completion'), findsNothing);
       await _tap(tester, find.text('Cancel'));
       expect(rig.harness.calls('_harness/task/complete'), isEmpty);
 
       await _menu(tester, 'Mark complete');
-      await _tap(tester, find.text('Completion'));
+      await _tap(tester, find.text('Mark done'));
       expect(rig.harness.calls('_harness/task/complete'), [
         {'id': 'task-2'},
       ]);
@@ -376,7 +380,7 @@ void main() {
       await _menu(tester, 'Delete task…');
       expect(find.text('Session deletion too'), findsOneWidget);
       await _tap(tester, find.byType(Switch));
-      await _tap(tester, find.text('Deletion'));
+      await _tap(tester, find.text('Delete'));
       expect(rig.harness.calls('_harness/task/delete'), [
         {'id': 'task-1', 'delete-session': true},
       ]);

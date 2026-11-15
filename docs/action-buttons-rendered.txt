@@ -1,0 +1,38 @@
+Action buttons, as the Emacs pages render them
+=============================================
+
+These are the pages' own buffers, rendered headlessly by the same
+functions that draw them on screen (no display was available to
+take the docs/media pictures again).
+
+Computers page  (lisp/ui/harness-ui-computers.el)
+-------------------------------------------------
+
+ Computers ────────────────────────────────────────────────────────────────────────────────────────
+ Home              c-1         client · connected
+ capabilities: none   resources: 0
+ [View] [Control] [Unregister]
+
+Its buttons' tooltips
+---------------------
+  [View]         → view the screen of the computer at point (V)
+  [Control]      → take control of the computer at point (c)
+  [Unregister]   → unregister the computer at point (u)
+
+Workspace computer page  (lisp/ui/harness-ui-workspace.el)
+----------------------------------------------------------
+Workspace computer  ·  Home  ·  Live
+
+State
+  Backend  local
+  Isolation  local display and process
+  Control  Agent
+  Display  127.0.0.1:90
+  Screen  1280 × 800
+
+Screen
+  VNC  http://127.0.0.1:6080/vnc_lite.html
+  Socket  ws://127.0.0.1:6080/websockify
+  Start  Stop  Restart  Take over  Return control  Open VNC page  Screenshot  Refresh
+
+s · start   S · stop   t · take over   T · return control   o · open VNC page   p · screenshot   r · refresh   q · bury

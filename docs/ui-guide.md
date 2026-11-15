@@ -38,11 +38,12 @@ while they use it.
 
 The Flutter client's Computers page follows the same copy rule: headings
 `Computers`, `Session`, `Machines`, `Resources`, `This client`; buttons
-`View`, `Control`, `Return`, `Grant`, `Revocation`, `Preference`,
-`Registration`, `Reconnection`, `Disconnection`, `Capture off`, `File
-import`; states `No computers`, `No resources`, `No session`, `No screen
-socket`, `View only`, `Screen lost`, `Not registered`, `Registered`,
-`Disconnected`, `Not checked`, `Off on this phone`; capabilities `View`,
+that act in the imperative, `View`, `Control`, `Return`, `Grant`,
+`Revoke`, `Prefer`, `Register`, `Reconnect`, `Disconnect`, `Import
+file`, with `Capture off` naming a state; states `No computers`, `No
+resources`, `No session`, `No screen socket`, `View only`, `Screen
+lost`, `Not registered`, `Registered`, `Disconnected`, `Not checked`,
+`Off on this phone`; capabilities `View`,
 `Windows`, `Pointer`, `Keyboard`, `Clipboard`, `Audio`, `Sandbox`, `Exec`,
 and on this client `Screen`, `Camera`, `Microphone`, `Files`, `Clipboard`;
 notes `Capture only · no pointer or keyboard control`, `Screen capture ·
@@ -111,7 +112,11 @@ Display
 - Built-in widgets only: `button.el`, `widget.el`, `tabulated-list-mode`, `transient`, `icons.el`, `svg.el`, `image.el`, header and mode lines.  No box-drawing UI except where the medium is a graph.
 - Never block: the UI runs in the user's Emacs and the harness in its own process (see "Processes" in architecture.md), so the only way to freeze the user is UI code itself.  Never call the bus (`harness-call`, `harness-method-exists-p`): the modules are not loaded here.  Project roots and file lists come from `harness-files` (`harness-files-project-root`, `harness-files-list` → promise).  Every request is asynchronous; show a lightweight loading state (`harness-dim-face` text, a header-line spinner) and replace it when the result arrives; failures show in the buffer, not just the echo area.
 - Interface text is nouns, noun phrases and adjectives: `Network`, `No web tools · bash offline`, `3 offered · 2 off`, `connected`, `local harness`. No full sentences in headings, labels, buttons, notes, forms, tooltips, menus, status lines or echo-area messages. Say the state, not a story about it: `local harness`, not `This Emacs runs the harness itself`. Remove explanatory paragraphs rather than merely their punctuation. Prose belongs only in explicit help or setting descriptions (for example, the defcustom documentation on the settings page). User/model messages, logs and server error payloads are data, not interface copy. Follow the copy-first checklist below.
-- Menus, transient and popup alike, follow the same rule: an entry names its command as a noun phrase, `Session switch` rather than `Switch session`, `Turn cancellation` rather than `Cancel turn`, and its column headings and prefix description are noun phrases too. `harness-ui-menus-are-noun-phrases` (`test/harness-ui-test.el`) holds the harness's own menus to their exact words; a mode whose `harness-menu-group` the menu shows has the same assertion in its own test, as the computers page does.
+- A control that acts says so in the imperative: `[Verify]`, `[Register]`, `[Revoke]`, `[Reconnect]`, `[Send back]`, `[Keep working]`, `[Start]`, `[Stop]`. A noun names what a control shows or opens instead -- a page, a heading, a category, a field's label, an object, a state: `[Computers]`, `[Review Changes]`, `[Settings]`, `connected`. Do not nominalize an action into a category to satisfy the noun rule; `[Verification]`, `[Registration]`, `[Revocation]`, `[Reconnection]` and `[Working phase]` were that regression, and are wrong. The split holds in a menu and its tooltips too: `Verify (accept)` for a command that acts, `Session switch` for one that names a page or a setting. `harness-ui-review-test`, `harness-ui-tasks-test`, `harness-ui-computers-test`,
+`harness-ui-server-test` and `harness-ui-workspace-test` hold these words
+exactly; a bar of controls drawn outside those pages, as the workspace
+computer bar is, is held the same way.
+- Menus, transient and popup alike, follow the same split: an entry that acts names its command in the imperative -- `Verify (accept)`, `Send back with feedback`, `Start`, `Reconnect` -- and one that opens a page or names a setting stays a noun phrase, `Session switch` rather than `Switch session`, `Turn cancellation` rather than `Cancel turn`. Column headings and the prefix description are noun phrases. `harness-ui-menus-are-noun-phrases` (`lisp/ui/harness-ui-test.el`) holds the harness's own menus to their exact words; a mode whose `harness-menu-group` the menu shows has the same assertion in its own test, as the computers page does.
 - Every keyboard command has a mouse target: a button, a header-line segment or a mode-line segment with `help-echo`.
 - Help text is one line: with tooltips off (`tooltip-mode` nil) it shows in the echo area, where a second line grows the mini window, shrinks every window and moves the button under the mouse, so hovering it makes it hard to click.  Build `help-echo` text from parts through `harness-ui-one-line`, never with newlines.
 - Redraw incrementally with markers and `inhibit-read-only`; never re-render the whole transcript on a delta.
@@ -126,7 +131,8 @@ Display
 1. **Before implementation:** list the words for every changed surface:
    headings, fields, checkbox labels, buttons, tooltips, headers, menus,
    empty/loading states, success, validation and failures. Each entry
-   must be a noun phrase or adjective, not a sentence. Move explanations
+   must be a noun phrase or adjective, not a sentence -- except a
+   control that acts, which takes its imperative verb. Move explanations
    to explicit help rather than adding prose beneath ordinary controls.
 2. **Regression tests:** assert the exact rendered copy, not only the
    presence of a few labels. Include tooltips and header/menu text, and

@@ -321,7 +321,7 @@ Future<void> main() async {
       await _settle(tester, 4);
       await tester.tap(find.text('Mark complete'));
       await _settle(tester, 4);
-      await tester.tap(find.text('Completion'));
+      await tester.tap(find.text('Mark done'));
       await _settle(tester, 8);
       expect(harness.tasks['task-2']!['state'], 'done');
     });

@@ -126,7 +126,7 @@ void main() {
     expect(harness.resourcesCalls, isEmpty);
 
     // Cancel changes nothing and sends nothing.
-    await tester.tap(find.text('Deletion').first);
+    await tester.tap(find.text('Delete').first);
     await tester.pumpAndSettle();
     expect(find.text('Cookie deletion'), findsOneWidget);
     await tester.tap(_dialogText('Cancel'));
@@ -135,9 +135,9 @@ void main() {
     expect(controller.resources!.browser!.sites.first.cookies, 12);
 
     // Confirming sends the scope and the kinds.
-    await tester.tap(find.text('Deletion').first);
+    await tester.tap(find.text('Delete').first);
     await tester.pumpAndSettle();
-    await tester.tap(_dialogText('Deletion'));
+    await tester.tap(_dialogText('Delete'));
     await tester.pumpAndSettle();
     expect(controller.resources!.browser!.sites.first.cookies, 0);
     expect(controller.resources!.browser!.sites.first.auth, 'signed-out');
@@ -155,15 +155,15 @@ void main() {
     await _pump(tester, app, controller);
     await tester.drag(find.byType(ListView), const Offset(0, -700));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Removal'));
+    await tester.tap(find.text('Remove'));
     await tester.pumpAndSettle();
     expect(find.text('Login removal'), findsWidgets);
     await tester.tap(_dialogText('Cancel'));
     await tester.pumpAndSettle();
     expect(harness.resourcesCalls, isEmpty);
-    await tester.tap(find.text('Removal'));
+    await tester.tap(find.text('Remove'));
     await tester.pumpAndSettle();
-    await tester.tap(_dialogText('Removal'));
+    await tester.tap(_dialogText('Remove'));
     await tester.pumpAndSettle();
     expect(controller.resources!.browser!.logins, isEmpty);
     expect(
@@ -276,7 +276,7 @@ void main() {
     expect(find.text('Audit'), findsOneWidget);
     expect(find.text('Allowed'), findsWidgets);
     expect(find.text('Ask'), findsWidgets);
-    expect(find.text('Revocation'), findsWidgets);
+    expect(find.text('Revoke'), findsWidgets);
     semantics.dispose();
   });
 
@@ -289,9 +289,9 @@ void main() {
     addTearDown(controller.dispose);
     await _pump(tester, app, controller);
     expect(find.text('Preview · no changes'), findsOneWidget);
-    expect(find.text('Deletion…'), findsOneWidget);
+    expect(find.text('Delete…'), findsOneWidget);
     final clearAll = tester.widget<HarnessTextButton>(
-      find.widgetWithText(HarnessTextButton, 'Deletion…'),
+      find.widgetWithText(HarnessTextButton, 'Delete…'),
     );
     expect(clearAll.onPressed, isNull);
     expect(controller.canManage, isFalse);
@@ -332,9 +332,9 @@ void main() {
     harness.resourcesFail = true;
     await tester.tap(find.text('stoneco.example').first);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Deletion').first);
+    await tester.tap(find.text('Delete').first);
     await tester.pumpAndSettle();
-    await tester.tap(_dialogText('Deletion'));
+    await tester.tap(_dialogText('Delete'));
     await tester.pumpAndSettle();
     expect(find.textContaining('box refused'), findsWidgets);
     expect(controller.resources!.browser!.sites.first.cookies, 12);

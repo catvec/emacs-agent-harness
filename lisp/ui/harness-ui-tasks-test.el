@@ -2054,7 +2054,7 @@ tests that check a card's detail line show it first."
        board "Your input  1\\(.\\|\n\\)*duplicate of .CSV export.")
       (harness-ui-tasks-test--goto-card board "duplicate of")
       (with-current-buffer board
-        (should (equal '("Drop" "Write-up")
+        (should (equal '("Drop" "Write it up")
                        (take 2 (mapcar #'car (harness-ui-tasks--actions (harness-ui-tasks--task))))))
         ;; m takes feedback on it: why it is not a duplicate.
         (harness-ui-tasks-reply)
@@ -2504,7 +2504,7 @@ the same would carry the bar on."
 
 (ert-deftest harness-ui-tasks-keep-working-and-put-in-review ()
   "The board moves a task out of review, and back into it, by hand.
-[Working phase] takes it to the working phase, its report kept; Put in
+[Keep working] takes it to the working phase, its report kept; Put in
 review, in its menu, puts it back without waiting for a hand-in."
   (harness-ui-tasks-test-with
     (let ((harness-tasks-require-verification t))
@@ -2515,7 +2515,7 @@ review, in its menu, puts it back without waiting for a hand-in."
       (let ((id (plist-get (car (harness-call 'task/list default-directory)) :id)))
         (harness-ui-tasks-test--goto-card board "Fix the flaky test")
         (with-current-buffer board
-          (should (member '("Working phase" harness-ui-tasks-return-to-work)
+          (should (member '("Keep working" harness-ui-tasks-return-to-work)
                           (harness-ui-tasks--actions (harness-ui-tasks--task))))
           (call-interactively #'harness-ui-tasks-return-to-work))
         (harness-test-wait (lambda () (eq 'active (plist-get (harness-call 'task/get id) :state)))
@@ -2530,7 +2530,7 @@ review, in its menu, puts it back without waiting for a hand-in."
         (harness-ui-tasks-test--wait-text board "In progress  1\\(.\\|\n\\)*Fix the flaky test")
         (harness-ui-tasks-test--goto-card board "Fix the flaky test")
         (with-current-buffer board
-          (should (member '("Manual review" harness-ui-tasks-force-review)
+          (should (member '("Put in review" harness-ui-tasks-force-review)
                           (harness-ui-tasks--actions (harness-ui-tasks--task))))
           (call-interactively #'harness-ui-tasks-force-review))
         (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*Fix the flaky test")
@@ -2562,7 +2562,7 @@ card shows the review's own column."
                                   (harness-ui-tasks-test--card-text board "Fix the flaky test")))
           (should (equal '("Reply" "Pause")
                          (take 2 (mapcar #'car (harness-ui-tasks--actions (harness-ui-tasks--task))))))
-          (should (member '("Manual review" harness-ui-tasks-force-review)
+          (should (member '("Put in review" harness-ui-tasks-force-review)
                           (harness-ui-tasks--actions (harness-ui-tasks--task))))
           (call-interactively #'harness-ui-tasks-force-review))
         (harness-ui-tasks-test--wait-text board "Ready for review  1\\(.\\|\n\\)*Fix the flaky test")
@@ -2597,7 +2597,7 @@ card shows the review's own column."
                                                  (harness-ui-tasks--header most-positive-fixnum))))
       (harness-ui-tasks-test--goto-card board "Fix the flaky test")
       (with-current-buffer board
-        (should (equal '("Verification" "Return")
+        (should (equal '("Verify" "Send back")
                        (take 2 (mapcar #'car (harness-ui-tasks--actions (harness-ui-tasks--task))))))
         (should (eq 'harness-ui-tasks-verify (key-binding (kbd "v"))))
         (should (eq 'harness-ui-tasks-reject (key-binding (kbd "R"))))
@@ -2670,7 +2670,7 @@ buttons, and a function that fails adds none and breaks nothing."
                      (cl-position "Look closer" all :test #'equal))))
         (should-not (assoc "Look closer" (harness-ui-tasks--actions (harness-ui-tasks--task) t)))
         (should-not (string-match-p "\\[Look closer\\]" (harness-ui-tasks-test--board-text board)))
-        (should (string-match-p "\\[Verification\\] \\[Return\\]" (harness-ui-tasks-test--board-text board)))
+        (should (string-match-p "\\[Verify\\] \\[Send back\\]" (harness-ui-tasks-test--board-text board)))
         (should (equal (harness-ui-tasks--task) (harness-ui-tasks-task-at-point)))))))
 
 (declare-function harness-ui-tools-dev-open-p "harness-ui-tools-dev" (task))
@@ -2710,7 +2710,7 @@ session, which a click on its title opens."
         ;; Not as a button: the card's buttons stay Verify and Send back.
         (should-not (string-match-p "\\[Open harness\\]" (harness-ui-tasks-test--board-text board)))
         (should-not (harness-ui-tasks--find-button "open-harness" (point-min) (point-max)))
-        (should (string-match-p "\\[Verification\\] \\[Return\\]" (harness-ui-tasks-test--board-text board)))
+        (should (string-match-p "\\[Verify\\] \\[Send back\\]" (harness-ui-tasks-test--board-text board)))
         ;; The menu's entry starts the worktree's own live loop.
         (harness-ui-tasks-test--goto-card board "Try the harness")
         (call-interactively (nth 1 (funcall open-harness))))
@@ -4554,7 +4554,7 @@ Refine, and paused, it offers Resume first."
         ;; Paused and parked, it is resumed first, as in Pending.
         (should (equal '("Resume" "Queue")
                        (take 2 (mapcar #'car (harness-ui-tasks--actions parked)))))
-        (should-not (member "Refinement" (mapcar #'car (harness-ui-tasks--actions parked))))
+        (should-not (member "Refine" (mapcar #'car (harness-ui-tasks--actions parked))))
         (should-not (member "Edit" (mapcar #'car (harness-ui-tasks--actions parked))))
         (should (string-match-p "paused" (harness-ui-tasks--pending-detail parked nil nil)))
         (should (string-match-p "sent back from review" (harness-ui-tasks--pending-detail parked nil nil)))
@@ -4562,7 +4562,7 @@ Refine, and paused, it offers Resume first."
         ;; A parked task that never worked is no fresh write-up either.
         (should (equal '("Resume" "Queue")
                        (take 2 (mapcar #'car (harness-ui-tasks--actions fresh-parked)))))
-        (should-not (member "Refinement" (mapcar #'car (harness-ui-tasks--actions fresh-parked))))
+        (should-not (member "Refine" (mapcar #'car (harness-ui-tasks--actions fresh-parked))))
         (should (member '("Edit" harness-ui-tasks-edit)
                         (harness-ui-tasks--actions fresh-parked)))
         (with-current-buffer board
@@ -5019,11 +5019,11 @@ view's own answer buttons and gains Pause beside them."
                        (take 2 (mapcar #'car (harness-ui-tasks--actions error-task)))))
         (should (string-match-p "\\[Retry\\] \\[Pause\\]"
                                 (substring-no-properties (harness-ui-tasks--card-buttons error-task))))
-        ;; A task at work: Pause after Steering.
+        ;; A task at work: Pause after Steer.
         (let ((labels (mapcar #'car (harness-ui-tasks--actions working))))
           (should (member "Pause" labels))
           (should (> (cl-position "Pause" labels :test #'equal)
-                     (cl-position "Steering" labels :test #'equal))))
+                     (cl-position "Steer" labels :test #'equal))))
         ;; A task that cannot continue: Reply first, and Pause is there.
         (should (equal "Reply" (caar (harness-ui-tasks--actions cannot))))
         (should (member "Pause" (mapcar #'car (harness-ui-tasks--actions cannot)))))
@@ -5190,8 +5190,8 @@ that, only forgets the key."
           (harness-ui-tasks-test--change board id :state "active" :column "active" :started (float-time))
           (with-current-buffer board (harness-ui-tasks--render t))
           (should-not (string-search "[Start]" (harness-ui-tasks-test--card-text board "Waiting task")))
-          (should (string-search "[Steering]" (harness-ui-tasks-test--card-text board "Waiting task")))
-          (should-not (harness-ui-tasks-test--held-p board "Waiting task" "[Steering]"))
+          (should (string-search "[Steer]" (harness-ui-tasks-test--card-text board "Waiting task")))
+          (should-not (harness-ui-tasks-test--held-p board "Waiting task" "[Steer]"))
           (should (with-current-buffer board (harness-ui-tasks--pressed-keys)))
           (funcall (nth 2 (car (harness-ui-tasks-test--sent sent "_harness/task/start"))) nil)
           (should-not (with-current-buffer board (harness-ui-tasks--pressed-keys))))))))
@@ -5769,7 +5769,7 @@ That is `harness-ui-tasks-test--columns' of a buffer of its own."
   "A working task in the main tree with todos done and a time, titled NAME.
 Its title is `harness-ui-tasks-test--long-name' unless NAME is given.  It
 has every fact a working card has but the rare ones, and its buttons are
-\[Steering].  Its session is in the cache; return the task."
+\[Steer].  Its session is in the cache; return the task."
   (let ((id (or id "t-col-long")))
     (puthash (concat "s-" id)
              (list :id (concat "s-" id) :name (or name harness-ui-tasks-test--long-name) :status "running"
@@ -7126,7 +7126,7 @@ is not paused, with a message that says what the card is."
         (dolist (task tasks)
           (let ((buttons (substring-no-properties (harness-ui-tasks--card-buttons task)))
                 (actions (harness-ui-tasks--actions task)))
-            (should (string-search "[Steering]" buttons))
+            (should (string-search "[Steer]" buttons))
             (should-not (string-search "[Pause]" buttons))
             (should-not (string-search "[Stop]" buttons))
             (should (equal (cadr (assoc "Pause" actions)) 'harness-ui-tasks-pause))

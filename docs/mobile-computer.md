@@ -49,7 +49,7 @@ its tools go with it.
   case could not find its own record.
 - The id is generated lowercase for the same reason.  The secret is never
   hashed on the device; the harness keeps only a salted SHA-256 of it.
-- Registration is explicit.  The Computers page's `[Registration]`
+- Registration is explicit.  The Computers page's `[Register]`
   button calls `computer/register` with the computer description, the
   secret, the resources (the app-files directory, and a display, camera
   and microphone while those capabilities are offered) and the two MCP
@@ -142,7 +142,7 @@ person's switch and go to `outbox/` only.  The limits are 512 KiB for a
 read or import and 256 KiB for a write, with at most 500 entries in one
 listing; over them, the tool answers with an error rather than truncating
 silently.  The page shows `[File writing]` (`Outbox only`) and
-`[File import]`.
+`[Import file]`.
 
 The root is a cache directory in this build, and the OS may reclaim it;
 the import/outbox scope, not durability, is what the store guarantees
@@ -156,9 +156,9 @@ The Flutter Computers page gets a `This client` section after
 id and OS, a registration state (`Not registered`, `Registered`,
 `Disconnected`), a switch per capability with its state, `[File writing]`
 and `Outbox only` when files are on, `[Capture off]` while a capture is
-active, and the buttons `[Registration]`, `[Reconnection]`,
-`[Disconnection]`, `[Revocation]` and `[File import]`.  The copy is nouns,
-noun phrases and adjectives like the rest of the page
+active, and the buttons `[Register]`, `[Reconnect]`, `[Disconnect]`,
+`[Revoke]` and `[Import file]`.  A button that acts says so in the
+imperative; the rest is nouns, noun phrases and adjectives like the page
 (`Capture only · no pointer or keyboard control`, `Screen capture ·
 broadcast extension required`).  The page is drawn at the end so the
 registry and the resources keep the top of the page.

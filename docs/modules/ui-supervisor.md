@@ -26,7 +26,7 @@ session's name, which the header's other segments have as well; the
 segment is fitted at `harness-ui-supervisor--priority`, below every
 segment of the session's own, so a window too narrow for all of it
 drops the badge before it loses the model, the mode or the rest.
-A click there toggles it, and so does V in the harness keys (C-c h V,
+A click there toggles it, and so does V in the harness keys (C-c h S v,
 `harness-toggle-supervisor`), which asks the harness for the change with
 `_harness/supervisor/set` and says what it changed.  The header follows
 the session as the harness sends it.
