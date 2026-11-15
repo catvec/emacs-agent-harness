@@ -1,0 +1,44 @@
+{
+  "name": "emacs-agent-harness-promo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The promo film for Emacs Agent Harness: real footage of the harness, motion graphics and a score, written as code with framefields.",
+  "packageManager": "npm@12.1.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "allowScripts": {
+    "skia-canvas": true,
+    "sharp": false,
+    "webgpu": false,
+    "onnxruntime-node": false,
+    "node-av": false,
+    "esbuild": false,
+    "protobufjs": false
+  },
+  "scripts": {
+    "check": "tsx src/check.ts",
+    "cues": "tsx src/print-cues.ts",
+    "encode": "scripts/encode.sh",
+    "frames": "tsx src/render.ts frames",
+    "grid": "tsx src/render.ts grid",
+    "lint": "tsx src/render.ts lint",
+    "music": "tsx src/music/render-music.ts",
+    "prep": "FONTCONFIG_FILE=\"$PWD/assets/fonts/fonts.conf\" tsx src/prep.ts",
+    "render": "scripts/render-all.sh",
+    "sync": "tsx src/print-cues.ts > /dev/null && python3 -I scripts/sync-check.py",
+    "typecheck": "tsc --noEmit -p .",
+    "style-sheet": "tsx src/style-sheet.ts"
+  },
+  "dependencies": {
+    "framefields": "2.5.3",
+    "sharp": "0.35.5",
+    "skia-canvas": "3.0.8"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

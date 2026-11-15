@@ -453,3 +453,9 @@ prompt hash is taken from the redacted text, never the original.
 git-ai's own `prompt_storage` stays `local`: it never receives the
 harness prompts.  Its `notes` mode (redacted prompts inside the note)
 and `default` mode (upload to git-ai's cloud) are not used here.
+
+# Development
+
+```sh
+promo/scripts/render-all.sh                  # record the promo film's footage of the real harness and render it (promo/README.md)
+```
