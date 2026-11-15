@@ -21,7 +21,10 @@ import io.flutter.plugin.common.MethodChannel
  */
 class MainActivity : FlutterActivity() {
     private var channel: MethodChannel? = null
+    private var computerPlatformChannel: MethodChannel? = null
+    private var computerControlChannel: MethodChannel? = null
     private var voiceAudio: MethodChannel? = null
+
     private var mediaSession: MediaSession? = null
     private var screenShareChannel: MethodChannel? = null
 
@@ -45,6 +48,23 @@ class MainActivity : FlutterActivity() {
             }
         }
         channel = methodChannel
+        val computerChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            ComputerPlatform.CHANNEL,
+        )
+        computerChannel.setMethodCallHandler { call, result ->
+            ComputerPlatform.handle(this, call, result)
+        }
+        computerPlatformChannel = computerChannel
+        val controlChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            ComputerControl.CHANNEL,
+        )
+        controlChannel.setMethodCallHandler { call, result ->
+            val metrics = resources.displayMetrics
+            ComputerControl.handle(this, call, result, metrics)
+        }
+        computerControlChannel = controlChannel
         val screenChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "app.harness/screen_share",
@@ -66,6 +86,17 @@ class MainActivity : FlutterActivity() {
             VoiceAudioChannel.CHANNEL,
         )
         voiceAudio?.setMethodCallHandler(VoiceAudioChannel(this))
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        if (ComputerPlatform.onRequestPermissionsResult(requestCode, permissions, grantResults)) {
+            return
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     }
 
     /** Start the mediaProjection foreground service before getDisplayMedia. */
@@ -138,8 +169,14 @@ class MainActivity : FlutterActivity() {
         stopMediaButtons()
         channel?.setMethodCallHandler(null)
         channel = null
+        computerPlatformChannel?.setMethodCallHandler(null)
+        computerPlatformChannel = null
+        computerControlChannel?.setMethodCallHandler(null)
+        computerControlChannel = null
         voiceAudio?.setMethodCallHandler(null)
         voiceAudio = null
+        screenShareChannel?.setMethodCallHandler(null)
+        screenShareChannel = null
         super.onDestroy()
     }
 }

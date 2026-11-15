@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../computer/computer_capabilities.dart';
 import '../../computer/computer_capture_port.dart';
+import '../../computer/computer_platform.dart';
 import '../../computer/mobile_computer_controller.dart';
 import '../../models/computer.dart';
 import '../../state/app_controller.dart';
@@ -263,6 +264,38 @@ class _ThisPhoneCard extends StatelessWidget {
                   ? null
                   : (value) => controller.setEnabled(capability, value),
             ),
+          // Pointer and keyboard drive other apps, so they are listed apart
+          // and gated by the OS's own accessibility setting.  iOS gives no app
+          // a public way to do this, and the row stays off there.
+          for (final capability
+              in MobileComputerController.controlCapabilityNames)
+            _PhoneCapabilityRow(
+              name: capability,
+              enabled: controller.isEnabled(capability),
+              status: controller.capabilities[capability],
+              onChanged:
+                  controller.busy || !controller.controlAvailable
+                  ? null
+                  : (value) => controller.setEnabled(capability, value),
+            ),
+          if (controller.systemControl == SystemControlState.disabled)
+            Padding(
+              padding: const EdgeInsets.only(left: 4, top: 2),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'System control off · OS settings',
+                      style: HarnessText.meta(context),
+                    ),
+                  ),
+                  HarnessTextButton(
+                    label: 'Settings',
+                    onPressed: () => controller.openControlSettings(),
+                  ),
+                ],
+              ),
+            ),
           if (controller.fileWritesEnabled ||
               controller.capabilities['files']?.offered == true)
             Material(
@@ -280,9 +313,16 @@ class _ThisPhoneCard extends StatelessWidget {
             ),
           const SizedBox(height: HarnessSpace.sm),
           Text(
-            'Capture only · no pointer or keyboard control',
+            'Storage · ${controller.storageDetail}',
             style: HarnessText.meta(context),
           ),
+          if (controller.systemControl == SystemControlState.unsupported)
+            Text(
+              controller.machineOs == 'ios'
+                  ? 'Pointer and keyboard · app-scoped only'
+                  : 'Pointer and keyboard · no system control',
+              style: HarnessText.meta(context),
+            ),
           if (controller.machineOs == 'ios')
             Text(
               'Screen capture · broadcast extension required',

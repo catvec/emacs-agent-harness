@@ -37,6 +37,8 @@ const Map<String, String> computerCapabilityLabels = {
   'audio': 'Microphone',
   'files': 'Files',
   'clipboard': 'Clipboard',
+  'pointer': 'Pointer',
+  'keyboard': 'Keyboard',
 };
 
 /// The states a mobile computer offers, by capability name, with a detail

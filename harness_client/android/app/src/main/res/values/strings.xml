@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The description the OS's accessibility settings screen shows beside
+         this app's control service.  It is data in the system UI, not a page
+         this app draws, and it must say plainly what the service does. -->
+    <string name="harness_control_description">Pointer, keyboard and gesture control for a harness session the person grants it to</string>
+    <string name="harness_control_label">Harness control</string>
+</resources>

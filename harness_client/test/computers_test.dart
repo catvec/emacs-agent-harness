@@ -159,11 +159,20 @@ void main() {
     expect(find.text('Microphone'), findsOneWidget);
     expect(find.text('Files'), findsOneWidget);
     expect(find.text('Clipboard'), findsOneWidget);
-    expect(find.text('Not checked'), findsNWidgets(5));
-    expect(
-      find.text('Capture only · no pointer or keyboard control'),
-      findsOneWidget,
-    );
+    // Five sources the OS has not answered for, and the two the person's own
+    // system control gates: a widget test has no platform channel, so every
+    // state is `Not checked` rather than a permission state made up here.
+    expect(find.text('Not checked'), findsNWidgets(7));
+    // The two rows a person's own system control gates, listed apart from the
+    // capture ones: `Pointer` and `Keyboard` are also a remote machine's
+    // capabilities, so more than one is expected.
+    expect(find.text('Pointer'), findsWidgets);
+    expect(find.text('Keyboard'), findsWidgets);
+    expect(find.text('Storage · Not checked'), findsOneWidget);
+    // Android has the control; it is off until the person turns it on in the
+    // OS, and the row says so rather than claiming it is unavailable.
+    expect(find.text('System control off · OS settings'), findsOneWidget);
+    expect(find.text('Settings'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

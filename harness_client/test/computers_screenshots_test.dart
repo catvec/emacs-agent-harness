@@ -174,22 +174,24 @@ void main() {
   });
 
   testWidgets('this client', (tester) async {
-    final (boundary, _) = await _show(tester, width: 390, height: 844);
-    // Scroll until the card itself is built, not until its heading shows:
-    // the list builds its last child only once it is near the viewport, and
-    // a heading at the top of the screen does not bring the card under it.
-    for (var i = 0;
-        i < 12 && find.text('Import file').evaluate().isEmpty;
-        i++) {
-      await tester.drag(find.byType(ListView), const Offset(0, -400));
-      await tester.pump();
-    }
+    // A viewport tall enough for the whole card: the phone's own width, so
+    // the copy wraps as it does there, but not cut off by its height.  The
+    // list builds its last child only once it is near the viewport, so a
+    // short one would leave the card half built and half asserted.
+    final (boundary, _) = await _show(tester, width: 390, height: 2600);
     expect(find.text('THIS CLIENT'), findsOneWidget);
     expect(find.text('This phone'), findsOneWidget);
     expect(find.text('Not registered'), findsOneWidget);
     expect(find.text('Register'), findsOneWidget);
     expect(find.text('Import file'), findsOneWidget);
-    expect(find.text('Capture only · no pointer or keyboard control'), findsOneWidget);
+    // The card says where the app keeps what it keeps, and that this
+    // build has no system control to offer: the phone's own pointer and
+    // keyboard, not the harness's.
+    expect(find.text('Storage · Not checked'), findsOneWidget);
+    expect(find.text('Pointer'), findsWidgets);
+    expect(find.text('Keyboard'), findsWidgets);
+    expect(find.text('System control off · OS settings'), findsOneWidget);
+    expect(find.text('Settings'), findsOneWidget);
     expect(tester.takeException(), isNull);
     if (shots != null) {
       await _write(tester, boundary, '$shots/computers-phone-client.png');

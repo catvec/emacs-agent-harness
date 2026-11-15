@@ -8,6 +8,7 @@ import 'computer_capabilities.dart';
 import 'computer_capture_port.dart';
 import 'computer_file_store.dart';
 import 'computer_identity.dart';
+import 'computer_platform.dart';
 import 'mcp_server.dart';
 
 /// The three ACP calls a registration makes, behind an interface so the
@@ -104,8 +105,16 @@ class MobileComputerEndpoint {
     required this.transport,
     required this.capture,
     required this.files,
+    SystemControlPort control = const UnsupportedSystemControl(),
+    SystemControlState Function()? controlState,
     Map<String, bool> enabled = const <String, bool>{},
-  }) : _enabled = <String, bool>{} {
+  }) : control = control,
+       _controlState =
+           controlState ??
+           (() => control.supported
+               ? SystemControlState.disabled
+               : SystemControlState.unsupported),
+       _enabled = <String, bool>{} {
     _enabled.addAll(enabled);
     _statusSubscription = capture.statuses.listen(_onCaptureEvent);
   }
@@ -119,6 +128,20 @@ class MobileComputerEndpoint {
   final ComputerTransport transport;
   final ComputerCapturePort capture;
   final ComputerFileStore files;
+
+  /// The person's opt-in system control (an Android accessibility service),
+  /// or [UnsupportedSystemControl] where the OS gives an app no public way to
+  /// drive another app.  Screen viewing is not control: this is a separate
+  /// grant, advertised only while the OS itself says it is on.
+  final SystemControlPort control;
+
+  /// What the OS last said of that control, as a value.  It is read from
+  /// what the app already holds rather than asked again here: a capability
+  /// refresh happens on the connection path, and a platform channel must
+  /// never be waited on there (a test, the web and a desktop build answer
+  /// none at all).  [MobileComputerController.refreshPlatform] asks the OS
+  /// and replaces the value.
+  final SystemControlState Function() _controlState;
 
   final Map<String, bool> _enabled;
   final Map<String, ComputerCapabilityStatus> _captureStates =
@@ -187,11 +210,39 @@ class MobileComputerEndpoint {
     ],
   };
 
+  /// The status a capability the person has not turned on reads.  It is a
+  /// noun phrase, and the same one the page shows.
+  static const _offOnThisPhone = ComputerCapabilityStatus(
+    state: ComputerCapabilityState.unavailable,
+    detail: 'Off on this phone',
+  );
+
+  /// What the OS says about the person's system control.  It never prompts:
+  /// only the person can enable an accessibility service, in the OS settings.
+  ComputerCapabilityStatus _controlStatus() {
+    final state = _controlState();
+    return switch (state) {
+      SystemControlState.enabled => const ComputerCapabilityStatus(
+        state: ComputerCapabilityState.available,
+        detail: 'Enabled in system settings',
+      ),
+      SystemControlState.disabled => const ComputerCapabilityStatus(
+        state: ComputerCapabilityState.unavailable,
+        detail: 'System control off',
+      ),
+      SystemControlState.unsupported => const ComputerCapabilityStatus(
+        state: ComputerCapabilityState.unavailable,
+        detail: 'No system control on this platform',
+      ),
+    };
+  }
+
   /// Refresh what the platform can capture, then advertise it.  The phone
   /// never prompts for a permission here: a source the OS has not answered
   /// yet reads available, and the first tool call asks.
   Future<void> refreshCapabilities() async {
     final states = await capture.capabilities();
+    final controlState = _controlStatus();
     final next = <String, ComputerCapabilityStatus>{};
     for (final source in ComputerCaptureSource.values) {
       final status =
@@ -200,12 +251,19 @@ class MobileComputerEndpoint {
             state: ComputerCapabilityState.unavailable,
           );
       final enabled = isEnabled(source.capability);
+      // A state the port reported after a stop, a revocation or a lifecycle
+      // change is newer than the OS read above; it is what the person and the
+      // harness are told until the next read replaces it.
+      final known = _captureStates[source.capability];
       next[source.capability] = enabled
-          ? (_captureStates[source.capability] ?? status)
+          ? (known ?? status)
           : ComputerCapabilityStatus(
               state: ComputerCapabilityState.unavailable,
               detail: 'Off on this phone',
             );
+    }
+    for (final name in const <String>['pointer', 'keyboard']) {
+      next[name] = isEnabled(name) ? controlState : _offOnThisPhone;
     }
     next['files'] = isEnabled('files') && files.available
         ? ComputerCapabilityStatus(
@@ -437,8 +495,8 @@ class MobileComputerEndpoint {
     version: '1.0.0',
     instructions:
         'The phone this client runs on: screen and camera pictures, a '
-        'microphone clip and its clipboard. It offers no pointer, keyboard '
-        'or window control.',
+        'microphone clip, its clipboard, and -- only while the person has '
+        'enabled the system control in the OS -- its pointer and keyboard.',
     tools: <McpTool>[
       McpTool(
         name: 'info',
@@ -494,6 +552,55 @@ class MobileComputerEndpoint {
         },
         readOnly: false,
         handler: (arguments) => _captureAudio(arguments),
+      ),
+      McpTool(
+        name: 'pointer',
+        title: 'Pointer control',
+        description:
+            'Tap, scroll or drag on the phone screen, through the system '
+            'control the person enabled in the OS settings. Needs the '
+            '`pointer` capability and a session grant for it.',
+        inputSchema: const <String, Object?>{
+          'type': 'object',
+          'properties': <String, Object?>{
+            'action': <String, Object?>{
+              'type': 'string',
+              'enum': <Object?>['click', 'scroll', 'drag'],
+            },
+            'x': <String, Object?>{'type': 'integer'},
+            'y': <String, Object?>{'type': 'integer'},
+            'toX': <String, Object?>{'type': 'integer'},
+            'toY': <String, Object?>{'type': 'integer'},
+            'direction': <String, Object?>{
+              'type': 'string',
+              'enum': <Object?>['up', 'down', 'left', 'right'],
+            },
+            'amount': <String, Object?>{'type': 'integer'},
+          },
+          'required': <Object?>['action'],
+        },
+        handler: (arguments) => _controlPointer(arguments),
+      ),
+      McpTool(
+        name: 'keyboard',
+        title: 'Keyboard control',
+        description:
+            'Type text or press Backspace or Return in the phone field that '
+            'has focus, through the system control the person enabled. Needs '
+            'the `keyboard` capability and a session grant for it.',
+        inputSchema: const <String, Object?>{
+          'type': 'object',
+          'properties': <String, Object?>{
+            'action': <String, Object?>{
+              'type': 'string',
+              'enum': <Object?>['type', 'key'],
+            },
+            'text': <String, Object?>{'type': 'string'},
+            'key': <String, Object?>{'type': 'string'},
+          },
+          'required': <Object?>['action'],
+        },
+        handler: (arguments) => _controlKeyboard(arguments),
       ),
       McpTool(
         name: 'clipboard',
@@ -618,6 +725,119 @@ class MobileComputerEndpoint {
       ),
     ],
   );
+
+  Future<Map<String, Object?>> _controlPointer(
+    Map<String, Object?> arguments,
+  ) async {
+    final refusal = _controlRefusal('pointer');
+    if (refusal != null) return refusal;
+    final action = asString(arguments['action']) ?? '';
+    if (!const <String>['click', 'scroll', 'drag'].contains(action)) {
+      return mcpTextResult(
+        'Unsupported pointer action: $action',
+        isError: true,
+      );
+    }
+    final generation = _generation;
+    final done = await control.pointer(
+      action: action,
+      x: (asInt(arguments['x']) ?? 0).toDouble(),
+      y: (asInt(arguments['y']) ?? 0).toDouble(),
+      toX: asInt(arguments['toX'])?.toDouble(),
+      toY: asInt(arguments['toY'])?.toDouble(),
+      direction: asString(arguments['direction']),
+      amount: asInt(arguments['amount']) ?? 1,
+    );
+    if (generation != _generation) {
+      // A stop, a revocation or a lifecycle change landed while the gesture
+      // was being dispatched; the person's grant is gone, so the call is not
+      // reported as done.
+      return mcpTextResult('Control stopped before the gesture', isError: true);
+    }
+    if (done != 'ok') {
+      return mcpTextResult(
+        'Pointer $action refused: ${_controlReason(done)}',
+        isError: true,
+        structured: <String, Object?>{'refused': done},
+      );
+    }
+    return mcpTextResult(
+      'Pointer $action on ${identity.name}',
+      structured: <String, Object?>{'done': action},
+    );
+  }
+
+  Future<Map<String, Object?>> _controlKeyboard(
+    Map<String, Object?> arguments,
+  ) async {
+    final refusal = _controlRefusal('keyboard');
+    if (refusal != null) return refusal;
+    final action = asString(arguments['action']) ?? '';
+    if (action != 'type' && action != 'key') {
+      return mcpTextResult(
+        'Unsupported keyboard action: $action',
+        isError: true,
+      );
+    }
+    final text = action == 'type' ? asString(arguments['text']) : null;
+    final key = action == 'key' ? asString(arguments['key']) : null;
+    if (action == 'type' && (text == null || text.isEmpty)) {
+      return mcpTextResult('No text to type', isError: true);
+    }
+    if (action == 'key' && (key == null || key.isEmpty)) {
+      return mcpTextResult('No key to press', isError: true);
+    }
+    final generation = _generation;
+    final done = await control.keyboard(text: text, key: key);
+    if (generation != _generation) {
+      return mcpTextResult('Control stopped before the input', isError: true);
+    }
+    if (done != 'ok') {
+      return mcpTextResult(
+        'Keyboard ${action == 'type' ? 'typing' : 'key'} refused: '
+        '${_controlReason(done)}',
+        isError: true,
+        structured: <String, Object?>{'refused': done},
+      );
+    }
+    return mcpTextResult(
+      action == 'type'
+          ? 'Typed ${text!.length} characters on ${identity.name}'
+          : 'Pressed $key on ${identity.name}',
+      structured: <String, Object?>{'done': action},
+    );
+  }
+
+  /// The refusal for a control call, or null when it may run.  It is the
+  /// person's switch first, then the OS, then the session's version of the
+  /// capability: three separate gates, and each says which one refused.
+  Map<String, Object?>? _controlRefusal(String capability) {
+    if (!isEnabled(capability)) {
+      return mcpTextResult(
+        '${computerCapabilityLabels[capability] ?? capability} is off on this phone',
+        isError: true,
+      );
+    }
+    final status = _capabilities[capability];
+    if (status == null || !status.offered) {
+      return mcpTextResult(
+        '${computerCapabilityLabels[capability] ?? capability} is not offered by '
+        'this phone: ${status?.label ?? 'Unavailable'}'
+        '${status?.detail == null ? '' : ' (${status!.detail})'}',
+        isError: true,
+      );
+    }
+    return null;
+  }
+
+  /// A refusal reason from the platform, in words for the model.
+  String _controlReason(String reason) => switch (reason) {
+    'service-off' => 'the system control is off in the OS settings',
+    'no-focus' => 'no text field has focus',
+    'unsupported' => 'this platform has no public input injection',
+    'unavailable' => 'the OS refused the gesture',
+    _ => reason,
+  };
 
   Future<Map<String, Object?>> _captureImage(
     ComputerCaptureSource source, {

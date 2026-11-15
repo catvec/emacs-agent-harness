@@ -10,6 +10,7 @@ import 'package:harness_client/src/computer/computer_capabilities.dart';
 import 'package:harness_client/src/computer/computer_capture_port.dart';
 import 'package:harness_client/src/computer/computer_file_store.dart';
 import 'package:harness_client/src/computer/computer_identity.dart';
+import 'package:harness_client/src/computer/computer_platform.dart';
 import 'package:harness_client/src/computer/mcp_server.dart';
 import 'package:harness_client/src/computer/mobile_computer_controller.dart';
 import 'package:harness_client/src/computer/mobile_computer_endpoint.dart';
@@ -213,6 +214,57 @@ class FakeCapture implements ComputerCapturePort {
   }
 }
 
+/// The person's opt-ins with the system control on, which is the only
+/// case where a pointer or keyboard is even considered.
+const Map<String, bool> _controlEnabled = <String, bool>{
+  'view': true,
+  'camera': true,
+  'audio': true,
+  'files': true,
+  'clipboard': false,
+  'pointer': true,
+  'keyboard': true,
+};
+
+/// The Android accessibility service, faked: it records what it was asked
+/// to do and answers with [next], so a refusal can be tested without a phone.
+class FakeControl implements SystemControlPort {
+  FakeControl(this._state);
+
+  final SystemControlState Function() _state;
+  final List<Map<String, Object?>> performed = <Map<String, Object?>>[];
+  String next = 'ok';
+
+  @override
+  bool get supported => true;
+
+  @override
+  Future<SystemControlState> state() async => _state();
+
+  @override
+  Future<String> pointer({
+    required String action,
+    required double x,
+    required double y,
+    double? toX,
+    double? toY,
+    String? direction,
+    int amount = 1,
+  }) async {
+    performed.add(<String, Object?>{'action': action, 'x': x, 'y': y});
+    return next;
+  }
+
+  @override
+  Future<String> keyboard({String? text, String? key}) async {
+    performed.add(<String, Object?>{'text': text, 'key': key});
+    return next;
+  }
+
+  @override
+  Future<bool> openSettings() async => true;
+}
+
 ComputerIdentity _identity() => const ComputerIdentity(
   id: 'cmp-ios-abc123',
   name: 'Test phone',
@@ -221,10 +273,36 @@ ComputerIdentity _identity() => const ComputerIdentity(
   secret: 'a-secret-that-is-at-least-32-characters-long',
 );
 
+/// One tool call through the endpoint's own MCP server, as the harness makes
+/// it, returning the MCP result the model would see.
+Future<Map<String, Object?>> _tool(
+  MobileComputerEndpoint endpoint,
+  String name,
+  Map<String, Object?> arguments,
+) async {
+  final answer = await endpoint.handleRequest(
+    MobileComputerEndpoint.mcpMethod,
+    <String, Object?>{
+      'computer': 'cmp-ios-abc123',
+      'server': 'computer',
+      'token': 'token-1',
+      'message': <String, Object?>{
+        'jsonrpc': '2.0',
+        'id': 1,
+        'method': 'tools/call',
+        'params': <String, Object?>{'name': name, 'arguments': arguments},
+      },
+    },
+  );
+  return ((answer as Map)['result'] as Map).cast<String, Object?>();
+}
+
 Future<MobileComputerEndpoint> _endpoint({
   FakeTransport? transport,
   FakeCapture? capture,
   ComputerFileStore? files,
+  SystemControlPort? control,
+  SystemControlState Function()? controlState,
   Map<String, bool>? enabled,
 }) async {
   final dir = Directory.systemTemp.createTempSync('mobile-computer-test-');
@@ -236,6 +314,8 @@ Future<MobileComputerEndpoint> _endpoint({
     transport: transport ?? FakeTransport(),
     capture: capture ?? FakeCapture(),
     files: store,
+    control: control ?? const UnsupportedSystemControl(),
+    controlState: controlState,
     enabled:
         enabled ??
         <String, bool>{
@@ -604,6 +684,83 @@ void main() {
     },
   );
 
+  test('system control is offered only while the OS says it is on', () async {
+    var state = SystemControlState.disabled;
+    final control = FakeControl(() => state);
+    final endpoint = await _endpoint(
+      control: control,
+      controlState: () => state,
+      enabled: _controlEnabled,
+    );
+    await endpoint.refreshCapabilities();
+    expect(endpoint.capabilities.offered, isNot(contains('pointer')));
+    expect(endpoint.capabilities['pointer']?.detail, 'System control off');
+
+    state = SystemControlState.enabled;
+    await endpoint.refreshCapabilities();
+    expect(endpoint.capabilities.offered, contains('pointer'));
+    expect(endpoint.capabilities.offered, contains('keyboard'));
+    expect(
+      endpoint.capabilities['pointer']?.state,
+      ComputerCapabilityState.available,
+    );
+  });
+
+  test('a control tool call is refused while the control is off', () async {
+    final control = FakeControl(() => SystemControlState.disabled);
+    final endpoint = await _endpoint(
+      control: control,
+      controlState: () => SystemControlState.disabled,
+      enabled: _controlEnabled,
+    );
+    await endpoint.register();
+    final answer = await _tool(endpoint, 'pointer', <String, Object?>{
+      'action': 'click',
+      'x': 1,
+      'y': 2,
+    });
+    expect(answer['isError'], isTrue);
+    expect('${answer['content']}', contains('not offered'));
+    expect(control.performed, isEmpty);
+  });
+
+  test('a platform with no input injection never offers control', () async {
+    final endpoint = await _endpoint(enabled: _controlEnabled);
+    await endpoint.refreshCapabilities();
+    expect(endpoint.capabilities.offered, isNot(contains('pointer')));
+    expect(endpoint.capabilities.offered, isNot(contains('keyboard')));
+    expect(
+      endpoint.capabilities['keyboard']?.detail,
+      'No system control on this platform',
+    );
+  });
+
+  test('a gesture the OS performs is reported, and its refusal says why', () async {
+    final control = FakeControl(() => SystemControlState.enabled);
+    final endpoint = await _endpoint(
+      control: control,
+      controlState: () => SystemControlState.enabled,
+      enabled: _controlEnabled,
+    );
+    await endpoint.register();
+    final done = await _tool(endpoint, 'pointer', <String, Object?>{
+      'action': 'click',
+      'x': 1,
+      'y': 2,
+    });
+    expect(done['isError'], isNot(isTrue));
+    expect(done['structuredContent'], containsPair('done', 'click'));
+    expect(control.performed, hasLength(1));
+
+    control.next = 'service-off';
+    final refused = await _tool(endpoint, 'keyboard', <String, Object?>{
+      'action': 'type',
+      'text': 'hi',
+    });
+    expect(refused['isError'], isTrue);
+    expect('${refused['content']}', contains('off in the OS settings'));
+  });
+
   test('revocation unregisters and stops everything', () async {
     final capture = FakeCapture();
     final transport = FakeTransport();
@@ -616,3 +773,4 @@ void main() {
     expect(capture.live, isEmpty);
   });
 }
+

@@ -13,14 +13,16 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
-    <!-- Live camera video, only while the person has turned Camera on. -->
+    <!-- The camera, for a computer registration and for live video: asked
+         for only when the person turns Camera on, never at start-up. -->
     <uses-permission android:name="android.permission.CAMERA"/>
-    <!-- Phone screen sharing: MediaProjection consent plus the foreground
-         service Android 10+ requires around it.  The service captures
-         nothing itself and stops with the share. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+    <!-- Screen capture: MediaProjection consent per session, and the
+         foreground service of that type Android 10+ requires around it.
+         The service captures nothing itself and stops with the share. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
-    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+
     <application
         android:label="Harness"
         android:usesCleartextTraffic="true"
@@ -48,6 +50,22 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- The opt-in system control.  Android lets only the person enable an
+             accessibility service, from the OS settings; the app never grants
+             it itself and advertises no pointer or keyboard while it is off.
+             Its metadata bounds it to gestures and the focused text field. -->
+        <service
+            android:name=".HarnessControlService"
+            android:exported="false"
+            android:label="@string/harness_control_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService"/>
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/harness_control_service"/>
+        </service>
         <!-- Android 10+ requires this around a MediaProjection; the app starts
              it before getDisplayMedia and stops it with the share. -->
         <service

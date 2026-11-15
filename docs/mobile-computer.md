@@ -41,9 +41,14 @@ its tools go with it.
 - The identity is `cmp-<os>-<random>`, stable for the installation.  The
   secret is 256 random bits, base64url without padding.  Both are kept in
   `harness-computer/identity.json` in the app's own file area.  On a
-  phone that is the app's cache: inside the app sandbox, but the OS may
-  reclaim it, and it is not hardware-backed.  A platform keystore is the
-  seam a later version replaces; the wire format does not change.
+  phone that is the app's documents directory (`filesDir` on Android,
+  `Documents` on iOS), which the OS does not reclaim, so the id survives a
+  reboot and a cache trim.  The secret is sealed in the platform's own
+  keystore -- the Android Keystore (`AES/GCM`, a non-exportable key) or
+  the iOS Keychain -- and is not written to the file at all when that
+  works.  A build with neither falls back to the file, and
+  `Storage · Temporary directory` says so on the page.  The wire format is
+  the same either way.
   `ComputerIdentity.load` also downcases an id it finds, because the
   harness keeps computer ids lowercase and a client that kept another
   case could not find its own record.
@@ -69,8 +74,9 @@ its tools go with it.
 
 ## Capabilities
 
-The vocabulary is the harness's: `view`, `camera`, `audio`, `files` and
-`clipboard`.  Each is a person's opt-in on the page, and separate from
+The vocabulary is the harness's: `view`, `camera`, `audio`, `files`,
+`clipboard`, and -- where the platform has it at all -- `pointer` and
+`keyboard`.  Each is a person's opt-in on the page, and separate from
 the harness's grant: the harness may allow a session a capability the app
 does not offer, and an app may offer one the session is not granted.
 Only a capability the person turned on and the platform reports usable is
@@ -92,13 +98,13 @@ capture and advertises the change; a frame or clip that finishes after
 the bump is refused rather than counted.
 
 Screen, camera and microphone are behind `ComputerCapturePort`.  The port
-owns the OS permission prompts, the capture session, the lifecycle and
-the frame format; the endpoint owns the MCP tool, the state machine and
-the token.  This build ships `NoopComputerCapturePort`, so those three
-read `Unavailable` and the harness gets no such capability.  The platform
-ports are the staged remainder (see [Not yet](#not-yet)).  Clipboard is
-implemented by the controller through Flutter's `Clipboard`, in the
-foreground only.  Files is implemented by the app's scoped store.
+owns the OS permission checks, the capture session, the lifecycle and the
+frame format; the endpoint owns the MCP tool, the state machine and the
+token.  This build's port is `SessionComputerCapturePort`, which drives
+the shared `MediaCaptureSession` of the live-video work rather than a
+second camera or screen stack of its own (see [Shared capture](#shared-capture)).
+Clipboard is implemented by the controller through Flutter's `Clipboard`,
+in the foreground only.  Files is implemented by the app's scoped store.
 
 ## The tool servers
 
@@ -159,28 +165,42 @@ and `Outbox only` when files are on, `[Capture off]` while a capture is
 active, and the buttons `[Register]`, `[Reconnect]`, `[Disconnect]`,
 `[Revoke]` and `[Import file]`.  A button that acts says so in the
 imperative; the rest is nouns, noun phrases and adjectives like the page
-(`Capture only · no pointer or keyboard control`, `Screen capture ·
+(`System control off · OS settings`, `Storage · App documents`,
+`Pointer and keyboard · app-scoped only`, `Screen capture ·
 broadcast extension required`).  The page is drawn at the end so the
 registry and the resources keep the top of the page.
 
-![The This client card on a phone: its label, the registration state, a switch and state per capability, the capture-only note, and the registration and file-import buttons](media/computers-phone-client.png)
+![The This client card on a phone: its label, the registration state, a switch and state per capability, the pointer and keyboard rows, the system-control note with its Settings button, the storage line, and the registration and file-import buttons](media/computers-phone-client.png)
 
 ## Platform matrix
 
 | capability | Android path | iOS path | this build |
 | --- | --- | --- | --- |
-| screen | `MediaProjection` consent, a foreground service of type `mediaProjection`; from Android 14 a per-session token | a ReplayKit broadcast upload extension | no-op port: `Unavailable` |
-| camera | CameraX, `CAMERA` permission | AVFoundation, `NSCameraUsageDescription` | no-op port: `Unavailable` |
-| microphone | `RECORD_AUDIO` permission | AVAudioSession, `NSMicrophoneUsageDescription` | no-op port: `Unavailable` |
-| files | app sandbox | app sandbox | real, scoped |
+| screen | `MediaProjection` consent, a foreground service of type `mediaProjection`; from Android 14 a per-session token | a ReplayKit broadcast upload extension | permission read from the OS; capture through the shared media session |
+| camera | CameraX, `CAMERA` permission | AVFoundation, `NSCameraUsageDescription` | permission read from the OS; capture through the shared media session |
+| microphone | `RECORD_AUDIO` permission | AVAudioSession, `NSMicrophoneUsageDescription` | permission read from the OS; capture through the shared media session |
+| files | app documents (`filesDir`) | app documents (`Documents`) | real, scoped, durable |
 | clipboard | `ClipboardManager` | `UIPasteboard` | real, foreground |
+| pointer | an opt-in `AccessibilityService`, enabled by the person in the OS settings | none: no public system-wide input injection | declared and gated; off until the person turns it on |
+| keyboard | the same service's text insertion | app-scoped only | declared and gated; off until the person turns it on |
 
 The Android screen contract is the one on
 <https://developer.android.com/media/grow/media-projection>; the iOS
 screen contract is ReplayKit's broadcast upload extension,
-<https://developer.apple.com/documentation/replaykit>.  The app does not
-claim a capability the platform port has not reported: the matrix says
-what the port will use, not that this build can do it.
+<https://developer.apple.com/documentation/replaykit>.  The Android
+control contract is the accessibility service
+(<https://developer.android.com/guide/topics/ui/accessibility/service>),
+which no app may grant itself: the person enables it in the OS settings,
+and the app only reads whether it is on.
+
+The app does not claim a capability the OS has not reported.  A
+permission the OS has not answered reads `Not checked`, a permission it
+refused reads `Denied` or `Revoked`, and a capture the app stopped reads
+`Suspended` or `Foreground only`; none of them is advertised to the
+harness as offered.  The matrix says what the port uses, not that every
+build has it: `NoopComputerMediaCapture` is the port's value until the
+shared media session is available to this branch (see [Shared
+capture](#shared-capture)).
 
 ## Decisions and alternatives
 
@@ -210,25 +230,75 @@ what the port will use, not that this build can do it.
   camera on another computer but not this one.  The page shows the app's
   side and the server's `computer/access` shows the session's.
 
-## Not yet
+## What is implemented, and what is not
+## Shared capture
 
-- **Platform capture.** A real Android `MediaProjection` port and an iOS
-  ReplayKit broadcast extension.  Until then screen, camera and
-  microphone are offered by no build and the tools answer with an error.
-  The capture session API is the one the voice/computer-use work
-  (`MediaCaptureSession`) provides; this change consumes the port, it
-  does not duplicate the capture implementation.
-- **Pointer and keyboard control.** The app is a capture client, not a
-  remote desktop server: it offers no pointer, keyboard or window
-  control, and the page says so.
+There is one capture stack, not two.  The live-video work owns
+`MediaCaptureSession` and its platform ports (camera, screen, encoder);
+this branch owns the adapter that lends that session to a registered
+computer:
+
+```
+MobileComputerEndpoint
+  └─ ComputerCapturePort            (the harness's vocabulary)
+       └─ SessionComputerCapturePort  (this branch: permission, generation, lifecycle)
+            └─ ComputerMediaCapture    (the seam: present, start, stop, frame, clip, signals)
+                 └─ MediaCaptureSession (t-ippnm26k: the one camera/screen stack)
+```
+
+`ComputerMediaCapture` is a narrow interface -- `present`, `start`,
+`stop`, `frame`, `clip`, `signals`, `handleLifecycle`, `dispose` -- and
+the only production implementer is the peer's `MediaCaptureSession`.
+`NoopComputerMediaCapture` implements it as absent, which is what this
+branch injects while that session is not on it: the adapter is complete
+and tested, the hardware path is not claimed.
+
+The split of responsibility is deliberate.  The port owns what the
+harness's contract needs -- which OS permission gates which source,
+what a capability state is, the generation that refuses a late frame,
+the stop on a revocation or a lifecycle change.  The media session
+owns what a camera and a screen need -- the consent flow, the
+foreground service, the encoder.  Neither re-implements the other, so
+there is no second camera or screen-share stack to keep in step.
+
+
+- **Pointer and keyboard as a separate- **The shared capture session's own platform work.** This branch owns
+  the adapter, not the camera or screen implementation: it consumes
+  `MediaCaptureSession` through `ComputerMediaCapture` and injects
+  `NoopComputerMediaCapture` while that session is not on this branch.
+  Until it lands, screen, camera and microphone read `Capture session
+  not connected` and the harness gets no such capability -- stated
+  here rather than faked.  See [Shared capture](#shared-capture).
+- **A real-device or emulator run.** The Android host code (the channel,
+  the keystore, the accessibility service) and the iOS runner are in
+  the tree, but this change was checked with `flutter analyze`, the
+  Dart suites and the screenshots -- not on a device or an emulator.
+  The native paths are therefore unproven at runtime, which is a
+  blocker and not a capability.
+, visible grant.**  Viewing the
+  screen is not control, so the app never treats one as the other.  On
+  Android it declares an `AccessibilityService` (`exported="false"`) that
+  performs a tap, a scroll, a drag and text insertion; the service is
+  off until the person enables it in the OS settings, and the endpoint
+  advertises `pointer` and `keyboard` only while that switch is on *and*
+  the service reports itself enabled.  A gesture or keystroke that
+  crosses a stop, a revocation or a lifecycle change is refused like a
+  late frame.  iOS has no public system-wide input injection, so it
+  offers no `pointer` or `keyboard` at all and the page says
+  `Pointer and keyboard · app-scoped only`; promising otherwise would be
+  a capability the platform cannot give.
+- **Window control.** Neither platform offers an app a public way to
+  move or resize another app's window; there is no such tool.
 - **Background capture.** The OS can stop a capture when the app leaves
   the foreground, and the app deliberately does not restart it.  A
   foreground service is the Android path; iOS has no general background
   screen capture.
-- **Persistence of the identity.** The identity and the app files live in
-  the app's cache area in this build; a platform-private directory is the
-  next step, and the secret should move to the platform keystore.
-- **A remote attach flow in the app.** The app attaches to the harness it
+- **A remote attach flow in the app.**- **Durability of the identity.** The identity, the scoped files and the
+  sealed secret are in the app's documents directory and the platform
+  keystore.  A build with no channel (the web, a desktop run) still
+  falls back to the process's temporary directory, and the page says
+  `Storage · Temporary directory` when it does.
+ The app attaches to the harness it
   is already connected to.  Registering this phone from another client,
   or attaching it to a second harness, uses the same methods but has no
   page yet.
@@ -239,7 +309,9 @@ what the port will use, not that this build can do it.
 its secret, the scoped file store, the four MCP methods, registration,
 the handshake that arrives before the token, a stale or wrong token, a
 screen capture, a stop during a capture, a revoked permission, lifecycle
-pause, and revocation.  `harness_client/test/computers_test.dart` asserts
+pause, revocation, the pointer and keyboard gated by the OS's control
+state, a control tool refused while it is off, and a platform with no
+input injection never offering it.  `harness_client/test/computers_test.dart` asserts
 the page's exact rendered copy and `test/computers_screenshots_test.dart`
 takes its pictures, including `computers-phone-client.png`.
 

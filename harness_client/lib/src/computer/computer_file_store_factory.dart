@@ -5,5 +5,14 @@ import 'computer_file_store_no_io.dart'
 
 /// Open the app's scoped file store on a platform that has files, or the
 /// honest no-file store on one that has none.
-ComputerFileStore openComputerFileStore({bool writesEnabled = false}) =>
-    platform.openPlatformComputerFileStore(writesEnabled: writesEnabled);
+///
+/// [rootPath] is the app's durable private directory, from the platform
+/// channel; without one the store falls back to the process's temporary
+/// directory, which is honest about being reclaimable but is not durable.
+ComputerFileStore openComputerFileStore({
+  bool writesEnabled = false,
+  String? rootPath,
+}) => platform.openPlatformComputerFileStore(
+  writesEnabled: writesEnabled,
+  rootPath: rootPath,
+);

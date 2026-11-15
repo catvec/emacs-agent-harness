@@ -6,14 +6,16 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/device_name.dart';
+import 'computer_platform.dart';
 
 /// Who this client is when it registers itself as a computer.
 ///
 /// The id is stable for the installation (`cmp-<os>-<random>`), and the
 /// secret is what proves that a reconnect speaks for the same registration.
-/// Both live in the app's private preferences: the mobile equivalent of a
-/// file only this app can read.  They are not hardware-backed; a platform
-/// keystore can replace [ComputerSecretStore] without touching the endpoint.
+/// The id and the name are in a file in the app's durable private directory;
+/// the secret is sealed by the platform (Android Keystore, iOS Keychain) when
+/// it has one, and otherwise sits in that same private file.  The wire format
+/// does not depend on which.
 class ComputerIdentity {
   const ComputerIdentity({
     required this.id,
@@ -33,16 +35,24 @@ class ComputerIdentity {
   static const _secretKey = 'harness.computer.secret';
   static const _nameKey = 'harness.computer.name';
 
+  /// Where the secret is kept when the platform has a keystore or a keychain.
+  /// The id and the name are not secret, so they stay in the identity file.
+  static const secretKey = 'identity.secret';
+
   /// Read this installation's identity, making an id and a secret the first
   /// time.  The secret is 256 random bits, base64url without padding.
   ///
   /// With [preferences] it is kept there (a widget test's mock store).  In
-  /// the app it is a JSON file in the app's private directory, read and
-  /// written synchronously so the first `initialize` can carry the real id
-  /// without waiting on a platform channel.  The file is inside the app
-  /// sandbox; it is not hardware-backed, and [ComputerSecretStore] is the
-  /// seam a platform keystore would replace.
-  static Future<ComputerIdentity> load({SharedPreferences? preferences}) async {
+  /// the app it is a JSON file under [directoryPath], the platform's durable
+  /// private directory, read and written synchronously so the first
+  /// `initialize` can carry the real id without waiting on a channel.  The
+  /// secret is sealed through [platform] and kept out of that file when the
+  /// platform has a keystore or a keychain.
+  static Future<ComputerIdentity> load({
+    SharedPreferences? preferences,
+    ComputerPlatform? platform,
+    String? directoryPath,
+  }) async {
     if (preferences != null) {
       var id = preferences.getString(_idKey);
       if (id == null || id.isEmpty) {
@@ -66,13 +76,17 @@ class ComputerIdentity {
         secret: secret,
       );
     }
-    final file = _file();
+    final file = _file(directoryPath);
+    final sealed = await _sealedSecret(platform);
     if (file.existsSync()) {
       try {
         final wire =
             jsonDecode(file.readAsStringSync()) as Map<String, Object?>;
         final id = (wire[_idKey] as String?)?.toLowerCase();
-        final secret = wire[_secretKey] as String?;
+        // The secret comes from the keystore when one answered, else from the
+        // file itself (a platform with no keystore, or a file written before
+        // the secret moved there).
+        final secret = sealed ?? wire[_secretKey] as String?;
         if (id != null &&
             id.isNotEmpty &&
             secret != null &&
@@ -95,14 +109,18 @@ class ComputerIdentity {
       name: deviceName(),
       os: computerOs(),
       arch: computerArch(),
-      secret: _randomToken(32),
+      secret: sealed != null && sealed.length >= 32 ? sealed : _randomToken(32),
     );
+    // The secret is sealed by the platform when it has a keystore or a
+    // keychain; the identity file then holds no secret at all.  Without one
+    // the file is the app sandbox, which is what it was before.
+    final sealedNow = await _sealSecret(platform, identity.secret);
     try {
       file.parent.createSync(recursive: true);
       file.writeAsStringSync(
         jsonEncode(<String, Object?>{
           _idKey: identity.id,
-          _secretKey: identity.secret,
+          if (!sealedNow) _secretKey: identity.secret,
           _nameKey: identity.name,
         }),
       );
@@ -112,8 +130,35 @@ class ComputerIdentity {
     return identity;
   }
 
-  static File _file() =>
-      File('${Directory.systemTemp.path}/harness-computer/identity.json');
+  /// The secret the platform's keystore holds, or null when it has none.
+  static Future<String?> _sealedSecret(ComputerPlatform? platform) async {
+    if (platform == null) return null;
+    try {
+      final value = await platform.unseal(secretKey);
+      return value != null && value.length >= 32 ? value : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<bool> _sealSecret(
+    ComputerPlatform? platform,
+    String secret,
+  ) async {
+    if (platform == null) return false;
+    try {
+      return await platform.seal(secretKey, secret);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// The identity file: the platform's durable app directory when it gave
+  /// one, else the process's temporary directory (a widget test, a desktop
+  /// build that was handed none).
+  static File _file(String? directoryPath) => File(
+    '${directoryPath ?? Directory.systemTemp.path}/harness-computer/identity.json',
+  );
 
   /// An identity for this run only, when preferences are not answering.
   factory ComputerIdentity.ephemeral() => ComputerIdentity(

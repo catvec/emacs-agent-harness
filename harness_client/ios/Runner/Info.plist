@@ -38,7 +38,7 @@
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Voice mode uses the microphone to speak with the agent.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Live camera video for a call with the agent.</string>
+	<string>A camera picture for the agent, and live camera video in a call.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Attach an image to a message for the agent to see.</string>
 	<key>UIApplicationSceneManifest</key>

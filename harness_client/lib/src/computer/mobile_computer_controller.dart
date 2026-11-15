@@ -11,7 +11,9 @@ import 'computer_capture_port.dart';
 import 'computer_file_store.dart';
 import 'computer_file_store_factory.dart';
 import 'computer_identity.dart';
+import 'computer_platform.dart';
 import 'mobile_computer_endpoint.dart';
+import 'session_computer_capture_port.dart';
 
 /// The app's view of this phone as a computer.
 ///
@@ -24,9 +26,15 @@ class MobileComputerController extends ChangeNotifier
     with WidgetsBindingObserver {
   MobileComputerController({
     this.preferences,
+    ComputerPlatform? platform,
+    SystemControlPort? control,
+    ComputerMediaCapture? media,
     ComputerCapturePort? capture,
     ComputerFileStore? files,
-  }) : _capture = capture ?? NoopComputerCapturePort(),
+  }) : platform = platform ?? computerPlatformFor(),
+       control = control ?? systemControlFor(),
+       _media = media ?? const NoopComputerMediaCapture(),
+       _capture = capture,
        _files = files {
     try {
       WidgetsBinding.instance.addObserver(this);
@@ -37,8 +45,26 @@ class MobileComputerController extends ChangeNotifier
   }
 
   final SharedPreferences? preferences;
-  final ComputerCapturePort _capture;
+
+  /// The phone's own OS: its permission answers, its durable private
+  /// directory, its keystore and its settings page for system control.
+  final ComputerPlatform platform;
+
+  /// The person's opt-in system control, which is the only pointer and
+  /// keyboard this phone offers.  It is [UnsupportedSystemControl] on a
+  /// platform with no public input injection (iOS), and nothing advertises it
+  /// until the OS says the person enabled it.
+  final SystemControlPort control;
+
+  final ComputerMediaCapture _media;
+  ComputerCapturePort? _capture;
   ComputerFileStore? _files;
+
+  /// What the OS last said, as a value.  Nothing on the connection path waits
+  /// for a channel; [readPlatform] fills it once and again when the person
+  /// asks or the app comes back to the front.
+  PlatformFacts _facts = const PlatformFacts();
+  PlatformFacts get platformFacts => _facts;
   bool _observing = false;
   bool _disposed = false;
 
@@ -58,6 +84,17 @@ class MobileComputerController extends ChangeNotifier
     'clipboard',
   ];
 
+  /// The capabilities that drive the phone rather than read it.  They are
+  /// listed apart on the page, because a person's `pointer` or `keyboard`
+  /// grant reaches other apps and the rest do not.
+  static const controlCapabilityNames = <String>['pointer', 'keyboard'];
+
+  /// Every capability the phone can offer, in the order a page lists them.
+  static const allCapabilityNames = <String>[
+    ...capabilityNames,
+    ...controlCapabilityNames,
+  ];
+
   ComputerIdentity? get identity => _identity;
   MobileComputerEndpoint? get endpoint => _endpoint;
   bool get isReady => _ready;
@@ -70,6 +107,92 @@ class MobileComputerController extends ChangeNotifier
   ComputerCapabilities get capabilities =>
       _endpoint?.capabilities ?? ComputerCapabilities.empty;
   ComputerCaptureSource? get captureSource => _endpoint?.status.captureSource;
+
+  /// Whether the OS says the person's system control is on, so the page can
+  /// say `Enabled` or `System control off` without guessing.  Before the OS is
+  /// asked it reads [SystemControlState.disabled] on a platform that has the
+  /// control at all, which is the true thing to say: it is off until a person
+  /// turns it on in the OS.
+  SystemControlState get systemControl =>
+      _facts.read || !control.supported
+      ? _facts.control
+      : SystemControlState.disabled;
+
+  /// Whether this platform can drive other apps at all.  A person still has
+  /// to enable it in the OS; this only says the door exists.
+  bool get controlAvailable => control.supported;
+
+  /// Open the OS's own settings page where the person enables or withdraws
+  /// the control.  The app never enables it itself.
+  Future<void> openControlSettings() async {
+    final opened = await control.openSettings();
+    _notice = opened ? null : 'No system control';
+    if (!opened && !control.supported) {
+      _error = 'No system control on this platform';
+    }
+    // The person may have just turned it on, so the OS is asked again.
+    if (opened) await refreshPlatform();
+    notifyListeners();
+  }
+
+  /// Re-read what the OS says: a permission the person changed in the system
+  /// settings while the app was open, and the system control they enabled.
+  /// Nothing is captured and nothing is started.
+  Future<void> refreshPlatform() async {
+    await readPlatform();
+    await _endpoint?.refreshCapabilities();
+    await _endpoint?.update();
+    notifyListeners();
+  }
+
+  /// Hand a freshly read [facts] to the endpoint that is bound now, so its
+  /// advertised control follows the OS.  Called from [readPlatform].
+  void _pushFacts() {
+    final endpoint = _endpoint;
+    if (endpoint == null) return;
+    unawaited(endpoint.refreshCapabilities());
+  }
+
+  /// Ask the OS once, with a bound, and hold what it says.  A channel that does
+  /// not answer (a test, the web, a desktop build) leaves the facts unread: the
+  /// page then says `Not checked` instead of inventing a permission state, and
+  /// nothing on the connection path was ever waiting for it.
+  Future<void> readPlatform() async {
+    final reading = _reading;
+    if (reading != null) {
+      await reading;
+      return;
+    }
+    final started = _readPlatform();
+    _reading = started;
+    try {
+      _facts = await started;
+    } finally {
+      _reading = null;
+    }
+    // The OS has now answered, so what this phone advertises may change: the
+    // endpoint reads the same held value, and is told to look again.
+    _pushFacts();
+    notifyListeners();
+  }
+
+  Future<PlatformFacts>? _reading;
+
+  Future<PlatformFacts> _readPlatform() async {
+    try {
+      return await platform.facts();
+    } catch (_) {
+      // No answer: the platform has nothing to say here, and the app goes on.
+      // A platform that never answers at all (a widget test's channel, the
+      // web) leaves this future open, which is why nothing on the connection
+      // path awaits it and no timer is kept to give up on it.
+      return _facts;
+    }
+  }
+
+  /// The capture port this phone actually offers with, for the page's
+  /// `Capture` state and for a test that replaces it.
+  ComputerCapturePort? get capturePort => _capture;
   DateTime? get captureStartedAt => _endpoint?.status.captureStartedAt;
   bool get fileWritesEnabled => _files?.writesEnabled ?? false;
   ComputerFileStore? get files => _files;
@@ -88,28 +211,59 @@ class MobileComputerController extends ChangeNotifier
 
   /// Load the identity, the scoped files and the saved opt-ins.  Called
   /// before the first connection and again when one replaces another.
+  ///
+  /// The identity is kept under the platform's own protection (the Android
+  /// Keystore or the iOS Keychain), and the files are the app's durable
+  /// private directory.  A platform with neither still starts: a run-only
+  /// identity and the process's temporary directory are honest fallbacks, and
+  /// [storageDetail] says which one is in use.
   Future<void> ready() async {
     if (_ready) return;
+    // The identity and the file store are made from what the OS already said
+    // ([readPlatform] is called once from `main`), so this never waits on a
+    // channel: a connection must not hang on one, and a test has none.
     try {
-      _identity = await loadMobileComputerIdentity(preferences: preferences);
+      _identity = await loadMobileComputerIdentity(
+        preferences: preferences,
+        platform: _facts.secure ? platform : null,
+        directoryPath: _facts.storageRoot,
+      );
     } catch (_) {
-      // A test or a platform without the preferences channel still gets an
-      // identity, kept for this run only.
+      // A test or a platform without the channel still gets an identity,
+      // kept for this run only.
       _identity = ComputerIdentity.ephemeral();
     }
     try {
-      _files ??= openComputerFileStore();
+      _files ??= openComputerFileStore(rootPath: _facts.storageRoot);
     } catch (_) {
       // No app documents here (a widget test, the web): an honest store
       // that offers no files.
       _files ??= const UnavailableComputerFileStore();
     }
+    _capture ??= SessionComputerCapturePort(
+      platform: platform,
+      media: _media,
+      facts: () => _facts,
+    );
     _enabled.addAll(<String, bool>{
-      for (final name in capabilityNames) name: false,
+      for (final name in allCapabilityNames) name: false,
     });
     _ready = true;
     notifyListeners();
+    // The OS is asked after the app is usable, never before it.  It fills the
+    // capability states the page shows; nothing waits for it.
+    if (!_facts.read) unawaited(readPlatform());
   }
+
+  /// Where the identity and the scoped files are kept, for the page.  It is
+  /// a fact about this run, not a promise: `App documents` once the OS gave
+  /// the app its own durable directory, `Temporary directory` when it gave
+  /// none, and `Not checked` before the OS was asked at all.
+  String get storageDetail => !_facts.read
+      ? 'Not checked'
+      : _facts.storageRoot == null
+      ? 'Temporary directory'
+      : 'App documents';
 
   /// Use [transport] for the harness the app is connected to now, and
   /// attach this phone again if it is registered there.  A fresh transport
@@ -127,8 +281,16 @@ class MobileComputerController extends ChangeNotifier
     final endpoint = MobileComputerEndpoint(
       identity: _identity!,
       transport: transport,
-      capture: _capture,
+      capture: _capture ??= SessionComputerCapturePort(
+        platform: platform,
+        media: _media,
+        facts: () => _facts,
+      ),
       files: _files!,
+      control: control,
+      // What the OS last said, not a fresh ask: this is the connection
+      // path, and a platform channel is never waited on here.
+      controlState: () => systemControl,
       enabled: _enabled,
     );
     _endpoint = endpoint;
@@ -173,6 +335,14 @@ class MobileComputerController extends ChangeNotifier
   /// stops a capture that is running and advertises the change.
   Future<void> setEnabled(String capability, bool enabled) async {
     final endpoint = _endpoint;
+    if (enabled &&
+        controlCapabilityNames.contains(capability) &&
+        !controlAvailable) {
+      _error = 'No system control on this platform';
+      _enabled[capability] = false;
+      notifyListeners();
+      return;
+    }
     _enabled[capability] = enabled;
     if (endpoint != null) {
       endpoint.setEnabled(capability, enabled);
@@ -323,4 +493,10 @@ class MobileComputerController extends ChangeNotifier
 
 Future<ComputerIdentity> loadMobileComputerIdentity({
   SharedPreferences? preferences,
-}) => ComputerIdentity.load(preferences: preferences);
+  ComputerPlatform? platform,
+  String? directoryPath,
+}) => ComputerIdentity.load(
+  preferences: preferences,
+  platform: platform,
+  directoryPath: directoryPath,
+);

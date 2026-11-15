@@ -3,6 +3,19 @@ import 'dart:typed_data';
 
 import 'computer_capabilities.dart';
 
+/// A capture the platform refused, with the state it means.  A port throws
+/// this instead of a bare error so the endpoint can put the harness's own
+/// noun in the tool result (`Permission denied`, `Foreground only`).
+class ComputerCaptureRefused implements Exception {
+  const ComputerCaptureRefused(this.state, this.reason);
+
+  final ComputerCapabilityState state;
+  final String reason;
+
+  @override
+  String toString() => reason;
+}
+
 /// A source a phone can capture from.
 enum ComputerCaptureSource {
   screen('view'),

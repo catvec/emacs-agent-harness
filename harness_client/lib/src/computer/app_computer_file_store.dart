@@ -28,13 +28,16 @@ class AppComputerFileStore implements ComputerFileStore {
   final Directory root;
   bool _writesEnabled;
 
-  static ComputerFileStore open({bool writesEnabled = false}) {
-    // The app's own private directory, with no platform channel to wait on.
-    // On a phone this is the app's cache directory: inside the sandbox, and
-    // the OS may reclaim it.  Imported user files are copies here, never the
-    // original path.
+  static ComputerFileStore open({
+    bool writesEnabled = false,
+    String? rootPath,
+  }) {
+    // The platform's durable private directory when it gave one (`filesDir`
+    // on Android, Documents on iOS), else the process's temporary directory.
+    // Either way it is inside the app sandbox, and imported user files are
+    // copies here, never the original path.
     final root = Directory(
-      p.join(Directory.systemTemp.path, 'harness-computer'),
+      p.join(rootPath ?? Directory.systemTemp.path, 'harness-computer'),
     );
     return AppComputerFileStore(root, writesEnabled: writesEnabled);
   }
@@ -362,5 +365,10 @@ class AppComputerFileStore implements ComputerFileStore {
 }
 
 /// The platform's file store, used by the conditional factory on dart:io.
-ComputerFileStore openPlatformComputerFileStore({bool writesEnabled = false}) =>
-    AppComputerFileStore.open(writesEnabled: writesEnabled);
+ComputerFileStore openPlatformComputerFileStore({
+  bool writesEnabled = false,
+  String? rootPath,
+}) => AppComputerFileStore.open(
+  writesEnabled: writesEnabled,
+  rootPath: rootPath,
+);
