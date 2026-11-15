@@ -2800,6 +2800,136 @@ programs on any host it used to hold for."
         ;; What the answer carries is the cover picked; picking none, the one it started on.
         (should (equal '(:cover "host-programs") (harness-ui-pending--answer-extras r "allow-always")))))))
 
+;;;; Why the request is asked
+
+;; The panel says why the person is asked, above the call, and the one
+;; reason that is a safety judgment wears the caution face and says it is
+;; unsafe.  The rest say what they are: no verdict came, the mode asks, a
+;; directory is outside, only the person answers.  A request from an
+;; older harness carries no reason, and its panel is drawn as it was.
+
+(defun harness-ui-pending-test-why-item (&optional id why)
+  "Return a pending item for a shell call, ID by default \"why\", with WHY."
+  (list :id (or id "why") :kind "permission"
+        :payload (append (list :title "Bash: rm -rf build && make" :tool "bash" :kind "exec"
+                               :input '(:command "rm -rf build && make")
+                               :options '("allow-once" "deny-once"))
+                         (and why (list :why why)))))
+
+(defun harness-ui-pending-test-why-unsafe ()
+  "The reason the harness sends for a call the judge weighed and would deny."
+  '(:code judge-deny :label "Safety check · denied by the permission judge" :unsafe t
+    :detail "it force pushes to the shared remote"))
+
+(ert-deftest harness-ui-pending-panel-says-why-a-safety-judgment-was-made ()
+  "A request the judge would deny says so on its own line, in the caution
+face, with the judge's words under it, above the call it is about."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-why-item "unsafe" (harness-ui-pending-test-why-unsafe))))
+      (let ((text (harness-ui-pending-test-rendered sid "unsafe")))
+        ;; The exact words of the line, and the detail under it.
+        (should (string-search (concat "   Why · Safety check · denied by the permission judge\n"
+                                       "     it force pushes to the shared remote\n")
+                               text))
+        ;; Above the call, and above the answers.
+        (should (< (string-search "Why ·" text)
+                   (string-search "command: rm -rf build && make" text)
+                   (string-search "[Allow]" text)))
+        (should-not (string-search "Model summary" text)))
+      ;; The label and the detail are drawn, and the label is the unsafe face.
+      (with-temp-buffer
+        (let ((harness-ui-session-id sid))
+          (harness-ui-pending--insert-permission (harness-ui-pending-record sid "unsafe")))
+        (goto-char (point-min))
+        (search-forward "Safety check · denied")
+        (should (harness-ui-pending-test-face-p (1- (point)) 'harness-ui-pending-why-unsafe-face))
+        (goto-char (point-min))
+        (search-forward "Why ·")
+        (should (harness-ui-pending-test-face-p (1- (point)) 'harness-dim-face))
+        (goto-char (point-min))
+        (search-forward "it force pushes")
+        (should (harness-ui-pending-test-face-p (1- (point)) 'harness-dim-face))
+        ;; The tooltip says what the line is: a judgment the person decides on.
+        (goto-char (point-min))
+        (search-forward "Safety check")
+        (let ((help (get-text-property (1- (point)) 'help-echo)))
+          ;; The tooltip, whole.
+          (should (equal (concat "Why · safety judgment · the auto-mode judge would deny this call"
+                                 " · unsafe · your decision")
+                         help))))
+      (should (harness-ui-pending--why-unsafe-p (harness-ui-pending-record sid "unsafe"))))))
+
+(ert-deftest harness-ui-pending-panel-says-why-with-no-safety-judgment ()
+  "The reasons that are no judgment on the call say exactly that, in their
+own words and without the unsafe face: the mode, a directory, a missing
+verdict."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-sync
+       sid (list (harness-ui-pending-test-why-item
+                  "mode" '(:code mode :label "Permission mode" :unsafe nil :detail nil))
+                 (harness-ui-pending-test-why-item
+                  "timeout" '(:code judge-timeout :label "No safety verdict · judge timeout"
+                                :unsafe :false :detail "it took longer than 30s"))
+                 (harness-ui-pending-test-why-item
+                  "access" '(:code access :label "Directory access" :unsafe nil
+                               :detail "/tmp/notes is outside the allowed directories"))))
+      ;; A reason with no detail is its line alone.
+      (should (string-search "   Why · Permission mode\n"
+                             (harness-ui-pending-test-rendered sid "mode")))
+      (should (string-search (concat "   Why · No safety verdict · judge timeout\n"
+                                     "     it took longer than 30s\n")
+                             (harness-ui-pending-test-rendered sid "timeout")))
+      (should (string-search "   Why · Directory access\n"
+                             (harness-ui-pending-test-rendered sid "access")))
+      ;; None of them is marked unsafe, whatever the wire said.
+      (dolist (pid '("mode" "timeout" "access"))
+        (should-not (harness-ui-pending--why-unsafe-p (harness-ui-pending-record sid pid))))
+      (with-temp-buffer
+        (let ((harness-ui-session-id sid))
+          (harness-ui-pending--insert-permission (harness-ui-pending-record sid "timeout")))
+        (goto-char (point-min))
+        (search-forward "No safety verdict")
+        (should (harness-ui-pending-test-face-p (1- (point)) 'harness-ui-pending-why-face))
+        (goto-char (point-min))
+        (search-forward "No safety verdict")
+        (let ((help (get-text-property (1- (point)) 'help-echo)))
+          (should (equal "Why · no safety judgment · the prompt's own reason" help)))))))
+
+(ert-deftest harness-ui-pending-panel-without-a-reason-is-as-it-was ()
+  "A request from a harness that sent no reason is drawn as it always was:
+no line, rather than an invented one."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-sync sid (list (harness-ui-pending-test-why-item "plain" nil)))
+      (let ((text (harness-ui-pending-test-rendered sid "plain")))
+        (should-not (string-search "Why ·" text))
+        (should (string-search "   command: rm -rf build && make\n" text))
+        (should (string-search "[Allow]" text)))
+      (should-not (harness-ui-pending--why (harness-ui-pending-record sid "plain")))
+      (should-not (harness-ui-pending--why-unsafe-p (harness-ui-pending-record sid "plain"))))))
+
+(ert-deftest harness-ui-pending-reason-survives-the-news-of-a-summary ()
+  "The reason is part of the request, not of what a model wrote: the summary
+that comes later leaves the reason line where it is."
+  (harness-ui-pending-test-with
+    (let ((sid (harness-ui-pending-test-session)))
+      (harness-ui-pending-sync
+       sid (list (harness-ui-pending-test-why-item
+                  "p1" (append (harness-ui-pending-test-why-unsafe) '(:summary nil)))))
+      (harness-ui-pending--on-event "session/pending-updated"
+                                    (list sid "p1" '(:summary "Deletes the build directory."
+                                                        :summary-model "claude:haiku" :summarizing nil)))
+      (let ((text (harness-ui-pending-test-rendered sid "p1")))
+        (should (string-search "   Why · Safety check · denied by the permission judge\n" text))
+        (should (string-search "     it force pushes to the shared remote\n" text))
+        (should (string-search "   Model summary · Deletes the build directory.\n" text))
+        ;; The reason is above the summary, which is above the answers.
+        (should (< (string-search "Why ·" text)
+                   (string-search "Model summary ·" text)
+                   (string-search "[Allow]" text)))))))
+
 ;;;; A model's summary of the call
 
 (defvar harness-ui-pending-test-changed nil

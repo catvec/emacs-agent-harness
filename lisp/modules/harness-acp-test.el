@@ -1256,6 +1256,54 @@ forwarded event; a request made without one has the keys empty."
       (should (equal (list (list sid "s1" '(:summary "Runs make." :summary-model "claude:haiku" :summarizing nil)))
                      (harness-acp-test-events "session/pending-updated"))))))
 
+(ert-deftest harness-acp-local-permission-request-carries-its-reason ()
+  "A request says in `_harness.why' why it is put to the person, in the
+harness's words: a safety judgment, no verdict, the mode, a directory.
+The label, the code, the unsafe flag and the detail go as the harness
+worded them, and a request made without a reason carries none."
+  (harness-acp-test-with
+    (let* ((conn (harness-acp-test-connect))
+           (sid (harness-acp-test-new-session conn))
+           (why-of (lambda (pid)
+                     (harness-test-wait
+                      (lambda () (cl-find-if (lambda (m) (and (equal (car m) "session/request_permission")
+                                                              (equal pid (plist-get (plist-get (nth 1 m) :_harness)
+                                                                                    :pendingId))))
+                                             harness-acp-test-messages)))
+                     (plist-get (plist-get (nth 1 (cl-find-if
+                                                   (lambda (m) (equal pid (plist-get (plist-get (nth 1 m) :_harness)
+                                                                                    :pendingId)))
+                                                   harness-acp-test-messages))
+                                           :_harness)
+                                :why))))
+      ;; A judge's denial: the one unsafe reason, with its own words.
+      (harness-emit 'permission/requested sid
+                    (list :id "w1" :kind 'permission
+                          :payload (list :tool "bash" :kind 'exec :input '(:command "make")
+                                         :why (list :code 'judge-deny
+                                                    :label "Safety check · denied by the permission judge"
+                                                    :unsafe t :detail "it force pushes"))))
+      (let ((why (funcall why-of "w1")))
+        ;; The wire spells a code as its name, as it spells every symbol.
+        (should (equal "judge-deny" (plist-get why :code)))
+        (should (equal "Safety check · denied by the permission judge" (plist-get why :label)))
+        (should (eq t (plist-get why :unsafe)))
+        (should (equal "it force pushes" (plist-get why :detail))))
+      ;; A mode that asks: no judgment, and it says so.
+      (harness-emit 'permission/requested sid
+                    (list :id "w2" :kind 'permission
+                          :payload (list :tool "bash" :kind 'exec
+                                         :why (list :code 'mode :label "Permission mode"
+                                                    :unsafe nil :detail nil))))
+      (let ((why (funcall why-of "w2")))
+        (should (equal "mode" (plist-get why :code)))
+        (should-not (plist-get why :unsafe))
+        (should-not (plist-get why :detail)))
+      ;; A request from a stage that named no reason carries none.
+      (harness-emit 'permission/requested sid
+                    (list :id "w3" :kind 'permission :payload (list :tool "bash" :kind 'exec)))
+      (should-not (funcall why-of "w3")))))
+
 (ert-deftest harness-acp-local-directory-permission-options ()
   "Every request is offered the same options, under the same names.
 A tool prompt, the jail's prompt about a directory and an agent's own

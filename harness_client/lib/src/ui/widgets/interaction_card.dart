@@ -394,6 +394,10 @@ class _PendingActionCardState extends State<PendingActionCard> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
           children: [
+            // Why the person is asked, before the call itself: a safety
+            // judgment on it, or the reason there was none.
+            if (request.why != null)
+              _WhyNote(why: request.why!, accent: accent),
             if (input.isNotEmpty)
               Container(
                 constraints: const BoxConstraints(maxHeight: 120),
@@ -901,6 +905,93 @@ class _DiagramView extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// Why the card asks: the harness's reason, in its own words, with
+/// the words behind it.  A safety judgment on the call wears the card's
+/// amber and says *Unsafe*; every other reason says plainly that no
+/// judgment was made (the judge timed out, could not be asked, answered
+/// unreadably), or that the mode, a directory or a confirmation is why.
+/// The detail is data — the judge's or the harness's words — and is
+/// shown as such, cut and masked where the harness made it.
+class _WhyNote extends StatelessWidget {
+  const _WhyNote({required this.why, required this.accent});
+
+  final PermissionWhy why;
+  final Color accent;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final detail = why.detail;
+    final unsafe = why.unsafe;
+    return Semantics(
+      container: true,
+      label: 'Why · ${why.label}'
+          '${unsafe ? ' · unsafe · your decision' : ''}'
+          '${detail == null ? '' : ' · $detail'}',
+      child: Container(
+        key: const ValueKey('permission-why'),
+        width: double.infinity,
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.fromLTRB(11, 8, 11, 9),
+        decoration: BoxDecoration(
+          color: unsafe
+              ? accent.withValues(alpha: 0.10)
+              : theme.colorScheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: unsafe
+                ? accent.withValues(alpha: 0.45)
+                : theme.colorScheme.outlineVariant.withValues(alpha: 0.7),
+          ),
+        ),
+        child: ExcludeSemantics(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    unsafe
+                        ? Icons.warning_amber_rounded
+                        : Icons.info_outline_rounded,
+                    size: 15,
+                    color: unsafe
+                        ? accent
+                        : theme.colorScheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Why',
+                    style: HarnessText.meta(
+                      context,
+                    ).copyWith(fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      why.label,
+                      style: HarnessText.meta(context).copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: unsafe ? accent : null,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              if (detail != null)
+                Padding(
+                  padding: const EdgeInsets.only(left: 21, top: 3),
+                  child: Text(detail, style: HarnessText.caption(context)),
+                ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

@@ -359,6 +359,9 @@ ITEM is (:id :kind :payload) in the wire shape."
             :commands (plist-get payload :commands) :covers (plist-get payload :covers)
             :ladder (plist-get payload :ladder) :cover (plist-get payload :cover)
             :reason (plist-get payload :reason)
+            ;; Why the user is asked, as the harness worded it: a safety
+            ;; judgment, no verdict, a mode or a directory.
+            :why (plist-get payload :why)
             :summary (plist-get payload :summary) :summary-model (plist-get payload :summary-model)
             :summarizing (and (harness-json-true-p (plist-get payload :summarizing)) t)
             :options (plist-get payload :options)))))
@@ -1437,6 +1440,8 @@ pattern, so it stays over the one line."
             "\n")
     (dolist (line (harness-ui-pending--permission-facts r))
       (insert (propertize (concat "   " line "\n") 'face 'harness-dim-face)))
+    ;; Why the user is asked, above the call it is about.
+    (harness-ui-pending--insert-why r)
     (when (plist-get r :input)
       (harness-ui-pending--insert-input r))
     (when-let* ((reason (plist-get r :reason)))
@@ -1455,6 +1460,74 @@ pattern, so it stays over the one line."
     (when-let* ((key (and harness-ui-pending-box-hints (nth 1 (car buttons)))))
       (insert "   " (harness-compose-panel-hint key) "\n"))
     (harness-ui-pending--decorate start (point) pid (harness-ui-pending--permission-map r))))
+
+;;;;; Why the request is asked
+;;
+;; A panel that only said "Permission" left the user guessing whether
+;; the call was judged unsafe, or the mode simply asked, or a directory
+;; was wanted.  The harness sends the reason with the request (`:why',
+;; see "Why a prompt is asked" in harness-perms.el) and the panel says
+;; it on a line of its own, under the facts and above what a model wrote:
+;;
+;;   Why · Safety check · denied by the permission judge
+;;     it force pushes to the shared remote
+;;
+;; A safety judgment wears `harness-caution-face' and is marked unsafe,
+;; so a call the judge weighed stands out from one nobody judged.  The
+;; other reasons say what they are: no verdict came, the mode asks, a
+;; directory is outside the allowed directories, only the user can
+;; answer.  The detail is the judge's own words or the harness's, and is
+;; shown as what it is: data, cut and masked of secrets where it was
+;; made, never a second copy of the call's arguments.
+
+(defface harness-ui-pending-why-face '((t :inherit bold))
+  "Face of the reason a permission request is put to the user."
+  :group 'harness-ui-pending)
+
+(defface harness-ui-pending-why-unsafe-face '((t :inherit (harness-caution-face bold)))
+  "Face of a reason that is a safety judgment on the call."
+  :group 'harness-ui-pending)
+
+(defconst harness-ui-pending--why-label "Why ·"
+  "What starts the line of the reason a permission request is asked.")
+
+(defun harness-ui-pending--why (r)
+  "Return the `:why' of permission record R, or nil when it carries none.
+It is (:code CODE :label LABEL :unsafe BOOL :detail TEXT) as the harness
+sent it.  A request from an older harness has none, and its panel is
+drawn as it was: no reason line rather than an invented one."
+  (let ((why (plist-get r :why)))
+    (and (listp why) (plist-get why :label) why)))
+
+(defun harness-ui-pending--why-unsafe-p (r)
+  "Non-nil when permission record R's reason is a safety judgment on its call."
+  (let ((why (harness-ui-pending--why r)))
+    (and (harness-json-true-p (plist-get why :unsafe)) t)))
+
+(defun harness-ui-pending--why-help (r)
+  "Return the tooltip of the reason line of permission record R."
+  (if (harness-ui-pending--why-unsafe-p r)
+      "Why · safety judgment · the auto-mode judge would deny this call · unsafe · your decision"
+    "Why · no safety judgment · the prompt's own reason"))
+
+(defun harness-ui-pending--insert-why (r)
+  "Insert the line of why permission record R is asked, and the detail.
+Nothing when the request carries no reason: an older harness sent none,
+and the panel is drawn as it was."
+  (when-let* ((why (harness-ui-pending--why r)))
+    (let ((label (format "%s" (plist-get why :label)))
+          (detail (plist-get why :detail)))
+      (insert (propertize (concat "   " (propertize harness-ui-pending--why-label 'face 'harness-dim-face)
+                                  " "
+                                  (propertize label 'face (if (harness-ui-pending--why-unsafe-p r)
+                                                              'harness-ui-pending-why-unsafe-face
+                                                            'harness-ui-pending-why-face))
+                                  "\n")
+                          'wrap-prefix "     "
+                          'help-echo (harness-ui-pending--why-help r)))
+      (when (and (stringp detail) (not (string-blank-p detail)))
+        (insert (propertize (concat "     " detail "\n") 'face 'harness-dim-face
+                            'wrap-prefix "     "))))))
 
 ;;;;; What a model says the call does
 ;;

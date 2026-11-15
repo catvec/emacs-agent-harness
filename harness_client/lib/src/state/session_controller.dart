@@ -1131,6 +1131,10 @@ class SessionController extends ChangeNotifier {
           'commands': payload['commands'],
           'covers': payload['covers'],
           'reason': payload['reason'],
+          // Why the person is asked: a safety judgment, no verdict, the
+          // mode, a directory.  Kept in the payload as the harness asked it,
+          // so a request a reconnect recovered says the same as a live one.
+          'why': payload['why'],
           // A cheap model's summary of the call, or that one is on its way
           // (the harness keeps these in the payload as it asks them).
           'summary': payload['summary'],

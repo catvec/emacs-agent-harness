@@ -1925,6 +1925,16 @@ a client that lets the user choose answers with the id of the chosen
 step in `_harness.cover' of its result, next to the outcome; one that
 does not gets the step it starts on.
 
+The request says why it is asked in `_harness.why', a plist
+{:code, :label, :unsafe, :detail} (see \"Why a prompt is asked\" in
+harness-perms.el): a client that draws its own words reads the code, and
+one that shows the harness's shows the label.  `:unsafe` is true only
+when the auto-mode judge weighed the call and would deny it; a judge
+that timed out, failed, could not be asked, or answered in no shape the
+strict reader takes made no judgment, and its code says so rather than
+suggesting one.  A client that knows nothing of the field shows the
+request as before.
+
 A cheap model summarizes what the call would do while the request
 waits (see \"Summaries of what a prompt asks\" in harness-perms.el).
 The request goes out at once, saying in `_harness.summarizing' that
@@ -1955,6 +1965,10 @@ shows the request as before."
                            :ladder (plist-get payload :ladder)
                            :cover (plist-get payload :cover)
                            :reason (plist-get payload :reason)
+                           ;; Why the prompt is shown: a safety
+                           ;; judgment, no verdict, a mode or a
+                           ;; directory (see "Why a prompt is asked").
+                           :why (plist-get payload :why)
                            :summary (plist-get payload :summary)
                            :summaryModel (plist-get payload :summary-model)
                            :summarizing (plist-get payload :summarizing)))

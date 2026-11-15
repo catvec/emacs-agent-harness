@@ -1610,6 +1610,320 @@ wrong shape, and with `harness-perms-claude-auto-mode' off."
          (should-not (harness-perms-claude-auto-mode-rules))
          (should (equal harness-perms--judge-system (harness-perms--judge-system-prompt))))))))
 
+;;;; Why a prompt is asked
+
+;; Every prompt says why the user is asked, and the one reason that is a
+;; safety judgment on the call -- the auto-mode judge weighing it and
+;; denying it -- is the only one that says so.  A judge that timed out,
+;; failed, could not be asked, or answered in no shape the strict reader
+;; takes made no judgment, and its prompt says that instead.  These tests
+;; hold each reason apart, and hold the reason to the request that waits:
+;; the prompt a client draws, and the one a reconnect recovers, are the
+;; same prompt.
+
+(defun harness-perms-test--prompt-why (&optional pid)
+  "Return the `:why' of the waiting prompt PID, by default the newest."
+  (plist-get (harness-perms-test--payload pid) :why))
+
+(defun harness-perms-test--prompt-for (request)
+  "Run REQUEST until its prompt waits; return (PROMISE . PID)."
+  (let ((n (length harness-perms-test--pending))
+        (p (harness-run-filter-async 'permission/decide (list :behavior 'ask) request)))
+    (harness-test-wait (lambda () (> (length harness-perms-test--pending) n)) 2 "the prompt")
+    (cons p (plist-get (car harness-perms-test--pending) :id))))
+
+(ert-deftest harness-perms-a-prompt-says-the-judge-found-the-call-unsafe ()
+  "A judge that would deny an interactive session's call puts it to the user
+with `:why' `judge-deny': the one reason marked unsafe, carrying the
+judge's own words.  The verdict's `:judge-deny' and `:reason' stay as they
+were, so every reader of them keeps its meaning."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (harness-perms-test--install-pending)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
+  (let* ((harness-perms-auto-model "judge:x")
+         (probe (harness-perms-test--judge-provider
+                 '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"it force pushes to the shared remote\"}")
+                   (:type done :stop-reason end-turn))))
+         (call (harness-perms-test--prompt-for (harness-perms-test--request "t_exec" 'exec))))
+    (should (= 1 (length (funcall probe 'requests))))
+    (let ((why (harness-perms-test--prompt-why (cdr call))))
+      (should (eq 'judge-deny (plist-get why :code)))
+      (should (harness-json-true-p (plist-get why :unsafe)))
+      (should (equal "Safety check · denied by the permission judge" (plist-get why :label)))
+      (should (equal "it force pushes to the shared remote" (plist-get why :detail))))
+    ;; The prompt still says the judge objected, in the words it always used.
+    (should (string-match-p "\\`The permission judge would deny this call: it force pushes"
+                            (plist-get (harness-perms-test--payload (cdr call)) :reason)))
+    (harness-call 'permission/answer "s1" (cdr call) "deny-once")
+    (should (eq 'deny (plist-get (harness-test-await (car call)) :behavior)))))
+
+(ert-deftest harness-perms-a-prompt-the-mode-asks-is-no-safety-judgment ()
+  "A call an ordinary ask mode puts to the user says the mode asked, and
+carries no claim that anything weighed the call: `mode', not unsafe."
+  (harness-perms-test--setup :permission-mode 'ask)
+  (harness-perms-test--install-pending)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :handler #'ignore)
+  (let* ((call (harness-perms-test--prompt-for (harness-perms-test--request "t_exec" 'exec)))
+         (why (harness-perms-test--prompt-why (cdr call))))
+    (should (eq 'mode (plist-get why :code)))
+    (should-not (plist-get why :unsafe))
+    (should (equal "Permission mode" (plist-get why :label)))
+    (should-not (plist-get why :detail))
+    (should-not (plist-get (harness-perms-test--payload (cdr call)) :reason))
+    (harness-call 'permission/answer "s1" (cdr call) "allow-once")
+    (should (eq 'allow (plist-get (harness-test-await (car call)) :behavior)))))
+
+(ert-deftest harness-perms-a-directory-prompt-says-access-not-safety ()
+  "A call reaching outside the allowed directories says the directory is the
+reason, and says nothing of a safety judgment; the agent's own request for
+one says that instead."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (let ((outside (harness-test-temp-dir)))
+    (harness-perms-test--install-pending)
+    (harness-define-tool "t_read" :label "Read" :kind 'read
+                         :paths (lambda (in) (list (plist-get in :path))) :handler #'ignore)
+    (let* ((call (harness-perms-test--prompt-for
+                  (harness-perms-test--request "t_read" 'read (expand-file-name "f" outside))))
+           (why (harness-perms-test--prompt-why (cdr call))))
+      (should (eq 'access (plist-get why :code)))
+      (should-not (plist-get why :unsafe))
+      (should (equal "Directory access" (plist-get why :label)))
+      ;; The detail is the harness's own phrase about where the path lies.
+      (should (string-match-p "outside the allowed directories" (plist-get why :detail)))
+      (should (plist-get (harness-perms-test--payload (cdr call)) :dir))
+      (harness-call 'permission/answer "s1" (cdr call) "deny-once")
+      (should (eq 'deny (plist-get (harness-test-await (car call)) :behavior))))
+    ;; The agent asking for a directory itself.
+    (harness-define-tool harness-perms-dir-tool :label "Directory" :kind 'meta
+                         :handler (lambda (_in _ctx) "granted"))
+    (let* ((call (harness-perms-test--prompt-for
+                  (list :session harness-perms-test--session :tool harness-perms-dir-tool :kind 'meta
+                        :input (list :path outside :reason "the notes are there")
+                        :call-id (harness-short-id))))
+           (why (harness-perms-test--prompt-why (cdr call))))
+      (should (eq 'access (plist-get why :code)))
+      (should-not (plist-get why :unsafe))
+      (should (string-match-p "the notes are there" (plist-get why :detail)))
+      (harness-call 'permission/answer "s1" (cdr call) "deny-once")
+      (harness-test-await (car call)))))
+
+(ert-deftest harness-perms-a-malformed-reply-says-the-reply-was-unreadable ()
+  "A judge whose reply holds no verdict made no judgment on the call, and the
+prompt says so: `judge-unreadable', not unsafe, with the reason no verdict
+came.  The fail-closed behaviour is what it was: the call is not run."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (harness-perms-test--install-pending)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
+  (let* ((harness-perms-auto-model "judge:x")
+         (probe (harness-perms-test--scripted-judge
+                 '(((:type text :delta "{\"allow\":\"ordinary work\"}")
+                    (:type done :stop-reason end-turn))
+                   ((:type text :delta "{\"allow\":\"ordinary work\"}")
+                    (:type done :stop-reason end-turn)))))
+         (call (harness-perms-test--prompt-for (harness-perms-test--request "t_exec" 'exec))))
+    ;; Asked twice, the correction the malformed reply earns, and no more.
+    (should (= 2 (length (funcall probe))))
+    (let ((why (harness-perms-test--prompt-why (cdr call))))
+      (should (eq 'judge-unreadable (plist-get why :code)))
+      (should-not (plist-get why :unsafe))
+      (should (equal "No safety verdict · unreadable judge reply" (plist-get why :label)))
+      (should (equal "its answer held no verdict" (plist-get why :detail))))
+    (harness-call 'permission/answer "s1" (cdr call) "deny-once")
+    (should (eq 'deny (plist-get (harness-test-await (car call)) :behavior)))))
+
+(ert-deftest harness-perms-a-judge-timeout-says-no-verdict-not-unsafe ()
+  "A judge that ran out of time made no judgment: the prompt says it timed
+out, and nothing on it says the call was found unsafe."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (harness-perms-test--install-pending)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing." :handler #'ignore)
+  (let* ((harness-perms-auto-model "judge:x")
+         (harness-perms--auto-timeout 0.2)
+         (cancelled nil))
+    (harness-define-provider 'judge
+      :label "Judge"
+      :complete (lambda (_req)
+                  (list :cancel (lambda () (setq cancelled t)))))
+    (let* ((call (harness-perms-test--prompt-for (harness-perms-test--request "t_exec" 'exec)))
+           (why (harness-perms-test--prompt-why (cdr call))))
+      (should cancelled)
+      (should (eq 'judge-timeout (plist-get why :code)))
+      (should-not (plist-get why :unsafe))
+      (should (equal "No safety verdict · judge timeout" (plist-get why :label)))
+      (should (string-match-p "it took longer than 0.2s" (plist-get why :detail)))
+      (harness-call 'permission/answer "s1" (cdr call) "deny-once")
+      (should (eq 'deny (plist-get (harness-test-await (car call)) :behavior))))))
+
+(ert-deftest harness-perms-a-failed-judge-call-says-it-failed ()
+  "A judge request that failed says that, with the failure's own words, and
+does not suggest anything was judged."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (harness-perms-test--install-pending)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :handler #'ignore)
+  (let* ((harness-perms-auto-model "judge:x")
+         (harness-retry-max-attempts 0))
+    (harness-define-provider 'judge :label "Judge"
+                             :complete (lambda (_req) (error "Cannot encode the request")))
+    (let* ((call (harness-perms-test--prompt-for (harness-perms-test--request "t_exec" 'exec)))
+           (why (harness-perms-test--prompt-why (cdr call))))
+      (should (eq 'judge-failed (plist-get why :code)))
+      (should-not (plist-get why :unsafe))
+      (should (equal "No safety verdict · failed judge call" (plist-get why :label)))
+      (should (string-match-p "Cannot encode the request" (plist-get why :detail)))
+      (harness-call 'permission/answer "s1" (cdr call) "deny-once")
+      (harness-test-await (car call)))))
+
+(ert-deftest harness-perms-a-judge-that-asked-for-the-user-says-no-verdict ()
+  "A judge that answered `ask' is no verdict, and the prompt says no verdict
+came rather than that the call was judged."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (harness-perms-test--install-pending)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :handler #'ignore)
+  (let* ((harness-perms-auto-model "judge:x")
+         (probe (harness-perms-test--judge-provider
+                 '((:type text :delta "{\"decision\":\"ask\"}")
+                   (:type done :stop-reason end-turn))))
+         (call (harness-perms-test--prompt-for (harness-perms-test--request "t_exec" 'exec))))
+    ;; An explicit ask is a decision, not a mistake: one call, no correction.
+    (should (= 1 (length (funcall probe 'requests))))
+    (let ((why (harness-perms-test--prompt-why (cdr call))))
+      (should (eq 'judge-asked (plist-get why :code)))
+      (should-not (plist-get why :unsafe))
+      (should (equal "No safety verdict · judge abstention" (plist-get why :label)))
+      (should (equal "it asked for the user" (plist-get why :detail))))
+    (harness-call 'permission/answer "s1" (cdr call) "deny-once")
+    (harness-test-await (car call))))
+
+(ert-deftest harness-perms-a-reason-is-masked-and-cut ()
+  "The words behind a reason are masked of secrets and cut: the prompt is a
+place a model's words are shown, and a judge that quoted a credential must
+not put it on the panel.  Nothing of the call's arguments is added."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (harness-perms-test--install-pending)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :handler #'ignore)
+  (let* ((harness-perms-auto-model "judge:x")
+         (long (make-string 1000 ?x))
+         ;; A live Stripe key's shape, which the default detectors know.
+         (value "sk_live_0123456789abcdef")
+         ;; What masking makes of it, worked out here so the assertion can
+         ;; name it without loading the secrets module for one function.
+         (placeholder "[redacted: stripe-key sha256:342e20de]")
+         (reason (format "it passes %s to %s" value long)))
+    ;; The secrets module is what masks text the harness shows, so the
+    ;; reason goes through it: a value the detectors know by its shape is
+    ;; gone from the prompt before it is drawn.
+    (harness-test-load-module 'secrets)
+    (harness-secrets-forget)
+    (let ((harness-secrets-mask t)
+          (harness-secrets-sources nil)
+          (harness-secrets-detectors 'default)
+          (harness-secrets-extra-detectors nil))
+      (harness-define-provider 'judge
+        :label "Judge"
+        :complete (lambda (req)
+                    (let ((cb (plist-get req :on-event)))
+                      (run-at-time 0.01 nil
+                                   (lambda ()
+                                     (funcall cb (list :type 'text :delta
+                                                       (harness-json-encode-text
+                                                        (list :decision "deny" :reason reason))))
+                                     (funcall cb '(:type done :stop-reason end-turn)))))
+                    (list :cancel #'ignore)))
+      (let* ((call (harness-perms-test--prompt-for (harness-perms-test--request "t_exec" 'exec)))
+             (why (harness-perms-test--prompt-why (cdr call)))
+             (detail (plist-get why :detail)))
+        (should (eq 'judge-deny (plist-get why :code)))
+        (should (harness-json-true-p (plist-get why :unsafe)))
+        ;; Masked, and said to be: the value is gone, the placeholder stands.
+        (should-not (string-match-p (regexp-quote value) detail))
+        (should (string-match-p (regexp-quote placeholder) detail))
+        ;; Cut: a model that rambles costs the panel a line, not a screen.
+        (should (<= (length detail) harness-perms--why-detail-chars))
+        (harness-call 'permission/answer "s1" (cdr call) "deny-once")
+        (harness-test-await (car call))))))
+
+(ert-deftest harness-perms-a-reason-is-told-apart-from-the-call ()
+  "A reason of each kind has its own code, its own label and its own
+`unsafe', and only the judge's own denial is unsafe."
+  (dolist (case '((judge-deny t "Safety check · denied by the permission judge")
+                  (judge-timeout nil "No safety verdict · judge timeout")
+                  (judge-unavailable nil "No safety verdict · judge unavailable")
+                  (judge-unreadable nil "No safety verdict · unreadable judge reply")
+                  (judge-failed nil "No safety verdict · failed judge call")
+                  (judge-empty nil "No safety verdict · empty judge reply")
+                  (judge-stopped nil "No safety verdict · incomplete judge reply")
+                  (mode nil "Permission mode")
+                  (access nil "Directory access")
+                  (confirm nil "Confirmation · yours alone")
+                  (away nil "Non-interactive mode · yours to turn on")))
+    (pcase-let ((`(,code ,unsafe ,label) case))
+      (ert-info ((format "code %s" code))
+        (let ((why (harness-perms--why code "detail")))
+          (should (eq code (plist-get why :code)))
+          (should (equal label (plist-get why :label)))
+          (should (equal (and unsafe t) (plist-get why :unsafe)))
+          (should (equal "detail" (plist-get why :detail))))))))
+
+(ert-deftest harness-perms-a-decision-names-the-reason-it-was-asked-for ()
+  "What a stage decided says why, and the prompt about it says the same:
+a judge's denial is unsafe, a missing verdict says which kind, and an
+ordinary undecided call is the mode's."
+  ;; The judge's denial, put to the user.
+  (let ((d (list :behavior 'ask :judge-deny t :reason "it wipes the disk")))
+    (should (equal (harness-perms--why 'judge-deny "it wipes the disk")
+                   (harness-perms--why-of d 'mode))))
+  ;; No verdict: the code says which kind, and it is never unsafe.
+  (dolist (case '((judge-timeout . "it took longer than 30s")
+                  (judge-failed . "it failed: a connection reset")
+                  (judge-empty . "it gave no answer")
+                  (judge-unreadable . "its answer held no verdict")))
+    (pcase-let ((`(,code . ,text) case))
+      (let* ((d (list :behavior 'ask :no-verdict text :no-verdict-code code))
+             (why (harness-perms--why-of d 'mode)))
+        (should (eq code (plist-get why :code)))
+        (should-not (plist-get why :unsafe))
+        (should (equal text (plist-get why :detail))))))
+  ;; A reason the decision itself carries wins.
+  (should (equal (harness-perms--why 'confirm "only you")
+                 (harness-perms--why-of
+                  (list :behavior 'ask :why (harness-perms--why 'confirm "only you")) 'mode)))
+  ;; Nothing said: the mode asked.
+  (should (eq 'mode (plist-get (harness-perms--why-of (list :behavior 'ask) 'mode) :code))))
+
+(ert-deftest harness-perms-a-recovered-prompt-says-the-same-why ()
+  "The reason is in the pending request the session keeps, so a client that
+connects while the prompt waits -- or reconnects after it did -- reads the
+same reason the live one was sent.  A prompt only the waiting table knew
+carries it too."
+  (harness-perms-test--setup :permission-mode 'auto)
+  (harness-perms-test--install-pending)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :handler #'ignore)
+  (let* ((harness-perms-auto-model "judge:x")
+         (probe (harness-perms-test--judge-provider
+                 '((:type text :delta "{\"decision\":\"deny\",\"reason\":\"it deletes the repository\"}")
+                   (:type done :stop-reason end-turn))))
+         (call (harness-perms-test--prompt-for (harness-perms-test--request "t_exec" 'exec)))
+         (pid (cdr call))
+         (sent (harness-perms-test--prompt-why pid)))
+    (should (= 1 (length (funcall probe 'requests))))
+    (should (eq 'judge-deny (plist-get sent :code)))
+    ;; The session keeps it: this is what a client reads when it connects.
+    (let ((kept (harness-perms-test--payload pid)))
+      (should (equal sent (plist-get kept :why)))
+      (should (equal (plist-get sent :detail) "it deletes the repository")))
+    ;; `permission/pending' answers the same request, reason and all.
+    (let ((recovered (cl-find pid (harness-call 'permission/pending "s1")
+                              :key (lambda (p) (plist-get p :id)) :test #'equal)))
+      (should recovered)
+      (should (equal sent (plist-get (plist-get recovered :payload) :why))))
+    ;; A prompt only the waiting table holds is the same shape.
+    (harness-unregister-method 'session/pending)
+    (let* ((held (harness-call 'permission/pending "s1"))
+           (payload (plist-get (car held) :payload)))
+      (should (equal sent (plist-get payload :why))))
+    (harness-call 'permission/answer "s1" pid "deny-once")
+    (harness-test-await (car call))))
+
 ;;;; Non-interactive
 
 (defun harness-perms-test--allowing-judge ()

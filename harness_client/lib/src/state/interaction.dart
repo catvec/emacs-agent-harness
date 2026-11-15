@@ -33,6 +33,7 @@ class InteractionRequest {
   }) : createdAt = DateTime.now() {
     if (isPermission) {
       final extra = harness;
+      why = PermissionWhy.fromWire(extra['why']);
       summary = _summaryText(extra['summary']);
       summaryModel = asString(extra['summaryModel']);
       summarizing = summary == null && extra['summarizing'] == true;
@@ -65,6 +66,12 @@ class InteractionRequest {
   String? summary;
   String? summaryModel;
   bool summarizing = false;
+
+  /// Why the person is asked, as the harness worded it ([PermissionWhy]):
+  /// a safety judgment on the call, no verdict from the judge, the mode
+  /// asking, a directory outside the allowed ones, or a confirmation only
+  /// the person gives.  Null for a harness that sends none.
+  PermissionWhy? why;
 
   /// Take in what the harness says of the summary: [changes] are the keys of
   /// the request's payload it added to (`summary`, `summary-model`,
@@ -184,6 +191,45 @@ class InteractionRequest {
     'answer': answer,
     if (attachments.isNotEmpty) 'attachments': attachments,
   };
+}
+
+/// Why a permission request is put to the person, as the harness sent
+/// it in `_harness.why`: [code] says what kind of reason it is, [label] is
+/// the harness's words for it, [unsafe] is true only when the auto-mode
+/// judge weighed the call and would deny it, and [detail] is the words
+/// behind it (the judge's own reason, or the harness's phrase).
+///
+/// [unsafe] is the one thing a client must not infer: a judge that timed
+/// out, failed, could not be asked, or answered in no shape the harness
+/// reads made no judgment on the call, and its code says so.  A client
+/// that draws its own words reads [code]; one that shows the harness's
+/// shows [label].  Nothing here decides anything: the person does.
+class PermissionWhy {
+  const PermissionWhy({
+    required this.code,
+    required this.label,
+    this.unsafe = false,
+    this.detail,
+  });
+
+  /// What the harness sent, or null when it sent no reason (an older one).
+  static PermissionWhy? fromWire(Object? wire) {
+    final map = asMap(wire);
+    final label = asString(map['label'])?.trim();
+    if (label == null || label.isEmpty) return null;
+    final detail = asString(map['detail'])?.trim();
+    return PermissionWhy(
+      code: asStringOr(map['code'], 'mode'),
+      label: label,
+      unsafe: map['unsafe'] == true,
+      detail: detail == null || detail.isEmpty ? null : detail,
+    );
+  }
+
+  final String code;
+  final String label;
+  final bool unsafe;
+  final String? detail;
 }
 
 /// [value], a summary the harness sent, as text, or null when it holds none.

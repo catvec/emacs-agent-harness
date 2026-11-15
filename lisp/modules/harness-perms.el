@@ -506,6 +506,109 @@ Turning it on is decided by the user alone; see
 Each request is the user's to confirm, so no answer is remembered: no
 rule may approve the next one.")
 
+;;;; Why a prompt is asked
+;;
+;; A prompt that only said "Permission" left the user guessing: was the
+;; call judged unsafe, or did the mode simply ask, or is the agent asking
+;; for a directory?  Each prompt therefore carries `:why', the reason it
+;; is put to the user, in a shape a UI draws without reading prose:
+;;
+;;   (:code CODE :label LABEL :unsafe BOOL :detail TEXT)
+;;
+;; CODE is one of `harness-perms--why-codes'; LABEL is what the prompt
+;; says in a few words, a noun phrase ("Safety check · denied by the
+;; permission judge"); UNSAFE is non-nil only for a judgment that the
+;; call itself is unsafe, never for a missing or unreadable verdict, an
+;; ask, or a stage that could not run; DETAIL is the words behind it, the
+;; judge's own reason among them, masked of secrets and cut.  The code is
+;; what the user and a test tell apart; the label is what a person reads.
+;;
+;; The rule the shape keeps: a safety judgment is never implied where
+;; none was made.  A judge that timed out, failed, could not be asked, or
+;; answered in no shape the strict reader takes made no judgment on the
+;; call, and its prompt says exactly that.
+
+(defconst harness-perms--why-codes
+  '(judge-deny judge-timeout judge-unavailable judge-unreadable judge-failed
+    judge-empty judge-stopped judge-asked mode access confirm away)
+  "The codes a prompt's `:why' may carry.
+`judge-deny' is the one safety judgment: the auto-mode judge weighed the
+call and would deny it.  `judge-timeout', `judge-unavailable',
+`judge-unreadable', `judge-failed', `judge-empty' and `judge-stopped' are
+the judge giving no verdict, which is no judgment on the call at all
+(`judge-asked' is the judge saying the user should decide).
+`mode' is the session's permission mode asking; `access' is a directory
+outside the allowed directories, or an agent's own request for one;
+`confirm' is a call only the user may confirm; `away' is an agent asking
+to turn non-interactive mode on.")
+
+(defconst harness-perms--why-labels
+  '((judge-deny . "Safety check · denied by the permission judge")
+    (judge-timeout . "No safety verdict · judge timeout")
+    (judge-unavailable . "No safety verdict · judge unavailable")
+    (judge-unreadable . "No safety verdict · unreadable judge reply")
+    (judge-failed . "No safety verdict · failed judge call")
+    (judge-empty . "No safety verdict · empty judge reply")
+    (judge-stopped . "No safety verdict · incomplete judge reply")
+    (judge-asked . "No safety verdict · judge abstention")
+    (mode . "Permission mode")
+    (access . "Directory access")
+    (confirm . "Confirmation · yours alone")
+    (away . "Non-interactive mode · yours to turn on"))
+  "What each `:why' code says on a prompt, in a few words.
+Interface copy: nouns and adjectives, no sentences.  The code says the
+same thing to a client that draws its own words.")
+
+(defconst harness-perms--why-detail-chars 400
+  "Longest `:detail' of a prompt's `:why', in characters; longer is cut.
+It is the judge's reason or the harness's own phrase, never the call's
+arguments: the prompt already shows those.")
+
+(defun harness-perms--why-label (code)
+  "Return what CODE, a `:why' code, says on a prompt."
+  (or (cdr (assq code harness-perms--why-labels))
+      (cdr (assq 'mode harness-perms--why-labels))))
+
+(defun harness-perms--why-detail (text)
+  "Return TEXT as a prompt's `:detail', masked of secrets and cut, or nil.
+The text is the judge's own reason or a phrase of the harness's, so it
+can hold anything the model wrote.  It goes to the user's screen, and
+from there to no one: it is masked anyway, as every other text the
+harness shows is (`harness-secrets-mask-text'), so a reason that quoted
+a credential does not put it on the panel."
+  (when (and (stringp text) (not (harness-string-blank-p text)))
+    (let ((text (string-trim text)))
+      (when (fboundp 'harness-secrets-mask-text)
+        (setq text (car (harness-secrets-mask-text text))))
+      (when (and (stringp text) (not (harness-string-blank-p text)))
+        (harness-truncate-end text harness-perms--why-detail-chars)))))
+
+(defun harness-perms--why (code &optional detail)
+  "Return the `:why' of a prompt asked for CODE, with DETAIL behind it.
+UNSAFE is set for `judge-deny' alone (see `harness-perms--why-codes'):
+the other codes are reasons that no judgment on the call was made."
+  (list :code code
+        :label (harness-perms--why-label code)
+        :unsafe (and (eq code 'judge-deny) t)
+        :detail (harness-perms--why-detail detail)))
+
+(defun harness-perms--why-of (decision fallback)
+  "Return the `:why' a prompt about DECISION carries, or FALLBACK's.
+DECISION's own `:why' wins when it has one, since the stage that
+decided knows best; else its `:judge-deny' and `:reason' are read, and
+its `:no-verdict-code' with `:no-verdict'; else FALLBACK, a code, is
+the reason.  This is what makes a prompt say the judge objected, or
+that no verdict came, rather than that the mode asked."
+  (or (plist-get decision :why)
+      (cond
+       ((plist-get decision :judge-deny)
+        (harness-perms--why 'judge-deny (plist-get decision :reason)))
+       ((plist-get decision :no-verdict-code)
+        (harness-perms--why (plist-get decision :no-verdict-code)
+                            (or (plist-get decision :no-verdict-detail)
+                                (plist-get decision :no-verdict))))
+       (t (harness-perms--why fallback)))))
+
 ;;;; Small helpers
 
 (defun harness-perms--sym (value)
@@ -2661,12 +2764,17 @@ properties to the entry kept until then."
                                                           (format " (%s)" tag)
                                                         ""))
                                        :reason reason
+                                       ;; A directory is the reason, not a safety
+                                       ;; judgment: nothing weighed the call itself.
+                                       :why (or (plist-get waiting :why)
+                                                (harness-perms--why 'access reason))
                                        :options options)))
          (pending (harness-perms--with-summary sid pending))
          (change (list :prompt pending :dir dir :pattern pattern
                        :explicit (and (plist-get waiting :explicit) t)))
          (pid (harness-call 'session/pending-add sid pending)))
     (puthash pid (append (list :session-id sid :request request :next next :dir dir :pattern pattern
+                               :why (plist-get (plist-get pending :payload) :why)
                                :change change)
                          waiting)
              harness-perms--waiting)
@@ -2849,7 +2957,9 @@ the user granted when they did, for `harness-perms--dir-request-result'."
                                next dir
                                (harness-perms--request-reason session dir why)
                                (harness-perms--dir-prompt-options harness-perms-dir-request-options)
-                               :explicit t)))))
+                               :explicit t
+                               :why (harness-perms--why
+                                     'access (harness-perms--request-reason session dir why)))))))
 
 (defun harness-perms--grant-requested (session-id grant scope input)
   "Grant GRANT to SESSION-ID as the user allowed it; return the decision.
@@ -3029,10 +3139,12 @@ call alone."
                                                                   (string-remove-suffix "." (string-trim why)))
                                                         "")
                                                       "Nobody is asked anything there until it is turned off again: the auto-mode judge decides what would ask you.")
+                                             :why (harness-perms--why 'away why)
                                              :options harness-perms-away-options)))
                (pending (harness-perms--with-summary sid pending))
                (pid (harness-call 'session/pending-add sid pending)))
-          (puthash pid (list :session-id sid :request request :next next :user-only t)
+          (puthash pid (list :session-id sid :request request :next next :user-only t
+                             :why (plist-get (plist-get pending :payload) :why))
                    harness-perms--waiting)
           (harness-emit 'permission/requested sid (plist-put (copy-sequence pending) :id pid))))))))
 
@@ -3719,7 +3831,9 @@ and the user decides whether the call may run."
            (harness-method-exists-p 'session/pending-add))
       (list :behavior 'ask :judge-deny t
             :reason (plist-get verdict :reason)
-            :hint (plist-get verdict :hint))
+            :hint (plist-get verdict :hint)
+            ;; The one place a prompt says a safety judgment was made.
+            :why (harness-perms--why 'judge-deny (plist-get verdict :reason)))
     verdict))
 
 (defun harness-perms--judge-prompt-reason (decision)
@@ -3865,15 +3979,22 @@ once, if the chain the verdict feeds into allows it."
              (attempt 0)                ; judge calls made so far
              (settled nil) (timer nil) (handle nil)
              (failure nil)              ; why the judge gave no verdict
+             (failure-code 'judge-empty) ; which kind of no-verdict it is
+             (failure-detail nil)       ; the prompt's own words for it, when they differ
              ;; A verdict is a new decision: DECISION itself comes back
-             ;; when the judge gave none.
+             ;; when the judge gave none, with `:no-verdict' and its code
+             ;; saying why, so a prompt says a verdict was missing rather
+             ;; than that the mode asked.
              (finish (lambda (d)
                        (unless settled
                          (setq settled t)
                          (when timer (cancel-timer timer))
                          (funcall next (if (eq d decision)
-                                           (plist-put (copy-sequence decision) :no-verdict
-                                                      (or failure "it gave no answer"))
+                                           (plist-put
+                                            (plist-put (plist-put (copy-sequence decision) :no-verdict
+                                                                 (or failure "it gave no answer"))
+                                                      :no-verdict-code failure-code)
+                                            :no-verdict-detail failure-detail)
                                          (harness-perms--judge-decision d session)))))))
         (cl-labels
             ;; Ask once, as call N.  TEXT is its message: the call, or
@@ -3889,7 +4010,8 @@ once, if the chain the verdict feeds into allows it."
                           (run-at-time harness-perms--auto-timeout nil
                                        (lambda ()
                                          (harness-log 'warn "perms: auto judge timed out for %s" (plist-get request :tool))
-                                         (setq failure (format "it took longer than %ss" harness-perms--auto-timeout))
+                                         (setq failure (format "it took longer than %ss" harness-perms--auto-timeout)
+                                               failure-code 'judge-timeout)
                                          (funcall finish decision)
                                          (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
                     ;; A one-off call through `harness-small-ask': a
@@ -3913,11 +4035,14 @@ once, if the chain the verdict feeds into allows it."
                                      (pcase (plist-get ev :type)
                                        ;; A try that failed is thrown away:
                                        ;; so is what it wrote.
-                                       ('restart (setq reply "" failure nil))
+                                       ('restart (setq reply "" failure nil
+                                                        failure-code 'judge-empty failure-detail nil))
                                        ('text
                                         (setq reply (concat reply (or (plist-get ev :delta) ""))))
                                        ('done
-                                        (setq failure (harness-perms--judge-failure ev reply))
+                                        (setq failure (harness-perms--judge-failure ev reply)
+                                              failure-code (harness-perms--judge-failure-code ev reply)
+                                              failure-detail nil)
                                         (let* ((read (harness-perms--read-verdict reply))
                                                (verdict (and (plist-get read :behavior) read))
                                                (problem (plist-get read :problem))
@@ -3932,6 +4057,11 @@ once, if the chain the verdict feeds into allows it."
                                                (correctable (and (= n 1) (not err)
                                                                  (not (plist-get read :asked))
                                                                  (null (plist-get read :behavior)))))
+                                          ;; An explicit ask is the judge's own
+                                          ;; words for leaving it to the user.
+                                          (when (plist-get read :asked)
+                                            (setq failure-code 'judge-asked
+                                                  failure-detail (plist-get read :problem)))
                                           (cond
                                            (verdict (funcall finish verdict))
                                            ;; A reply that held no verdict in
@@ -4238,6 +4368,21 @@ denial says the judge gave no verdict, which is what the call rests on."
           ((harness-string-blank-p text) "it gave no answer")
           (t "its answer held no verdict"))))
 
+(defun harness-perms--judge-failure-code (event text)
+  "Return which no-verdict the judge's `done' EVENT with TEXT describes.
+It is the `:why' code a prompt about the call carries, so the prompt
+tells a call the judge could not be asked about from one it weighed
+and answered in no shape the reader takes: `judge-failed' for a
+request that failed, `judge-stopped' for one that ended for any reason
+but the end of its turn, `judge-empty' for one that wrote nothing, and
+`judge-unreadable' for a reply the strict reader could not read (see
+`harness-perms--read-verdict').  None of them is a judgment on the
+call."
+  (cond ((plist-get event :error) 'judge-failed)
+        ((not (eq (plist-get event :stop-reason) 'end-turn)) 'judge-stopped)
+        ((harness-string-blank-p text) 'judge-empty)
+        (t 'judge-unreadable)))
+
 (defun harness-perms--unapproved (decision)
   "Return the denial of a call left undecided with DECISION while the user is away.
 Nobody can approve it: the judge gave no verdict, which DECISION's
@@ -4246,8 +4391,10 @@ Nobody can approve it: the judge gave no verdict, which DECISION's
     (if why
         (list :behavior 'deny
               :reason (format "the auto-mode judge gave no verdict (%s), and with the user away nobody could approve the call" why)
-              :hint harness-perms-no-verdict-hint)
+              :hint harness-perms-no-verdict-hint
+              :no-verdict-code (or (plist-get decision :no-verdict-code) 'judge-empty))
       (list :behavior 'deny
+            :no-verdict-code 'judge-unavailable
             :reason "no auto-mode judge could decide the call, and with the user away nobody could approve it"
             :hint harness-perms-non-interactive-hint))))
 
@@ -4994,6 +5141,10 @@ where it runs."
                                                    :cover (plist-get ladder :default))
                                              (list :title (harness-perms-describe-request request)
                                                    :reason (harness-perms--judge-prompt-reason decision)
+                                                   ;; Why the user is asked: the judge
+                                                   ;; objected, no verdict came, or the
+                                                   ;; mode asks (see "Why a prompt is asked").
+                                                   :why (harness-perms--why-of decision 'mode)
                                                    :options (harness-perms--tool-options)))))
              (pending (harness-perms--with-summary sid pending))
              (change (list :prompt pending :paths paths :cwd cwd :rule-commands commands
@@ -5001,6 +5152,7 @@ where it runs."
              (pid (harness-call 'session/pending-add sid pending)))
         (puthash pid (list :session-id sid :request request :next next :paths paths :cwd cwd
                            :rule-commands commands :ladder steps :cover (plist-get ladder :default)
+                           :why (plist-get (plist-get pending :payload) :why)
                            :change change)
                  harness-perms--waiting)
         (harness-emit 'permission/requested sid (plist-put (copy-sequence pending) :id pid)))))))
@@ -6249,12 +6401,14 @@ when REQUEST's session is non-interactive or there is no user to ask."
                                            :call-id (plist-get request :call-id)
                                            :title title
                                            :reason (plist-get prompt :reason)
+                                           :why (or (plist-get prompt :why) (harness-perms--why 'confirm))
                                            :options harness-perms-confirm-options
                                            :confirm t)))
              (pending (harness-perms--with-summary sid pending))
              (pid (harness-call 'session/pending-add sid pending)))
         (puthash pid (list :session-id sid :request request :next next :confirm t
                            :input (plist-get prompt :input) :hint hint :title title
+                           :why (plist-get (plist-get pending :payload) :why)
                            :options harness-perms-confirm-options)
                  harness-perms--waiting)
         (harness-emit 'permission/requested sid (plist-put (copy-sequence pending) :id pid))))))
@@ -6564,6 +6718,11 @@ only reads may read (see `harness-perms-inspection-dirs' and
                                                 :cwd (plist-get w :cwd)
                                                 :dir (plist-get w :dir) :pattern (plist-get w :pattern)
                                                 :title (or (plist-get w :title) (harness-perms-describe-request r))
+                                                ;; Why it is asked, kept for a client
+                                                ;; that connects while it waits.
+                                                :why (or (plist-get w :why)
+                                                         (and (plist-get w :dir) (harness-perms--why 'access))
+                                                         (harness-perms--why 'mode))
                                                 :options (or (plist-get w :options)
                                                              (if (plist-get w :dir)
                                                                  (harness-perms--dir-prompt-options
