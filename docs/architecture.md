@@ -848,6 +848,7 @@ interned back by the ACP layer for a fixed set of keys (`:status`,
          :cache-at FLOAT :cache-model "ID" :cache-ttl N         ; the last request that used the prompt cache
          :cache-dropped FLOAT)                                  ; when a redaction dropped that cache, if it did
  :cache nil|(:at FLOAT :ttl N :expires FLOAT :model "ID" [:dropped FLOAT])  ; derived: when the prompt cache lapses, whose it is
+ :compaction nil|(:node ID :replaced N :kind "KIND")  ; derived: the compaction in force, while the conversation it made is smaller
  :context-window N                  ; in effect: the override, else the model's
  :context-window-override nil|N     ; a window set for the session
  :budget nil|(:amount F :hard BOOL)    ; given to the session; the Budget setting is not copied
@@ -915,6 +916,18 @@ session, but no temporary directory; the policy fixes none of its
 settings and nothing can be sent to it.
 
 `:cache` says when the session's prompt cache lapses, and whose it is.
+`:compaction` says which compaction settled what goes first in the
+conversation it made, and is nil once the conversation has grown back
+past what that compaction replaced (`harness-session--compaction'): a
+record read says what a compaction decided without walking a
+transcript, so a listing of many sessions loads no node log.  The
+compaction module keeps it (`session/set-compaction') when it makes
+one, when one is reverted or restored, and when a node or a head goes
+that it names; a session compacted before sessions kept it is read
+once, by the cold-cache gate, when the answer matters
+(`harness-cowboy--settled-p').  No listing and no record read does it:
+a UI on another machine has the record and nothing else, and a chat's
+listing loads no node log.
 A provider keeps the start of a conversation cached for a while after a
 request read or wrote it (Anthropic five minutes or an hour, OpenAI
 five to ten minutes, DeepSeek hours), and every such request keeps it
@@ -1860,6 +1873,11 @@ redact).
 - `session/set-head ID NODE-ID` — time travel: the next message
   continues from NODE-ID, with a provider conversation cut to match (see
   "Node").  Refused while ID runs a turn.  Event `session/head-moved ID NODE-ID`.
+- `session/set-compaction ID COMPACTION` — the compaction in force in ID,
+  `(:node ID :replaced N :kind "KIND")`, or nil for none; the record's
+  `:compaction` says it, and a record read stays cheap.  The compaction
+  module sets it when it makes one, and clears it when one is reverted
+  or its node goes.  Announced as any change of the session is.
 - `session/discard-nodes ID NODE-IDS` → the ids actually removed.
   Removes the named nodes wherever they are; a kept node whose parent
   went is re-parented to the last kept ancestor before it, so the
@@ -6639,6 +6657,18 @@ as it is, all of the conversation uncached, without a decision.
   panel or with `/compact` -- answers the question already: the
   compaction module's gate (priority 11) holds the turn until it is
   done, the cache is reset, and this gate finds the session warm.
+- A compaction that is
+  done answers it for the conversation it made: while that
+  conversation is smaller than the one the compaction replaced (the
+  node's `:meta` `:input-tokens`), the gate lets a cold message
+  through unasked (`harness-cowboy--settled-p`, from the record's
+  `:compaction`).  Compacting the summary, the transcript note or the
+  fresh start again would save what it saved already.  The answer
+  stands until the conversation is as big again as the one the
+  compaction replaced: that is a new question.  It says nothing about
+  warmth -- `harness-cowboy-cold-p` goes on reading the lapse, and the
+  cache panel stays away for the same reason -- and a compaction that
+  failed, was dismissed or was reverted settles nothing.
 - Asked unless `harness-cowboy-ask` is nil or the session is
   non-interactive (the policy's `harness-non-interactive`, else the
   session's own `:non-interactive`, else the config, as perms decides):
@@ -13553,7 +13583,14 @@ runs `compaction/compact` (`harness-ui-compact-run`); the panel says
 `Compaction · transcript` while it runs (`harness-ui-compact-doing`), and
 it goes once the compaction resets the cache.  A session the cowboy
 module compacts before a message shows as running with the activity
-`compacting` meanwhile, so the panel offers nothing then either.  A
+`compacting` meanwhile, so the panel offers nothing then either.  Nor
+does it show for a conversation a compaction settled and that has not
+grown back past what it replaced: its rows would compact the summary,
+the transcript note or the fresh start that compaction left, which
+saves what it already saved (`harness-ui-cache--settled-p`, from the
+record's `:compaction`).  The lapse itself is no less true, and the
+panel comes back once the conversation is as big again as the one the
+compaction replaced.  A
 session blocked on an answer is in the middle of a turn, so it shows
 no panel at all.
 Cache warming (`harness-ui-cache-warm`, module `ui-cache-warm`): while a

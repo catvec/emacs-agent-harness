@@ -174,6 +174,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/runtime` (id &optional key value) — Get or set the runtime (unpersisted) property KEY of session ID.
 - `session/select` (&optional filter) — Return the session plists FILTER selects, newest first.
 - `session/set-all` (settings &optional filter) — Apply SETTINGS to every session FILTER selects; return the ids changed.
+- `session/set-compaction` (id compaction) — Say which compaction of session ID is the one in force, or nil for none.
 - `session/set-ext` (id key value &optional hint) — Set the setting KEY of session ID's `:ext` to VALUE; return the session plist.
 - `session/set-head` (id node-id) — Move the head of session ID to NODE-ID (time travel within the DAG).
 - `session/set-plan` (id text) — Set the current plan TEXT of session ID.

@@ -206,6 +206,7 @@
 (declare-function harness-agent-step-request "harness-agent" (session-id state on-event))
 (declare-function harness-cowboy--non-interactive-p "harness-cowboy" (session))
 (declare-function harness-cowboy-parse-answer "harness-cowboy" (text))
+(declare-function harness-session--set-compaction "harness-session" (id compaction))
 (declare-function harness-agent-waiting-text "harness-agent" (texts))
 
 (defconst harness-compaction-kinds '(summary brief transcript fresh truncate)
@@ -570,6 +571,76 @@ where L is one of `ok', `warning', `urgent' and `critical'."
   (let ((context (or (plist-get (plist-get session :usage) :context) 0)))
     (> context (harness-compaction--usable (harness-compaction--window session)
                                            (harness-compaction--reserve session)))))
+
+(defun harness-compaction-settled (session)
+  "Return the compaction that settled what goes first for SESSION, or nil.
+That is the compaction in force, while the conversation it made has
+not grown back to the size that compaction replaced: (:node ID
+:replaced TOKENS :context TOKENS :kind KIND).
+
+A compaction is one of the answers to the cold-cache question
+(harness-cowboy.el) and to the one before an automatic compaction: it
+replaces the conversation with a summary, a transcript note or nothing,
+so the message that follows sends what stands in for the conversation
+instead of the conversation.  Compacting that result again would only
+redo an answer already given -- a summary of a summary saves what the
+first saved -- so the answer stands until the conversation is as big
+again as the one the compaction replaced (its `:input-tokens'), which is
+the size at which a compaction was last worth making.
+
+The answer is the node's, not a cache's: a compaction leaves nothing
+cached, and the cache of the conversation it made lapses as any does
+(`harness-session--cache').  So this says nothing about warmth -- the
+cache goes on reporting the lapse -- only that the decision is made.  A
+compaction the user reverted settled nothing: the conversation is the
+one before it again.  A compaction that failed appended no node, and
+settled nothing either.
+
+SESSION is a record as `session/get' gives it.  It carries the answer
+already (its `:compaction', see `harness-session--compaction'), so this
+walks no transcript and asks the harness nothing: a UI on another
+machine reads the record it holds."
+  (let* ((made (plist-get session :compaction))
+         (replaced (plist-get made :replaced))
+         (context (or (plist-get (plist-get session :usage) :context) 0)))
+    (when (and (plist-get made :node) (numberp replaced) (> replaced 0)
+               (< context replaced))
+      (list :node (plist-get made :node)
+            :kind (plist-get made :kind)
+            :replaced replaced
+            :context context))))
+
+(defun harness-compaction--made (node)
+  "Return what compaction NODE says settled a conversation, or nil.
+That is (:node ID :replaced TOKENS :kind KIND): the node, what it
+replaced and how, which a session keeps with its record
+(`session/set-compaction').  Nil for a node that is no compaction."
+  (when (harness-node-compaction-p node)
+    (list :node (plist-get node :id)
+          :replaced (plist-get (plist-get node :meta) :input-tokens)
+          :kind (harness-node-compaction-kind node))))
+
+(defun harness-compaction--settle (session-id made)
+  "Say that MADE, a compaction, is the one in force in SESSION-ID, or nil.
+MADE is as `harness-compaction--made' gives it; nil says no compaction
+is in force -- one was reverted, or its node is gone.  It is kept with
+the session record (`session/set-compaction'), so a record read says
+what settled the conversation without walking it."
+  (when (harness-method-exists-p 'session/set-compaction)
+    (ignore-errors (harness-call 'session/set-compaction session-id made))))
+
+(defun harness-compaction--in-force (session-id)
+  "Return the compaction in force in SESSION-ID, read from its transcript.
+That is (:node ID :replaced TOKENS :kind KIND) as
+`harness-compaction--made' gives it, or nil: the compaction the
+conversation starts at (`harness-path-from-compaction'), while it is
+not reverted.  A session keeps the answer from the moment a compaction
+is made (`harness-compaction--settle'); this reads it for a record
+saved before sessions kept it, and is asked only where a cold cache
+makes it worth the read (`harness-cowboy--settled-p')."
+  (when (and session-id (harness-method-exists-p 'session/nodes))
+    (harness-compaction--made
+     (car (harness-path-from-compaction (harness-call 'session/nodes session-id))))))
 
 (defun harness-compaction--carried-on-p (session-id)
   "Non-nil when SESSION-ID's user chose to carry on.
@@ -1296,6 +1367,7 @@ The conversation starts over from the node
                    (cl-loop for key in '(:usage :input-semantics :cache-write-status :billing :plan
                                          :list-cost :cost-source :observed-cost)
                             when (plist-member usage key) append (list key (plist-get usage key)))))
+    (harness-compaction--settle session-id (harness-compaction--made node))
     (harness-emit 'compaction/done session-id node)
     node))
 
@@ -1902,6 +1974,11 @@ NODE-ID, when non-nil, names the compaction the caller means (see
         (harness-log 'info "compaction: %s %s the compaction %s" session-id
                      (if revert "reverts" "restores") (plist-get node :id))
         (harness-compaction--mark-reverted session-id node revert)
+        ;; What settled the conversation is the compaction in force, or
+        ;; nothing once it is reverted: the record says so from here on
+        ;; (`harness-compaction-settled').
+        (harness-compaction--settle session-id
+                                     (and (not revert) (harness-compaction--made node)))
         ;; The model's next request is another conversation than the last:
         ;; a hosted loop starts a new one, and nothing the provider cached
         ;; of the old one is read, as after a compaction.

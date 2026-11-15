@@ -117,6 +117,14 @@ waits with the turn (`agent/hold`) and goes after the compaction, the
 turn's own message first, rather than steering it: recorded at once it
 would lie before the compaction node, where the model never reads it.
 
+One that is done answers it for the conversation it made
+(`harness-cowboy--settled-p`): compacting a summary, a transcript note
+or a fresh start again saves what the first saved, so the answer
+stands unasked until the conversation has grown back to the size the
+compaction replaced.  The cache of what it left lapses as any does,
+and the session reports that lapse as it always did; it is the
+decision that is made, not the warmth.
+
 ## Provides
 
 ### Methods

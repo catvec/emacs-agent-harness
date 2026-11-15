@@ -248,6 +248,7 @@ the token count progressively.
 - `session/nodes` ([session](session.md))
 - `session/provider-state` ([session](session.md))
 - `session/select` ([session](session.md))
+- `session/set-compaction` ([session](session.md))
 - `session/set-ext` ([session](session.md))
 - `session/set-provider-state` ([session](session.md))
 - `session/update-node` ([session](session.md))

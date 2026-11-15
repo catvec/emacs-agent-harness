@@ -166,7 +166,8 @@ A longer prompt is cut there, with a note saying it was.")
   move                                  ; a move waiting for its turn to end, or nil
   ext                                   ; settings modules keep here, a plist, or nil
   last-message                          ; time of its latest user or assistant message, or nil
-  steering)                             ; messages the running turn has not taken yet, or nil
+  steering                              ; messages the running turn has not taken yet, or nil
+  compaction)                           ; the compaction in force, as it was made, or nil
 
 (defvar harness-sessions (make-hash-table :test 'equal)
   "Session id -> `harness-session'.")
@@ -252,6 +253,7 @@ provider conversation and permission state behind it."
                :provider-state (harness-session-provider-state s)
                :provider-node (harness-session-provider-node s)
                :cache (harness-session--cache s)
+               :compaction (harness-session--compaction s)
                :move (harness-session-move s)
                :ext (harness-session-ext s)
                :last-message (harness-session-last-message s))))
@@ -345,6 +347,10 @@ or a plist (keyword keys) of those."
           (harness-session-provider-node s) (plist-get pl :provider-node)
           (harness-session-move s) (harness-session--move-value (plist-get pl :move))
           (harness-session-ext s) (harness-session--ext-value (plist-get pl :ext))
+          ;; The compaction in force, as the compaction module last said
+          ;; (`session/set-compaction'): nil for a record written before
+          ;; sessions kept it.
+          (harness-session-compaction s) (harness-session--compaction-value (plist-get pl :compaction))
           ;; Nil for a record written before sessions kept it.
           (harness-session-last-message s) (let ((v (plist-get pl :last-message))) (and (numberp v) v)))
     ;; A session saved before the policy came keeps no setting it fixes.
@@ -870,6 +876,71 @@ and `harness-session--cache' goes on reporting it as it was."
        (not (numberp (plist-get (harness-session-usage s) :cache-dropped)))
        (harness-session--cache s)
        t))
+
+(defun harness-session--compaction-value (value)
+  "Return VALUE, a record's stored compaction, as a session holds it.
+That is (:node ID :replaced TOKENS :kind KIND), or nil for anything
+else: a record written before sessions kept one, and one whose node is
+gone."
+  (when (and (consp value) (plist-get value :node) (numberp (plist-get value :replaced)))
+    (list :node (plist-get value :node) :replaced (plist-get value :replaced)
+          :kind (plist-get value :kind))))
+
+(defun harness-session--compaction (s)
+  "Return the compaction that settled what goes first for session S, or nil.
+That is (:node ID :replaced TOKENS :kind KIND :context TOKENS): the
+compaction in force on S, while the conversation it made has not grown
+back to the size that compaction replaced.  A message that meets a
+lapsed cache then sends what the compaction left, and compacting that
+again would only redo an answer already given, so the cold-cache gate
+(harness-cowboy.el) and the cache panel (harness-ui-cache.el) say
+nothing of it.  Nil before a compaction, once one is reverted, and for
+a conversation grown back past what the compaction replaced: those are
+questions no one has answered yet.  Nothing here says the cache is
+warm -- `harness-session--cache' goes on reporting the lapse.
+The compaction is the record's own (`session/set-compaction'): the
+compaction module sets it when it makes one, and clears it when one is
+reverted or its node goes, so reading a record never loads a node log,
+and a listing of many sessions stays cheap.  A session compacted
+before sessions kept it says none until the cold-cache gate reads its
+transcript once and keeps the answer (`harness-compaction--settle')."
+  (let* ((made (harness-session-compaction s))
+         (replaced (plist-get made :replaced))
+         (context (or (plist-get (harness-session-usage s) :context) 0)))
+    (when (and (plist-get made :node) (numberp replaced) (> replaced 0)
+               (< context replaced))
+      (list :node (plist-get made :node)
+            :kind (plist-get made :kind)
+            :replaced replaced
+            :context context))))
+
+(defun harness-session--settle-compaction (s)
+  "Read which compaction of session S is in force, and keep it with the record.
+Called where the conversation changes without its size doing so: a
+node dropped, a head moved back before the compaction in force.  The
+nodes are in memory there already (`harness-session--load-nodes'), so
+nothing is read from disk for it."
+  (let* ((node (car (harness-path-from-compaction (harness-session--path s))))
+         (made (and (harness-node-compaction-in-force-p node)
+                    (list :node (plist-get node :id)
+                          :replaced (plist-get (plist-get node :meta) :input-tokens)
+                          :kind (harness-node-compaction-kind node)))))
+    (unless (equal made (harness-session-compaction s))
+      (setf (harness-session-compaction s) made)
+      (harness-session--touch s))))
+
+(harness-defmethod session/set-compaction (id compaction)
+  "Say which compaction of session ID is the one in force, or nil for none.
+COMPACTION is (:node ID :replaced TOKENS :kind KIND), what the
+compaction module made and what it replaced; nil once it is reverted,
+or its node is gone.  It is kept with the record, so a record read
+says what settled the conversation without walking it
+(`harness-session--compaction'), and announced as any other change."
+  (let ((s (harness-session--get id)))
+    (unless (equal compaction (harness-session-compaction s))
+      (setf (harness-session-compaction s) compaction)
+      (harness-session--touch s))
+    compaction))
 
 (defun harness-session--cache (s)
   "Return what is known of the prompt cache of session S, or nil.
@@ -2482,6 +2553,9 @@ after the new head."
             (eq (harness-session-status s) 'running))
       (signal 'harness-error (list "The session is running a turn; stop it before moving its head")))
     (setf (harness-session-head s) node-id)
+    ;; A head moved back before the compaction in force leaves it out of
+    ;; the conversation: what the record says is read again.
+    (harness-session--settle-compaction s)
     (harness-emit 'session/head-moved id node-id)
     (harness-session--touch s)
     node-id))
@@ -2531,6 +2605,9 @@ the return value says what was removed."
           (harness-call 'store/append (harness-session--nodes-name id)
                         (list :_op "delete" :id node-id)))
         (harness-session--touch s)
+        ;; The compaction in force may have been one of them: what the
+        ;; record says is read again rather than guessed.
+        (harness-session--settle-compaction s)
         (harness-emit 'session/nodes-removed id removed)
         (unless (equal head old-head)
           (harness-emit 'session/head-moved id head))))

@@ -176,6 +176,21 @@ before; the prompt is not."
   (let ((id (plist-get session :id)))
     (and (or (harness-ui-session-live id) (harness-ui-prompt-in-flight-p id)) t)))
 
+(defun harness-ui-cache--settled-p (session)
+  "Non-nil when a compaction already settled what goes first in SESSION.
+That is the record's `:compaction' (see
+`harness-compaction-settled'): a compaction in force whose conversation
+has not grown back to the size it replaced.  The panel's offer is the
+answer that compaction gave, so it stays away -- the rows would compact
+the summary, the transcript note or the fresh start the compaction left,
+which saves what it already saved.  The lapse itself is no less true: the
+record's `:cache' still says it, and the panel comes back once the
+conversation has grown back past what the compaction replaced.
+Only the record is read, never the harness: a UI on another machine has
+the record and nothing else."
+  (and (plist-member session :compaction)
+       (plist-get session :compaction)))
+
 (defun harness-ui-cache--state (session &optional now)
   "Return what the cache panel shows of SESSION at NOW, or nil for nothing.
 NOW is the current time by default.  The panel shows once the cache
@@ -204,6 +219,10 @@ again."
     (when (and (numberp expires)
                at-rest
                (not (harness-ui-cache--running-p session))
+               ;; A compaction already answered what goes first for the
+               ;; conversation it made: its rows would offer to compact
+               ;; what the compaction left (`harness-cowboy--settled-p').
+               (not (harness-ui-cache--settled-p session))
                (or from (>= (or now (float-time)) expires)))
       (append (list :at (plist-get cache :at) :ttl (plist-get cache :ttl) :expires expires
                     :context (plist-get (plist-get session :usage) :context)

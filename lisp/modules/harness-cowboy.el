@@ -106,6 +106,14 @@
 ;; turn's own message first, rather than steering it: recorded at once it
 ;; would lie before the compaction node, where the model never reads it.
 ;;
+;; One that is done answers it for the conversation it made
+;; (`harness-cowboy--settled-p'): compacting a summary, a transcript note
+;; or a fresh start again saves what the first saved, so the answer
+;; stands unasked until the conversation has grown back to the size the
+;; compaction replaced.  The cache of what it left lapses as any does,
+;; and the session reports that lapse as it always did; it is the
+;; decision that is made, not the warmth.
+;;
 
 ;;; Code:
 
@@ -119,6 +127,8 @@
 (defvar harness-non-interactive)
 (declare-function harness-compaction-history-p "harness-compaction" (session-id))
 (declare-function harness-compaction--effective-kind "harness-compaction" (session-id kind opts))
+(declare-function harness-compaction--settle "harness-compaction" (session-id node))
+(declare-function harness-compaction--in-force "harness-compaction" (session-id))
 
 ;;;; Settings
 
@@ -305,6 +315,30 @@ that read the same conversation reaches here (`harness-session--cache')."
          (plist-get session :head)
          (>= (if (numberp context) context 0) (max 0 (or harness-cowboy-min-context 0)))
          t)))
+
+(defun harness-cowboy--settled-p (session)
+  "Non-nil when a compaction already settled what goes first in SESSION.
+That is a compaction in force whose conversation has not grown back to
+the size it replaced (`harness-compaction-settled', read from the
+record's `:compaction'): the answer it took is the answer, so a message
+that meets a lapsed cache goes on unasked, and is not held for a
+question about compacting what the compaction left.  Nothing of it says
+the cache is warm: `harness-cowboy-cold-p' goes on reading the lapse,
+and the panel that reports it stays away for the same reason.
+A session compacted before sessions kept the answer has none on its
+record: its transcript is read once here, and what it says kept
+(`harness-compaction--settle'), so the question is not asked of a
+conversation a compaction already made."
+  (and (fboundp 'harness-compaction-settled)
+       (or (harness-compaction-settled session)
+           (let ((id (plist-get session :id)))
+             (and id
+                  (null (plist-get session :compaction))
+                  (fboundp 'harness-compaction--in-force)
+                  (let ((made (harness-compaction--in-force id)))
+                    (harness-compaction--settle id made)
+                    (harness-compaction-settled
+                     (harness-plist-merge session (list :compaction made)))))))))
 
 (defun harness-cowboy--non-interactive-p (session)
   "Non-nil when SESSION never waits for the user.
@@ -1118,10 +1152,13 @@ the turn goes on with: asked (`harness-cowboy--ask') or taken unasked
   "Hold SESSION's turn while what goes first, its cache being cold, is decided.
 VALUE and NEXT are those of the `agent/before-turn' filter.  SESSION is
 read again first: an earlier gate (the fallback, a handoff) may have
-changed it."
+changed it.  A conversation a compaction made, still smaller than the
+one that compaction replaced, goes on unasked: that answer is given
+already (`harness-cowboy--settled-p')."
   (let* ((id (plist-get session :id))
          (session (or (ignore-errors (harness-call 'session/get id)) session)))
     (if (or (not (plist-get value :proceed))
+            (harness-cowboy--settled-p session)
             (not (or (harness-cowboy-cold-p session)
                      (harness-cowboy--new-conversation-p session))))
         (funcall next value)

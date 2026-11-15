@@ -100,6 +100,16 @@ first seconds of 1970."
   (harness-test-wait (lambda () (harness-call 'question/pending sid)) 5 "the cold-cache question")
   (car (harness-call 'question/pending sid)))
 
+(defun harness-cowboy-test--question-now (sid)
+  "Return SID's pending cold-cache question, or nil, waiting briefly for one.
+Unlike `harness-cowboy-test--question' this does not fail when there is
+none: a test that expects no question asks this."
+  (let ((deadline (+ (float-time) 1.0)))
+    (while (and (not (harness-call 'question/pending sid))
+                (< (float-time) deadline))
+      (sleep-for 0.02)))
+  (car (harness-call 'question/pending sid)))
+
 (defun harness-cowboy-test--answer (sid text)
   "Answer the question SID waits on with TEXT."
   (harness-call 'question/answer sid (plist-get (harness-cowboy-test--question sid) :id) (list :answer text)))
@@ -409,17 +419,28 @@ the message that waited for it is asked about, as it would have been."
         (should (string-match-p "session_history" (plist-get node :content))))
       (should (string-match-p "conversation so far was compacted into a file"
                               (harness-cowboy-test--request-text (car harness-cowboy-test--requests))))
-      ;; Cold again: carry on, the whole conversation as it is.
+      ;; Cold again, the conversation still smaller than the one the
+      ;; transcript replaced: the answer stands, unasked, and the whole of
+      ;; what the compaction left goes.
       (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
       (let ((p (harness-call 'agent/prompt sid "second")))
+        (should-not (harness-cowboy-test--question-now sid))
+        (harness-test-await p 10))
+      (should (= 1 (length (harness-cowboy-test--compactions sid))))
+      (should-not (harness-cowboy-test--hint-nodes sid "· continuation ·"))
+      (let ((text (harness-cowboy-test--request-text (car harness-cowboy-test--requests))))
+        (should (string-match-p "first" text))
+        (should (string-match-p "second" text)))
+      ;; Grown back past what the transcript replaced -- the size at which
+      ;; compacting it was last worth doing: that is a new question.
+      (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400
+                                                 :context 3600 :cache-at 1000.0))
+      (let ((p (harness-call 'agent/prompt sid "third")))
         (harness-cowboy-test--answer sid "carry on")
         (harness-test-await p 10))
       (should (= 1 (length (harness-cowboy-test--compactions sid))))
-      (should (cl-some (lambda (h) (string-match-p "· continuation · ~430 tokens uncached · answer\\'" h))
-                       (harness-cowboy-test--hints sid)))
-      (let ((text (harness-cowboy-test--request-text (car harness-cowboy-test--requests))))
-        (should (string-match-p "first" text))
-        (should (string-match-p "second" text))))))
+      (should (cl-some (lambda (h) (string-match-p "· continuation · ~3\\.6k tokens uncached · answer\\'" h))
+                       (harness-cowboy-test--hints sid))))))
 
 (ert-deftest harness-cowboy-ignore-sends-everything-and-adds-nothing ()
   "The ignore setting carries on with the whole conversation, uncached,
@@ -789,9 +810,16 @@ is not cached: the conversation is written to a transcript instead."
                      (plist-get (plist-get (car (harness-cowboy-test--compactions sid)) :meta) :cowboy)))
       (should (cl-some (lambda (h) (string-match-p "default" h))
                        (harness-cowboy-test--hints sid)))
-      ;; Cold again: nobody is asked.
+      ;; Cold again, under what the fresh start replaced: nobody is
+      ;; asked, and nothing is compacted a second time.
       (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
       (harness-test-await (harness-call 'agent/prompt sid "two") 10)
+      (should-not (harness-call 'question/pending sid))
+      (should (= 1 (length (harness-cowboy-test--compactions sid))))
+      ;; Grown back past what the fresh start replaced, a cold cache is a
+      ;; new question: the saved answer takes it, unasked, and compacts.
+      (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400 :context 3600 :cache-at 1000.0))
+      (harness-test-await (harness-call 'agent/prompt sid "three") 10)
       (should-not (harness-call 'question/pending sid))
       (should (= 2 (length (harness-cowboy-test--compactions sid)))))))
 
@@ -808,9 +836,14 @@ a hint, and the default taken the same way the next time."
                  ((symbol-function 'harness-method/provider/complete)
                   (lambda (req) (push req requests) (funcall orig req))))
         (harness-test-await (harness-call 'agent/prompt sid "one") 10)
-        ;; Cold again: the saved default is taken, unasked, once more.
+        ;; Cold again, under what the transcript replaced: the answer the
+        ;; transcript gave stands, and nothing is written a second time.
         (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
-        (harness-test-await (harness-call 'agent/prompt sid "two") 10))
+        (harness-test-await (harness-call 'agent/prompt sid "two") 10)
+        (should (= 1 (length (harness-cowboy-test--compactions sid))))
+        ;; Grown back past it, the saved default is taken, unasked, again.
+        (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400 :context 3600 :cache-at 1000.0))
+        (harness-test-await (harness-call 'agent/prompt sid "three") 10))
       (should (eq 'summary harness-cowboy-default))
       (should-not harness-cowboy-ask)
       (should (= 2 (length (harness-cowboy-test--compactions sid))))
@@ -889,9 +922,14 @@ the old default, redo stops asking again, and undo works once more."
       (should-not harness-cowboy-ask)
       (should (eq 'undone (car (harness-cowboy-test--move 'undo id))))
       (should (eq t harness-cowboy-ask))
-      ;; Undone, a cold cache asks again.
+      ;; Undone, a cold cache asks again -- once the conversation has grown
+      ;; back past what the fresh start replaced: under it, the fresh start
+      ;; answered already, whichever setting is undone.
       (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
-      (let ((p (harness-call 'agent/prompt sid "two")))
+      (harness-test-await (harness-call 'agent/prompt sid "two") 10)
+      (should-not (harness-cowboy-test--question-now sid))
+      (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400 :context 3600 :cache-at 1000.0))
+      (let ((p (harness-call 'agent/prompt sid "three")))
         (should (harness-cowboy-test--question sid))
         (harness-cowboy-test--answer sid "carry on")
         (harness-test-await p 10)))))
@@ -1072,7 +1110,9 @@ answer's decision, and any of those sessions can undo it."
       ;; is on again there too, and the next cold message asks.
       (should (eq 'undone (car (harness-cowboy-test--move 'undo id))))
       (should (eq t harness-cowboy-ask))
-      (harness-call 'session/usage-add other '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
+      ;; A conversation the transcript it took did not shrink away from: the
+      ;; size is what makes a cold cache a new question, not the answer.
+      (harness-call 'session/usage-add other '(:input 10 :output 10 :cache-read 400 :context 3600 :cache-at 1000.0))
       (let ((p (harness-call 'agent/prompt other "again")))
         (should (harness-cowboy-test--question other))
         (harness-cowboy-test--answer other "carry on")
@@ -1081,7 +1121,7 @@ answer's decision, and any of those sessions can undo it."
       (should-not (harness-node-decided-by (car (last (harness-cowboy-test--hint-nodes other "answer\\'")))))
       ;; A session that does not wait for you takes the default the undo
       ;; put back, and no decision is behind it.
-      (harness-call 'session/usage-add non-interactive '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
+      (harness-call 'session/usage-add non-interactive '(:input 10 :output 10 :cache-read 400 :context 3600 :cache-at 1000.0))
       (harness-test-await (harness-call 'agent/prompt non-interactive "again") 10)
       (let ((hint (car (last (harness-cowboy-test--hint-nodes non-interactive "default · non-interactive")))))
         ;; The default is a brief summary, which nobody chose here: the
@@ -1130,7 +1170,9 @@ undo works; the other, its settings taken over, ends."
     (let* ((sid (harness-cowboy-test-session))
            (one (harness-node-decision (harness-cowboy-test--always sid "always start afresh"))))
       (should (eq 'undone (car (harness-cowboy-test--move 'undo one))))
-      (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400 :context 430 :cache-at 1000.0))
+      ;; Grown back past what the fresh start replaced, so that the
+      ;; undone answer is asked about again.
+      (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400 :context 3600 :cache-at 1000.0))
       (let ((two (harness-node-decision (harness-cowboy-test--always sid "always start afresh"))))
         (should two)
         (should-not (equal one two))
@@ -1312,6 +1354,143 @@ will not answer the question for them."
       (should (harness-call 'question/pending sid))
       (harness-cowboy-test--answer sid "hold")
       (harness-test-await p 10))))
+
+;;;; A compaction answers the question it made the conversation for
+
+(ert-deftest harness-cowboy-a-compaction-answers-the-next-lapse ()
+  "The compaction's own result goes cold: no question, no second compaction.
+A compaction is one of the answers the question offers, so the message
+that meets a lapsed cache of what it left goes on unasked -- the summary
+of a summary saves what the first saved -- and the turn runs to its end.
+The cache is no less lapsed: the record still says when it expired."
+  (harness-cowboy-test-with
+    (let* ((sid (harness-cowboy-test-session)))
+      (let ((p (harness-call 'agent/prompt sid "one")))
+        (harness-cowboy-test--answer sid "t")
+        (harness-test-await p 10))
+      (should (= 1 (length (harness-cowboy-test--compactions sid))))
+      ;; The conversation the transcript left, its cache lapsed.
+      (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400
+                                                 :context 430 :cache-at 1000.0))
+      (let ((p (harness-call 'agent/prompt sid "two")))
+        (should-not (harness-cowboy-test--question-now sid))
+        (should (eq 'end-turn (plist-get (harness-test-await p 10) :stop-reason))))
+      (should (= 1 (length (harness-cowboy-test--compactions sid))))
+      ;; The one hint of a cold cache is the answer the first prompt gave:
+      ;; nothing was written for the second.
+      (should (= 1 (length (harness-cowboy-test--hint-nodes sid "\\`Cache · cold ·"))))
+      ;; Honest still: nothing claims the cache is warm, and the turn's
+      ;; own request stamped the cache of what the compaction left.
+      (let ((cache (plist-get (harness-call 'session/get sid) :cache)))
+        (should (numberp (plist-get cache :at)))
+        (should (> (plist-get cache :at) 1300.0)))
+      (should (equal "transcript"
+                     (harness-node-compaction-kind (car (harness-cowboy-test--compactions sid))))))))
+
+(ert-deftest harness-cowboy-a-settled-session-says-so-on-its-record ()
+  "The session's record carries the compaction that settled it, for a UI.
+A record whose conversation a compaction made, and that has not grown
+back past what it replaced, names the compaction, what it replaced and
+what the conversation is now; a conversation grown back names nothing,
+and so does one whose compaction was reverted."
+  (harness-cowboy-test-with
+    (let ((sid (harness-cowboy-test-session)))
+      (let ((p (harness-call 'agent/prompt sid "one")))
+        (harness-cowboy-test--answer sid "t")
+        (harness-test-await p 10))
+      (let ((settled (plist-get (harness-call 'session/get sid) :compaction)))
+        (should (equal "transcript" (plist-get settled :kind)))
+        (should (= 3020 (plist-get settled :replaced)))
+        (should (numberp (plist-get settled :context)))
+        (should (equal (plist-get (car (harness-cowboy-test--compactions sid)) :id)
+                       (plist-get settled :node))))
+      ;; Grown back past what the transcript replaced: nothing is
+      ;; settled, and the record says so without reading a node log.
+      (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400
+                                                 :context 9000 :cache-at (float-time)))
+      (should-not (harness-session--compaction (harness-session--get sid)))
+      ;; Reverted, the conversation is the one before it again.
+      (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400
+                                                 :context 430 :cache-at (float-time)))
+      (should (harness-session--compaction (harness-session--get sid)))
+      (harness-call 'compaction/revert sid)
+      (should-not (harness-session--compaction (harness-session--get sid)))
+      (should-not (plist-get (harness-call 'session/get sid) :compaction))
+      ;; Restored, it stands again, without the transcript being read.
+      (harness-call 'compaction/restore sid)
+      (should (harness-session--compaction (harness-session--get sid))))))
+
+(ert-deftest harness-cowboy-a-compaction-that-failed-answers-nothing ()
+  "A compaction that failed leaves the question as it was: the cache is cold.
+It appended no node, so nothing is settled, and the message that meets
+the cold cache is asked about as it would have been without it."
+  (harness-cowboy-test-with
+    (let ((sid (harness-cowboy-test-session)))
+      (cl-letf (((symbol-function 'harness-method/session/write-transcript)
+                 (lambda (&rest _) (signal 'harness-error (list "no room for a transcript")))))
+        (should-error (harness-test-await
+                       (harness-call 'compaction/compact sid '(:kind "transcript" :idle t)) 10)))
+      (should-not (harness-cowboy-test--compactions sid))
+      (should-not (plist-get (harness-call 'session/get sid) :compaction))
+      (let ((p (harness-call 'agent/prompt sid "two")))
+        (should (harness-cowboy-test--question sid))
+        (harness-cowboy-test--answer sid "carry on")
+        (harness-test-await p 10)))))
+
+(ert-deftest harness-cowboy-a-settled-record-survives-a-restart ()
+  "A compaction's answer is kept with the record, and read again on a restart.
+A record saved with the compaction in force says so when the sessions
+are loaded again, without its node log being read: the listing a chat
+makes stays cheap, and the gate finds the answer there."
+  (harness-cowboy-test-with
+    (let ((sid (harness-cowboy-test-session)))
+      (let ((p (harness-call 'agent/prompt sid "one")))
+        (harness-cowboy-test--answer sid "t")
+        (harness-test-await p 10))
+      (should (plist-get (harness-call 'session/get sid) :compaction))
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      ;; Read from the record alone: the nodes are not in memory yet.
+      (should-not (harness-session-loaded (harness-session--get sid)))
+      (let ((record (harness-call 'session/get sid)))
+        (should (plist-get record :compaction))
+        (should (equal "transcript" (plist-get (plist-get record :compaction) :kind))))
+      (should-not (harness-session-loaded (harness-session--get sid)))
+      ;; A record saved before sessions kept the answer has none: the gate
+      ;; reads the transcript once, and keeps what it says.
+      (harness-call 'session/set-compaction sid nil)
+      (should-not (plist-get (harness-call 'session/get sid) :compaction))
+      (should (harness-cowboy--settled-p (harness-call 'session/get sid)))
+      (should (plist-get (harness-call 'session/get sid) :compaction)))))
+
+(ert-deftest harness-cowboy-a-queued-message-meets-the-settled-answer ()
+  "A message queued behind a turn meets the compaction's answer, not a question.
+The compaction ran before the turn, and the message sent while the turn
+runs waits for it and then meets the conversation the compaction left:
+the answer stands, so no question is put to it either."
+  (harness-cowboy-test-with
+    (let* ((harness-provider-demo--delay 0.2)
+           (sid (harness-cowboy-test-session))
+           (p nil))
+      (let ((first (harness-call 'agent/prompt sid "one")))
+        (harness-cowboy-test--answer sid "t")
+        (setq p first)
+        (harness-test-await p 20))
+      (harness-call 'session/usage-add sid '(:input 10 :output 10 :cache-read 400
+                                                 :context 430 :cache-at 1000.0))
+      (let ((a (harness-call 'agent/prompt sid "two"))
+            (b nil))
+        (harness-test-wait (lambda () (harness-call 'agent/running sid)) 5 "the turn")
+        (setq b (harness-call 'agent/prompt sid "three"))
+        (should-not (harness-cowboy-test--question-now sid))
+        (should (eq 'end-turn (plist-get (harness-test-await a 20) :stop-reason)))
+        (harness-test-await b 20))
+      (should (= 1 (length (harness-cowboy-test--compactions sid))))
+      (let ((texts (mapcar (lambda (n) (plist-get n :content))
+                           (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user))
+                                             (harness-call 'session/nodes sid)))))
+        (should (equal '("one" "two" "three") (last texts 3)))))))
 
 (provide 'harness-cowboy-test)
 ;;; harness-cowboy-test.el ends here

@@ -1255,9 +1255,9 @@ its transcript; one made at its parent's head goes on."
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :name "old") :id))
            (s (gethash id harness-sessions))
-           ;; Made before the last five slots: provider-node, move, ext,
-           ;; last-message and steering.
-           (old (apply #'record (cl-loop for i below (- (length s) 5) collect (aref s i)))))
+           ;; Made before the last six slots: provider-node, move, ext,
+           ;; last-message, steering and compaction.
+           (old (apply #'record (cl-loop for i below (- (length s) 6) collect (aref s i))))) 
       (puthash id old harness-sessions)
       (should-error (harness-session-provider-node old))
       (should-error (harness-session-move old))

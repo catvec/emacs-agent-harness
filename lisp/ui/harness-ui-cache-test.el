@@ -428,6 +428,43 @@ function that signals does not stop the prompt from being kept or let go."
         (harness-resolve answer '(:stopReason "end_turn"))
         (should-not (harness-ui-prompt-in-flight-p "s-there"))))))
 
+(ert-deftest harness-ui-cache-panel-stays-away-once-a-compaction-settled-it ()
+  "A compaction answered what goes first: its own result shows no panel.
+The rows would offer to compact the summary, the transcript note or the
+fresh start the compaction left, which saves what the first saved.  The
+record is what says so, so a UI on another machine reads it too; the
+lapse itself is no less true, and the panel comes back once the
+conversation has grown back past what the compaction replaced."
+  (let ((harness-ui--models (make-hash-table :test 'equal))
+        (expires (harness-ui-cache-test--local 14 7))
+        (settled (list :node "n-c1" :kind "transcript" :replaced 200000 :context 4000)))
+    (puthash "test:m" '(:id "test:m" :pricing (:input 3.0 :output 15.0 :cache-read 0.3 :cache-write 3.75))
+             harness-ui--models)
+    (let* ((cache (list :at (- expires 300) :ttl 300 :expires expires))
+           (s (harness-ui-cache-test--session :cache cache :compaction settled)))
+      ;; The state the panel draws from is nil, and so is the panel: no
+      ;; heading, no rows, nothing offering to compact again.
+      (should-not (harness-ui-cache--state s (+ expires 600)))
+      (should-not (harness-ui-cache-test--banner s (+ expires 600)))
+      ;; The lapse is still reported: nothing claims the cache is warm.
+      (should (equal cache (plist-get s :cache)))
+      ;; Grown back past what the compaction replaced: a new question, and
+      ;; the panel says the very words it always did.
+      (let ((text (harness-ui-cache-test--banner
+                   (harness-plist-merge s (list :compaction nil))
+                   (+ expires 600))))
+        (should (string-match-p
+                 (concat "Cache  expired · 14:07 · 5 minutes · "
+                         (regexp-quote (harness-ui-model-label "test:m"))
+                         " · ~84\\.0k tokens$")
+                 text))
+        (should (string-match-p
+                 (concat "^   " (regexp-quote "Cost  ~$0.315 uncached · ~$0.025 cached") "$")
+                 text)))
+      ;; A record from a harness without the key reads as before.
+      (let ((plain (harness-plist-remove s :compaction)))
+        (should (harness-ui-cache--state plain (+ expires 600)))))))
+
 (ert-deftest harness-ui-cache-banner-says-what-the-next-message-costs ()
   "The panel says when the cache lapsed, how long it lasts, how much
 context the next message sends uncached and what that costs against
