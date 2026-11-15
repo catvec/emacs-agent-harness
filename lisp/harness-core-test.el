@@ -406,6 +406,58 @@ which names what went wrong, and a plain error list reads as its text."
   (should (equal "plain" (harness-error-message "plain")))
   (should (equal "curl said no" (harness-error-message '(curl "curl said no" :code 56)))))
 
+(ert-deftest harness-util-error-message-reads-a-failed-request ()
+  "A rejected HTTP request reads as what failed, not how it is shaped.
+`harness-http-request-json' rejects with a tagged tuple, which is no
+defined error type, so `error-message-string' would print it as a
+peculiar error -- or, signalled as it stands, replace the whole
+failure with \"Invalid error symbol\".  The status and what the
+provider said are the reason a session stopped, so they are read here."
+  ;; A status and a body: the status, then the message the body carries.
+  (should (equal "HTTP 503: upstream unavailable"
+                 (harness-error-message
+                  '(http-error 503 "{\"error\":{\"message\":\"upstream unavailable\"}}"))))
+  ;; A body that is no JSON is its own first line, which is all a proxy sends.
+  (should (equal "HTTP 502: Bad Gateway"
+                 (harness-error-message '(http-error 502 "Bad Gateway"))))
+  (should (equal "HTTP 401: No auth credentials found"
+                 (harness-error-message
+                  '(http-error 401 "{\"detail\":\"No auth credentials found\"}"))))
+  ;; A request that never reached the server has no status to name.
+  (should (equal "Connection reset by peer"
+                 (harness-error-message
+                  '(http-error nil (curl "Connection reset by peer" :code 56)))))
+  ;; A body that says nothing still says the request failed.
+  (should (equal "HTTP 500: request failed with HTTP 500"
+                 (harness-error-message '(http-error 500 ""))))
+  ;; A 2xx that was not JSON.
+  (should (equal "HTTP 200: the answer was not JSON"
+                 (harness-error-message '(json-error 200 "peculiar error: end of file")))))
+
+(ert-deftest harness-util-resignal-keeps-what-failed ()
+  "`harness-resignal' signals a rejection without losing it.
+Signalling a tagged tuple as it stands signals its car, which is no
+defined error symbol: Emacs then reports \"Invalid error symbol:
+http-error\" and the status, the body and the reason are gone.  A
+defined error type keeps its own identity, so a caller's handler still
+sees it."
+  ;; A tagged tuple is carried as the harness's own error, with its text.
+  (let ((err (condition-case err (harness-resignal '(http-error 503 "unavailable"))
+                          (error err))))
+    (should (eq 'harness-error (car err)))
+    (should (equal "HTTP 503: unavailable" (cadr err)))
+    (should-not (string-match-p "Invalid error symbol" (cadr err))))
+  ;; A defined type is signalled as itself, not wrapped.
+  (should (eq 'harness-no-such-method
+              (condition-case err (harness-resignal '(harness-no-such-method "x"))
+                (error (car err)))))
+  ;; A string, and a transport failure, read as their text.
+  (should (equal "plain"
+                 (condition-case err (harness-resignal "plain") (error (cadr err)))))
+  (should (equal "reset"
+                 (condition-case err (harness-resignal '(curl "reset" :code 56))
+                   (error (cadr err))))))
+
 (ert-deftest harness-util-valid-text ()
   "`harness-valid-text' repairs a raw byte and leaves good text alone."
   ;; Multibyte text with no raw byte: unchanged, not even copied.

@@ -534,7 +534,7 @@ signing in as somebody else lists theirs."
                (harness-log 'warn "responses: listing models failed: %s; keeping the %d listed before"
                             (harness-error-message err) (length (plist-get cache :models)))
                (plist-get cache :models))
-           (signal (car err) (cdr err)))))))))
+           (harness-resignal err))))))))
 
 ;;;; Request body
 

@@ -224,6 +224,17 @@ of slipping through.  The checks are, in order:
    is `catalogue-empty` — not "no refresh"; a fetch that fails is
    `catalogue-unavailable`.  Neither dispatches.
 
+   A `catalogue-unavailable` pause names what actually failed, because
+   that is the reason the session stopped: the HTTP status and the
+   message the provider's body carries (`HTTP 503: upstream
+   unavailable`), or the transport's own failure when the request never
+   reached the server.  The fetch rejects with
+   `harness-http-request-json`'s tagged tuple — `(http-error STATUS
+   BODY)` — which is no defined error type, so it is read through
+   `harness-error-message` and passed on with `harness-resignal`:
+   signalling the tuple as it stands would signal its car and replace
+   the whole failure with "Invalid error symbol: http-error".
+
 A stale reading being refreshed is not a switch: the endpoint stays the
 same, and only a failure to re-qualify stops the request.  A refusal
 sends nothing and leaves a hint and an `openrouter/route-paused` event.

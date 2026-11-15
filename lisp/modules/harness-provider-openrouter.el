@@ -466,7 +466,7 @@ so a fetch that answers immediately is never stored settled."
                            reading))
                        (lambda (err)
                          (remhash model harness-openrouter--fetching)
-                         (signal (car err) (cdr err))))))
+                         (harness-resignal err)))))
         (unless (harness-promise-settled-p reading)
           (puthash model reading harness-openrouter--fetching))
         reading)))
@@ -1953,7 +1953,12 @@ request that worked."
     (harness-openrouter--cancel-handle state)))
 
 (defun harness-openrouter--catalogue-failure (session-id on-event err)
-  "End the request of SESSION-ID ON-EVENT because its catalogue could not be read."
+  "End the request of SESSION-ID ON-EVENT because its catalogue could not be read.
+ERR is the fetch's rejection, and what it says is what the pause says: a
+server that refused the read reads as its HTTP status and its own message, a
+connection that never opened as the transport's failure.  It is the reason
+the session stopped, so it is never replaced by a description of the
+rejection's shape (see `harness-error-message')."
   (let ((detail (format "the endpoint catalogue could not be read: %s"
                         (harness-error-message err))))
     (harness-openrouter--paused session-id 'catalogue-unavailable detail)

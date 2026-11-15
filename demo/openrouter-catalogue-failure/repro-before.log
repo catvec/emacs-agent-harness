@@ -1,0 +1,56 @@
+Running 1 tests (2026-11-14 19:37:00-0500, selector ‘(member harness-provider-openrouter-a-refused-catalogue-names-the-status)’)
+Test harness-provider-openrouter-a-refused-catalogue-names-the-status backtrace:
+  ert-fail(((should (equal "OpenRouter routing paused: the endpoint ca
+  (if (unwind-protect (setq value-938 (apply fn-936 args-937)) (setq f
+  (let (form-description-940) (if (unwind-protect (setq value-938 (app
+  (let ((value-938 'ert-form-evaluation-aborted-939)) (let (form-descr
+  (let* ((fn-936 #'equal) (args-937 (condition-case err (list "OpenRou
+  (let ((events (harness-openrouter-test--run (harness-openrouter-test
+  (progn (fset 'harness-http-request #'harness-openrouter-test--fake-r
+  (unwind-protect (progn (fset 'harness-http-request #'harness-openrou
+  (let* ((old (symbol-function 'harness-http-request))) (unwind-protec
+  (let ((harness-openrouter-test--requests nil) (harness-openrouter-te
+  (progn (fset 'harness-call vnew) (let ((harness-openrouter-test--req
+  (unwind-protect (progn (fset 'harness-call vnew) (let ((harness-open
+  (let* ((vnew #'(lambda (method &rest args) (cond ((eq method ...) (l
+  (let ((harness-openrouter-test--stored nil) (harness-openrouter-test
+  (let ((harness-openrouter-routing policy) (harness-openrouter--catal
+  (let ((policy (harness-openrouter-test-policy)) (hints nil)) (let ((
+  #f(lambda () [t] (let ((policy (harness-openrouter-test-policy)) (hi
+  #f(compiled-function () #<bytecode 0x35873312b7513d4>)()
+  handler-bind-1(#f(compiled-function () #<bytecode 0x35873312b7513d4>
+  ert--run-test-internal(#s(ert--test-execution-info :test ... :result
+  ert-run-test(#s(ert-test :name harness-provider-openrouter-a-refused
+  ert-run-or-rerun-test(#s(ert--stats :selector ... :tests ... :test-m
+  ert-run-tests((member harness-provider-openrouter-a-refused-catalogu
+  ert-run-tests-batch((member harness-provider-openrouter-a-refused-ca
+  ert-run-tests-batch-and-exit((member harness-provider-openrouter-a-r
+  (progn (fset 'harness-openrouter--choose-now vnew) (ert-run-tests-ba
+  (unwind-protect (progn (fset 'harness-openrouter--choose-now vnew) (
+  (let* ((vnew #'(lambda (policy) (hx-old-reading-of (plist-get policy
+  load-with-code-conversion("/tmp/hx-probe-old.el" "/tmp/hx-probe-old.
+  command-line-1(("-L" "lisp" "-L" "lisp/modules" "-L" "lisp/ui" "-L" 
+  command-line()
+  normal-top-level()
+Test harness-provider-openrouter-a-refused-catalogue-names-the-status condition:
+    (ert-test-failed
+     ((should
+       (equal
+	"OpenRouter routing paused: the endpoint catalogue could not be read: HTTP 503: unavailable"
+	(plist-get ... :error)))
+      :form
+      (equal
+       "OpenRouter routing paused: the endpoint catalogue could not be read: HTTP 503: unavailable"
+       "OpenRouter routing paused: the endpoint catalogue could not be read: Invalid error symbol: http-error")
+      :value nil :explanation
+      (arrays-of-different-length 90 101
+				  "OpenRouter routing paused: the endpoint catalogue could not be read: HTTP 503: unavailable"
+				  "OpenRouter routing paused: the endpoint catalogue could not be read: Invalid error symbol: http-error"
+				  first-mismatch-at 69)))
+   FAILED  1/1  harness-provider-openrouter-a-refused-catalogue-names-the-status (0.025939 sec) at lisp/modules/harness-provider-openrouter-test.el:849
+
+Ran 1 tests, 0 results as expected, 1 unexpected (2026-11-14 19:37:00-0500, 0.116110 sec)
+
+1 unexpected results:
+   FAILED  harness-provider-openrouter-a-refused-catalogue-names-the-status
+

@@ -1,0 +1,35 @@
+
+A catalogue the server refused
+
+  HTTP 503 {"error":{"message":"upstream unavailable"}}
+    before: OpenRouter routing paused: the endpoint catalogue could not be read: Invalid error symbol: http-error
+    after:  OpenRouter routing paused: the endpoint catalogue could not be read: HTTP 503: upstream unavailable
+
+  HTTP 429 {"error":{"message":"rate limited, retry in 20s"}}
+    before: OpenRouter routing paused: the endpoint catalogue could not be read: Invalid error symbol: http-error
+    after:  OpenRouter routing paused: the endpoint catalogue could not be read: HTTP 429: rate limited, retry in 20s
+
+  HTTP 502 Bad Gateway
+    before: OpenRouter routing paused: the endpoint catalogue could not be read: Invalid error symbol: http-error
+    after:  OpenRouter routing paused: the endpoint catalogue could not be read: HTTP 502: Bad Gateway
+
+A request that never reached the server
+
+  (curl Connection reset by peer :code 56)
+    before: OpenRouter routing paused: the endpoint catalogue could not be read: Invalid error symbol: http-error
+    after:  OpenRouter routing paused: the endpoint catalogue could not be read: Connection reset by peer
+
+  (curl Operation timed out :code 28)
+    before: OpenRouter routing paused: the endpoint catalogue could not be read: Invalid error symbol: http-error
+    after:  OpenRouter routing paused: the endpoint catalogue could not be read: Operation timed out
+
+Passing the fetch's rejection on
+  (http-error 503 "unavailable")
+    before: (error "Invalid error symbol" http-error)
+    after:  (harness-error "HTTP 503: unavailable")
+  (harness-no-such-method "x")
+    before: (harness-no-such-method "x")
+    after:  (harness-no-such-method "x")
+
+Neither message names an error symbol, and both keep the reason the session stopped.
+

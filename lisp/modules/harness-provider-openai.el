@@ -575,7 +575,7 @@ the catalogue logs, and nothing is cached."
                       models)
                     (lambda (err)
                       (if (not cached)
-                          (signal (car err) (cdr err))
+                          (harness-resignal err)
                         (harness-log 'warn "openai %s: listing models failed: %s; keeping the %d listed before"
                                      id (harness-error-message err) (length (cdr cached)))
                         (cdr cached))))))))

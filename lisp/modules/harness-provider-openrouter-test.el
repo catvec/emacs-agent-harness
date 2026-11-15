@@ -823,6 +823,47 @@ later request of the same session is restricted to it."
                                                                 (plist-get r :url)))
                                     harness-openrouter-test--requests))))))))
 
+(ert-deftest harness-provider-openrouter-catalogue-failure-says-what-failed ()
+  "A catalogue read that failed pauses with the reason, not with its shape.
+`harness-http-request-json' rejects with (http-error STATUS BODY), a
+tagged tuple and no defined error type.  Passing it on by signalling its
+car used to replace the whole failure with \"Invalid error symbol:
+http-error\", so a server that was briefly unavailable read as a bug in
+the harness and the status was lost.  The pause names the status and what
+the provider said."
+  (let ((policy (harness-openrouter-test-policy)))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-session (harness-openrouter-test--session "s-new")
+        (harness-openrouter-test-with-fake
+            (list (cons (harness-openrouter-test--catalogue-url-regexp)
+                        `(:body ,(harness-json-encode
+                                  (list :error (list :message "upstream unavailable"))))))
+          ;; A 200 whose body is an error object is a refusal to read too.
+          (let ((events (harness-openrouter-test--run (harness-openrouter-test--request))))
+            (should (eq 'catalogue-unavailable
+                        (plist-get (car (last events)) :error-kind)))
+            (should (equal (concat "OpenRouter routing paused: the endpoint catalogue"
+                                   " could not be read: OpenRouter catalogue error: upstream unavailable")
+                           (plist-get (car (last events)) :error)))))))))
+
+(ert-deftest harness-provider-openrouter-a-refused-catalogue-names-the-status ()
+  "A catalogue the server refused is reported by its HTTP status.
+This is the failure that was reported as \"Invalid error symbol:
+http-error\": the transport's own rejection, passed on by the shared
+fetch and read by the pause.  What the session is told names the status
+and what the provider said, and never an error symbol."
+  (let ((policy (harness-openrouter-test-policy)))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-session (harness-openrouter-test--session "s-new")
+        (harness-openrouter-test-with-fake
+            (list (cons (harness-openrouter-test--catalogue-url-regexp)
+                        '(:error (http-error 503 "unavailable"))))
+          (let ((events (harness-openrouter-test--run (harness-openrouter-test--request))))
+            (should (equal "OpenRouter routing paused: the endpoint catalogue could not be read: HTTP 503: unavailable"
+                           (plist-get (car (last events)) :error)))
+            (should-not (string-match-p "Invalid error symbol"
+                                        (plist-get (car (last events)) :error)))))))))
+
 (ert-deftest harness-provider-openrouter-unknown-prices-send-nothing ()
   "A fresh catalogue that cannot identify the endpoint sends no completion.
 The block names the provider it could not resolve, and it never falls

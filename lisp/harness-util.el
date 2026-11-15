@@ -2380,20 +2380,54 @@ any other value.  Return non-nil when the default was given again."
 
 ;;;; Errors
 
+(defconst harness-error-message-limit 200
+  "Longest error text the harness reports, in characters.
+A message longer than this is cut where it is logged, hinted and shown:
+an error that carries a whole transcript, prompt or request body as its
+data would otherwise be repeated whole in *Messages*, in a session's
+history and in the tree.")
+
+(defun harness-error--cut (text limit)
+  "Return TEXT cut to LIMIT characters, with an ellipsis when it was."
+  (if (and (stringp text) (> (length text) limit))
+      (concat (substring text 0 (max 0 (1- (max 1 limit)))) "…")
+    text))
+
 (defun harness-error-message (err)
   "Return a readable message for ERR (an error data list or string).
 An ACP error, (acp-error CODE MESSAGE DATA), reads as its MESSAGE.  A
 list whose first element is no defined error type and whose second is a
 string, (curl MESSAGE :code 56), reads as that string: the details would
-otherwise print as \"peculiar error: \\\"...\\\", :code, 56\".  A defined
-error type keeps its own message, (harness-no-such-method NAME) reading
-as \"No such harness method: NAME\", except the harness's own
-`harness-error', whose data is the text a caller reads: its
+otherwise print as \"peculiar error: \\\"...\\\", :code, 56\".
+
+The failures `harness-http-request-json' rejects with are read here too,
+so a layer that passes one on says what failed rather than how the
+rejection is shaped: (http-error STATUS BODY) reads as \"HTTP 503: <what
+the body says>\", or as just what the transport said when the request
+never reached the server, and (json-error STATUS DETAIL) as \"HTTP 200:
+the answer was not JSON\".  A provider's error body is data, so only the
+message it carries is taken, never the whole body.
+
+A defined error type keeps its own message, (harness-no-such-method
+NAME) reading as \"No such harness method: NAME\", except the harness's
+own `harness-error', whose data is the text a caller reads: its
 \"Harness error: \\\"...\\\"\" wrapper is an internal prefix, not
 something a session or a person is told."
   (cond ((stringp err) err)
         ((and (eq (car-safe err) 'acp-error) (stringp (nth 2 err)) (not (string-empty-p (nth 2 err))))
          (nth 2 err))
+        ;; The two shapes `harness-http-request-json' rejects with.
+        ((eq (car-safe err) 'http-error)
+         (let* ((status (nth 1 err))
+                (body (nth 2 err))
+                (text (if (stringp body)
+                          (harness-error--body-message body status)
+                        (harness-error-message body))))
+           (harness-error--cut (if status (format "HTTP %s: %s" status text) text)
+                               harness-error-message-limit)))
+        ((eq (car-safe err) 'json-error)
+         (harness-error--cut (format "HTTP %s: the answer was not JSON" (nth 1 err))
+                             harness-error-message-limit))
         ((and (consp err) (symbolp (car err)) (stringp (cadr err))
               (not (get (car err) 'error-conditions)))
          (cadr err))
@@ -2407,18 +2441,48 @@ something a session or a person is told."
            (error (format "%S" err))))
         (t (format "%S" err))))
 
-(defconst harness-error-message-limit 200
-  "Longest error text the harness reports, in characters.
-A message longer than this is cut where it is logged, hinted and shown:
-an error that carries a whole transcript, prompt or request body as its
-data would otherwise be repeated whole in *Messages*, in a session's
-history and in the tree.")
+(defun harness-error--body-message (body status)
+  "Return what BODY, a failed response, says went wrong.
+The usual shape is an `error' object with a `message'; a `detail' or a
+`message' string is read too, and text that is no JSON is its own first
+line, which is all a proxy or a load balancer sends.  A body that says
+nothing at all reads as a request that failed with STATUS, so a caller
+is told something whatever the server sent."
+  (let* ((json (ignore-errors (harness-json-parse body)))
+         (error (and (listp json) (plist-get json :error)))
+         (message (cond ((stringp error) error)
+                        ((and (listp error) (stringp (plist-get error :message)))
+                         (plist-get error :message))
+                        ((and (listp json) (stringp (plist-get json :detail))
+                              (not (string-empty-p (plist-get json :detail))))
+                         (plist-get json :detail))
+                        ((and (listp json) (stringp (plist-get json :message))
+                              (not (string-empty-p (plist-get json :message))))
+                         (plist-get json :message))
+                        ((and (stringp body) (not (string-empty-p (string-trim body))))
+                         (harness-first-line (string-trim body) 300)))))
+    (if (and (stringp message) (not (string-empty-p message))) message
+      (format "request failed%s" (if status (format " with HTTP %s" status) "")))))
 
-(defun harness-error--cut (text limit)
-  "Return TEXT cut to LIMIT characters, with an ellipsis when it was."
-  (if (and (stringp text) (> (length text) limit))
-      (concat (substring text 0 (max 0 (1- (max 1 limit)))) "…")
-    text))
+;; A rejection value is not always a defined error type (see
+;; `harness-resignal'), so re-signalling one needs care.
+
+(defun harness-resignal (err)
+  "Signal ERR again, so a caller's handler sees what actually failed.
+ERR is a rejection value: an error data list, a string, or any object.
+`harness-http-request-json' rejects with a tagged tuple rather than a
+defined error type -- (http-error STATUS BODY), (json-error STATUS
+DETAIL) -- and so do other layers.  Signalling such a list as it stands
+would signal its car, which is no defined error symbol, and Emacs would
+replace the real failure with \"Invalid error symbol: http-error\": the
+status, the body and the reason would all be gone, and a transient
+failure of the server would read as a bug in the harness.  A defined
+error type is signalled as itself; everything else is signalled as a
+`harness-error' whose data is `harness-error-message' of ERR, the text a
+session or a person reads."
+  (if (and (consp err) (symbolp (car err)) (get (car err) 'error-conditions))
+      (signal (car err) (cdr err))
+    (signal 'harness-error (list (harness-error-message err)))))
 
 (defun harness-error--short-data (data limit &optional depth)
   "Return error DATA with long strings cut to LIMIT characters.
