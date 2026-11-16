@@ -569,6 +569,12 @@ a note is on the graph only when the agent writes it with
   "The nightly dream is due at the configured hour, records its run and repeats."
   (harness-workspace-test-with
     (let* ((harness-workspace-knowledge-dream 'auto)
+           ;; The tick dreams a workspace only once the hour has passed
+           ;; today (`harness-workspace-knowledge--dream-due-p').  Hour 0
+           ;; has passed at every moment of the day, so the test says the
+           ;; same thing whenever it runs; the default hour made it pass
+           ;; after 03:00 and fail before it.
+           (harness-workspace-knowledge-dream-hour 0)
            (workspace (harness-workspace-test-workspace))
            (id (plist-get workspace :id))
            (today (format-time-string "%Y-%m-%d")))
