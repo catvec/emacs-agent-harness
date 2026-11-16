@@ -489,7 +489,13 @@ target says so by naming it, with a **Use here** control that moves the words
 there. Only the target box offers Interrupt, Cancel work, Mute and the compact
 pipeline line, because those act on the call rather than on the box. [The
 routing design](design/live-voice-routing.md) has the picture and the reasoning.
-A reply
+
+A compose box that names no session and no workspace thread -- the task board's
+box, a popout's box -- has nowhere to send live words. It says **Voice · no
+session** and offers no Start control, since a start there could only fail;
+`C-c v` and the mouse press name the missing target in the echo area, and
+`M-x harness-voice` opens a voice chat instead, as it does from any other
+buffer. A reply
 the speech service could not say, or one
 utterance it could not transcribe, does not end the session: the status stays
 what it was, and the controls and the transcript name the loss in a line of

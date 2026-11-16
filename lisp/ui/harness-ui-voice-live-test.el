@@ -771,6 +771,93 @@ none of them is delivered twice."
      (list :event "delegation" :id "d-3" :utterance 3 :text "Request 3."))
     (should (= 3 (length harness-ui-voice-live-test--calls)))))
 
+;;;; A compose box with no target
+
+;; The reported failure: voice mode would not start on a machine whose
+;; voice controls were shown in the task board's compose box.  That box
+;; names no session and no workspace thread, so the start had nowhere to
+;; send its words and failed with "Live voice session unavailable"; the
+;; box kept offering a Start control that could only fail.  A box is a
+;; target exactly when the start has somewhere to go.
+
+(defun harness-ui-voice-live-test--box-without-target ()
+  "Make a compose box that names no session and no workspace thread.
+It is what the task board's box and a popout's box are."
+  (let ((buffer (generate-new-buffer " *live voice board*")))
+    (with-current-buffer buffer
+      (use-local-map harness-compose-map)
+      (harness-compose-setup :project (lambda () default-directory)
+                             :redraw #'ignore)
+      (let ((inhibit-read-only t))
+        (insert (propertize "Board\n" 'read-only t))
+        (harness-compose-insert))
+      (harness-compose-capture))
+    buffer))
+
+(ert-deftest harness-ui-voice-live-box-without-a-target-offers-no-start ()
+  "A box that names no session shows no Start control, and says why.
+The exact rendered copy is pinned: the status, its tooltip, and the
+absence of both controls that could only fail there."
+  (harness-ui-voice-live-test-with
+    (let ((box (harness-ui-voice-live-test--box-without-target)))
+      (unwind-protect
+          (with-current-buffer box
+            (should-not (harness-voice-live--target-p))
+            (should-not (harness-voice-live--route-of-buffer (current-buffer)))
+            (let* ((line (harness-voice-live--controls))
+                   (text (substring-no-properties line)))
+              ;; The words, exactly.
+              (should (equal " Voice · no session · [Setup]" text))
+              ;; No control that would fail, and no failed status.
+              (should-not (string-search "[Start]" text))
+              (should-not (string-search "[Use here]" text))
+              (should-not (string-search "Live · Failed" text))
+              ;; The tooltip is a noun phrase naming the missing target.
+              (should (equal "Live voice · no session target"
+                             (get-text-property (string-match "Voice · no session" line)
+                                                'help-echo line)))))
+        (when (buffer-live-p box) (kill-buffer box))))
+    ;; A box that names a session is a target, and still offers Start.
+    (should (harness-voice-live--target-p))
+    (should (string-search "[Start]" (harness-voice-live--controls)))))
+
+(ert-deftest harness-ui-voice-live-box-without-a-target-refuses-the-start ()
+  "The start from a box with no target is one line, not a failure.
+`harness-voice-dictate' and the mouse press name the missing target
+before any process, sidecar or permission is touched."
+  (harness-ui-voice-live-test-with
+    (let ((box (harness-ui-voice-live-test--box-without-target)))
+      (unwind-protect
+          (with-current-buffer box
+            (setq-local harness-compose-controls-functions (list #'harness-voice--controls))
+            (should (equal "Live voice · no session target"
+                           (error-message-string (should-error (harness-voice-dictate)))))
+            (should (equal "Live voice · no session target"
+                           (error-message-string (should-error (harness-voice-hold)))))
+            ;; Nothing started, and the controls did not turn into a failure.
+            (should-not (harness-voice-live--active-p))
+            (should-not harness-voice-live--process)
+            (should-not (eq harness-voice-live--state 'failed)))
+        (when (buffer-live-p box) (kill-buffer box))))))
+
+(ert-deftest harness-ui-voice-live-box-without-a-target-opens-a-voice-chat ()
+  "`harness-voice' in a box with no target gets a voice chat instead.
+That is where an ordinary buffer already goes; a compose box with no
+session must not be a dead end."
+  (harness-ui-voice-live-test-with
+    (let ((box (harness-ui-voice-live-test--box-without-target))
+          (opened nil))
+      (unwind-protect
+          (with-current-buffer box
+            (cl-letf (((symbol-function 'harness-new-session)
+                       (lambda (dir position _callback)
+                         (push (list dir position) opened))))
+              (harness-voice)
+              (should (= 1 (length opened)))
+              ;; The board's own box gained no controls of its own.
+              (should-not (harness-voice-live--active-p))))
+        (when (buffer-live-p box) (kill-buffer box))))))
+
 ;;;; End to end through the real sidecar
 
 ;; The scripted sidecar is a real process speaking the real protocol.

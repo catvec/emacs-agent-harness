@@ -693,6 +693,20 @@ the call has nowhere to go and ends."
   (and (harness-voice-live--active-p)
        (eq harness-voice-live--buffer (current-buffer))))
 
+(defun harness-voice-live--target-p (&optional buffer)
+  "Non-nil when BUFFER, this buffer by default, names a live target.
+A compose box that names no session and no workspace thread has nowhere
+to send its words, so it is not a target and must not offer to start a
+call: the task board's box and a popout's box are such hosts.  This asks
+what the start asks (`harness-voice-live--route-of-buffer'), so a box
+that draws Start is exactly a box whose Start works."
+  (let ((buffer (or buffer (current-buffer))))
+    (and (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (and (harness-compose-live-p)
+                (harness-voice-live--route-of-buffer buffer)
+                t)))))
+
 (defun harness-voice-live--face ()
   "Return the face for the live status."
   (cond ((eq harness-voice-live--state 'failed) 'harness-failure-face)
@@ -730,65 +744,82 @@ between capturing and reading."
   "Return fitted live voice controls for a compose box, or nil.
 A box that is not the call's target still shows the call, with the
 target's name and a control that moves the words here: the indicator
-never says `Listening' in a box the words do not go to."
+never says `Listening' in a box the words do not go to.
+
+A box that names no session and no workspace thread has nowhere to send
+its words, so it offers no start and no target: it says `Voice · no
+session' instead.  The task board and a popout are such hosts, and a
+Start control there could only fail (`harness-voice-live--target-p')."
   (when (and harness-voice--enabled (harness-voice-live-p))
     (let ((active (harness-voice-live--active-p))
           (here (harness-voice-live--here-p))
+          (target (harness-voice-live--target-p))
           (items nil))
       (if (not harness-voice--controls)
           (setq items (list (list (harness-voice--button
                                    "Voice" #'harness-voice "Voice controls · C-c h V v"))))
-        (setq items
-              (list
-               (list (propertize (harness-voice-live--status)
-                                 'face (harness-voice-live--face)
-                                 'help-echo (or harness-voice-live--error "Live voice status"))
-                     100 nil)
-               (list (cond
-                      ((and active here)
-                       (harness-voice--button "End" #'harness-voice-live-stop
-                                              "Live session · end"))
-                      (active
-                       (harness-voice--button "Use here" #'harness-voice-live-use-here
-                                              "Live voice · target"))
-                      (t
-                       (harness-voice--button "Start" #'harness-voice-live--start-here
-                                              "Live voice · sidecar session")))
-                     95 nil)
-               (and active here harness-voice-live--pending
-                    (not (harness-voice-live--input-busy-p))
-                    (list (harness-voice--button "Submission" #'harness-voice-live-send-now
-                                                 "Pending speech submission") 94 nil))
-               (and active here
-                    (list (harness-voice--button "Interrupt C-c V" #'harness-voice-live-interrupt
-                                                 "Playback · interruption") 90 nil))
-               (and harness-voice-live--error
-                    (list (propertize harness-voice-live--error 'face 'harness-failure-face
-                                      'help-echo harness-voice-live--error) 85 nil))
-               (and active harness-voice-live--camera
-                    (list (propertize (harness-voice-live--camera-label)
-                                      'face (harness-voice-live--camera-face)
-                                      'help-echo "Camera · live capture")
-                          84 nil))
-               (and active harness-voice-live--notice
-                    (list (propertize harness-voice-live--notice 'face 'harness-caution-face
-                                      'help-echo harness-voice-live--notice) 83 nil))
-               (and active here harness-voice-live--working
-                    (list (harness-voice--button "Cancel work" #'harness-voice-live-cancel
-                                                 "Agent turn · cancellation") 80 nil))
-               (and active here
-                    (list (harness-voice--button
-                           (if harness-voice-live--muted
-                               (harness-voice-live--resume-button)
-                             (harness-voice-live--pause-button))
-                           #'harness-voice-live-mute
-                           (if (harness-voice-provider-camera-p)
-                               "Camera · live capture"
-                             "Microphone · live session")) 70 nil))
-               (list (harness-voice--button "Transcript" #'harness-voice-live-transcript
-                                            "Live transcript") 60 nil)
-               (list (harness-voice--button "Setup" #'harness-voice-setup
-                                            "Voice settings") 50 nil))))
+        (if (not target)
+            (setq items
+                  (list
+                   (list (propertize "Voice · no session" 'face 'harness-dim-face
+                                     'help-echo "Live voice · no session target")
+                         100 nil)
+                   (and active
+                        (list (harness-voice--button "Transcript" #'harness-voice-live-transcript
+                                                     "Live transcript") 60 nil))
+                   (list (harness-voice--button "Setup" #'harness-voice-setup
+                                                "Voice settings") 50 nil)))
+          (setq items
+                (list
+                 (list (propertize (harness-voice-live--status)
+                                   'face (harness-voice-live--face)
+                                   'help-echo (or harness-voice-live--error "Live voice status"))
+                       100 nil)
+                 (list (cond
+                        ((and active here)
+                         (harness-voice--button "End" #'harness-voice-live-stop
+                                                "Live session · end"))
+                        (active
+                         (harness-voice--button "Use here" #'harness-voice-live-use-here
+                                                "Live voice · target"))
+                        (t
+                         (harness-voice--button "Start" #'harness-voice-live--start-here
+                                                "Live voice · sidecar session")))
+                       95 nil)
+                 (and active here harness-voice-live--pending
+                      (not (harness-voice-live--input-busy-p))
+                      (list (harness-voice--button "Submission" #'harness-voice-live-send-now
+                                                   "Pending speech submission") 94 nil))
+                 (and active here
+                      (list (harness-voice--button "Interrupt C-c V" #'harness-voice-live-interrupt
+                                                   "Playback · interruption") 90 nil))
+                 (and harness-voice-live--error
+                      (list (propertize harness-voice-live--error 'face 'harness-failure-face
+                                        'help-echo harness-voice-live--error) 85 nil))
+                 (and active harness-voice-live--camera
+                      (list (propertize (harness-voice-live--camera-label)
+                                        'face (harness-voice-live--camera-face)
+                                        'help-echo "Camera · live capture")
+                            84 nil))
+                 (and active harness-voice-live--notice
+                      (list (propertize harness-voice-live--notice 'face 'harness-caution-face
+                                        'help-echo harness-voice-live--notice) 83 nil))
+                 (and active here harness-voice-live--working
+                      (list (harness-voice--button "Cancel work" #'harness-voice-live-cancel
+                                                   "Agent turn · cancellation") 80 nil))
+                 (and active here
+                      (list (harness-voice--button
+                             (if harness-voice-live--muted
+                                 (harness-voice-live--resume-button)
+                               (harness-voice-live--pause-button))
+                             #'harness-voice-live-mute
+                             (if (harness-voice-provider-camera-p)
+                                 "Camera · live capture"
+                               "Microphone · live session")) 70 nil))
+                 (list (harness-voice--button "Transcript" #'harness-voice-live-transcript
+                                              "Live transcript") 60 nil)
+                 (list (harness-voice--button "Setup" #'harness-voice-setup
+                                              "Voice settings") 50 nil)))))
       (let ((room (max 1 (- (/ (harness-compose--room) (frame-char-width)) 3))))
         (concat (harness-ui-settings-line (list items) room)
                 ;; The pipeline is a line of its own under the controls:
@@ -2654,8 +2685,12 @@ once, with a Retry control, rather than waiting out its own deadline."
         (harness-voice-live--prepare)
         (unless harness-voice-mode (harness-voice-mode 1))
         (harness-voice--adopt)
-        (setf (harness-voice-pipeline-input harness-voice-live--pipeline)
-              (harness-voice-live--input))
+        ;; Through the setter, never `setf': this file's `setf' on the
+        ;; accessor compiles to a call of a function that does not exist
+        ;; when it is compiled before the struct is (see
+        ;; `harness-voice-pipeline-set-input').
+        (harness-voice-pipeline-set-input harness-voice-live--pipeline
+                                          (harness-voice-live--input))
         (harness-voice-live--pipeline-bump 'connecting)
         (setq harness-voice-live--error nil
               harness-voice-live--notice nil

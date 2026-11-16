@@ -553,5 +553,78 @@ meter can be read as the measurement it is."
                   (done . "done") (failed . "failed") (cancelled . "cancelled")))
     (should (equal (cdr case) (harness-voice-pipeline--turn-label (car case))))))
 
+(ert-deftest harness-ui-voice-pipeline-input-setter-survives-compile-order ()
+  "The input is set through a function that works in any compile order.
+A `cl-defstruct' accessor's `setf' is a compiler macro the struct's own
+definition installs when it is evaluated.  A `setf' on the accessor in
+another file, compiled where the struct's definition has not been
+evaluated -- a first compile, a stale cache, a file compiled on its own
+-- becomes a call of the function `(setf harness-voice-pipeline-input)',
+which nothing defines: the byte-compiled file then fails at run time with
+`Symbol's function definition is void'.  The machine whose compile order
+evaluated the struct first never saw it, and the other one did.
+
+`harness-ui-voice-live' sets the slot through
+`harness-voice-pipeline-set-input' instead, a plain function.  This
+compiles a file that does both in that order and calls each: the function
+answers, and the `setf' it replaces is shown to fail, so the order the
+test relies on is the order that broke."
+  (let* ((dir (make-temp-file "harness-voice-setter-" t))
+         (out (expand-file-name "out" dir))
+         (use (expand-file-name "use.el" dir))
+         (emacs (expand-file-name invocation-name invocation-directory))
+         (paths (append (list "-L" (expand-file-name "lisp/ui" harness-test-root)
+                              "-L" (expand-file-name "lisp" harness-test-root)
+                              "-L" (expand-file-name "lisp/modules" harness-test-root))
+                        (cl-loop for d in '("image-viewer" "compose-quote"
+                                            "change-review" "worktree-assume")
+                                 append (list "-L" (expand-file-name
+                                                    (concat "lisp/vendor/" d)
+                                                    harness-test-root))))))
+    (unwind-protect
+        (progn
+          (make-directory out)
+          ;; Declared, never required: the struct is not evaluated when
+          ;; this compiles, which is the order that broke the `setf'.
+          (with-temp-file use
+            (insert ";;; -*- lexical-binding: t; -*-\n"
+                    "(require 'cl-lib)\n"
+                    "(declare-function harness-voice-pipeline-set-input \"harness-ui-voice-pipeline\")\n"
+                    "(declare-function harness-voice-pipeline-input \"harness-ui-voice-pipeline\")\n"
+                    "(defun use-setter (p)\n"
+                    "  (harness-voice-pipeline-set-input p 'camera)\n"
+                    "  (harness-voice-pipeline-input p))\n"
+                    "(defun use-setf (p)\n"
+                    "  (setf (harness-voice-pipeline-input p) 'camera)\n"
+                    "  (harness-voice-pipeline-input p))\n"
+                    "(provide 'use)\n"))
+          (should (eq 0 (apply #'call-process emacs nil nil nil
+                               "-Q" "--batch"
+                               (append paths
+                                       (list "--eval"
+                                             (format "(setq byte-compile-dest-file-function (lambda (f) (expand-file-name (concat (file-name-nondirectory f) \"c\") %S)))"
+                                                     out)
+                                             "-f" "batch-byte-compile" use)))))
+          (let ((answer
+                 (lambda (form)
+                   (with-temp-buffer
+                     (apply #'call-process emacs nil t nil
+                            "-Q" "--batch"
+                            (append paths
+                                    (list "-L" out
+                                          "--eval"
+                                          (format "(progn (require 'harness-ui-voice-pipeline) (require 'use) (princ (format \"%%S\" (condition-case e (%s (harness-voice-pipeline-create 'off)) (error (error-message-string e))))))"
+                                                  form))))
+                     (string-trim (buffer-string))))))
+            ;; The setter answers the input, in the order that broke the
+            ;; `setf'.
+            (should (equal "camera" (funcall answer "use-setter")))
+            ;; And the `setf' this replaces really does fail there, so the
+            ;; test would catch it coming back.
+            ;; Emacs prints the symbol with its space escaped.
+            (should (string-match-p "void: .*setf.*harness-voice-pipeline-input"
+                                    (funcall answer "use-setf")))))
+      (ignore-errors (delete-directory dir t)))))
+
 (provide 'harness-ui-voice-pipeline-test)
 ;;; harness-ui-voice-pipeline-test.el ends here

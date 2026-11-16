@@ -490,7 +490,13 @@ With the live provider, a press starts the live session instead."
       (when (windowp window) (select-window window))))
   (unless (harness-compose-live-p) (user-error "Voice compose unavailable"))
   (if (harness-voice-live-p)
-      (unless (harness-voice-live--active-p)
+      (cond
+       ((harness-voice-live--active-p) nil)
+       ;; A box with no session or thread cannot start a call, and says so
+       ;; in one line instead of a failure it could never recover from.
+       ((not (harness-voice-live--target-p))
+        (user-error "Live voice · no session target"))
+       (t
         (condition-case err
             (harness-voice-live-start)
           (error
@@ -498,7 +504,7 @@ With the live provider, a press starts the live session instead."
                  harness-voice-live--state 'failed
                  harness-voice-live--error (harness-ui-one-line
                                             (error-message-string err)))
-           (harness-voice--refresh))))
+           (harness-voice--refresh)))))
     (condition-case err
         (harness-voice--start-recording)
       (error
@@ -577,8 +583,12 @@ With the live provider this starts a stopped session, or mutes and
 unmutes the running one."
   (interactive)
   (if (harness-voice-live-p)
-      (if (harness-voice-live--active-p)
-          (harness-voice-live-mute)
+      (cond
+       ((harness-voice-live--active-p)
+        (harness-voice-live-mute))
+       ((not (harness-voice-live--target-p))
+        (user-error "Live voice · no session target"))
+       (t
         (condition-case err
             (harness-voice-live-start)
           (error
@@ -586,7 +596,7 @@ unmutes the running one."
                  harness-voice-live--state 'failed
                  harness-voice-live--error (harness-ui-one-line
                                             (error-message-string err)))
-           (harness-voice--refresh))))
+           (harness-voice--refresh)))))
     (if (and harness-voice--job (eq (harness-voice--job-phase harness-voice--job) 'recording))
         (harness-voice-release)
       (condition-case err
@@ -1210,12 +1220,17 @@ ownership; disabling stops audio, not work."
       (harness-voice--set-state 'ready))))
 
 (defun harness-voice-toggle ()
-  "Toggle voice in the current chat."
+  "Toggle voice in the current chat.
+A box that names no session or workspace thread has no live target, so
+it gets the voice chat instead (`harness-voice')."
   (interactive)
   (if (harness-voice-live-p)
-      (if (harness-voice-live--active-p)
-          (harness-voice-live-stop)
+      (cond
+       ((harness-voice-live--active-p)
+        (harness-voice-live-stop))
+       ((harness-voice-live--target-p)
         (harness-voice-live--start-here))
+       (t (harness-voice)))
     (harness-voice-mode (if harness-voice-mode -1 1))))
 
 (defun harness-voice--context ()
@@ -1241,7 +1256,9 @@ repeats none of it.  No file contents are sent automatically; live audio
 stays in the sidecar you configured.  The normal send and tool paths keep
 threads, questions and permissions in the existing harness workflow."
   (interactive)
-  (if (harness-compose-live-p)
+  (if (and (harness-compose-live-p)
+           (or (not (harness-voice-live-p))
+               (harness-voice-live--target-p)))
       (progn
         (setq harness-voice--controls t)
         (if (and harness-ui-session-id
@@ -1254,6 +1271,10 @@ threads, questions and permissions in the existing harness workflow."
                          (not (harness-voice-live--active-p)))
                 (harness-voice-live--start-here)))
           (harness-voice--refresh)))
+    ;; An ordinary buffer, and a compose box that names no session or
+    ;; workspace thread -- the task board's, a popout's -- which has
+    ;; nowhere to send live words.  Both get a quick voice chat instead of
+    ;; controls that could only fail to start.
     (let ((context (harness-voice--context))
           (dir (harness-files-project-root default-directory)))
       (harness-new-session

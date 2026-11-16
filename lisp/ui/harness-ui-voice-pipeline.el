@@ -226,6 +226,19 @@ must never be called a microphone."
   (setf (harness-voice-pipeline-dirty p) t)
   p)
 
+(defun harness-voice-pipeline-set-input (p input)
+  "Make P read INPUT, `mic' or `camera'.
+A caller that sets the slot does it through this function, not with
+`setf' on the accessor: a `cl-defstruct' accessor's `setf' is a compiler
+macro the struct's own definition installs when it is evaluated, so a
+`setf' in another file compiles to a call of the function
+`(setf harness-voice-pipeline-input)' when that file is compiled before
+the struct is, and no such function exists.  Loaded from a compiled
+copy, that fails at run time; interpreted or compiled in another order,
+it works, so the bug appears on one machine and not another."
+  (setf (harness-voice-pipeline-input p) (or input 'mic))
+  (harness-voice-pipeline--changed p))
+
 (defun harness-voice-pipeline--current (p generation)
   "Return non-nil when GENERATION is nil or is P's generation."
   (or (null generation) (eql generation (harness-voice-pipeline-generation p))))
