@@ -1629,7 +1629,7 @@ policy there is no pin to ask, and none is sent either."
                (and (listp route)
                     (harness-json-true-p (plist-get route :structured-outputs)))))
     (list :type "json_schema"
-          :json_schema (list :name name :strict :true :schema schema))))
+          :json_schema (list :name name :strict t :schema schema))))
 
 (defun harness-openrouter--body-extra (_endpoint _name request)
   "Return the OpenRouter-only body fields for REQUEST.

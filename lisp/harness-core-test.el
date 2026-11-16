@@ -352,6 +352,15 @@ but for moving it to the priority given, as a reloaded `:init' gives."
 (ert-deftest harness-util-json-conventions ()
   (should (equal "{\"a\":1,\"b\":[1,2],\"c\":null,\"d\":false,\"e\":true,\"f\":{},\"g\":[]}"
                  (harness-json-encode '(:a 1 :b (1 2) :c nil :d :false :e t :f :empty :g []))))
+  ;; `:true' beside `:false': a keyword meant as a boolean must reach the
+  ;; wire as `true', never as the string ":true".  A `"strict":":true"'
+  ;; once did, and DeepInfra refused every such request with HTTP 422.
+  (should (equal "{\"a\":true,\"b\":false,\"c\":null}"
+                 (harness-json-encode '(:a :true :b :false :c :null))))
+  (should (equal "{\"strict\":true}"
+                 (harness-json-encode (list :strict :true))))
+  (should (equal "{\"strict\":true}"
+                 (harness-json-encode (list :strict t))))
   (should (equal '(:a 1 :b (1 2) :c nil :d :false)
                  (harness-json-parse "{\"a\":1,\"b\":[1,2],\"c\":null,\"d\":false}")))
   (should (equal "[{\"x\":1}]" (harness-json-encode '((:x 1)))))

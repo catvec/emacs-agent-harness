@@ -818,7 +818,8 @@ contracts).  lisp/vendor/README.md is the guide; the contract is this:
 ## Data shapes
 
 All shapes are keyword plists (the JSON convention in harness-util:
-objects are plists, arrays are lists, `nil` is null, `:false` is false).
+objects are plists, arrays are lists, `nil` is null, `t` is true,
+`:true` is true too, `:false` is false).
 `harness-json-encode` gives bytes (unibyte UTF-8 since Emacs 30) for a
 process, a file or an HTTP body; JSON that goes inside other text (a
 prompt, a tool result) or inside other JSON comes from

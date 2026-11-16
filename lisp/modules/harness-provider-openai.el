@@ -845,7 +845,7 @@ mean if it has checked: the field goes out as `json_schema', under
        (dialect nil)                    ; this dialect takes none here
        ((listp schema)
         (list :type "json_schema"
-              :json_schema (list :name name :strict :true :schema schema)))))))
+              :json_schema (list :name name :strict t :schema schema)))))))
 
 (defun harness-openai--body (endpoint name request)
   "Build the chat completions body for model NAME at ENDPOINT from REQUEST.

@@ -8,8 +8,9 @@
 ;;   lists, `null' is nil and `false' is `:false'.
 ;; - When encoding, a list whose first element is a keyword is an
 ;;   object, any other list is an array, `nil' is null, `t' is true,
-;;   `:false' is false, `:empty' is an empty object, and vectors are
-;;   arrays.  Use `harness-json-array' for an empty array.
+;;   `:true' is true, `:false' is false, `:empty' is an empty object,
+;;   and vectors are arrays.  Use `harness-json-array' for an empty
+;;   array.
 ;; - `harness-json-encode' returns bytes for a process, a file or an
 ;;   HTTP body: since Emacs 30 `json-serialize' gives unibyte UTF-8.
 ;;   JSON that goes inside other text (a prompt, a tool result) or
@@ -44,6 +45,10 @@
   (cond
    ((null obj) :null)
    ((eq obj t) t)
+   ;; `:true' is spelled out beside `:false' so the pair reads alike, and
+   ;; so a keyword that was meant as a boolean cannot fall through to the
+   ;; symbol branch below and reach a server as the string ":true".
+   ((eq obj :true) t)
    ((eq obj :false) :false)
    ((eq obj :null) :null)
    ((eq obj :empty) (make-hash-table :test 'equal :size 1))

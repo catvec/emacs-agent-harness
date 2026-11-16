@@ -101,6 +101,14 @@ Return (EVENTS . HANDLE) once `done' arrived; EVENTS are oldest first."
   "Return the JSON plist of the most recent fake request."
   (plist-get (car harness-openai-test--requests) :json))
 
+(defun harness-openai-test--last-request-raw ()
+  "Return the body of the most recent fake request as encoded JSON text.
+`harness-openai-test--last-request-json' parses the body back into Lisp,
+where `t' and `:true' both read as true; this is the text the server is
+actually sent, which is what a shape the server validates depends on."
+  (let ((json (plist-get (car harness-openai-test--requests) :json)))
+    (if (stringp json) json (harness-json-encode-text json))))
+
 (defun harness-openai-test--approx (a b)
   "Non-nil when numbers A and B agree to a millionth."
   (< (abs (- a b)) 1e-6))
@@ -524,8 +532,15 @@ that names none sends no such field at all."
       (let ((format (plist-get (harness-openai-test--last-request-json) :response_format)))
         (should (equal "json_schema" (plist-get format :type)))
         (should (equal "verdict" (plist-get (plist-get format :json_schema) :name)))
-        (should (equal :true (plist-get (plist-get format :json_schema) :strict)))
-        (should (equal schema (plist-get (plist-get format :json_schema) :schema))))
+        (should (equal t (plist-get (plist-get format :json_schema) :strict)))
+        (should (equal schema (plist-get (plist-get format :json_schema) :schema)))
+        ;; The strictness must be the JSON boolean `true' on the wire, not
+        ;; the string ":true": DeepInfra refused the latter with HTTP 422
+        ;; ("Input should be 'text'"), which cost every judge verdict.
+        (should (string-match-p "\"strict\":true"
+                                (harness-openai-test--last-request-raw)))
+        (should-not (string-match-p "\"strict\":\""
+                                    (harness-openai-test--last-request-raw))))
       ;; A dialect that takes no schema swallows it rather than failing
       ;; the call: this is what a provider that said nothing gets.
       (let ((endpoint (list :id 'quiet :base-url "https://quiet.example/v1"
