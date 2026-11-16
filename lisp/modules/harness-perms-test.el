@@ -689,6 +689,115 @@ A model named by the provider's `:tiers' is used; an explicit model wins."
                                                      (expand-file-name "f" (plist-get harness-perms-test--session :cwd)))))
     (should (null (funcall probe 'requests)))))
 
+(ert-deftest harness-perms-auto-mode-deadline-stops-a-judge-whose-handle-came-late ()
+  "A judge whose deadline passes before its handle comes back is still stopped.
+The deadline is armed before `harness-prompt-ask' is called, and that call
+does routing, admission and catalogue work before the provider returns a
+handle.  A timer that fired in that window found no handle to cancel, so
+the request went on unowned: its transport was never torn down, its
+internal record stayed running, and nothing could stop it later.  The
+decision is the no-verdict one, and the request is cancelled as soon as
+its handle exists."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing."
+                       :handler (lambda (_in _ctx) (error "The judge's call ran")))
+  (let* ((cancelled 0)
+         (harness-perms-auto-model "judge:x")
+         (harness-perms--auto-timeout 0.15))
+    (harness-define-provider 'judge
+      :label "Judge"
+      :complete (lambda (_req)
+                  ;; Routing and admission happen inside this call: the
+                  ;; deadline passes while there is no handle yet.
+                  (accept-process-output nil 0.3)
+                  (list :cancel (lambda () (cl-incf cancelled)))))
+    (let ((d (harness-perms-test--decide (harness-perms-test--request "t_exec" 'exec))))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (eq 'judge-timeout (plist-get d :no-verdict-code)))
+      (should (string-match-p "no verdict (it took longer than 0.15s)" (plist-get d :reason)))
+      ;; The request was stopped although its handle arrived after the deadline.
+      (should (= 1 cancelled)))))
+
+(ert-deftest harness-perms-auto-mode-a-completed-call-is-not-cancelled-again ()
+  "A call that already ended is not stopped when its late handle comes back.
+The provider answers the first call and starts the retry inside
+`harness-prompt-ask', so the retry's handle exists before the first
+call's does.  That first call already emitted `done', which ended its
+request and finished its record: the handle arriving afterwards is
+nothing to stop, and cancelling it would finalize a completed record a
+second time.  The retry decides the call and its handle is kept."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing."
+                       :handler (lambda (_in _ctx) (error "The judge's call ran")))
+  (let* ((cancelled nil)
+         (calls 0)
+         (harness-perms-auto-model "judge:x")
+         (harness-perms--auto-timeout 5))
+    (harness-define-provider 'judge
+      :label "Judge"
+      :complete (lambda (req)
+                  (cl-incf calls)
+                  (let ((n calls)
+                        (cb (plist-get req :on-event)))
+                    ;; Both calls answer synchronously, inside the
+                    ;; `harness-prompt-ask' that is sending them.  Call 1
+                    ;; writes no verdict, so its answer starts call 2
+                    ;; before call 1 has returned a handle; call 2 writes
+                    ;; a verdict, which decides the call.
+                    (if (= n 1)
+                        (progn
+                          (funcall cb (list :type 'text :delta "not a verdict"))
+                          (funcall cb (list :type 'done :stop-reason 'end-turn)))
+                      (funcall cb (list :type 'text
+                                        :delta "{\"decision\":\"allow\",\"reason\":\"fine\"}"))
+                      (funcall cb (list :type 'done :stop-reason 'end-turn)))
+                    (let ((id n))
+                      (list :cancel (lambda () (push id cancelled)))))))
+    (let ((d (harness-perms-test--decide (harness-perms-test--request "t_exec" 'exec))))
+      (should (eq 'allow (plist-get d :behavior)))
+      (should (equal "fine" (plist-get d :reason)))
+      (should (= 2 calls))
+      ;; The first call was over before its handle came back: nothing was
+      ;; cancelled, so its record is finalized once, by its own `done'.
+      (should-not cancelled))))
+
+(ert-deftest harness-perms-auto-mode-a-timeout-stops-the-retry-not-the-ended-call ()
+  "A deadline stops the live call's handle, not the one that already ended.
+Call 1 answers with no verdict synchronously, which starts the
+correction retry; call 2 stays in flight and returns its own handle;
+then call 1's handle comes back, late.  The deadline fires while call 2
+is live.  The decision is the no-verdict one, and the handle stopped is
+call 2's: a shared `handle' would have been overwritten by call 1's
+late return, so the deadline would have cancelled the call that was
+already over and left the live one running."
+  (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
+  (harness-define-tool "t_exec" :label "Run" :kind 'exec :description "Runs a thing."
+                       :handler (lambda (_in _ctx) (error "The judge's call ran")))
+  (let* ((cancelled nil)
+         (calls 0)
+         (harness-perms-auto-model "judge:x")
+         (harness-perms--auto-timeout 0.15))
+    (harness-define-provider 'judge
+      :label "Judge"
+      :complete (lambda (req)
+                  (cl-incf calls)
+                  (let ((n calls)
+                        (cb (plist-get req :on-event)))
+                    ;; Call 1 answers with no verdict, synchronously: its
+                    ;; answer starts call 2 before call 1 returns.  Call 2
+                    ;; says nothing, so it is the live call when the
+                    ;; deadline fires.
+                    (when (= n 1)
+                      (funcall cb (list :type 'text :delta "not a verdict"))
+                      (funcall cb (list :type 'done :stop-reason 'end-turn)))
+                    (let ((id n))
+                      (list :cancel (lambda () (push id cancelled)))))))
+    (let ((d (harness-perms-test--decide (harness-perms-test--request "t_exec" 'exec))))
+      (should (eq 'deny (plist-get d :behavior)))
+      (should (eq 'judge-timeout (plist-get d :no-verdict-code)))
+      (should (= 2 calls))
+      ;; Call 2 was the live one, and it is the one that was stopped.
+      (should (equal '(2) cancelled)))))
 (ert-deftest harness-perms-auto-mode-asks-again-when-the-judge-ran-out-of-tokens ()
   "A judge that spends its whole output budget thinking is asked again.
 A reasoning model writes no verdict before `max-tokens'; the second call

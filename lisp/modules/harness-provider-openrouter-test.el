@@ -1480,6 +1480,121 @@ what the harness keeps is the identity of the failure, never the request."
         (should (string-match-p "error_type=invalid_request" (plist-get done :error)))
         (should (string-match-p "provider=OpenInference" (plist-get done :error)))))))
 
+(ert-deftest harness-provider-openrouter-an-ephemeral-request-sends-without-storing ()
+  "A one-off call's request is routed and sent, and no pin is stored.
+The judge names a session of its own, which no session record holds.
+Routing must not store a pin under that id: `session/set-ext' signals
+`No session' before anything is sent, and the caller is left waiting for
+its deadline.  The route is still chosen and applied, and the request
+goes out exactly once, to the selected endpoint."
+  (let ((policy (harness-openrouter-test-policy)))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-session (harness-openrouter-test--session "s-1")
+        (harness-openrouter-test-with-fake
+            (list (harness-openrouter-test--catalogue-response)
+                  (harness-openrouter-test--completion-response))
+          (let* ((req (plist-put (copy-sequence (harness-openrouter-test--request))
+                                 :ephemeral t))
+                 (events (harness-openrouter-test--run req))
+                 (completions
+                  (cl-remove-if-not
+                   (lambda (r) (string-match-p "chat/completions" (plist-get r :url)))
+                   harness-openrouter-test--requests)))
+            ;; One completion was sent, and the call ended as the fixture says.
+            (should (= 1 (length completions)))
+            (should (= 1 (length (harness-openrouter-test--done-events events))))
+            (should (eq 'end-turn (plist-get (car (last events)) :stop-reason)))
+            ;; It went to the endpoint routing selected, and no other.
+            (should (equal '("deepinfra/fp8")
+                           (append (plist-get (plist-get (plist-get (car completions) :json)
+                                                         :provider)
+                                              :only)
+                                   nil)))
+            (should (eq :false (plist-get (plist-get (plist-get (car completions) :json)
+                                                     :provider)
+                                          :allow_fallbacks)))
+            ;; Nothing was pinned under the one-off session's id.
+            (should-not harness-openrouter-test--stored)))))))
+
+(defun harness-openrouter-test--routing-failure (failure)
+  "Run a request that is not ephemeral and cannot be pinned, for FAILURE.
+FAILURE is `:no-session' -- the registry does not hold the session -- or
+`:store-refused' -- the registry refuses the write.  Return the events
+the caller saw, oldest first, with the fake transport in place.  The
+session is a real `harness-sessions' entry, which `session/exists-p'
+reads; no store is loaded in this suite, so the record is made directly
+rather than through `session/create'."
+  (let* ((cwd (harness-test-temp-dir))
+         (parent (format "s-real-%s" (harness-short-id)))
+         (real (symbol-function 'harness-call))
+         (events nil))
+    (unwind-protect
+        (progn
+          (puthash parent
+                   (make-harness-session :id parent :name parent :cwd cwd
+                                         :kind 'main :status 'idle)
+                   harness-sessions)
+          (cl-letf (((symbol-function 'harness-call)
+                     (lambda (method &rest args)
+                       (pcase method
+                         ('session/exists-p
+                          (if (eq failure :no-session)
+                              nil
+                            (apply real method args)))
+                         ('session/set-ext
+                          (if (eq failure :store-refused)
+                              (signal 'harness-error (list "the store refused it"))
+                            (apply real method args)))
+                         (_ (apply real method args))))))
+            (harness-call 'provider/complete
+                          (plist-put (copy-sequence
+                                      (harness-openrouter-test--request
+                                       (list :id (format "%s-perms" parent)
+                                             :cwd cwd :host nil)))
+                                     :on-event (lambda (e) (push e events)))))
+          (harness-test-wait
+           (lambda () (cl-find 'done events :key (lambda (e) (plist-get e :type))))
+           5 "done"))
+      (remhash parent harness-sessions))
+    (nreverse events)))
+
+(defun harness-openrouter-test--assert-routing-failed (events)
+  "Assert EVENTS say the call failed without reaching the transport."
+  ;; Nothing was sent: no completion reached the fake.
+  (should-not (cl-find-if (lambda (r) (string-match-p "chat/completions"
+                                                     (plist-get r :url)))
+                          harness-openrouter-test--requests))
+  ;; The caller was told, once, rather than left waiting for its deadline.
+  (let ((done (harness-openrouter-test--done-events events)))
+    (should (= 1 (length done)))
+    (should (eq 'error (plist-get (car done) :stop-reason)))
+    (should (equal 'routing-failed (plist-get (car done) :error-kind)))))
+
+(ert-deftest harness-provider-openrouter-a-missing-session-fails-closed ()
+  "A request that is not ephemeral and names no known session sends nothing.
+The ephemeral skip must not weaken an ordinary request: a session the
+registry does not hold is an error, raised before anything is sent, and
+the caller hears it as a `done'."
+  (let ((policy (harness-openrouter-test-policy)))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--catalogue-response)
+                (harness-openrouter-test--completion-response))
+        (harness-openrouter-test--assert-routing-failed
+         (harness-openrouter-test--routing-failure :no-session))))))
+
+(ert-deftest harness-provider-openrouter-a-refused-pin-fails-closed ()
+  "A request that is not ephemeral and cannot store its pin sends nothing.
+A registry that refuses the write is an error, raised before anything is
+sent, and the caller hears it as a `done'."
+  (let ((policy (harness-openrouter-test-policy)))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--catalogue-response)
+                (harness-openrouter-test--completion-response))
+        (harness-openrouter-test--assert-routing-failed
+         (harness-openrouter-test--routing-failure :store-refused))))))
+
 (ert-deftest harness-provider-openrouter-fork-does-not-inherit-a-pin ()
   "A fork starts unpinned; the parent's pin is never copied to it.
 The pin lives in the session's `ext', which `session/fork' does not copy,
@@ -1557,6 +1672,50 @@ why, and a provider the policy does not name is refused outright."
           (should-not harness-openrouter-test--stored))))))
 
 ;;;; Cancellation
+
+(ert-deftest harness-provider-openrouter-a-routing-error-is-delivered-once ()
+  "A routing error ends the call exactly once, and a later cancel adds nothing.
+The pin cannot be stored, so the success handler signals.  That is
+delivered as one `done' with `routing-failed' -- not left to the caller's
+deadline -- and cancelling afterwards, twice, emits nothing further.
+Nothing reaches the transport."
+  (let ((policy (harness-openrouter-test-policy))
+        (session (harness-openrouter-test--session "s-new"))
+        (events nil)
+        (handle nil))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-session session
+        ;; Captured inside `with-session', so the stubs it installs stay in
+        ;; the chain: only `session/set-ext' is overridden, and every other
+        ;; call reaches them.
+        (let ((real (symbol-function 'harness-call)))
+          (harness-openrouter-test-with-fake
+              (list (harness-openrouter-test--catalogue-response)
+                    (harness-openrouter-test--completion-response))
+            (cl-letf (((symbol-function 'harness-call)
+                       (lambda (method &rest args)
+                         (pcase method
+                           ('session/set-ext
+                            (signal 'harness-error (list "the store refused it")))
+                           (_ (apply real method args))))))
+              (setq handle (harness-call 'provider/complete
+                                         (plist-put (harness-openrouter-test--request session)
+                                                    :on-event (lambda (e) (push e events)))))
+              (harness-test-wait
+               (lambda () (harness-openrouter-test--done-events events)) 5 "done"))
+            ;; All request assertions inside `with-fake', where the fake's
+            ;; own record of what it served is still bound.
+            (should-not (cl-find-if (lambda (r) (string-match-p "chat/completions"
+                                                               (plist-get r :url)))
+                                    harness-openrouter-test--requests))
+            (let ((done (harness-openrouter-test--done-events events)))
+              (should (= 1 (length done)))
+              (should (eq 'error (plist-get (car done) :stop-reason)))
+              (should (equal 'routing-failed (plist-get (car done) :error-kind))))
+            ;; Cancelling afterwards is harmless and announces nothing more.
+            (funcall (plist-get handle :cancel))
+            (funcall (plist-get handle :cancel))
+            (should (= 1 (length (harness-openrouter-test--done-events events))))))))))
 
 (ert-deftest harness-provider-openrouter-cancel-before-the-catalogue-resolves ()
   "Cancelling before the catalogue answers stops the request and sends nothing.

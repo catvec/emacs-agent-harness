@@ -1160,10 +1160,20 @@ another model (`harness-openrouter--same-model-p')."
        (list :canonical-slug canonical-slug))
      (list :basis "chosen"))))
 
-(defun harness-openrouter--store-route (session-id route)
-  "Store ROUTE as SESSION-ID's pinned route; return ROUTE."
+(defun harness-openrouter--store-route (session-id route &optional ephemeral)
+  "Store ROUTE as SESSION-ID's pinned route; return ROUTE.
+A pin is kept in the session's `ext', so it is stored only for a session
+the registry holds.  EPHEMERAL says the request is a one-off call that
+named a session of its own, which no session record holds: its route is
+announced, since it was chosen and the request goes on with it, and
+nothing is stored.  A request that is not ephemeral stores its route as
+it always did, so a missing or deleted session is still an error from
+`session/set-ext', raised before anything is sent."
   (when (harness-method-exists-p 'session/set-ext)
-    (harness-call 'session/set-ext session-id harness-openrouter--route-key route))
+    (if ephemeral
+        (harness-log 'debug "openrouter: %s is a one-off call; its route is not stored"
+                     session-id)
+      (harness-call 'session/set-ext session-id harness-openrouter--route-key route)))
   (harness-emit 'openrouter/route-selected session-id route)
   route)
 
@@ -2537,7 +2547,8 @@ Nothing is sent until the pin exists."
     (harness-then
      (harness-openrouter--choose-now-with-slug policy)
      (lambda (reading)
-       (unless (harness-openrouter--cancelled-p state)
+       (condition-case err
+           (unless (harness-openrouter--cancelled-p state)
          ;; The policy is the one in force now, not the one that sent for
          ;; the catalogue: a session must not be pinned by a policy the
          ;; operator has replaced, and the pin, the limits and the privacy
@@ -2563,7 +2574,8 @@ Nothing is sent until the pin exists."
             (t
              (let* ((route (harness-openrouter--store-route
                             session-id (harness-openrouter--route-plist
-                                        decision (plist-get reading :canonical-slug))))
+                                        decision (plist-get reading :canonical-slug))
+                            (plist-get request :ephemeral)))
                     (snapshot (list :policy in-force :route route)))
                (harness-openrouter--degraded session-id reading)
                (harness-openrouter--hint
@@ -2580,7 +2592,14 @@ Nothing is sent until the pin exists."
                 (plist-put (copy-sequence request) :session
                            (or (ignore-errors (harness-call 'session/get session-id))
                                (plist-get request :session)))
-                on-event)))))))
+                on-event))))))
+           (error
+            (unless (harness-openrouter--cancelled-p state)
+              (funcall on-event
+                       (list :type 'done :stop-reason 'error
+                             :error-kind 'routing-failed
+                             :error (format "OpenRouter routing failed: %s"
+                                            (harness-error-message err))))))))
      (lambda (err)
        (unless (harness-openrouter--cancelled-p state)
          (harness-openrouter--catalogue-failure session-id on-event err))))

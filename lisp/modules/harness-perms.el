@@ -4002,8 +4002,14 @@ once, if the chain the verdict feeds into allows it."
             ;; call keeps its own reply and only speaks while it is the
             ;; live one, so an event from a call that ran out cannot
             ;; decide for its retry.
-            ((ask (n text)
-                  (let ((reply "") (live (setq attempt n)))
+            ((stop (h)
+                   ;; A handle no call will keep: its request is stopped.
+                   ;; What its internal record needs is the provider's
+                   ;; business, which owns that record (see
+                   ;; `harness-provider--job-events').
+                   (ignore-errors (funcall (plist-get h :cancel))))
+             (ask (n text)
+                  (let ((reply "") (live (setq attempt n)) (ended nil))
                     (setq failure nil)
                     (when timer (cancel-timer timer))
                     (setq timer
@@ -4013,89 +4019,105 @@ once, if the chain the verdict feeds into allows it."
                                          (setq failure (format "it took longer than %ss" harness-perms--auto-timeout)
                                                failure-code 'judge-timeout)
                                          (funcall finish decision)
-                                         (when handle (ignore-errors (funcall (plist-get handle :cancel)))))))
+                                         (when handle (stop handle)))))
                     ;; A one-off call through `harness-small-ask': a
                     ;; provider's bad minute -- a rate limit, a connection
                     ;; cut -- is waited out and the verdict asked for again,
                     ;; as a step of a turn would be.
-                    (setq handle
-                          (harness-prompt-ask
-                           ;; The correction is only the second call's.
-                           (if (> n 1)
-                               '(perms-judge-system perms-judge-question perms-judge-correction)
-                             '(perms-judge-system perms-judge-question))
-                           (harness-perms--judge-request session model system text n)
-                           (list :label "perms judge"
-                                 :on-event
-                                 (lambda (ev)
-                                   ;; A call that is over -- timed out, or
-                                   ;; answered by its retry -- decides
-                                   ;; nothing more, and asks nothing more.
-                                   (when (and (= live attempt) (not settled))
-                                     (pcase (plist-get ev :type)
-                                       ;; A try that failed is thrown away:
-                                       ;; so is what it wrote.
-                                       ('restart (setq reply "" failure nil
-                                                        failure-code 'judge-empty failure-detail nil))
-                                       ('text
-                                        (setq reply (concat reply (or (plist-get ev :delta) ""))))
-                                       ('done
-                                        (setq failure (harness-perms--judge-failure ev reply)
-                                              failure-code (harness-perms--judge-failure-code ev reply)
-                                              failure-detail nil)
-                                        (let* ((read (harness-perms--read-verdict reply))
-                                               (verdict (and (plist-get read :behavior) read))
-                                               (problem (plist-get read :problem))
-                                               (err (plist-get ev :error))
-                                               ;; A call that answered with no
-                                               ;; verdict is asked once more,
-                                               ;; in the shape the contract
-                                               ;; reads.  One that failed, gave
-                                               ;; up, or asked for the user is
-                                               ;; not: there is nothing of its
-                                               ;; own to correct.
-                                               (correctable (and (= n 1) (not err)
-                                                                 (not (plist-get read :asked))
-                                                                 (null (plist-get read :behavior)))))
-                                          ;; An explicit ask is the judge's own
-                                          ;; words for leaving it to the user.
-                                          (when (plist-get read :asked)
-                                            (setq failure-code 'judge-asked
-                                                  failure-detail (plist-get read :problem)))
-                                          (cond
-                                           (verdict (funcall finish verdict))
-                                           ;; A reply that held no verdict in
-                                           ;; the expected shape is asked for
-                                           ;; once more, in that shape.  The
-                                           ;; call is not run on it.
-                                           (correctable
-                                            ;; An override that cannot be
-                                            ;; rendered leaves the call
-                                            ;; undecided rather than breaking
-                                            ;; the chain: the user is asked.
-                                            (let ((text (condition-case err
-                                                            (harness-perms--judge-correction-text
-                                                             question reply problem model)
-                                                          (error
-                                                           (harness-log
-                                                            'warn "perms: cannot ask the judge again: %s"
-                                                            (harness-error-message err))
-                                                           nil))))
-                                              (if text
-                                                  (progn
-                                                    (harness-log
-                                                     'info
-                                                     "perms: auto judge gave no verdict for %s (%s); asking once, in the expected shape"
-                                                     (plist-get request :tool)
-                                                     (or problem "it stopped at its output limit"))
-                                                    (ask 2 text))
-                                                (funcall finish decision))))
-                                           (t
-                                            (harness-log 'warn "%s" (harness-perms--no-verdict-message
-                                                                     (plist-get request :tool) ev reply
-                                                                     problem))
-                                            (funcall finish decision)))))
-                                       (_ nil))))))))))
+                    (let ((h
+                           (harness-prompt-ask
+                            ;; The correction is only the second call's.
+                            (if (> n 1)
+                                '(perms-judge-system perms-judge-question perms-judge-correction)
+                              '(perms-judge-system perms-judge-question))
+                            (harness-perms--judge-request session model system text n)
+                            (list :label "perms judge"
+                                  :on-event
+                                  (lambda (ev)
+                                    ;; A call that is over -- timed out, or
+                                    ;; answered by its retry -- decides
+                                    ;; nothing more, and asks nothing more.
+                                    (when (and (= live attempt) (not settled))
+                                      (pcase (plist-get ev :type)
+                                        ;; A try that failed is thrown away:
+                                        ;; so is what it wrote.
+                                        ('restart (setq reply "" failure nil
+                                                         failure-code 'judge-empty failure-detail nil))
+                                        ('text
+                                         (setq reply (concat reply (or (plist-get ev :delta) ""))))
+                                        ('done
+                                         (setq ended t
+                                               failure (harness-perms--judge-failure ev reply)
+                                               failure-code (harness-perms--judge-failure-code ev reply)
+                                               failure-detail nil)
+                                         (let* ((read (harness-perms--read-verdict reply))
+                                                (verdict (and (plist-get read :behavior) read))
+                                                (problem (plist-get read :problem))
+                                                (err (plist-get ev :error))
+                                                ;; A call that answered with no
+                                                ;; verdict is asked once more,
+                                                ;; in the shape the contract
+                                                ;; reads.  One that failed, gave
+                                                ;; up, or asked for the user is
+                                                ;; not: there is nothing of its
+                                                ;; own to correct.
+                                                (correctable (and (= n 1) (not err)
+                                                                  (not (plist-get read :asked))
+                                                                  (null (plist-get read :behavior)))))
+                                           ;; An explicit ask is the judge's own
+                                           ;; words for leaving it to the user.
+                                           (when (plist-get read :asked)
+                                             (setq failure-code 'judge-asked
+                                                   failure-detail (plist-get read :problem)))
+                                           (cond
+                                            (verdict (funcall finish verdict))
+                                            ;; A reply that held no verdict in
+                                            ;; the expected shape is asked for
+                                            ;; once more, in that shape.  The
+                                            ;; call is not run on it.
+                                            (correctable
+                                             ;; An override that cannot be
+                                             ;; rendered leaves the call
+                                             ;; undecided rather than breaking
+                                             ;; the chain: the user is asked.
+                                             (let ((text (condition-case err
+                                                             (harness-perms--judge-correction-text
+                                                              question reply problem model)
+                                                           (error
+                                                            (harness-log
+                                                             'warn "perms: cannot ask the judge again: %s"
+                                                             (harness-error-message err))
+                                                            nil))))
+                                               (if text
+                                                   (progn
+                                                     (harness-log
+                                                      'info
+                                                      "perms: auto judge gave no verdict for %s (%s); asking once, in the expected shape"
+                                                      (plist-get request :tool)
+                                                      (or problem "it stopped at its output limit"))
+                                                     (ask 2 text))
+                                                 (funcall finish decision))))
+                                            (t
+                                             (harness-log 'warn "%s" (harness-perms--no-verdict-message
+                                                                      (plist-get request :tool) ev reply
+                                                                      problem))
+                                             (funcall finish decision)))))
+                                        (_ nil))))))))
+                      ;; Each call owns the handle it got back.  A call
+                      ;; whose deadline passed while it was being prepared,
+                      ;; or which its retry already replaced, stops its own
+                      ;; request and keeps nothing: a late call can neither
+                      ;; adopt nor overwrite its retry's handle.  One that
+                      ;; ended before its handle came back has nothing left
+                      ;; to stop.
+                      (cond
+                       ;; Its `done' came first, and that already ended the
+                       ;; call: its record is finished and there is nothing
+                       ;; left to stop, retry or not.
+                       (ended nil)
+                       ((/= live attempt) (stop h))
+                       (settled (stop h))
+                       (t (setq handle h)))))))
           (ask 1 question))))))
 
 ;;;; Auto mode: the rules Claude Code's own auto mode follows
