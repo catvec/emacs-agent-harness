@@ -129,6 +129,15 @@ chat or a workspace looks like to the live transport."
            ;; Existing transport tests cross the real grace boundary with
            ;; explicit waits.  Deterministic safety tests below use 1.2s.
            (harness-voice-live-turn-grace 0.03)
+           ;; The premature-submission recovery has tests of its own below,
+           ;; which turn its window on; the transport tests here script
+           ;; events milliseconds apart, which no window should read as a
+           ;; person resuming the same thought.
+           (harness-voice-live-recovery-window nil)
+           (harness-voice-live-recovery-cancel-timeout 0.2)
+           (harness-voice-live--recovery nil)
+           (harness-voice-live--recovery-timer nil)
+           (harness-voice-live--recovery-token 0)
            (harness-voice-live-pending-release-delay 0.15)
            (harness-voice-conversation-turns 40)
            (harness-voice-live-follow-selection nil)
@@ -368,6 +377,12 @@ of several frames changes nothing."
           (should (equal 2 (length lines)))
           (setq harness-voice-live--stage 'holding)
           (should (equal "Live · Holding reply" (harness-voice-live--status)))
+          ;; The premature-submission recovery's own state, in the same
+          ;; exact words the transcript's evidence uses.
+          (setq harness-voice-live--stage 'recovering)
+          (should (equal "Live · Recovering thought" (harness-voice-live--status)))
+          (should (equal "↺ Recovering thought" (harness-voice-live--stage-text)))
+          (setq harness-voice-live--stage 'holding)
           (should (equal (concat " Live · Holding reply · [End] · [Interrupt C-c V]"
                                  " · [Mute C-c v] · [Transcript] · [Setup]")
                          (nth 0 (split-string (substring-no-properties
@@ -2518,6 +2533,473 @@ a speech server answers with no audio at all."
     (harness-test-wait
      (lambda () (>= (length (harness-ui-voice-live-test--acknowledgments)) 2))
      5 "both receipts")))
+
+
+;;;; Taking back a premature voice turn
+
+(defvar harness-ui-voice-live-test--nodes nil
+  "The transcript `_harness/session/nodes' answers with, oldest first.")
+(defvar harness-ui-voice-live-test--head-error nil
+  "When non-nil, `_harness/session/set-head' fails with this text.")
+(defvar harness-ui-voice-live-test--heads nil
+  "The heads the recovery asked for, oldest first.")
+(defvar harness-ui-voice-live-test--requests nil
+  "The UI calls the recovery made, as (METHOD PARAMS), oldest first.")
+(defvar harness-ui-voice-live-test--timers nil
+  "The timers the transport scheduled, as (TIMER DELAY REPEAT FUNCTION ARGS).")
+
+(defmacro harness-ui-voice-live-test-with-recovery (&rest body)
+  "Run BODY in a live call whose recovery can be driven deterministically.
+The clock is one the test advances, the sidecar and the session's
+transcript are scripted, and every timer is kept to be fired by hand."
+  (declare (indent 0))
+  `(harness-test-with-clock
+     (harness-ui-voice-live-test-with
+       (let ((harness-voice-live-recovery-window 0.6)
+             (harness-voice-live-recovery-cancel-timeout 5.0)
+             (harness-voice-live-turn-grace 1.2)
+             (harness-ui-voice-live-test--nodes nil)
+             (harness-ui-voice-live-test--head-error nil)
+             (harness-ui-voice-live-test--heads nil)
+             (harness-ui-voice-live-test--requests nil)
+             (harness-ui-voice-live-test--timers nil)
+             (harness-ui-voice-live-test--output nil))
+         (setq harness-voice-live--state 'listening
+               harness-voice-live--stage 'listening
+               harness-voice-live--buffer (current-buffer)
+               harness-voice-live--session "live-session")
+         (cl-letf (((symbol-function 'harness-voice-live--active-p) (lambda () t))
+                   ((symbol-function 'harness-voice-live--send)
+                    (lambda (event) (push event harness-ui-voice-live-test--output) t))
+                   ((symbol-function 'run-at-time)
+                    (lambda (delay repeat function &rest args)
+                      (let ((timer (timer-create)))
+                        (push (list timer delay repeat function args)
+                              harness-ui-voice-live-test--timers)
+                        timer)))
+                   ((symbol-function 'harness-ui-call)
+                    (lambda (method params callback &optional on-error)
+                      (push (list method params) harness-ui-voice-live-test--requests)
+                      (pcase method
+                        ("_harness/session/nodes"
+                         (funcall callback harness-ui-voice-live-test--nodes))
+                        ("_harness/session/set-head"
+                         (if harness-ui-voice-live-test--head-error
+                             (funcall on-error (list 'harness-error
+                                                     harness-ui-voice-live-test--head-error))
+                           (push (plist-get params :node-id) harness-ui-voice-live-test--heads)
+                           (funcall callback (plist-get params :node-id))))
+                        (_ (funcall callback nil)))
+                      nil)))
+           ,@body)))))
+
+(defun harness-ui-voice-live-test--recovery-timer (function)
+  "Return the newest timer scheduled for FUNCTION."
+  (let ((entry (cl-find function harness-ui-voice-live-test--timers
+                        :key (lambda (item) (nth 3 item)))))
+    (and entry (car entry))))
+
+(defun harness-ui-voice-live-test--submitted (text &optional id)
+  "Submit a voice message with TEXT as utterance ID, and return its job.
+The message goes through the ordinary pending turn and its grace, so the
+recovery is armed by the submission itself."
+  (let ((id (or id 1)))
+    (harness-ui-voice-live-test--utterance id text)
+    (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+    (should (= 1 (length harness-ui-voice-live-test--calls)))
+    (car (last harness-voice-live--delegations))))
+
+(defun harness-ui-voice-live-test--turn-running (&optional text)
+  "Report the submitted turn as started, so the answer is in flight."
+  (harness-voice--on-event "agent/turn-started" '("live-session"))
+  (when text (harness-ui-voice-live-test--chunk text "n-1")))
+
+(defun harness-ui-voice-live-test--nodes-with (voice-parent &optional tool after)
+  "Return transcript nodes: the voice message, its answer, and TOOL or AFTER.
+VOICE-PARENT is the node the voice message hangs from."
+  (append
+   (list (list :id "u-0" :kind 'user :ts 1.0 :content "earlier")
+         (list :id voice-parent :kind 'assistant :ts 2.0 :content "earlier answer"))
+   (list (list :id "u-1" :kind 'user :ts (float-time)
+               :content (harness-ui-voice-live-test--latest-prompt)
+               :parent voice-parent))
+   (when tool
+     (list (list :id "c-1" :kind 'tool-call :ts (float-time) :call-id "call-1")
+           (list :id "r-1" :kind 'tool-result :ts (float-time) :call-id "call-1")))
+   (list (list :id "a-1" :kind 'assistant :ts (float-time)
+               :content "Which parser?" :parent "u-1"))
+   (when after
+     (list (list :id "u-2" :kind 'user :ts (float-time) :content "the JSON one")))))
+
+(defun harness-ui-voice-live-test--continue (id text)
+  "Deliver the resumed speech's words TEXT as utterance ID."
+  (harness-voice-live--handle (list :event "speech" :active t :utterance id))
+  (harness-voice-live--handle (list :event "speech" :active nil :utterance id))
+  (harness-voice-live--handle (list :event "transcribing" :utterance id))
+  (harness-voice-live--handle (list :event "user_delta" :utterance id :text text :final t))
+  (harness-voice-live--handle (list :event "delegation" :id (format "d-%s" id)
+                                   :utterance id :text text)))
+
+(ert-deftest harness-ui-voice-live-recovery-first-words-cancel-at-once ()
+  "The first accepted words of resumed speech cancel the turn immediately.
+No complete sentence is waited for: the words that arrive half a second
+after the submission stop playback, close the output gate and send the
+ordinary session cancellation, in the event that carried them."
+  (harness-ui-voice-live-test-with-recovery
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which parser?")
+    ;; Half a second later, the person goes on.
+    (cl-incf harness-test-clock-offset 0.5)
+    (harness-voice-live--handle (list :event "speech" :active t :utterance 2))
+    (harness-voice-live--handle (list :event "transcribing" :utterance 2))
+    ;; Nothing is cancelled for the onset or the transcription request ...
+    (should-not harness-ui-voice-live-test--notifications)
+    ;; ... and the first accepted word cancels in the same event.
+    (harness-voice-live--handle (list :event "user_delta" :utterance 2 :text "in" :final t))
+    (should (eq (harness-voice-recovery-state harness-voice-live--recovery) 'recovering))
+    (should (equal '(("session/cancel" (:sessionId "live-session")))
+                   harness-ui-voice-live-test--notifications))
+    (should (eq harness-voice-live--stage 'recovering))
+    (should (equal "Live · Recovering thought" (harness-voice-live--status)))
+    ;; Playback was stopped and output held before the cancel.
+    (should (cl-find "interrupt" harness-ui-voice-live-test--output
+                     :key (lambda (e) (plist-get e :event)) :test #'equal))
+    (should (cl-find "turn_hold" harness-ui-voice-live-test--output
+                     :key (lambda (e) (plist-get e :event)) :test #'equal))
+    (should-not harness-voice-live--held)))
+
+(ert-deftest harness-ui-voice-live-recovery-outside-the-window-is-a-new-thought ()
+  "Speech that began after the window gets its own turn; nothing is cancelled.
+The answered fragment stays answered, and the new words are submitted
+as the request they are."
+  (harness-ui-voice-live-test-with-recovery
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which parser?")
+    (harness-voice-live--finish-turn "end-turn")
+    (cl-incf harness-test-clock-offset 2.0)
+    (harness-voice-live--handle (list :event "speech" :active t :utterance 2))
+    (harness-voice-live--handle (list :event "user_delta" :utterance 2
+                                      :text "in file.py" :final t))
+    (harness-voice-live--handle (list :event "delegation" :id "d-2" :utterance 2
+                                      :text "in file.py"))
+    (should-not harness-ui-voice-live-test--notifications)
+    (should-not harness-voice-live--recovery)
+    ;; The person stops: their new thought is a turn of its own.
+    (harness-voice-live--handle (list :event "speech" :active nil :utterance 2))
+    (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+    (should (equal "in file.py" (harness-ui-voice-live-test--latest-prompt)))))
+
+(ert-deftest harness-ui-voice-live-recovery-empty-and-noise-never-cancel ()
+  "An empty transcription, a caption of no words and an unsure reading cancel nothing.
+The microphone is heard, and the turn it answered goes on."
+  (harness-ui-voice-live-test-with-recovery
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which parser?")
+    (cl-incf harness-test-clock-offset 0.2)
+    (harness-voice-live--handle (list :event "speech" :active t :utterance 2))
+    (dolist (text '("" "   " "…" "♪"))
+      (harness-voice-live--handle (list :event "user_delta" :utterance 2 :text text :final t)))
+    (harness-voice-live--handle (list :event "user_delta" :utterance 2
+                                      :text "in file.py" :final t :certainty "unsure"))
+    (harness-voice-live--handle (list :event "segment" :state "dropped" :id "u-2"
+                                      :reason "no words"))
+    (should-not harness-ui-voice-live-test--notifications)
+    (should (harness-voice-recovery-armed-p harness-voice-live--recovery))
+    (should harness-voice-live--working)
+    (should-not (eq harness-voice-live--stage 'recovering))))
+
+(ert-deftest harness-ui-voice-live-recovery-resubmits-the-whole-thought-once ()
+  "The thought is submitted once, when the person finally stops talking.
+The history was rewound, so the draft carries the original words and the
+continuations in order, and the prompt that crosses is the whole
+thought -- not the fragment, and not the continuation alone."
+  (harness-ui-voice-live-test-with-recovery
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which parser?")
+    (setq harness-ui-voice-live-test--nodes
+          (harness-ui-voice-live-test--nodes-with "a-0"))
+    (cl-incf harness-test-clock-offset 0.3)
+    (harness-ui-voice-live-test--continue 2 "in file.py")
+    ;; The cancelled turn acknowledges the cancellation: the history is
+    ;; read, the head moves back, and the draft is armed.
+    (harness-voice-live--finish-turn "cancelled")
+    (should (equal '("a-0") harness-ui-voice-live-test--heads))
+    (should (equal "Please document the parser in file.py"
+                   (harness-voice-live--pending-text)))
+    ;; Nothing is submitted while the person is still talking.
+    (harness-voice-live--handle (list :event "speech" :active t :utterance 3))
+    (should (= 1 (length harness-ui-voice-live-test--calls)))
+    ;; The person stops: one ordinary grace, and the whole thought goes.
+    (harness-voice-live--handle (list :event "speech" :active nil :utterance 3))
+    (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+    (should (= 2 (length harness-ui-voice-live-test--calls)))
+    (should (equal "Please document the parser in file.py"
+                   (harness-ui-voice-live-test--latest-prompt)))
+    ;; And it is submitted exactly once: the record is spent with the
+    ;; submission, so nothing can fire again for it.
+    (should-not harness-voice-live--pending)
+    (should-not harness-voice-live--pending-timer)
+    (should (= 2 (length harness-ui-voice-live-test--calls)))))
+
+(ert-deftest harness-ui-voice-live-recovery-successive-endpoints-one-thought ()
+  "Two premature endpoints in one thought are joined without a repeat.
+Each continuation is one source of the thought, in the order spoken, and
+the second does not need a second cancellation."
+  (harness-ui-voice-live-test-with-recovery
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which parser?")
+    (setq harness-ui-voice-live-test--nodes
+          (harness-ui-voice-live-test--nodes-with "a-0"))
+    (cl-incf harness-test-clock-offset 0.2)
+    (harness-ui-voice-live-test--continue 2 "in file.py")
+    (harness-voice-live--finish-turn "cancelled")
+    ;; The person pauses again, then goes on once more.
+    (cl-incf harness-test-clock-offset 1.5)
+    (harness-ui-voice-live-test--continue 3 "and its error cases")
+    (should (equal "Please document the parser in file.py and its error cases"
+                   (harness-voice-live--pending-text)))
+    (should (equal 1 (length harness-ui-voice-live-test--notifications)))
+    (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+    (should (equal "Please document the parser in file.py and its error cases"
+                   (harness-ui-voice-live-test--latest-prompt)))))
+
+(ert-deftest harness-ui-voice-live-recovery-partial-revision-is-not-duplicated ()
+  "A revised transcript replaces its own words in the thought.
+A caption that grows into a final is one phrase, not two, and an
+out-of-order fragment keeps the place its speech had."
+  (harness-ui-voice-live-test-with-recovery
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which parser?")
+    (setq harness-ui-voice-live-test--nodes
+          (harness-ui-voice-live-test--nodes-with "a-0"))
+    (cl-incf harness-test-clock-offset 0.2)
+    (harness-voice-live--handle (list :event "speech" :active t :utterance 2))
+    (harness-voice-live--handle (list :event "user_delta" :utterance 2 :text "in file" :final t))
+    (harness-voice-live--finish-turn "cancelled")
+    (harness-voice-live--handle (list :event "user_delta" :utterance 2 :text "in file.py" :final t))
+    (harness-voice-live--handle (list :event "user_delta" :utterance 2 :text "in file.py" :final t))
+    (should (equal "Please document the parser in file.py"
+                   (harness-voice-live--pending-text)))))
+
+(ert-deftest harness-ui-voice-live-recovery-keeps-a-history-a-tool-changed ()
+  "A turn that ran a tool keeps its history; the continuation is appended.
+A rewind cannot undo a file written or a command run, so the transcript
+says the history was kept and only the new words are submitted."
+  (harness-ui-voice-live-test-with-recovery
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which parser?")
+    (setq harness-ui-voice-live-test--nodes
+          (harness-ui-voice-live-test--nodes-with "a-0" t))
+    (cl-incf harness-test-clock-offset 0.2)
+    (harness-ui-voice-live-test--continue 2 "in file.py")
+    (harness-voice-live--finish-turn "cancelled")
+    (should-not harness-ui-voice-live-test--heads)
+    (should (string-match-p "History · kept · tool calls"
+                            (harness-ui-voice-live-test--transcript)))
+    (should (equal "in file.py" (harness-voice-live--pending-text)))
+    (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+    ;; Only the continuation went on: the fragment is already in the
+    ;; history the tool's turn kept.
+    (should (equal "in file.py" (harness-ui-voice-live-test--latest-prompt)))
+    (should (= 2 (length harness-ui-voice-live-test--calls)))))
+
+(ert-deftest harness-ui-voice-live-recovery-never-rewinds-a-later-message ()
+  "A message typed after the voice turn is never rewound away.
+The history stays, and the continuation is submitted on its own."
+  (harness-ui-voice-live-test-with-recovery
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which parser?")
+    (setq harness-ui-voice-live-test--nodes
+          (harness-ui-voice-live-test--nodes-with "a-0" nil t))
+    (cl-incf harness-test-clock-offset 0.2)
+    (harness-ui-voice-live-test--continue 2 "in file.py")
+    (harness-voice-live--finish-turn "cancelled")
+    (should-not harness-ui-voice-live-test--heads)
+    (should (string-match-p "History · kept · later message"
+                            (harness-ui-voice-live-test--transcript)))
+    (should (equal "in file.py" (harness-voice-live--pending-text)))))
+
+(ert-deftest harness-ui-voice-live-recovery-cancel-timeout-keeps-the-history ()
+  "A turn that never acknowledges the cancel is not rewound.
+Its head may still be written after, so the history stays and the
+continuation is submitted alone."
+  (harness-ui-voice-live-test-with-recovery
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which parser?")
+    (setq harness-ui-voice-live-test--nodes
+          (harness-ui-voice-live-test--nodes-with "a-0"))
+    (cl-incf harness-test-clock-offset 0.2)
+    (harness-ui-voice-live-test--continue 2 "in file.py")
+    (should (harness-ui-voice-live-test--recovery-timer
+             #'harness-voice-live--recovery-cancel-expired))
+    (harness-ui-voice-live-test--fire
+     (harness-ui-voice-live-test--recovery-timer
+      #'harness-voice-live--recovery-cancel-expired))
+    (should-not harness-ui-voice-live-test--heads)
+    (should (string-match-p "History · kept · cancel timeout"
+                            (harness-ui-voice-live-test--transcript)))
+    (should (equal "in file.py" (harness-voice-live--pending-text)))))
+
+(ert-deftest harness-ui-voice-live-recovery-a-finished-turn-is-not-cancelled ()
+  "A turn that already ended is not cancelled again; the history is read at once.
+The words still recover the thought, and no session/cancel is sent for
+a turn that is over."
+  (harness-ui-voice-live-test-with-recovery
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which parser?")
+    (harness-voice-live--finish-turn "end-turn")
+    (setq harness-ui-voice-live-test--nodes
+          (harness-ui-voice-live-test--nodes-with "a-0"))
+    (cl-incf harness-test-clock-offset 0.3)
+    (harness-ui-voice-live-test--continue 2 "in file.py")
+    (should-not harness-ui-voice-live-test--notifications)
+    (should (equal '("a-0") harness-ui-voice-live-test--heads))
+    (should (equal "Please document the parser in file.py"
+                   (harness-voice-live--pending-text)))))
+
+(ert-deftest harness-ui-voice-live-recovery-a-failed-rewind-appends-the-continuation ()
+  "A head that will not move leaves the history as it stands.
+The message is in it, so the continuation is submitted alone and the
+transcript says why the rewind did not happen."
+  (harness-ui-voice-live-test-with-recovery
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which parser?")
+    (setq harness-ui-voice-live-test--nodes
+          (harness-ui-voice-live-test--nodes-with "a-0")
+          harness-ui-voice-live-test--head-error "The session is running a turn")
+    (cl-incf harness-test-clock-offset 0.2)
+    (harness-ui-voice-live-test--continue 2 "in file.py")
+    (harness-voice-live--finish-turn "cancelled")
+    (should (string-match-p "History · kept · The session is running a turn"
+                            (harness-ui-voice-live-test--transcript)))
+    (should (equal "in file.py" (harness-voice-live--pending-text)))))
+
+(ert-deftest harness-ui-voice-live-recovery-other-session-is-untouched ()
+  "A recovery belongs to the thread the words were spoken in.
+A switch abandons it: nothing of another session's history is rewound,
+and nothing is submitted to the thread selected afterwards."
+  (harness-ui-voice-live-test-with-recovery
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which parser?")
+    (setq harness-ui-voice-live-test--nodes
+          (harness-ui-voice-live-test--nodes-with "a-0"))
+    (cl-incf harness-test-clock-offset 0.2)
+    (harness-voice-live--handle (list :event "speech" :active t :utterance 2))
+    (harness-voice-live--route-set (list :kind 'session :buffer (current-buffer)
+                                         :session "other-session" :name "Other"))
+    (should-not (eq (harness-voice-recovery-state harness-voice-live--recovery)
+                    'recovering))
+    (harness-voice-live--handle (list :event "user_delta" :utterance 2
+                                      :text "in file.py" :final t))
+    (should-not harness-ui-voice-live-test--heads)
+    (should-not (string-match-p "_harness/session/set-head"
+                                (mapconcat (lambda (r) (car r))
+                                           harness-ui-voice-live-test--requests " ")))
+    ;; The transcript says what became of it, in the record's own words.
+    (should (string-match-p "Not recovered · retargeted"
+                            (harness-ui-voice-live-test--transcript)))))
+
+(ert-deftest harness-ui-voice-live-recovery-late-events-of-the-undone-turn-are-dropped ()
+  "Late chunks and tool calls of the cancelled turn are not spoken.
+The turn the recovery took back has nothing left to say, and its output
+does not reach the speaker after the cancellation."
+  (harness-ui-voice-live-test-with-recovery
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which ")
+    (setq harness-ui-voice-live-test--nodes
+          (harness-ui-voice-live-test--nodes-with "a-0"))
+    (cl-incf harness-test-clock-offset 0.2)
+    (harness-ui-voice-live-test--continue 2 "in file.py")
+    (harness-voice-live--finish-turn "cancelled")
+    (setq harness-ui-voice-live-test--output nil)
+    ;; A late chunk, and a tool call that arrives after the cancel.
+    (harness-voice--on-update
+     "live-session"
+     (list :sessionUpdate "agent_message_chunk" :_harness (list :nodeId "n-late")
+           :content (list :type "text" :text "parser do you mean?")))
+    (harness-voice--on-update
+     "live-session"
+     (list :sessionUpdate "tool_call" :title "Read file.py"))
+    (should-not (cl-find "commentary" harness-ui-voice-live-test--output
+                         :key (lambda (e) (plist-get e :event)) :test #'equal))
+    (should-not (cl-find "thinking" harness-ui-voice-live-test--output
+                         :key (lambda (e) (plist-get e :event)) :test #'equal))
+    (should (equal "Please document the parser in file.py"
+                   (harness-voice-live--pending-text)))))
+
+(ert-deftest harness-ui-voice-live-recovery-a-repeated-delegation-is-one-thought ()
+  "A provider that sends the same delegation twice adds it once.
+The thought neither repeats the words nor loses them."
+  (harness-ui-voice-live-test-with-recovery
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which parser?")
+    (setq harness-ui-voice-live-test--nodes
+          (harness-ui-voice-live-test--nodes-with "a-0"))
+    (cl-incf harness-test-clock-offset 0.2)
+    (harness-ui-voice-live-test--continue 2 "in file.py")
+    (harness-voice-live--finish-turn "cancelled")
+    (harness-voice-live--handle (list :event "delegation" :id "d-2" :utterance 2
+                                      :text "in file.py"))
+    (should (equal "Please document the parser in file.py"
+                   (harness-voice-live--pending-text)))
+    (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+    (should (= 2 (length harness-ui-voice-live-test--calls)))))
+
+(ert-deftest harness-ui-voice-live-recovery-mute-and-stop-abandon-it ()
+  "Muting or ending the call abandons the recovery; nothing is rewound.
+The microphone owns the call, and a call that stops takes its recovery
+with it."
+  (harness-ui-voice-live-test-with-recovery
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which parser?")
+    (setq harness-ui-voice-live-test--nodes
+          (harness-ui-voice-live-test--nodes-with "a-0"))
+    (cl-incf harness-test-clock-offset 0.2)
+    (harness-voice-live--handle (list :event "speech" :active t :utterance 2))
+    (harness-voice-live--handle (list :event "user_delta" :utterance 2
+                                      :text "in file.py" :final t))
+    (should harness-voice-live--recovery)
+    (harness-voice-live--clear-gate)
+    (should-not harness-voice-live--recovery)
+    (should-not harness-voice-live--recovery-timer)))
+
+(ert-deftest harness-ui-voice-live-recovery-keeps-its-timing-as-evidence ()
+  "The transcript keeps how the recovery was timed and what it decided.
+The measure is the speech's onset, not the transcript's arrival, and the
+words that were heard are kept with it."
+  (harness-ui-voice-live-test-with-recovery
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which parser?")
+    (setq harness-ui-voice-live-test--nodes
+          (harness-ui-voice-live-test--nodes-with "a-0"))
+    (cl-incf harness-test-clock-offset 0.15)
+    (harness-voice-live--handle (list :event "speech" :active t :utterance 2))
+    ;; Speech to text took another two seconds; the onset is what counts.
+    (cl-incf harness-test-clock-offset 2.0)
+    (harness-voice-live--handle (list :event "user_delta" :utterance 2
+                                      :text "in file.py" :final t))
+    (harness-voice-live--finish-turn "cancelled")
+    (let ((text (harness-ui-voice-live-test--transcript)))
+      (should (string-match-p "Recovery" text))
+      (should (string-match-p "Resumed speech · 15[01]ms · onset" text))
+      (should (string-match-p "History · rewound" text)))))
+
+(ert-deftest harness-ui-voice-live-recovery-off-is-the-old-behaviour ()
+  "With the window off nothing is armed, and a pause is answered as before.
+The feature is a setting, and a call that turns it off keeps every
+submission and never cancels one."
+  (harness-ui-voice-live-test-with-recovery
+    (setq harness-voice-live-recovery-window nil)
+    (harness-ui-voice-live-test--submitted "Please document the parser")
+    (harness-ui-voice-live-test--turn-running "Which parser?")
+    (should-not harness-voice-live--recovery)
+    (harness-voice-live--finish-turn "end-turn")
+    (cl-incf harness-test-clock-offset 0.2)
+    (harness-ui-voice-live-test--continue 2 "in file.py")
+    (should-not harness-ui-voice-live-test--notifications)
+    (harness-voice-live--handle (list :event "speech" :active nil :utterance 2))
+    (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+    (should (equal "in file.py" (harness-ui-voice-live-test--latest-prompt)))))
 
 
 (provide 'harness-ui-voice-live-test)

@@ -186,6 +186,58 @@ block, because that is what the model sees.
   timers, worker queues and held list, so a reconnect starts listening
   rather than stuck in `speech_active` or `awaiting`.
 
+## Taking back a turn the endpoint cut short
+
+Everything above assumes the transcript that arrived is the thought.  It is
+not always: a speech endpoint calls a pause an utterance end, and the person
+goes on half a second later.  The gate cannot help -- the turn was already
+submitted and may be answering -- so the turn is taken back instead.  The
+design and its alternatives are in
+[the recovery design](design/voice-turn-recovery.md); this section is what a
+client and an operator need to know.
+
+- **Armed at submission.**  Every voice message submitted by the live
+  transport arms a recovery for `harness-voice-live-recovery-window` seconds
+  (0.6 by default; nil turns it off).
+- **Measured at the speech, not at the words.**  The window runs from the
+  submission to the moment the *resumed speech began*, as the sidecar's own
+  gate reports it (`speech` with `active: true`).  Speech to text takes as long
+  as it takes, and a continuation spoken inside the window is still recovered
+  when its transcript arrives late.  A provider with no speech gate leaves the
+  transcript's arrival as the only evidence; the window then applies to that,
+  and the transcript says which measure was used -- `onset` or `transcript`.
+- **Triggered by words.**  The first accepted nonempty words of the resumed
+  speech cancel the turn, in the same event that carried them.  An empty
+  transcription, a caption of punctuation or noise, a reading the provider
+  marks `unsure`, and the submitted message's own capture never trigger it.
+- **What happens.**  Playback stops, output is held, `session/cancel` goes out,
+  and once the turn acknowledges the cancellation the history is read and
+  rewound to the node before the voice message -- through `session/set-head`,
+  the same mechanism the session tree's checkout uses, so a hosted provider's
+  conversation is cut to match before the next turn.
+- **What is never rewound.**  A turn that ran a tool: a rewind cannot undo a
+  file written or a command run, so its history stays and only the
+  continuation is added.  A message typed after the voice turn is never
+  rewound away either.  The transcript's `Recovery` section says which case
+  happened.
+- **One submission, at the end.**  The original words and every continuation
+  join the ordinary pending turn, and the turn-completion grace above submits
+  the whole thought once, when the person stops.  Successive premature
+  endpoints add their words without a repeat, and a revised transcript of one
+  capture replaces its earlier words in place.
+- **Lifecycles.**  A session switch, mute, stop, reconnect, redaction or reload
+  abandons the recovery; nothing of another thread is rewound and nothing is
+  submitted to one.  A turn that does not acknowledge the cancellation within
+  `harness-voice-live-recovery-cancel-timeout` (5 s) is not rewound -- it may
+  still be writing -- and the continuation is submitted on its own.
+
+The status line reads `Recovering thought` while this happens, and the
+transcript's `Recovery` section keeps the evidence: how the window was
+measured and how long it was, the first words heard, and what the history
+allowed.
+
+![The voice transcript after a recovery: resumed speech 356 ms after the submission, the history rewound, and the whole thought sent once](media/voice-turn-recovery.png)
+
 ## Live conversation controls
 
 The Flutter voice screen distinguishes four actions, because they mean
@@ -352,6 +404,15 @@ microphone:
 ```sh
 python3 test/voice_fixtures.py --out /tmp/voice-fixtures
 ```
+
+The premature-submission recovery is covered by ERT alone, with a scripted
+sidecar and a clock the test advances: `lisp/ui/harness-ui-voice-recovery-test.el`
+for the window, the accepted-words rule and the history plan, and the recovery
+tests of `lisp/ui/harness-ui-voice-live-test.el` for the cancellation, the
+rewind, the combined submission, the fallback and the abandoned lifecycles.
+The timing those tests observe is the fixture's clock, not a microphone: the
+cancel leaves in the same event as the first word, and nothing in the path
+waits.
 
 The ERT suites cover the Emacs side (`lisp/ui/harness-ui-voice-live-test.el`)
 and the Flutter tests cover the client (`voice_controller_test.dart`,

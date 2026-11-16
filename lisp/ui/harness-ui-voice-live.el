@@ -40,6 +40,7 @@
 (require 'harness-ui-voice-conversation)
 (require 'harness-ui-voice-pipeline)
 (require 'harness-ui-voice-turn)
+(require 'harness-ui-voice-recovery)
 
 (declare-function harness-voice--adopt "harness-ui-voice")
 (declare-function harness-voice--button "harness-ui-voice")
@@ -217,6 +218,42 @@ transcribing instead, which cancels the timer; its reply becomes pending
 context and is never replayed blindly."
   :type 'number
   :group 'harness-voice)
+(defcustom harness-voice-live-recovery-window 0.6
+  "Seconds after a voice submission in which resumed speech takes it back.
+The window runs from the moment the voice message was submitted to the
+moment the person's resumed speech *began*, as the sidecar's own speech
+gate reports it -- never to the moment its transcript arrived.  Speech
+to text takes as long as it takes, and a continuation begun inside the
+window is recovered when its words come back late.  A provider that
+reports no onset leaves the transcript's arrival as the only evidence,
+and the window then applies to that.  nil turns the recovery off."
+  :type '(choice (const :tag "Off" nil) number)
+  :group 'harness-voice)
+
+(defcustom harness-voice-live-recovery-cancel-timeout 5.0
+  "Seconds to wait for a cancelled turn to acknowledge the cancellation.
+The history is rewound only once the turn is over: a head that moved
+under a running turn would go on being written after.  A turn that has
+not ended by then is left as it is, and the continuation is submitted
+on its own -- the safe fallback, never a rewind over a turn still
+writing."
+  :type 'number
+  :group 'harness-voice)
+
+(defvar harness-voice-live--recovery nil
+  "The armed voice-turn recovery, or nil.
+See `harness-ui-voice-recovery'; it holds the voice message that was
+submitted, when, the resumed speech's onset and the words that went on.
+The transport cancels, rewinds and resubmits on its decision.")
+(defvar harness-voice-live--recovery-timer nil
+  "Timer waiting for a cancelled turn to acknowledge, or nil.")
+(defvar harness-voice-live--recovery-token 0
+  "Invalidates cancel-wait callbacks across newer recoveries and lifecycles.")
+(defvar harness-voice-live--recovery-seq 0
+  "Counter naming each recovery, so a late callback knows its own.
+The record is a value that evidence notes replace with a copy, so a
+callback compares this id, never the record itself.")
+
 (defvar harness-voice-live--transcript nil "The live caption buffer, or nil.")
 (defvar harness-voice-live--speaker nil "Speaker of the caption line being written.")
 (defvar harness-voice-live--section nil "Section of the transcript being written.")
@@ -413,6 +450,7 @@ thread."
 A queued delegation is answered so its sidecar does not wait for a turn
 that will never come; a turn already running is left to finish, and its
 reply is not spoken into the new thread."
+  (harness-voice-live--recovery-drop "retargeted")
   (harness-voice-live--pending-cancel "retargeted")
   (let ((queued harness-voice-live--delegations))
     (setq harness-voice-live--delegations nil)
@@ -537,6 +575,7 @@ flickers in and out is noise, and a wait that short needs no clock."
     ('transcribing "Transcribing")
     ('holding "Holding reply")
     ('finishing "Finishing thought")
+    ('recovering "Recovering thought")
     ('continuation "Waiting for continuation")
     ('cut-off "Possible cut-off")
     ('thinking "Working")
@@ -558,6 +597,7 @@ Speaking has its own mark: the reply is arriving, not waited for."
           (mod harness-voice-live--stage-frame (length harness-voice-live--spinner))))
    ((eq harness-voice-live--stage 'speaking) "▷")
    ((eq harness-voice-live--stage 'holding) "‖")
+   ((eq harness-voice-live--stage 'recovering) "↺")
    ((eq harness-voice-live--stage 'muted) "⊘")
    ((eq harness-voice-live--stage 'failed) "✕")
    (t "●")))
@@ -629,7 +669,7 @@ by naming the one that is."
      (concat " · " (harness-voice-live--stage-name)
              (let ((elapsed (harness-voice-live--elapsed)))
                (when elapsed (format " · %.1fs" elapsed)))))
-    ((memq harness-voice-live--stage '(finishing continuation cut-off))
+    ((memq harness-voice-live--stage '(finishing continuation cut-off recovering))
      (concat " · " (harness-voice-live--stage-name)))
     ((eq harness-voice-live--state 'speaking) " · Speaking")
     ((eq harness-voice-live--stage 'speaking) " · Speaking")
@@ -1234,7 +1274,8 @@ local pipeline, the fixture or a custom sidecar."
         harness-voice-live--heard ""))
 
 (defun harness-voice-live--clear-gate ()
-  "Forget speech, pending input, held output and both release timers."
+  "Forget speech, pending input, held output, a recovery and their timers."
+  (harness-voice-live--recovery-cancel)
   (harness-voice-live--pending-cancel "cancelled")
   (harness-voice-live--cancel-held-timer)
   (setq harness-voice-live--held-timer nil
@@ -1247,7 +1288,8 @@ local pipeline, the fixture or a custom sidecar."
   (or harness-voice-live--pending harness-voice-live--caption-hold
       (harness-voice-live--input-busy-p)
       harness-voice-live--held
-      (memq harness-voice-live--stage '(hearing transcribing holding))))
+      (memq harness-voice-live--stage '(hearing transcribing holding recovering))
+      (eq (harness-voice-recovery-state harness-voice-live--recovery) 'recovering)))
 
 (defun harness-voice-live--cancel-held-timer ()
   "Cancel a pending false-trigger release, including an already queued callback."
@@ -2003,6 +2045,13 @@ Finals are classified in onset order, not transcription completion order."
                (text (harness-voice-live--pending-text))
                (ids (delq nil (mapcar (lambda (item) (plist-get item :id)) items)))
                (job (list :id (car ids) :ids ids :text text :route (plist-get pending :route)
+                          :items (mapcar (lambda (item)
+                                           (list :segment (plist-get item :segment)
+                                                 :order (plist-get item :order)
+                                                 :text (plist-get item :raw-text)
+                                                 :caption (plist-get item :caption)
+                                                 :truncated (plist-get item :truncated)))
+                                         items)
                           :segments (mapcar (lambda (item) (plist-get item :segment)) items))))
           (harness-voice-live--pending-cancel-timer)
           (dolist (item items)
@@ -2015,11 +2064,16 @@ Finals are classified in onset order, not transcription completion order."
                 harness-voice-live--caption-recovery nil
                 harness-voice-live--held nil)
           (harness-voice-live--turn-hold nil)
+          ;; The thought the recovery put together has crossed: the record
+          ;; has nothing left to take back.
+          (when (eq (harness-voice-recovery-state harness-voice-live--recovery) 'done)
+            (harness-voice-live--recovery-cancel))
           (harness-voice-live--transcript-sent
            text (and (= (length items) 1) (plist-get (car items) :caption)))
           (harness-voice-conversation-hear harness-voice-live--conversation text text)
           (setq harness-voice-live--delegations
                 (nconc harness-voice-live--delegations (list job)))
+          (harness-voice-live--recovery-arm job)
           (when harness-voice-live--delegation
             (harness-voice-live--pipeline-turn-queued (car ids) (plist-get job :segments)))
           (harness-voice-live--delegate-next))))))
@@ -2030,6 +2084,380 @@ Finals are classified in onset order, not transcription completion order."
 An ineligible action is a no-op, not a deferred override."
   (interactive)
   (harness-voice-live--pending-commit))
+
+;;;; Taking back a premature voice turn
+
+;; The speech endpoint is not the person's.  A transcript that arrives
+;; after a short silence is submitted at once, and the agent answers it;
+;; when the person was only pausing, that answer answers half a thought.
+;; The recovery is armed with every voice submission and disarmed when
+;; its window closes, the call ends or the target moves.  When resumed
+;; speech begins inside the window, the first words it produces -- not
+;; the onset, not a complete sentence -- take the turn back: playback
+;; stops, the turn is cancelled, the history is rewound to before the
+;; voice message when that is provably safe, and the original words go
+;; back in the draft.  The continuations join them there, and the
+;; ordinary turn-completion grace submits the whole thought once, when
+;; the person finally stops talking.  The timing and the safety rules
+;; are in `harness-ui-voice-recovery'.
+
+(defun harness-voice-live--recovery-arm (job)
+  "Arm a recovery for JOB, the voice turn just submitted.
+Nothing is armed when the feature is off: a voice message submitted with
+no window is answered as it always was.  The record keeps the route the
+words were spoken under, so a target that moved abandons the recovery
+rather than rewinding another thread."
+  (harness-voice-live--recovery-cancel)
+  (setq harness-voice-live--recovery
+        (and harness-voice-live-recovery-window
+             (harness-voice-recovery-arm
+              (list :id (cl-incf harness-voice-live--recovery-seq)
+                    :session (plist-get (plist-get job :route) :session)
+                    :generation (plist-get (plist-get job :route) :generation)
+                    :route (plist-get job :route)
+                    :turn (plist-get job :id)
+                    :text (plist-get job :text)
+                    :items (plist-get job :items)
+                    :segments (plist-get job :segments)
+                    :submitted (float-time))))))
+
+(defun harness-voice-live--recovery-cancel-timer ()
+  "Invalidate the cancel-wait deadline, including callbacks already queued."
+  (cl-incf harness-voice-live--recovery-token)
+  (when (timerp harness-voice-live--recovery-timer)
+    (cancel-timer harness-voice-live--recovery-timer))
+  (setq harness-voice-live--recovery-timer nil))
+
+(defun harness-voice-live--recovery-cancel ()
+  "Forget the recovery, whatever it was doing."
+  (harness-voice-live--recovery-cancel-timer)
+  (setq harness-voice-live--recovery nil))
+
+(defun harness-voice-live--recovery-drop (why)
+  "Abandon the recovery for WHY, keeping what it saw as evidence.
+The turn it was about stays exactly as it is."
+  (when harness-voice-live--recovery
+    (setq harness-voice-live--recovery
+          (harness-voice-recovery-abandon harness-voice-live--recovery why))
+    ;; The record's own words for it, so the section does not say the same
+    ;; thing twice in two ways.
+    (harness-voice-live--recovery-say
+     (car (last (harness-voice-recovery-evidence harness-voice-live--recovery))))
+    (harness-voice-live--recovery-cancel-timer)))
+
+(defun harness-voice-live--recovery-note (text)
+  "Keep TEXT as evidence of the recovery, when one is armed."
+  (when harness-voice-live--recovery
+    (setq harness-voice-live--recovery
+          (harness-voice-recovery-note harness-voice-live--recovery text))))
+
+(defun harness-voice-live--recovery-evidence (text)
+  "Keep TEXT as evidence and write it into the transcript's Recovery section.
+The section is the audit record of a recovery: what was heard, when,
+which measure timed it, and what the history allowed.  Nothing is
+rewritten and nothing is removed: the nodes a rewind left behind stay in
+the session's tree."
+  (harness-voice-live--recovery-note text)
+  (harness-voice-live--recovery-say text))
+
+(defun harness-voice-live--recovery-say (text)
+  "Write TEXT into the transcript's Recovery section, as it stands."
+  (when (and (stringp text) (not (string-empty-p text)))
+    (harness-voice-live--transcript-text 'recovery "Recovery" (concat text "\n")
+                                         'harness-caution-face)))
+
+(defun harness-voice-live--recovery-same-p (record)
+  "Non-nil when RECORD is the recovery still armed.
+A record is a value that an evidence note replaces with a copy, so it is
+named by its id, never by identity."
+  (and record harness-voice-live--recovery
+       (eql (plist-get record :id) (plist-get harness-voice-live--recovery :id))))
+
+(defun harness-voice-live--recovery-here-p ()
+  "Non-nil when the armed recovery still belongs to this call and target."
+  (and harness-voice-live--recovery
+       (harness-voice-live--active-p)
+       (not harness-voice-live--muted)
+       (not (memq harness-voice-live--state '(ending failed)))
+       (harness-voice-live--route-current-p
+        (plist-get harness-voice-live--recovery :generation))))
+
+(defun harness-voice-live--recovery-onset (event)
+  "Note that speech resumed in EVENT, which may take back the voice turn.
+The sidecar reports the onset as it hears it, before any word exists;
+that is what the window is measured from.  The submitted message's own
+capture is not resumed speech, and neither is a speech event for it."
+  (when (and harness-voice-live--recovery
+             (harness-voice-live--recovery-here-p)
+             (equal (plist-get event :event) "speech")
+             (plist-get event :active)
+             (not (equal (plist-get event :reason) "muted")))
+    (setq harness-voice-live--recovery
+          (harness-voice-recovery-onset
+           harness-voice-live--recovery
+           (and (plist-get event :utterance)
+                (format "u-%s" (plist-get event :utterance)))
+           (float-time)))))
+
+(defun harness-voice-live--recovery-words (text source &optional certainty)
+  "Take the voice turn back for TEXT, the first words of resumed speech.
+SOURCE is the capture the words came from and CERTAINTY the provider's
+own word about its reading.  Nothing is cancelled for an empty or
+wordless transcription, an unsure reading, the message's own capture, or
+words whose speech began outside the window: those are a new thought or
+no thought at all.  The decision is made here, in the event that
+carried the words, with no wait of any kind."
+  (let ((decision (and harness-voice-live--recovery
+                       (harness-voice-live--recovery-here-p)
+                       (harness-voice-recovery-trigger
+                        harness-voice-live--recovery text
+                        (list :source source :certainty certainty
+                              :now (float-time)
+                              :window harness-voice-live-recovery-window)))))
+    (pcase (car-safe decision)
+      ('trigger
+       (setq harness-voice-live--recovery (cdr decision))
+       (harness-voice-live--recovery-start source text))
+      ('ignore
+       (when (memq (cdr decision) '(outside-window finished))
+         (harness-voice-live--recovery-cancel))
+       nil))))
+
+(defun harness-voice-live--recovery-revise ()
+  "Put a revised continuation back in the draft the recovery made.
+A transcript that arrives again with other words is the same utterance
+corrected; the draft it already built is rebuilt, so the thought says
+the words once, as they finally were."
+  (when (and (eq (harness-voice-recovery-state harness-voice-live--recovery) 'done)
+             (plist-get harness-voice-live--recovery :plan)
+             harness-voice-live--pending)
+    (harness-voice-live--recovery-finish
+     (plist-get harness-voice-live--recovery :plan))))
+
+(defun harness-voice-live--recovery-caption (text source &optional final certainty)
+  "Keep TEXT, SOURCE's caption, as part of the thought being recovered.
+Return non-nil when the caption belongs to a recovery already under way:
+its words join the thought, and the caption is not new input for the
+pending turn.  A caption of a capture the recovery does not hold is
+ordinary speech, and the caller decides what it is."
+  (when (and (memq (harness-voice-recovery-state harness-voice-live--recovery)
+                   '(recovering done))
+             (harness-voice-recovery-continuation-source-p
+              harness-voice-live--recovery source))
+    (unless (equal certainty "unsure")
+      (setq harness-voice-live--recovery
+            (harness-voice-recovery-caption
+             harness-voice-live--recovery source text final))
+      (harness-voice-live--recovery-revise))
+    t))
+
+(defun harness-voice-live--recovery-absorb (event)
+  "Non-nil when delegation EVENT is words of the thought being taken back.
+Resumed speech is transcribed and delegated like any other; while a
+recovery holds that capture, its transcript is part of the thought, not
+a turn of its own, and nothing is sent to the agent for it."
+  (and (memq (harness-voice-recovery-state harness-voice-live--recovery)
+             '(recovering done))
+       (harness-voice-recovery-continuation-source-p
+        harness-voice-live--recovery (harness-voice-live--input-source event))))
+
+(defun harness-voice-live--recovery-absorbed (event)
+  "Keep delegation EVENT's words as the continuation they are, and drop the turn.
+The sidecar asked for a turn it will not get: it is answered with a
+cancellation, so it stops waiting, and the words are already in the
+draft."
+  (let* ((text (or (plist-get event :text) ""))
+         (source (harness-voice-live--input-source event))
+         (id (plist-get event :id))
+         (record (and source (cdr (assoc source harness-voice-live--input-chunks)))))
+    (setq harness-voice-live--recovery
+          (harness-voice-recovery-continue harness-voice-live--recovery source text))
+    ;; The capture is the thought's own: it is resolved, not waiting for
+    ;; a turn that will never be sent.
+    (when record
+      (setf (plist-get record :open) nil
+            (plist-get record :await-delegate) nil
+            (plist-get record :state) 'resolved))
+    (harness-voice-live--pipeline-segment
+     (list :event "segment" :state "dropped" :id source :reason "recovered"))
+    ;; The words are the thought's now: a draft built before they came
+    ;; says them as they finally are.
+    (harness-voice-live--recovery-revise)
+    (harness-voice-live--send
+     (list :event "delegate_result" :id id :text "" :error t :message "recovered"))))
+
+(defun harness-voice-live--recovery-start (source text)
+  "Take the turn back now, for SOURCE's TEXT, the continuation's first words.
+Playback stops at once and the output gate closes; the turn is cancelled
+through the ordinary `session/cancel' path, and the continuation is kept
+as part of the thought the draft will carry.  The rewind waits for the
+cancel to be acknowledged (`harness-voice-live--recovery-cancelled'),
+because a head moved under a running turn would go on being written
+after."
+  (let* ((record harness-voice-live--recovery)
+         (session (plist-get record :session)))
+    (setq harness-voice-live--recovery
+          (harness-voice-recovery-continue record source text))
+    ;; What timed it, and what was heard: the record of why this turn is
+    ;; being taken back.
+    (harness-voice-live--recovery-say
+     (car (harness-voice-recovery-evidence harness-voice-live--recovery)))
+    (harness-voice-live--recovery-evidence
+     (format "Recovering · %s" (harness-ui-one-line text)))
+    (harness-voice-live--send (list :event "interrupt"))
+    (harness-voice-live--acknowledgment-cancel)
+    (harness-voice-live--cancel-held-timer)
+    (setq harness-voice-live--held nil)
+    (harness-voice-live--stage-set 'recovering)
+    (harness-voice-live--turn-hold t)
+    (harness-voice-live--pipeline-playback 'interrupted)
+    (harness-voice-live--refresh)
+    (if (and (stringp session) (not (string-empty-p session))
+             (harness-voice-live--recovery-turn-running-p record))
+        (progn
+          (harness-ui-notify "session/cancel" (list :sessionId session))
+          (let ((token (cl-incf harness-voice-live--recovery-token)))
+            (setq harness-voice-live--recovery-timer
+                  (run-at-time harness-voice-live-recovery-cancel-timeout nil
+                               #'harness-voice-live--recovery-cancel-expired token))))
+      ;; No turn of this call is in flight -- it already ended, or a
+      ;; workspace thread runs it elsewhere: the history is read at once.
+      (harness-voice-live--recovery-cancelled))))
+
+(defun harness-voice-live--recovery-turn-running-p (record)
+  "Non-nil when the turn RECORD was submitted for is still running.
+A turn this call already saw end has nothing to cancel, and waiting for
+an acknowledgement that will never come would only delay the recovery."
+  (and harness-voice-live--working
+       (equal (plist-get record :turn)
+              (plist-get harness-voice-live--delegation :id))))
+
+(defun harness-voice-live--recovery-cancel-expired (token)
+  "Finish a recovery whose cancelled turn TOKEN waited for and never ended.
+A turn that does not acknowledge its cancellation may still be writing,
+so its history is not rewound: the continuation is submitted on its own,
+and the transcript says so."
+  (when (and (= token harness-voice-live--recovery-token)
+             (eq (harness-voice-recovery-state harness-voice-live--recovery) 'recovering))
+    (setq harness-voice-live--recovery-timer nil)
+    (harness-voice-live--recovery-evidence "History · kept · cancel timeout")
+    ;; The voice message was submitted, so it is in the history; only
+    ;; the continuation goes on, and the head is not touched.
+    (harness-voice-live--recovery-finish
+     (list :action 'append :draft nil :why "cancel timeout"))))
+
+(defun harness-voice-live--recovery-cancelled ()
+  "Continue a recovery whose turn the cancel ended: read the history, then act.
+The transcript is read from the harness rather than guessed, and what
+the rewind may do is decided from it (`harness-voice-recovery-plan')."
+  (when (eq (harness-voice-recovery-state harness-voice-live--recovery) 'recovering)
+    (let ((record harness-voice-live--recovery))
+      (if (not (harness-voice-live--active-p))
+          (harness-voice-live--recovery-cancel)
+        (harness-voice-live--recovery-cancel-timer)
+        (harness-ui-call
+         "_harness/session/nodes"
+         (list :id (plist-get record :session))
+         (lambda (nodes)
+           (when (harness-voice-live--recovery-same-p record)
+             (harness-voice-live--recovery-plan nodes)))
+         (lambda (_error)
+           (when (harness-voice-live--recovery-same-p record)
+             (harness-voice-live--recovery-plan nil))))))))
+
+(defun harness-voice-live--recovery-plan (nodes)
+  "Carry out the recovery over the history NODES the cancelled turn left.
+A rewind moves the session's head to the node before the voice message,
+through `session/set-head', which the agent follows before its next
+turn: the provider's conversation is cut to match, and the cancelled
+turn's nodes stay on their own branch of the tree.  Anything a rewind
+cannot safely undo keeps the history and appends the continuation
+instead."
+  (let* ((record harness-voice-live--recovery)
+         (plan (harness-voice-recovery-plan record nodes))
+         (session (plist-get record :session)))
+    (setq harness-voice-live--recovery
+          (plist-put (copy-sequence record) :plan plan))
+    (harness-voice-live--recovery-evidence
+     (harness-voice-recovery-plan-line plan))
+    (if (and (eq (plist-get plan :action) 'rewind)
+             (stringp session) (not (string-empty-p session)))
+        (harness-ui-call
+         "_harness/session/set-head"
+         (list :id session :node-id (plist-get plan :head))
+         (lambda (_)
+           (when (harness-voice-live--recovery-same-p record)
+             (harness-voice-live--recovery-finish plan)))
+         (lambda (error)
+           (when (harness-voice-live--recovery-same-p record)
+             ;; A head that would not move leaves the history as it is;
+             ;; the message is in it, so only the continuation goes on.
+             (harness-voice-live--recovery-evidence
+              (format "History · kept · %s"
+                      (harness-ui-one-line (harness-error-message error))))
+             (harness-voice-live--recovery-finish
+              (harness-voice-recovery-fallback plan "rollback failed")))))
+      (harness-voice-live--recovery-finish plan))))
+
+(defun harness-voice-live--recovery-finish (plan)
+  "Put the thought back in the draft, as PLAN says, and let it be submitted.
+The continuations and, when PLAN says so, the original words go into the
+ordinary pending turn, so the turn-completion grace decides when the
+person is done talking and submits the whole thought once.  A history
+that kept the voice message already holds the original, so only the
+continuations are added."
+  (let* ((record harness-voice-live--recovery)
+         (items (harness-voice-recovery-draft record plan))
+         (continuations (harness-voice-recovery-continuations record))
+         (text (harness-voice-recovery-combined record continuations))
+         (order (or (plist-get (car (last items)) :order) 0)))
+    (setq harness-voice-live--recovery (harness-voice-recovery-finish record 'done))
+    (when (and (harness-voice-live--active-p)
+               (not (memq harness-voice-live--state '(ending failed))))
+      (if (string-empty-p text)
+          (harness-voice-live--recovery-cancel)
+        (unless harness-voice-live--pending
+          (setq harness-voice-live--pending
+                (list :route (or (plist-get record :route)
+                                 (harness-voice-live--route))
+                      :items nil)))
+        ;; A revised continuation rebuilds what this recovery put there
+        ;; before: its own sources go, and are added again as they are
+        ;; now, so the thought says each utterance once.
+        (let ((mine (plist-get record :draft-segments)))
+          (when mine
+            (setf (plist-get harness-voice-live--pending :items)
+                  (cl-remove-if (lambda (item)
+                                  (member (plist-get item :segment) mine))
+                                (plist-get harness-voice-live--pending :items)))))
+        (setq harness-voice-live--recovery
+              (plist-put (copy-sequence harness-voice-live--recovery)
+                         :draft-segments
+                         (append (plist-get record :segments)
+                                 (mapcar #'car continuations))))
+        (dolist (item items)
+          (harness-voice-live--pending-add
+           (list :segment (plist-get item :segment)
+                 :order (plist-get item :order)
+                 :raw-text (plist-get item :text)
+                 :text (plist-get item :text)
+                 :caption (plist-get item :caption)
+                 :truncated (plist-get item :truncated))))
+        ;; Each continuation is one source of the same thought, in the
+        ;; order it was spoken.
+        (dolist (pair continuations)
+          (cl-incf order)
+          (harness-voice-live--pending-add
+           (list :segment (car pair) :order order
+                 :raw-text (cdr pair) :text (cdr pair))))
+        ;; The words are the draft's now: a caption hold from the same
+        ;; captures cannot keep it from being submitted.
+        (setq harness-voice-live--caption-hold nil
+              harness-voice-live--caption-recovery nil
+              harness-voice-live--caption-hold-order 0)
+        (harness-voice-live--stage-set 'finishing)
+        (harness-voice-live--pending-update)
+        (harness-voice-live--refresh)))))
 
 ;;;; Delegation
 
@@ -2052,7 +2480,11 @@ belong to the thread they were said in, and a thread selected after
 them is not it."
   (when (and (null harness-voice-live--delegation)
              harness-voice-live--delegations
-             (harness-voice-live--active-p))
+             (harness-voice-live--active-p)
+             ;; A turn taken back is still ending: a prompt sent now
+             ;; would steer the very turn the recovery is undoing.
+             (not (eq (harness-voice-recovery-state harness-voice-live--recovery)
+                      'recovering)))
     (let* ((job (pop harness-voice-live--delegations))
            (id (plist-get job :id))
            (text (plist-get job :text))
@@ -2255,6 +2687,8 @@ continuation intent and explicit or likely cut-offs have no deadline."
          ((harness-voice-live--input-busy-p) 'transcribing)
          (harness-voice-live--pending (harness-voice-live--pending-stage))
          (harness-voice-live--caption-hold harness-voice-live--caption-hold)
+         ((eq (harness-voice-recovery-state harness-voice-live--recovery) 'recovering)
+          'recovering)
          (harness-voice-live--held 'holding)
          (harness-voice-live--working 'thinking)
          (t 'listening))))
@@ -2317,8 +2751,16 @@ old one would arrive as if it answered the new one."
             harness-voice-live--order nil))
     ;; A turn that ends while another delegation waits stays in Working:
     ;; the next turn starts at once.
+    ;; A turn the recovery cancelled is over: its history can be read and
+    ;; its head moved without a write following it.
+    (when (and cancelled
+               (eq (harness-voice-recovery-state harness-voice-live--recovery)
+                   'recovering))
+      (harness-voice-live--recovery-cancelled))
     (unless (or (eq harness-voice-live--state 'speaking)
-                harness-voice-live--delegations)
+                harness-voice-live--delegations
+                (eq (harness-voice-recovery-state harness-voice-live--recovery)
+                    'recovering))
       (harness-voice-live--settle-stage))
     (harness-voice-live--refresh)
     (harness-voice-live--delegate-next)))
@@ -2455,6 +2897,7 @@ it is."
        (harness-voice-live--pipeline-touch t)
        (harness-voice-live--refresh)))
     ("speech"
+     (harness-voice-live--recovery-onset event)
      (let ((active (plist-get event :active)))
        (when (plist-get event :utterance)
          (harness-voice-live--utterance-route-set
@@ -2528,14 +2971,26 @@ it is."
          (when (plist-get event :utterance)
            (setq harness-voice-live--utterance
                  (format "u-%s" (plist-get event :utterance))))
-         (harness-voice-live--pipeline-caption text final)
+         ;; The first accepted words of resumed speech take the turn back
+         ;; in this very event; the rest of the thought joins the draft.
+         (if (harness-voice-live--recovery-caption
+              text (harness-voice-live--input-source event) final certainty)
+             ;; A caption of the thought being recovered is not new input
+             ;; for the pending turn: it is already part of the draft.
+             nil
+           (harness-voice-live--recovery-words
+            text (harness-voice-live--input-source event) certainty)
+           (harness-voice-live--pipeline-caption text final))
          (setq harness-voice-live--heard
                (concat harness-voice-live--heard text))
-         (unless (eq harness-voice-live--stage 'transcribing)
+         (unless (memq harness-voice-live--stage '(transcribing recovering))
            (harness-voice-live--stage-set 'hearing))
          (harness-voice-live--caption "You" text final
                                        (and (equal certainty "likely") "likely"))
-         (unless harness-voice-live--muted
+         (unless (or harness-voice-live--muted
+                     (harness-voice-recovery-continuation-source-p
+                      harness-voice-live--recovery
+                      (harness-voice-live--input-source event)))
            (harness-voice-live--caption-hold-update
             text final (eq (plist-get event :truncated) t)
             (harness-voice-live--input-source event))))
@@ -2556,7 +3011,14 @@ it is."
         harness-voice-live--conversation text 'backchannel)))
     ("delegation"
      (harness-voice-live--cancel-held-timer)
-     (harness-voice-live--delegate event))
+     ;; A provider that sends no captions still takes its turn back on
+     ;; the first words of the continuation.
+     (harness-voice-live--recovery-words
+      (plist-get event :text) (harness-voice-live--input-source event))
+     (if (harness-voice-live--recovery-absorb event)
+         ;; The words are the thought being taken back, not a new turn.
+         (harness-voice-live--recovery-absorbed event)
+       (harness-voice-live--delegate event)))
     ("interrupted"
      (harness-voice-live--cancel-held-timer)
      (setq harness-voice-live--held nil)
@@ -2913,6 +3375,7 @@ missed an event still starts."
     (user-error "Live voice inactive"))
   (setq harness-voice-live--muted (not harness-voice-live--muted))
   (when harness-voice-live--muted
+    (harness-voice-live--recovery-drop "muted")
     (harness-voice-live--pending-cancel "cancelled")
     (setq harness-voice-live--speech-active nil
           harness-voice-live--utterance nil
