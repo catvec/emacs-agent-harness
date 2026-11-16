@@ -1595,6 +1595,79 @@ sent, and the caller hears it as a `done'."
         (harness-openrouter-test--assert-routing-failed
          (harness-openrouter-test--routing-failure :store-refused))))))
 
+(defun harness-openrouter-test--repeat-of (route request)
+  "Return REQUEST as a repeat of a send authorised by ROUTE.
+A repeat carries, in its own state, what authorised the send it repeats
+\(`harness-retry-authorise'): the policy and the route.  That is the path
+`harness-openrouter--complete''s `repeat' branch takes, which is where a
+one-off call's second attempt goes."
+  (let ((state (make-harness-retry--request)))
+    (setf (harness-retry--request-retrying state) t)
+    (harness-retry-authorise
+     (harness-retry-attach request state)
+     (list :policy harness-openrouter-routing :route route))))
+
+(ert-deftest harness-provider-openrouter-a-repeat-of-a-one-off-call-stores-no-pin ()
+  "A one-off call's repeat completes a slugless pin without storing it.
+A repeat goes to `harness-openrouter--complete-pinned', whose canonical
+slug repair stores the completed route.  For a one-off call that id is
+the call's own (`SESSION-perms'), which no session record holds, so the
+store raised `No session' inside a promise callback: nothing was sent and
+the caller never heard anything, which is the deadline it then sat out.
+The repair is told the call is a one-off, so it announces the route and
+stores nothing -- and the request still goes out."
+  (let* ((policy (harness-openrouter-test-policy))
+         (judge (harness-openrouter-test--session "s-judge")))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-session judge
+        (harness-openrouter-test-with-fake
+            (list (harness-openrouter-test--completion-response))
+          (harness-openrouter-test--seed-reading 5)
+          ;; The pin has no slug, and the model record answers now, as a
+          ;; repeat's re-read would.
+          (cl-letf (((symbol-function 'harness-openrouter--fetch-canonical-slug)
+                     (lambda (_model)
+                       (harness-resolved "deepseek/deepseek-v4.1-flash-20261017"))))
+            (let* ((request (harness-openrouter-test--repeat-of
+                             (harness-openrouter-test--route)
+                             (plist-put (harness-openrouter-test--request judge)
+                                        :ephemeral t)))
+                   (events (harness-openrouter-test--run request)))
+              ;; The call went out and ended, rather than sitting out a
+              ;; deadline it could never beat.
+              (should (= 1 (length (harness-openrouter-test--done-events events))))
+              (should (eq 'end-turn (plist-get (car (last events)) :stop-reason)))
+              ;; Nothing was pinned under the one-off session's id.
+              (should-not harness-openrouter-test--stored))))))))
+
+(ert-deftest harness-provider-openrouter-a-repeat-of-a-session-call-still-stores ()
+  "An ordinary request's repeat still records the completed pin.
+The one-off skip must not be widened: a repeat of a real session's
+request stores its completed route as it always did, so the pin the next
+dispatch reads carries the slug the audit needs."
+  (let* ((policy (harness-openrouter-test-policy))
+         (session (harness-openrouter-test--session "s-real")))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-session session
+        (harness-openrouter-test-with-fake
+            (list (harness-openrouter-test--completion-response))
+          (harness-openrouter-test--seed-reading 5)
+          (cl-letf (((symbol-function 'harness-openrouter--fetch-canonical-slug)
+                     (lambda (_model)
+                       (harness-resolved "deepseek/deepseek-v4.1-flash-20261017"))))
+            (let ((events (harness-openrouter-test--run
+                           ;; The same repeat path, for a real session: no
+                           ;; `:ephemeral', so its pin is stored.
+                           (harness-openrouter-test--repeat-of
+                            (harness-openrouter-test--route)
+                            (harness-openrouter-test--request session)))))
+              (should (= 1 (length (harness-openrouter-test--done-events events))))
+              (should (eq 'end-turn (plist-get (car (last events)) :stop-reason))))))
+        ;; Stored under the session's own id, with the slug recorded.
+        (should harness-openrouter-test--stored)
+        (should (equal "deepseek/deepseek-v4.1-flash-20261017"
+                       (plist-get harness-openrouter-test--stored :canonical-slug)))))))
+
 (ert-deftest harness-provider-openrouter-fork-does-not-inherit-a-pin ()
   "A fork starts unpinned; the parent's pin is never copied to it.
 The pin lives in the session's `ext', which `session/fork' does not copy,

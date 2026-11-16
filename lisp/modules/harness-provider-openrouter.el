@@ -1906,11 +1906,20 @@ only the model it asked for."
            (plist-put (copy-sequence reading) :canonical-slug slug)
          reading)))))
 
-(defun harness-openrouter--ensure-canonical (session-id route)
+(defun harness-openrouter--ensure-canonical (session-id route &optional ephemeral)
   "Return a promise of ROUTE with its model's canonical slug recorded.
 ROUTE is an existing pin.  One that already records a slug is answered as
 it is, with no request: this is what a dispatch of a pin made since the
 slug was recorded costs, which is nothing.
+
+EPHEMERAL says SESSION-ID names a one-off call's own session, which no
+session record holds, so the completed route is announced and not
+stored -- as `harness-openrouter--store-route' takes it.  It is an
+argument rather than a read of `harness-openrouter--ephemeral' because
+the store happens inside a promise callback, which may run after the
+dynamic extent that bound that variable: a repeat of a one-off call
+would otherwise try to store its pin under an id no session holds, and
+`session/set-ext' would signal `No session' before anything was sent.
 
 A pin with no slug was written before this module recorded them, and
 OpenRouter serves it exactly as it serves any pin -- the routing summary
@@ -1934,7 +1943,7 @@ check allowed, so nothing here rejects."
      (lambda (slug)
        (let ((completed (harness-openrouter--with-canonical route slug)))
          (when (and slug (not (eq completed route)))
-           (harness-openrouter--store-route session-id completed))
+           (harness-openrouter--store-route session-id completed ephemeral))
          completed))
      (lambda (_err) route))))
 
@@ -2477,7 +2486,13 @@ written before this module recorded slugs is completed first
 of it finds the slug already there.  Without that, such a pin would be
 sent, answered, and then refused by its own audit -- every time -- for a
 request that worked."
-  (let ((state (list nil nil)))
+  ;; The request itself says whether its session is a one-off call's: the
+  ;; store below runs in a promise callback, which may outlive the dynamic
+  ;; binding of `harness-openrouter--ephemeral', and reading the request is
+  ;; what a repeat -- the caller that reaches here without a fresh bind --
+  ;; is judged by.
+  (let ((state (list nil nil))
+        (ephemeral (and (plist-get request :ephemeral) t)))
     (let ((refusal (harness-openrouter--pin-refusal policy route)))
       (cond
        ((and refusal (not (eq (car refusal) 'catalogue-stale)))
@@ -2487,7 +2502,7 @@ request that worked."
         ;; completed from its model's slug before it goes out; that is a
         ;; request only for a pin that has no slug, and once per pin.
         (harness-then
-         (harness-openrouter--ensure-canonical session-id route)
+         (harness-openrouter--ensure-canonical session-id route ephemeral)
          (lambda (route)
            (unless (harness-openrouter--cancelled-p state)
              (let ((refusal (harness-openrouter--pin-refusal policy route)))
@@ -2498,7 +2513,7 @@ request that worked."
        (t
         (harness-then
          (harness-all (list (harness-openrouter--choose-now policy)
-                            (harness-openrouter--ensure-canonical session-id route)))
+                            (harness-openrouter--ensure-canonical session-id route ephemeral)))
          (lambda (values)
            (let ((reading (nth 0 values))
                  (route (nth 1 values)))
