@@ -87,6 +87,27 @@ FILE's name before -test, or a prefix of it followed by a dash."
   "Return FILE relative to the repository."
   (file-relative-name file harness-test-root))
 
+(defun harness-test-layout--tracked-p (file)
+  "Non-nil when FILE belongs to the repository, rather than to the checkout.
+The suites of the repository are the files git tracks.  A working
+checkout also holds files of nobody's: the ignored `scripts/.dev/'
+scratch directory, which a dev loop fills with a whole second checkout,
+and whatever a test or a person left behind.  Those carry their own
+copies of `*-test.el', and none of them is a suite of this repository --
+counting one would fail this layout for a file no commit can change.
+FILE may be a directory, which is the same question.
+
+Asked of git, because that is where the answer lives: nothing here
+repeats its ignore rules.  Outside a git checkout -- an exported tarball
+-- every file is the repository's, and the question is not asked."
+  (if (not (file-exists-p (expand-file-name ".git" harness-test-root)))
+      t
+    (with-temp-buffer
+      (let ((default-directory (file-name-as-directory harness-test-root)))
+        (zerop (ignore-errors
+                 (call-process "git" nil t nil "ls-files" "--error-unmatch" "--"
+                               (harness-test-layout--relative file))))))))
+
 (ert-deftest harness-test-layout-every-suite-lives-beside-its-module ()
   "Every suite outside test/ carries the name of a module beside it."
   (let ((orphans nil)
@@ -105,14 +126,21 @@ FILE's name before -test, or a prefix of it followed by a dash."
                          (harness-test-layout--suites-in "test")))))
 
 (ert-deftest harness-test-layout-every-suite-is-in-a-known-place ()
-  "No suite hides where the test runner does not look for it."
+  "No suite of the repository hides where the test runner does not look.
+Every tracked `*-test.el' under the directories the repository keeps code
+in is one `harness-test-layout--suites' finds, so a suite added in a
+place the runner never looks for is reported rather than silently never
+run.  What a checkout holds besides -- the ignored `scripts/.dev/' and
+whatever a run left there -- is not the repository's to place."
   (let ((found nil))
     (dolist (dir '("lisp" "test" ".harness" "scripts"))
       (setq found (append found
                           (and (file-directory-p (expand-file-name dir harness-test-root))
-                               (directory-files-recursively
-                                (expand-file-name dir harness-test-root)
-                                "-test\\.el\\'")))))
+                               (cl-remove-if-not
+                                #'harness-test-layout--tracked-p
+                                (directory-files-recursively
+                                 (expand-file-name dir harness-test-root)
+                                 "-test\\.el\\'"))))))
     (should (equal (sort (copy-sequence (harness-test-layout--suites)) #'string<)
                    (sort (delete-dups found) #'string<)))))
 
