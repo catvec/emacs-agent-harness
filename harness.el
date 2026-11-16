@@ -31,12 +31,12 @@
 ;;    :tools web)
 ;;
 ;; (`harness-enabled-modules' t loads every module but the off-by-default
-;; ones, `harness-off-by-default-modules': demo and supervisor.  A name
-;; in `harness-enabled-modules' loads one of those all the same.)  A
-;; module brings the modules it requires along, and its other half:
-;; ui-tasks, the task board, with tasks.  M-x harness-enable-module
-;; enables one at once, and M-x harness-describe-module says what one
-;; does.
+;; ones, `harness-off-by-default-modules': demo, supervisor and
+;; system-one.  A name in `harness-enabled-modules' loads one of those
+;; all the same.)  A module brings the modules it requires along, and
+;; its other half: ui-tasks, the task board, with tasks.  M-x
+;; harness-enable-module enables one at once, and M-x
+;; harness-describe-module says what one does.
 ;;
 ;; Libraries that are not the harness's -- compose-quote, which the
 ;; compose box quotes with -- live under lisp/vendor, a directory each,
@@ -183,7 +183,7 @@ it run \\[harness-restart]."
                  (repeat :tag "These, besides the core" symbol))
   :group 'harness)
 
-(defcustom harness-off-by-default-modules '(demo supervisor)
+(defcustom harness-off-by-default-modules '(demo supervisor system-one)
   "Modules `harness-enabled-modules' t leaves out: they load only when named.
 A module here does not load merely because every module is asked for.
 It loads when `harness-enabled-modules' names it, when a module that
@@ -195,7 +195,10 @@ module it names.
 The `demo' module runs a hand-in's demo on its workspace computer and
 opens the presenter that walks the reviewer through it, and
 `supervisor' makes sessions plan and delegate.  Neither is what a
-harness should do unasked, so both ship here.  Set this to nil for t to
+harness should do unasked, so both ship here.  `system-one' decides
+tool calls with a local classifier, and a stage that can deny a call
+is turned on by the user who read its numbers, not by the harness:
+see `docs/design/system-one-classifier.md'.  Set this to nil for t to
 load them too.  `harness-disabled-modules' keeps a module out
 altogether, whatever this says.  The harness process reads this when it
 starts, so after changing it run \\[harness-restart]."

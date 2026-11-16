@@ -56,6 +56,7 @@ and supervisor load only when they are named.
  ;;speech             ; The local speech service the harness runs for its clients: the…
  ;;stacks             ; Compose stacks that modules and plugins declare: start, stop, state,…
  ;;supervisor         ; Supervisor mode: sessions that plan and delegate, enforced by the…
+ ;;system-one         ; A local reflex that reads a tool call: a small fine-tuned encoder…
  ;;tasks              ; Task mode: one session per task, through review and the merge queue,…
  ;;tasks-notify       ; Notifies you when a task's work waits for your review or a task is…
  ;;tasks-search       ; Search the harness with a cheap model: tasks and actions on them,…
@@ -180,6 +181,7 @@ and supervisor load only when they are named.
 | [stacks](stacks.md) |  |  | Compose stacks that modules and plugins declare: start, stop, state, dynamic ports, the harness server's network, and the log of each stack's last command. |
 | [store](store.md) | by default |  | JSON, JSONL and SQLite persistence under the state directory. |
 | [supervisor](supervisor.md) | when named | [session](session.md), [agent](agent.md), [tools](tools.md), [readonly](readonly.md) | Supervisor mode: sessions that plan and delegate, enforced by the harness. |
+| [system-one](system-one.md) | when named | [session](session.md), [tools](tools.md), [perms](perms.md) | A local reflex that reads a tool call: a small fine-tuned encoder answers whether the call is safe work, above a trust threshold it allows or denies it, and between them it leaves the call to the judge and the user. |
 | [tasks](tasks.md) |  | [store](store.md), [project](project.md), [session](session.md), [agent](agent.md) | Task mode: one session per task, through review and the merge queue, with a limit of tasks at once per project, started by priority. |
 | [tasks-notify](tasks-notify.md) |  | [tasks](tasks.md), [notifications](notifications.md) | Notifies you when a task's work waits for your review or a task is done (and, opt-in, when one needs your input). |
 | [tasks-search](tasks-search.md) |  | [tasks](tasks.md), [provider](provider.md), [session-search](session-search.md) | Search the harness with a cheap model: tasks and actions on them, sessions, commands and an answer in words. |
@@ -451,7 +453,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `naming/auto-p` | [naming](naming.md) | [tasks](tasks.md) (50) |
 | `naming/system-prompt` | [naming](naming.md) | [tasks](tasks.md) (60) |
 | `notification/before-send` | [notifications](notifications.md) |  |
-| `permission/decide` | [tools](tools.md) | [access](access.md) (4, 5), [computers](computers.md) (7), [perms](perms.md) (5, 6, 10, 20, 30, 40, 90), [readonly](readonly.md) (8), [secret-sandbox](secret-sandbox.md) (2, 21), [secrets](secrets.md) (3), [supervisor](supervisor.md) (9, 28), [tasks](tasks.md) (25), [tools-sessions](tools-sessions.md) (6) |
+| `permission/decide` | [tools](tools.md) | [access](access.md) (4, 5), [computers](computers.md) (7), [perms](perms.md) (5, 6, 10, 20, 30, 40, 90), [readonly](readonly.md) (8), [secret-sandbox](secret-sandbox.md) (2, 21), [secrets](secrets.md) (3), [supervisor](supervisor.md) (9, 28), [system-one](system-one.md) (25), [tasks](tasks.md) (25), [tools-sessions](tools-sessions.md) (6) |
 | `permission/dir-entries` | [perms](perms.md) | [access](access.md) (50) |
 | `session/before-move` | [session](session.md) | [merge](merge.md) (50), [tasks](tasks.md) (50) |
 | `task/before-hand-in` | [tools-handin](tools-handin.md) |  |

@@ -1,0 +1,5 @@
+# The training and serving environment, CPU-only.
+# torch from https://download.pytorch.org/whl/cpu, which is much smaller.
+torch==2.15.0
+transformers==5.23.0
+numpy

@@ -1,0 +1,51 @@
+{
+ "base": "sentence-transformers/all-MiniLM-L6-v2",
+ "max_tokens": 256,
+ "epochs": 3.0,
+ "batch": 32,
+ "lr": 3e-05,
+ "seed": 7,
+ "threads": 8,
+ "best": {
+  "epoch": 3,
+  "train_loss": 0.1258207373701188,
+  "val_loss": 0.2561372988213797,
+  "val_accuracy": 0.9158798283261803,
+  "val_auc": 0.953513407711881
+ },
+ "history": [
+  {
+   "epoch": 1,
+   "train_loss": 0.5453272224689016,
+   "val_loss": 0.371566255921458,
+   "val_accuracy": 0.8326180257510729,
+   "val_auc": 0.9358729692699158
+  },
+  {
+   "epoch": 2,
+   "train_loss": 0.20375643932849777,
+   "val_loss": 0.21320328903044755,
+   "val_accuracy": 0.9296137339055794,
+   "val_auc": 0.9501288575716057
+  },
+  {
+   "epoch": 3,
+   "train_loss": 0.1258207373701188,
+   "val_loss": 0.2561372988213797,
+   "val_accuracy": 0.9158798283261803,
+   "val_auc": 0.953513407711881
+  }
+ ],
+ "test": {
+  "loss": 0.32375988221802404,
+  "accuracy": 0.8989805375347544,
+  "auc": 0.9386815236762771
+ },
+ "counts": {
+  "train": 6262,
+  "val": 1165,
+  "test": 1079
+ },
+ "trained_at": "2026-11-14T20:23:53Z",
+ "seconds": 2360
+}

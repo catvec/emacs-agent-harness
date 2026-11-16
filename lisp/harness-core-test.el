@@ -1486,9 +1486,10 @@ with its UI half, and taking its two modules out leaves readonly in."
          (harness-module-directories '("lisp/modules" "lisp/ui"))
          (files (harness--module-files)))
     (should-not harness-disabled-modules)
-    (should (equal '(demo supervisor) harness-off-by-default-modules))
+    (should (equal '(demo supervisor system-one) harness-off-by-default-modules))
     (dolist (file '("lisp/modules/harness-demo.el"
-                    "lisp/modules/harness-supervisor.el" "lisp/ui/harness-ui-supervisor.el"))
+                    "lisp/modules/harness-supervisor.el" "lisp/ui/harness-ui-supervisor.el"
+                    "lisp/modules/harness-system-one.el"))
       (should-not (member (harness--path file) files)))
     (dolist (file '("lisp/modules/harness-readonly.el" "lisp/modules/harness-tasks.el"))
       (should (member (harness--path file) files)))
@@ -1990,20 +1991,22 @@ every module; one `t' loads already is still refused."
     (harness-stop)))
 
 (ert-deftest harness-loader-ships-demo-and-supervisor-off-by-default ()
-  "The demo and walkthrough module and supervisor mode load only when named.
+  "The demo and walkthrough module, supervisor mode and the reflex load only when named.
 `harness-enabled-modules' t, the setting that asks for every module,
-leaves both out, with the UI half of supervisor; a list naming one
+leaves all three out, with the UI half of supervisor; a list naming one
 loads it, with what it requires and its UI half."
   (let* ((sources (harness--module-sources))
          (harness-enabled-modules t)
          (harness-disabled-modules nil))
-    (should (equal '(demo supervisor) harness-off-by-default-modules))
+    (should (equal '(demo supervisor system-one) harness-off-by-default-modules))
     (should (harness-module-off-by-default-p 'demo))
     (should (harness-module-off-by-default-p 'supervisor))
     (should (harness-module-off-by-default-p 'ui-supervisor))
+    (should (harness-module-off-by-default-p 'system-one))
     (should-not (memq 'demo (harness--selected-modules sources)))
     (should-not (memq 'supervisor (harness--selected-modules sources)))
     (should-not (memq 'ui-supervisor (harness--selected-modules sources)))
+    (should-not (memq 'system-one (harness--selected-modules sources)))
     (let ((harness-enabled-modules '(demo)))
       (should (memq 'demo (harness--selected-modules sources))))
     (let ((harness-enabled-modules '(supervisor)))

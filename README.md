@@ -170,7 +170,7 @@ The `(harness-enable-modules ...)` function helps enable and load modules of you
 
 See [`docs/modules/README.md`](./docs/modules/README.md) for a full list of modules by category.
 
-You can set the `harness-enabled-modules` variable to `t` in order to load all modules distributed with the harness, except the modules off by default: `demo`, which runs a hand-in's demo and opens the walkthrough presenter, and `supervisor`. They load when `harness-enable-modules` names them, or when you take them off `harness-off-by-default-modules`.
+You can set the `harness-enabled-modules` variable to `t` in order to load all modules distributed with the harness, except the modules off by default: `demo`, which runs a hand-in's demo and opens the walkthrough presenter; `supervisor`; and `system-one`, the local reflex that reads a tool call and decides it when it is sure. They load when `harness-enable-modules` names them, or when you take them off `harness-off-by-default-modules`.
 
 A non-comprehensive list of all the different functionality offered by modules shipped with the harness:
 
@@ -225,6 +225,17 @@ A non-comprehensive list of all the different functionality offered by modules s
   - Directory allow listing, including the worktrees of the sub-agents a session started, which it may read
   - Secret file blocking
   - Auto mode
+  - A local reflex in front of the judge (`system-one`): a 22M-parameter
+    encoder fine-tuned on labelled workflows of tool calls reads the
+    call being decided and answers one number, the probability that
+    it is safe work.  At or above `harness-system-one-trust` it
+    allows the call, at or below one minus it it denies the call,
+    and between them it says nothing and the judge is asked as
+    before; on the held-out data that settles 17% of calls and the
+    one it gets wrong is a good call stopped, never harm let
+    through.  Its window is one call with the turn before it, which
+    is the size the data reads best ([the model card](scripts/system-one/MODEL_CARD.md),
+    [the design](docs/design/system-one-classifier.md))
   - A permission panel that parts the lasting answers from Allow and Deny
   - Live access introspection: `session_info` reports the session's permission mode, writable and read-only directories with their sources, network, tools turned off, Linux capabilities and standing allow/deny rules
   - The access view names a sub-agent worktree among a session's directories, with buttons to give it up or make it writable
