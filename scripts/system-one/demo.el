@@ -50,8 +50,8 @@
   "The calls the demo decides, each as (TOOL KIND INPUT).")
 
 (defun system-one-demo--print (call decision)
-  "Print one line: the call as the model read it, who decided it, and why."
-  (message "%-62s %-6s %-11s %s"
+  "Print a call as the model read it, and under it who decided and why."
+  (message "%s\n    %-6s %-11s %s"
            (harness-system-one--render-call call)
            (or (plist-get decision :behavior) "?")
            (or (harness-tools-decision-by decision) "-")
