@@ -39,6 +39,11 @@
 ;; to t itself.  Set before the module loads, as above.
 (setq harness-ui-report-auto-fold nil)
 
+;; A suite runs the harness in this Emacs, the in-process mode
+;; `harness-process' documents nil for (harness.el:217): the modules of
+;; lisp/modules load here, and the tests drive them in this process.
+(setq harness-process nil)
+
 (add-to-list 'load-path harness-test-root)
 (dolist (d '("lisp" "lisp/modules" "lisp/ui" "test"))
   (add-to-list 'load-path (expand-file-name d harness-test-root)))

@@ -820,13 +820,40 @@ connection and the ACP client stay the same thing."
           (harness-acp--client-set client slot key)
           key))))
 
+(defun harness-acp--host-here-p ()
+  "Non-nil when the MCP host is this Emacs's to use.
+The host is a module of the harness side of the process split, and that
+side is this Emacs when the modules of lisp/modules load here -- the
+question `harness--module-kinds' answers, and the one
+`harness--module-files' decides the split with.  It is so in the
+harness process, which sets `harness-module-directories' to
+lisp/modules and `harness-process' nil for itself (harness-server.el),
+and in the Emacs a harness runs in, where `harness-process' is nil.
+
+`harness-process' alone says where the harness runs, not which side
+this Emacs is: it is non-nil in the UI of a harness process, which
+loads lisp/ui and the ACP client half alone.  Neither that nor the
+host's symbols being defined here makes the UI a host -- only loading
+the host's own file would, and the UI never does -- so a UI that some
+code contaminated with them still declares and attaches nothing."
+  (and (fboundp 'harness--module-kinds)
+       (memq 'other (harness--module-kinds)) t))
+
 (defun harness-acp--emacs-server ()
   "Declare the MCP server an Emacs lends, when the MCP host is here.
 Return non-nil when the host can attach one.  On the UI side of the
-process split there is no host, and nothing to attach."
-  (when (and harness-process (not (fboundp 'harness-mcp-attach)))
+process split there is no host, and nothing to attach, so nothing here
+loads one: `harness-mcp' is a module of the harness side, and requiring
+it here would register it, and its requirements (config among them), in
+the UI's module registry, where they cannot start.
+
+Where the host is here, it loads the host as before when the harness
+did not, so that a harness driven in-process -- a suite, or a module
+loaded by hand -- still attaches the Emacs a client lends."
+  (when (and (harness-acp--host-here-p)
+             (not (fboundp 'harness-mcp-define-server)))
     (require 'harness-mcp nil t))
-  (when (fboundp 'harness-mcp-define-server)
+  (when (and (harness-acp--host-here-p) (fboundp 'harness-mcp-define-server))
     (harness-mcp-define-server
      'emacs
      :title "Emacs"
