@@ -468,6 +468,29 @@ box.example.invalid."
   "Create and return a fresh temporary directory."
   (file-name-as-directory (make-temp-file "harness-tmp-" t)))
 
+(defun harness-test-tracked-p (file)
+  "Non-nil when FILE belongs to the repository, rather than to the checkout.
+A suite that audits the repository -- the layout of its suites, the calls
+its scripts make -- is making a statement about what a commit holds.  A
+working checkout holds more than that: the ignored `scripts/.dev/'
+scratch directory, which a dev loop fills with a whole second checkout,
+and whatever a test or a person left behind.  Those carry copies of the
+very files an audit reads, and none of them is the repository's: auditing
+one reports a defect no commit can fix, and passes in a fresh clone,
+which has no such directory.
+
+Asked of git, because that is where the answer lives: nothing here
+repeats its ignore rules.  Outside a git checkout -- an exported tarball
+-- every file is the repository's, and the question is not asked.  FILE
+may be a directory, which is the same question."
+  (if (not (file-exists-p (expand-file-name ".git" harness-test-root)))
+      t
+    (with-temp-buffer
+      (let ((default-directory (file-name-as-directory harness-test-root)))
+        (zerop (ignore-errors
+                 (call-process "git" nil t nil "ls-files" "--error-unmatch" "--"
+                               (file-relative-name file harness-test-root))))))))
+
 (defun harness-test-real-home ()
   "Return the user's home directory as the password database has it.
 Not $HOME: a suite run from a harness session's shell runs in that

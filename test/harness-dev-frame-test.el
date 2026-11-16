@@ -57,12 +57,16 @@ They raise a frame, give it the input focus, or delete one.")
   "Return the production Emacs Lisp files a task's path can run.
 That is the harness itself, its modules and UI, this repository's
 plugins, and the development scripts.  Vendored libraries and the tests
-themselves are left out: they are not a task's path."
+themselves are left out: they are not a task's path.  So is anything the
+checkout holds but no commit does (`harness-test-tracked-p'): the ignored
+`scripts/.dev/' scratch directory keeps a whole second checkout, whose
+copies of these files are not this repository's to audit."
   (let* ((root harness-test-root)
          (vendor (expand-file-name "lisp/vendor/" root)))
     (cl-remove-if (lambda (file)
                     (or (string-match-p "-test\\.el\\'" file)
-                        (string-prefix-p vendor file)))
+                        (string-prefix-p vendor file)
+                        (not (harness-test-tracked-p file))))
                   (append
                    (list (expand-file-name "harness.el" root))
                    (directory-files-recursively (expand-file-name "lisp" root) "\\.el\\'")
@@ -70,11 +74,15 @@ themselves are left out: they are not a task's path."
                    (directory-files-recursively (expand-file-name "scripts" root) "\\.el\\'")))))
 
 (defun harness-dev-frame-test--shell-files ()
-  "Return the production shell scripts a task's path can run."
+  "Return the production shell scripts a task's path can run.
+A script no commit holds is not one, as in
+`harness-dev-frame-test--elisp-files'."
   (let ((root harness-test-root))
-    (append
-     (directory-files (expand-file-name "scripts" root) t "\\.sh\\'")
-     (directory-files-recursively (expand-file-name "scripts/analysis" root) "\\.sh\\'"))))
+    (cl-remove-if-not
+     #'harness-test-tracked-p
+     (append
+      (directory-files (expand-file-name "scripts" root) t "\\.sh\\'")
+      (directory-files-recursively (expand-file-name "scripts/analysis" root) "\\.sh\\'")))))
 
 (ert-deftest harness-dev-frame-no-production-path-raises-or-focuses-a-frame ()
   "No production code that runs for a task raises, focuses or deletes a frame."
