@@ -1048,34 +1048,215 @@ first, so its cards are there even before the workspace answers."
    (lambda (err)
      (message "Workspace · %s" (harness-error-message err)))))
 
+;;;; Choosing a workspace
+;;
+;; The list is one round trip, and the harness may take a while to answer
+;; it: a process that is still starting, a connection that is still
+;; authenticating, a server on another machine.  The command says it is
+;; loading before it asks, so the wait is never silent, and it keeps one
+;; choice at a time: a second invocation while the first waits joins it
+;; instead of opening a second menu.  The wait is the command loop's own
+;; (`recursive-edit'), so a redisplay and C-g arrive as they do for any
+;; command and no filter waits in a loop; the answer is read by the
+;; command that asked, so a menu never opens from a process filter.
+;; An answer that comes after the wait was given up, after the frame
+;; that asked is gone, or while a minibuffer of the person's own is in
+;; use, opens nothing.
+
+(cl-defstruct (harness-ui-workspace--choice
+               (:constructor harness-ui-workspace--choice-make)
+               (:copier nil))
+  id                ; its generation, for the log
+  frame             ; the frame it was asked in
+  asked             ; when it was asked
+  in-wait           ; non-nil while the command waits in a `recursive-edit'
+  answered          ; non-nil once the harness answered
+  workspaces        ; what the answer holds, when it answered
+  error             ; what the harness said instead, when it failed
+  timed-out         ; non-nil when the wait ended without an answer
+  cancelled)        ; non-nil once the person gave it up
+
+(defvar harness-ui-workspace--choosing nil
+  "The choice of workspace in flight, a `harness-ui-workspace--choice', or nil.")
+
+(defvar harness-ui-workspace--choice-generation 0
+  "Generation of the last choice of workspace, so a late answer is dropped.")
+
+(defconst harness-ui-workspace--choice-delay 0.2
+  "Seconds before the workspace selector says it is still waiting.
+The first message shows at once; this one follows when the harness has
+not answered yet, so a prompt answer does not flash two messages.")
+
+(defconst harness-ui-workspace--choice-timeout 60
+  "Seconds the workspace selector waits for the harness before giving up.")
+
+(defun harness-ui-workspace--choosing-p ()
+  "Non-nil while a choice of workspace waits for the harness."
+  (and harness-ui-workspace--choosing
+       (not (harness-ui-workspace--choice-cancelled harness-ui-workspace--choosing))))
+
+(defun harness-ui-workspace--choice-current-p (choice)
+  "Non-nil when CHOICE is still the one the person waits for."
+  (eq choice harness-ui-workspace--choosing))
+
+(defun harness-ui-workspace--choice-live-p (choice)
+  "Non-nil when CHOICE may still show what it read.
+That is false once another choice was asked, once this one was given
+up, and once the frame that asked is gone: its menu would open in a
+frame the person is no longer looking at."
+  (and (harness-ui-workspace--choice-current-p choice)
+       (not (harness-ui-workspace--choice-cancelled choice))
+       (frame-live-p (harness-ui-workspace--choice-frame choice))))
+
+(defun harness-ui-workspace--choice-answered-p (choice)
+  "Non-nil when CHOICE has its answer, a list of workspaces or an error."
+  (or (harness-ui-workspace--choice-answered choice)
+      (harness-ui-workspace--choice-error choice)))
+
+(defun harness-ui-workspace--choice-stop (choice)
+  "Stop waiting on CHOICE, which has its answer or was given up."
+  (when (harness-ui-workspace--choice-current-p choice)
+    (setq harness-ui-workspace--choosing nil)))
+
+(defun harness-ui-workspace--choice-wake (choice)
+  "End the wait of CHOICE, whose answer is in it.
+An answer that arrives after the wait ended does nothing here: the
+command that asked has already read the choice and moved on."
+  (when (harness-ui-workspace--choice-in-wait choice)
+    (setf (harness-ui-workspace--choice-in-wait choice) nil)
+    (exit-recursive-edit)))
+
+(defun harness-ui-workspace--choice-failed (err)
+  "Say in the echo area that the workspace list failed with ERR."
+  (if (harness-ui-connection-replaced-p err)
+      (message "Workspace selector · connection replaced · try again")
+    (message "Workspace selector · %s · try again"
+             (harness-error-message err))))
+
+(defun harness-ui-workspace--choice-show (choice position)
+  "Show what CHOICE read at POSITION, or say why there is nothing to show.
+The caller has decided CHOICE is still the one being asked for."
+  (cond
+   ((harness-ui-workspace--choice-error choice)
+    (harness-ui-workspace--choice-failed (harness-ui-workspace--choice-error choice)))
+   ((harness-ui-workspace--choice-timed-out choice)
+    (message "Workspace selector · timed out · try again"))
+   ((harness-ui-workspace--choice-answered choice)
+    (if (active-minibuffer-window)
+        ;; A minibuffer of the person's own is in use: a menu here would
+        ;; take it from them.
+        (message "Workspace selector · cancelled")
+      (harness-ui--in-frame
+       (harness-ui-workspace--choice-frame choice)
+       (lambda ()
+         (harness-ui-workspace--read-workspace
+          (harness-ui-workspace--choice-workspaces choice) position)))))
+   (t nil)))
+
+(defun harness-ui-workspace--read-workspace (workspaces position)
+  "Offer WORKSPACES by name and open the one chosen, at POSITION.
+A list of one opens it; an empty list creates the first workspace, as
+`harness-workspace' always has."
+  (cond
+   ((null workspaces)
+    (harness-ui-workspace--create "Home" nil position))
+   ((= (length workspaces) 1)
+    (harness-ui-workspace--open (car workspaces) position))
+   (t
+    (let* ((names (mapcar (lambda (workspace)
+                            (cons (or (plist-get workspace :name) "Workspace") workspace))
+                          workspaces))
+           (choice (completing-read "Workspace: " names nil t)))
+      (harness-ui-workspace--open (cdr (assoc choice names)) position)))))
+
+(defun harness-ui-workspace--choose (position)
+  "Read the workspaces and let the person choose one, at POSITION.
+The wait runs in the command loop, so Emacs stays responsive: the
+message says what is happening, and \\[keyboard-quit] gives the wait up.
+An answer that comes after that, or once the frame that asked is gone,
+opens nothing."
+  (let* ((choice (harness-ui-workspace--choice-make
+                  :id (cl-incf harness-ui-workspace--choice-generation)
+                  :frame (selected-frame)
+                  :asked (float-time)))
+         (slow nil)
+         (timeout nil))
+    (setq harness-ui-workspace--choosing choice)
+    ;; The acknowledgment comes before the request, so a harness that
+    ;; never answers is never a silent wait.
+    (message "Workspace selector · loading")
+    (unwind-protect
+        (progn
+          (harness-then (harness-ui-request "_harness/workspace/list" nil)
+                        (lambda (workspaces)
+                          (setf (harness-ui-workspace--choice-answered choice) t)
+                          (setf (harness-ui-workspace--choice-workspaces choice) workspaces)
+                          (harness-ui-workspace--choice-wake choice))
+                        (lambda (err)
+                          (setf (harness-ui-workspace--choice-error choice) err)
+                          (harness-ui-workspace--choice-wake choice)))
+          ;; The in-process harness may answer in the call above, and a
+          ;; wait for an answer already here waits for nothing.
+          (unless (harness-ui-workspace--choice-answered-p choice)
+            (setq slow (run-at-time harness-ui-workspace--choice-delay nil
+                                    (lambda ()
+                                      (when (harness-ui-workspace--choice-live-p choice)
+                                        (message "Workspace selector · waiting")))))
+            (setq timeout (run-at-time harness-ui-workspace--choice-timeout nil
+                                       (lambda ()
+                                         (when (harness-ui-workspace--choice-live-p choice)
+                                           (setf (harness-ui-workspace--choice-timed-out choice) t)
+                                           (harness-ui-workspace--choice-wake choice)))))
+            (setf (harness-ui-workspace--choice-in-wait choice) t)
+            ;; Nothing polls here: the command loop runs, so the
+            ;; answer's callback, a redisplay and C-g all arrive as they
+            ;; normally do.  A quit is the person giving the wait up.
+            (condition-case nil (recursive-edit) (quit nil))
+            (setf (harness-ui-workspace--choice-in-wait choice) nil)))
+      (when (timerp slow) (cancel-timer slow))
+      (when (timerp timeout) (cancel-timer timeout)))
+    (cond
+     ;; Another choice took over while this one waited: what the harness
+     ;; said is not the answer to the question being asked now.
+     ((not (harness-ui-workspace--choice-current-p choice)) nil)
+     ((and (harness-ui-workspace--choice-answered-p choice)
+           (frame-live-p (harness-ui-workspace--choice-frame choice)))
+      (harness-ui-workspace--choice-stop choice)
+      (harness-ui-workspace--choice-show choice position))
+     ((harness-ui-workspace--choice-answered-p choice)
+      ;; The frame that asked is gone: its menu would open where the
+      ;; person is no longer looking.
+      (harness-ui-workspace--choice-stop choice))
+     ((harness-ui-workspace--choice-timed-out choice)
+      ;; The timer said so already, and says to try again.
+      (harness-ui-workspace--choice-stop choice)
+      (harness-ui-workspace--choice-show choice position))
+     (t
+      ;; The wait ended with no answer and no timeout: C-g, which is no
+      ;; failure, and opens nothing when the answer finally comes.
+      (setf (harness-ui-workspace--choice-cancelled choice) t)
+      (harness-ui-workspace--choice-stop choice)
+      (message "Workspace selector · cancelled")))))
+
 ;;;###autoload
 (defun harness-workspace (&optional position new)
   "Open the persistent workspace chat at POSITION.
 With a prefix argument NEW, create a workspace first: ask for its name
-and root.  With more than one workspace, choose one by name."
+and root.  With more than one workspace, choose one by name.
+The list is read asynchronously, and the command says so at once, so a
+harness that is slow to answer is never a silent wait;
+\\[keyboard-quit] stops waiting, and no menu opens afterwards."
   (interactive (list (and current-prefix-arg (harness-ui-read-position))
                      current-prefix-arg))
   (if new
       (let ((name (string-trim (read-string "Workspace name: " "Home")))
             (root (read-directory-name "Workspace root: " nil nil t)))
         (harness-ui-workspace--create (if (string-blank-p name) "Home" name) root position))
-    (harness-ui-call
-     "_harness/workspace/list"
-     nil
-     (lambda (workspaces)
-       (cond
-        ((null workspaces)
-         (harness-ui-workspace--create "Home" nil position))
-        ((= (length workspaces) 1)
-         (harness-ui-workspace--open (car workspaces) position))
-        (t
-         (let* ((names (mapcar (lambda (workspace)
-                                 (cons (or (plist-get workspace :name) "Workspace") workspace))
-                               workspaces))
-                (choice (completing-read "Workspace: " names nil t)))
-           (harness-ui-workspace--open (cdr (assoc choice names)) position)))))
-     (lambda (err)
-       (message "Workspace · %s" (harness-error-message err))))))
+    (if (harness-ui-workspace--choosing-p)
+        ;; A second invocation joins the choice that waits: two menus
+        ;; over one list would answer the same question twice.
+        (message "Workspace selector · loading")
+      (harness-ui-workspace--choose position))))
 
 (defun harness-ui-workspace--kill ()
   "Stop the timer of a workspace buffer that is going away."

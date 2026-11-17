@@ -29,8 +29,12 @@
        (harness-test-load-module 'ui-compose)
        (harness-test-load-module 'ui-workspace)
        (harness-ui-pending--forget-all)
+       ;; A selector left waiting by a case that failed is nobody's:
+       ;; the next case starts with none, and with no timer of one.
+       (setq harness-ui-workspace--choosing nil)
        (unwind-protect (progn ,@body)
          (harness-ui-pending--forget-all)
+         (setq harness-ui-workspace--choosing nil)
          (harness-ui-workspace--shutdown)))))
 
 (defun harness-ui-workspace-test-data ()
@@ -1243,3 +1247,254 @@ workspace has to be the one it shows."
         (harness-ui-workspace-test--type (kbd "C-c C-c")))
       (should (equal "_harness/workspace/prompt" (caar sent)))
       (should (string-match-p "Ship it" (plist-get (cadar sent) :text))))))
+
+;;;; Choosing a workspace
+
+;; `harness-workspace' reads the list asynchronously.  These hold the
+;; words it says, what it does with an answer that arrives late, and the
+;; paths that create a workspace or open the only one unchanged.  The
+;; wait is a `recursive-edit', so an answer is delivered the way a timer
+;; delivers one: from the command loop.
+
+(defun harness-ui-workspace-test--said (fn)
+  "Run FN, returning the messages it showed, newest first."
+  (let (said)
+    (cl-letf (((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (push (apply #'format format-string args) said)
+                 nil)))
+      (funcall fn))
+    said))
+
+(defun harness-ui-workspace-test--answer-later (promise value)
+  "Answer PROMISE with VALUE from the command loop."
+  (run-at-time 0.05 nil (lambda () (harness-resolve promise value)))
+  promise)
+
+(defun harness-ui-workspace-test--two ()
+  "Return two workspaces, so the selector has something to offer."
+  '((:id "a" :name "Home") (:id "b" :name "Work")))
+
+(ert-deftest harness-ui-workspace-selector-says-it-is-loading-before-it-asks ()
+  "The selector says it is waiting before the request goes out.
+The words are the inventory's, and the acknowledgment comes first, so a
+harness that never answers is never a silent wait."
+  (harness-ui-workspace-test-with
+    (let ((said nil) (asked-when-said nil) (promise (harness-make-promise)))
+      (cl-letf (((symbol-function 'harness-ui-request)
+                 (lambda (&rest _) (setq asked-when-said (copy-sequence said)) promise))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) nil)))
+        (setq said (harness-ui-workspace-test--said
+                    (lambda ()
+                      (harness-ui-workspace-test--answer-later promise nil)
+                      (harness-ui-workspace--choose nil))))
+        ;; Before the request, the echo area already said so.
+        (should (equal "Workspace selector · loading" (car (last said))))))))
+
+(ert-deftest harness-ui-workspace-selector-says-it-is-still-waiting ()
+  "A harness that is slow to answer is told apart from one that hung.
+The words are the inventory's, and they follow the first message rather
+than replacing it before it could be read."
+  (harness-ui-workspace-test-with
+    (let ((promise (harness-make-promise)) (said nil)
+          (harness-ui-workspace--choice-delay 0.05))
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) promise))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) nil)))
+        (setq said (harness-ui-workspace-test--said
+                    (lambda ()
+                      ;; The answer comes after the delay, so both
+                      ;; messages are shown, in that order.
+                      (run-at-time 0.2 nil (lambda () (harness-resolve promise nil)))
+                      (harness-ui-workspace--choose nil))))
+        (should (equal '("Workspace selector · waiting"
+                         "Workspace selector · loading")
+                       said))))))
+
+(ert-deftest harness-ui-workspace-selector-waits-in-the-command-loop ()
+  "The wait is the command loop's, not a loop of the command's own.
+Nothing sleeps or accepts output in it, so a redisplay and C-g arrive
+as they do for any command."
+  (harness-ui-workspace-test-with
+    (let ((promise (harness-make-promise)) slept waited)
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) promise))
+                ((symbol-function 'sit-for) (lambda (&rest _) (setq slept t)))
+                ((symbol-function 'accept-process-output)
+                 (lambda (&rest _) (setq slept t)))
+                ((symbol-function 'recursive-edit) (lambda () (setq waited t)))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) nil)))
+        (harness-ui-workspace-test--said (lambda () (harness-ui-workspace--choose nil))))
+      (should waited)
+      (should-not slept))))
+
+(ert-deftest harness-ui-workspace-selector-cancel-drops-the-late-answer ()
+  "A cancelled wait opens no menu when its answer finally comes.
+The person gave the question up: no minibuffer appears behind them."
+  (harness-ui-workspace-test-with
+    (let ((promise (harness-make-promise)) (offered nil) (said nil))
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) promise))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) (setq offered t))))
+        (setq said (harness-ui-workspace-test--said
+                    (lambda ()
+                      ;; What C-g does to the wait: the recursive edit
+                      ;; ends with a quit, and the command goes on.
+                      (run-at-time 0.05 nil (lambda () (abort-recursive-edit)))
+                      (harness-ui-workspace--choose nil))))
+        ;; The answer comes after the wait was given up.
+        (harness-resolve promise (harness-ui-workspace-test--two))
+        (harness-test-wait (lambda () (null harness-ui-workspace--choosing)) 2))
+      (should-not offered)
+      (should-not (harness-ui-workspace--choosing-p)))))
+
+(ert-deftest harness-ui-workspace-selector-repeat-invocation-joins-the-first ()
+  "A second invocation while one waits asks the harness once.
+Two menus over one list would answer the same question twice, so the
+second command says it is loading and asks nothing."
+  (harness-ui-workspace-test-with
+    (let ((asked 0) (promise (harness-make-promise)) (said nil) (joined nil))
+      (cl-letf (((symbol-function 'harness-ui-request)
+                 (lambda (method &rest _)
+                   (when (equal method "_harness/workspace/list") (cl-incf asked))
+                   promise))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) nil)))
+        (setq said (harness-ui-workspace-test--said
+                    (lambda ()
+                      ;; The second invocation comes while the first
+                      ;; waits, as a second key press would.
+                      (run-at-time 0.05 nil
+                                   (lambda ()
+                                     (setq joined (harness-ui-workspace--choosing-p))
+                                     (harness-workspace)
+                                     (harness-resolve promise nil)))
+                      (harness-ui-workspace--choose nil)))))
+      (should joined)
+      ;; Asked once, and both invocations said they were loading.
+      (should (= 1 asked))
+      (should (equal '("Workspace selector · loading"
+                       "Workspace selector · loading")
+                     said))
+      (should-not (harness-ui-workspace--choosing-p)))))
+
+(ert-deftest harness-ui-workspace-selector-drops-an-answer-from-a-dead-frame ()
+  "An answer that comes back after its frame is gone opens nothing.
+The menu would appear in a frame the person is no longer looking at."
+  (harness-ui-workspace-test-with
+    (let ((promise (harness-make-promise)) (offered nil) (asked-frame nil))
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) promise))
+                ((symbol-function 'frame-live-p) (lambda (f) (not (eq f asked-frame))))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) (setq offered t))))
+        (harness-ui-workspace-test--said
+         (lambda ()
+           ;; The answer arrives, and by then the frame that asked is
+           ;; gone: the person closed it while the harness thought.
+           (run-at-time 0.05 nil
+                        (lambda ()
+                          (setq asked-frame (harness-ui-workspace--choice-frame
+                                             harness-ui-workspace--choosing))
+                          (harness-resolve promise (harness-ui-workspace-test--two))))
+           (harness-ui-workspace--choose nil))))
+      (should asked-frame)
+      (should-not offered)
+      (should-not (harness-ui-workspace--choosing-p)))))
+
+(ert-deftest harness-ui-workspace-selector-reports-a-failure-with-retry ()
+  "A harness that cannot answer says so, and says to try again.
+The selector is free to be asked again at once."
+  (harness-ui-workspace-test-with
+    (let ((said nil))
+      (cl-letf (((symbol-function 'harness-ui-request)
+                 (lambda (&rest _)
+                   (let ((p (harness-make-promise)))
+                     (run-at-time 0.05 nil
+                                  (lambda ()
+                                    (harness-reject p (list 'harness-error "the harness is out of reach"))))
+                     p))))
+        (setq said (harness-ui-workspace-test--said
+                    (lambda () (harness-ui-workspace--choose nil)))))
+      (should (member "Workspace selector · the harness is out of reach · try again" said))
+      (should-not (harness-ui-workspace--choosing-p))
+      ;; Asked again, it asks the harness again.
+      (cl-letf (((symbol-function 'harness-ui-request)
+                 (lambda (&rest _) (harness-resolved (harness-ui-workspace-test--two))))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) nil)))
+        (harness-ui-workspace-test--said (lambda () (harness-workspace)))
+        (should-not (harness-ui-workspace--choosing-p))))))
+
+(ert-deftest harness-ui-workspace-selector-times-out-with-retry ()
+  "A harness that never answers does not hold the command for ever.
+The wait ends with a line that says to try again, and nothing opens.
+The timer is the command's own, shortened for the test."
+  (harness-ui-workspace-test-with
+    (let ((promise (harness-make-promise)) (offered nil) (said nil)
+          (harness-ui-workspace--choice-timeout 0.2)
+          (started (float-time)))
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) promise))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) (setq offered t))))
+        (setq said (harness-ui-workspace-test--said
+                    (lambda () (harness-ui-workspace--choose nil))))
+        (should (< (- (float-time) started) 5))
+        (should-not offered)
+        (should (member "Workspace selector · timed out · try again" said))
+        (should-not (harness-ui-workspace--choosing-p))
+        ;; The answer that comes afterwards opens nothing.
+        (harness-resolve promise (harness-ui-workspace-test--two))
+        (should-not offered)))))
+
+(ert-deftest harness-ui-workspace-selector-opens-the-choice-it-read ()
+  "The menu opens with what the answer holds, and the choice opens it."
+  (harness-ui-workspace-test-with
+    (let ((promise (harness-make-promise)) (offered nil) (opened nil))
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) promise))
+                ((symbol-function 'completing-read)
+                 (lambda (prompt choices &rest _)
+                   (setq offered (cons prompt (mapcar #'car choices)))
+                   "Work"))
+                ((symbol-function 'harness-ui-workspace--open)
+                 (lambda (workspace &optional _position) (setq opened workspace))))
+        (harness-ui-workspace-test--said
+         (lambda ()
+           (harness-ui-workspace-test--answer-later promise (harness-ui-workspace-test--two))
+           (harness-ui-workspace--choose nil))))
+      (should (equal "Workspace: " (car offered)))
+      (should (equal '("Home" "Work") (cdr offered)))
+      (should (equal "b" (plist-get opened :id)))
+      (should-not (harness-ui-workspace--choosing-p)))))
+
+(ert-deftest harness-ui-workspace-selector-keeps-the-single-and-none-paths ()
+  "One workspace opens it; none creates the first, as before.
+Neither asks the person to choose, and neither says it is waiting."
+  (harness-ui-workspace-test-with
+    (let ((opened nil) (created nil))
+      (cl-letf (((symbol-function 'harness-ui-workspace--open)
+                 (lambda (workspace &optional _position) (setq opened workspace)))
+                ((symbol-function 'harness-ui-workspace--create)
+                 (lambda (name &optional root position)
+                   (setq created (list name root position)))))
+        (harness-ui-workspace--read-workspace (list (list :id "only" :name "Only")) nil)
+        (should (equal "only" (plist-get opened :id)))
+        (harness-ui-workspace--read-workspace nil nil)
+        (should (equal '("Home" nil nil) created))
+        (should-not (harness-ui-workspace--choosing-p))))))
+
+(ert-deftest harness-ui-workspace-selector-does-not-take-a-minibuffer-in-use ()
+  "An answer that arrives while a minibuffer of the person's own is in
+use opens no menu: it would take that minibuffer from them."
+  (harness-ui-workspace-test-with
+    (let ((promise (harness-make-promise)) (offered nil) (said nil))
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) promise))
+                ((symbol-function 'active-minibuffer-window) (lambda () (selected-window)))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) (setq offered t))))
+        (setq said (harness-ui-workspace-test--said
+                    (lambda ()
+                      (harness-ui-workspace-test--answer-later promise (harness-ui-workspace-test--two))
+                      (harness-ui-workspace--choose nil))))
+      (should-not offered)
+      (should (member "Workspace selector · cancelled" said))))))
