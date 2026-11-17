@@ -259,7 +259,7 @@ class UnmuteSidecar(Sidecar):
         self._clear_queues()
         log("microphone %s" % ("muted" if muted else "open"))
 
-    def interrupt(self):
+    def interrupt(self, request_id=None):
         """Silence output, not microphone/transcription or the agent's work."""
         self.cancel_release()
         self._clear_output()
@@ -267,7 +267,7 @@ class UnmuteSidecar(Sidecar):
         # and one that is sounding gives way with everything else.
         self.pending_acknowledgment = None
         self.stop_acknowledgment()
-        super().interrupt()
+        super().interrupt(request_id=request_id)
 
     def fail(self, message):
         """Report a failure that ends the session."""

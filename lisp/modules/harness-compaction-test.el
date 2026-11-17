@@ -2750,7 +2750,7 @@ both messages after the summary."
       ;; Both wait: this compaction showed nothing, so the turn does now.
       (should (eq 'running (plist-get (harness-call 'session/get id) :status)))
       (should (equal '(:phase compacting :detail "2 messages wait")
-                     (harness-plist-remove (harness-call 'agent/activity id) :since)))
+                     (harness-plist-remove (harness-call 'agent/activity id) :since :turn-id)))
       (should-not (harness-compaction-test-steering id))
       (should (eq 'end-turn (plist-get (harness-test-await turn 20) :stop-reason)))
       (should (equal '(user assistant hint hint compaction hint user user assistant)
@@ -2805,7 +2805,7 @@ the step that follows reads the summary and the message, and answers."
       (should (eq 'running (plist-get (harness-call 'session/get id) :status)))
       ;; Whatever the step before left the line saying, the turn compacts.
       (should (equal '(:phase compacting :detail "1 message waits: “and also this”")
-                     (harness-plist-remove (harness-call 'agent/activity id) :since)))
+                     (harness-plist-remove (harness-call 'agent/activity id) :since :turn-id)))
       (should-not (member "and also this" (harness-compaction-test-user-texts id)))
       (should (eq 'end-turn (plist-get (harness-test-await turn 20) :stop-reason)))
       (should (equal '(user hint tool-call tool-result hint compaction hint user assistant)

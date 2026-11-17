@@ -264,9 +264,9 @@ class LipreadSidecar(Sidecar):
         if self.loop is not None:
             self.loop.stop(1)
 
-    def interrupt(self):
-        self.speech_active = False
-        super().interrupt()
+    def interrupt(self, request_id=None):
+        # Playback interruption does not end an in-progress mouth gesture.
+        super().interrupt(request_id=request_id)
 
     # -- the camera --------------------------------------------------
 

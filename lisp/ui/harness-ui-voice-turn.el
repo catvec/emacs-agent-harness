@@ -15,13 +15,45 @@
   "Return TEXT in lower case, without terminal sentence punctuation."
   (string-trim-right (downcase (string-trim text)) "[[:space:].!?,;:]+"))
 
-(defun harness-voice-turn-recovery-p (text)
-  "Whether all of TEXT is an unquoted continuation recovery cue."
-  (let ((ending (harness-voice-turn--ending text)))
+(defconst harness-voice-turn--continuation-cue-regexp
+  (concat "\\(?:one \\(?:second\\|sec\\|moment\\)"
+          "\\|hold on\\(?: \\(?:a\\|one\\) \\(?:second\\|sec\\|moment\\)\\)?"
+          "\\|let me think\\|give me \\(?:a\\|one\\) \\(?:moment\\|second\\|sec\\)"
+          "\\|wait \\(?:a\\|one\\) \\(?:sec\\|second\\|moment\\)"
+          "\\|\\(?:i need to \\)?catch my breath\\|um\\|uh\\|erm\\|hmm\\)")
+  "Direct pause and hesitation cues, without surrounding words or punctuation.")
+
+(defun harness-voice-turn--control-p (text cue-regexp)
+  "Whether all of TEXT matches CUE-REGEXP with bounded polite wrappers.
+Only whitespace and commas separate optional discourse prefixes, in order:
+`oh', `well', `ok'/`okay'/`all right'/`alright', `actually', then `please'.
+A final `please' and terminal punctuation are optional.  Quotation marks
+and other content are not removed; matching never changes TEXT."
+  (let ((ending (replace-regexp-in-string
+                 "[[:space:]]+" " " (harness-voice-turn--ending text))))
     (and (string-match-p
-          "\\`\\(?:please[[:space:]]+\\)?\\(?:continue\\|go[[:space:]]+on\\)\\(?:[[:space:],]+please\\)?\\'"
+          (concat "\\`\\(?:oh[ ,]+\\)?\\(?:well[ ,]+\\)?"
+                  "\\(?:\\(?:ok\\|okay\\|all right\\|alright\\)[ ,]+\\)?"
+                  "\\(?:actually[ ,]+\\)?\\(?:please[ ,]+\\)?"
+                  "\\(?:" cue-regexp "\\)\\(?:[ ,]+please\\)?\\'")
           ending)
          t)))
+
+(defun harness-voice-turn-recovery-p (text)
+  "Whether all of TEXT is an unquoted recovery or explicit send cue.
+Recognize `continue', `go on', and `send'/`submit' with `it'/`that' and
+optional `now', with the wrappers of `harness-voice-turn--control-p'.
+Callers consume a cue only for an existing draft; without one TEXT is an
+ordinary request, retained unchanged.  Embedded and named uses are data."
+  (harness-voice-turn--control-p
+   text "continue\\|go on\\|\\(?:send\\|submit\\) \\(?:it\\|that\\)\\(?: now\\)?"))
+
+(defun harness-voice-turn-continuation-p (text)
+  "Whether all of TEXT is an unquoted pause or hesitation cue.
+Use the wrappers of `harness-voice-turn--control-p'.  Unlike
+`harness-voice-turn-reason', this never matches content ending in a cue;
+only a whole control utterance may be omitted from a pending request."
+  (harness-voice-turn--control-p text harness-voice-turn--continuation-cue-regexp))
 
 (defun harness-voice-turn-reason (text &optional truncated)
   "Classify the ending of accumulated TEXT.
@@ -33,11 +65,7 @@ pause intent takes precedence over it; quoted and named cues are data."
                     "[\"“][^\"”]*[\"”]\\|'[^']*'\\|‘[^’]*’" " quoted " text))
          (ending (harness-voice-turn--ending unquoted))
          (cue (string-match
-               (concat "\\b\\(?:one \\(?:second\\|sec\\|moment\\)"
-                       "\\|hold on\\(?: \\(?:a\\|one\\) \\(?:second\\|sec\\|moment\\)\\)?"
-                       "\\|let me think\\|give me \\(?:a\\|one\\) \\(?:moment\\|second\\|sec\\)"
-                       "\\|wait \\(?:a\\|one\\) \\(?:sec\\|second\\|moment\\)"
-                       "\\|\\(?:i need to \\)?catch my breath\\|um\\|uh\\|erm\\|hmm\\)"
+               (concat "\\b" harness-voice-turn--continuation-cue-regexp
                        "\\(?:[,[:space:]]+please\\)?\\'")
                ending))
          (named (and cue (string-match-p

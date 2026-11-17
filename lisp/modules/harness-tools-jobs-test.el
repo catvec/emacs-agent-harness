@@ -386,6 +386,11 @@ and stopping it ends its run while the runtime and the files stay."
           (should-not (plist-get stopped :is-error))
           (should (string-search "stopped" (plist-get stopped :content))))
         (should (file-exists-p (expand-file-name "served.txt" root)))
+        ;; The stop records the job stopped at once; the supervisor ends
+        ;; its run asynchronously, so the server answering is what says
+        ;; the run is really gone -- waiting on the job's own state would
+        ;; pass before the kill landed.
+        (should-not (eq 'running (plist-get (car (harness-tools-jobs-session-entries sid)) :state)))
         (harness-test-wait
          (lambda ()
            (not (eq 'running (plist-get (car (harness-tools-jobs-session-entries sid)) :state))))
@@ -606,9 +611,14 @@ to leave a process running there rather than run it plainly."
                          :timeout 120)
                   id (harness-tools-jobs-test--job-id first))
             (should id)
+            ;; Wait for the process name itself, not the `pid-1' prefix
+            ;; the command prints before it: the log holds the prefix as
+            ;; soon as its bytes arrive, and the name is still a read
+            ;; behind it on a loaded machine.  A wait weaker than what
+            ;; the assertion reads passes there and fails on the check.
             (harness-test-wait
              (lambda ()
-               (string-match-p "pid-1"
+               (string-match-p "pid-1: bwrap"
                                (or (plist-get (harness-tools-jobs-test--call sid :action "logs" :id id)
                                               :content)
                                    "")))

@@ -368,6 +368,21 @@ window the ones that must stay on one line."
        (eq (marker-buffer harness-compose-start) (current-buffer))
        (<= harness-compose-start harness-compose-end)))
 
+(defvar harness-compose--drawing nil
+  "The buffer `harness-compose-insert' is inserting a box into, or nil.
+The markers of a box exist only once it is inserted, but the controls
+above the prompt are drawn first, so they see this instead.")
+
+(defun harness-compose-host-p ()
+  "Non-nil when this buffer is a compose host, drawn or being drawn.
+A control line above the prompt (`harness-compose-controls-functions')
+runs while the box is still being inserted, so it cannot ask
+`harness-compose-live-p', which reads the markers the insertion has not
+placed yet.  This is true then as well, and false in a buffer that only
+hides a box (`harness-compose-hide') or never had one."
+  (or (harness-compose-live-p)
+      (eq harness-compose--drawing (current-buffer))))
+
 (defun harness-compose-capture ()
   "Remember the box's text, before the host deletes it to redraw."
   (when (harness-compose-live-p)
@@ -560,12 +575,16 @@ attachments show as chips (`harness-compose--show-tokens')."
           harness-compose--detached nil))
   (let ((start (point)))
     (setq harness-compose--controls-fit-room nil)
-    (dolist (fn harness-compose-controls-functions)
-      (when-let* ((line (funcall fn)))
-        (setq harness-compose--controls-fit-room (harness-compose--room))
-        (insert (propertize (concat line "\n") 'read-only t 'rear-nonsticky t))))
-    ;; Partial tail redraws stop here, preserving controls and the draft.
-    (setq harness-compose-controls-start (copy-marker start)))
+    ;; The controls are drawn above the prompt, before the markers of the
+    ;; box exist: they see this buffer as a compose host while they run
+    ;; (`harness-compose-host-p').
+    (let ((harness-compose--drawing (current-buffer)))
+      (dolist (fn harness-compose-controls-functions)
+        (when-let* ((line (funcall fn)))
+          (setq harness-compose--controls-fit-room (harness-compose--room))
+          (insert (propertize (concat line "\n") 'read-only t 'rear-nonsticky t))))
+      ;; Partial tail redraws stop here, preserving controls and the draft.
+      (setq harness-compose-controls-start (copy-marker start))))
   (let* ((background (or face 'harness-compose-face))
          (accent (and accent (list accent background)))
          (prompt (if accent (concat (harness-compose-bar (car accent) background) "❯ ") "❯ "))

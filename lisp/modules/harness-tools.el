@@ -720,7 +720,9 @@ says the last thing in its transcript."
      ;; A call being checked waits for the user once a request is pending
      ;; on it: that is what the note says, not that the call is checked.
      ((and (harness-session-waiting-on-user-p session) (harness-tools--pending-phrase session)))
-     (activity (harness-tools--activity-phrase activity))
+     ;; An activity that only names its turn says nothing of what the turn
+     ;; does yet: the note falls back to the transcript, as without one.
+     ((plist-get activity :phase) (harness-tools--activity-phrase activity))
      ((eq (plist-get session :status) 'blocked) "waiting on you")
      (t (or (harness-tools--last-node-phrase (plist-get session :id))
             (if (eq (plist-get session :status) 'running) "working" "idle"))))))
@@ -1328,8 +1330,23 @@ announces the result as `tools/finished' after this;
          (result (harness-run-filter 'tools/result result session-id call)))
     result))
 
+(defun harness-tools--originating-turn-active-p (ctx)
+  "Non-nil while CTX's scoped originating turn can still start this call.
+Unscoped calls, and harnesses without the agent module, are unchanged.
+A late permission decision must not start old work in a replacement turn."
+  (let ((token (plist-get ctx :turn-id)))
+    (or (null token) (not (harness-method-exists-p 'agent/activity))
+        (let ((activity (harness-call 'agent/activity (plist-get ctx :session-id))))
+          (and (equal token (plist-get activity :turn-id))
+               (not (plist-get activity :cancelling)))))))
+
 (harness-defmethod tools/execute (session-id call)
   "Execute CALL (:id :name :input) for SESSION-ID; return a promise of a RESULT.
+An internal `:turn-id' on CALL is copied unchanged to the handler's
+context, including across permission waits, so supported cancellation
+can target the originating execution rather than a later turn.  A scoped
+call whose originating turn was cancelled or replaced while permission
+was pending returns an error without starting the handler.
 The `permission/decide' chain decides first; in corporate mode a call of
 a tool of kind net is denied without asking it, unless it is a web
 search, and so is a call of ssh (`harness-tools--corporate-refusal').
@@ -1348,6 +1365,7 @@ secrets in all three."
          (session (harness-tools--session session-id))
          (ctx (list :session-id session-id :cwd (plist-get session :cwd)
                     :host (plist-get session :host) :call-id call-id
+                    :turn-id (plist-get call :turn-id)
                     :report (lambda (text)
                               (harness-emit 'tools/progress session-id call-id
                                             (harness-tools--output-text text session-id)))
@@ -1375,15 +1393,19 @@ secrets in all three."
            (let ((behavior (plist-get decision :behavior)))
              (harness-emit 'permission/decided session-id request decision)
              (harness-then
-              (if (eq behavior 'allow)
-                  (let* ((computer (plist-get decision :computer))
-                         (ctx (if computer
-                                  (plist-put (copy-sequence ctx) :computer computer)
-                                ctx)))
-                    (harness-tools--run-handler tool (or (plist-get decision :input) input) ctx))
+              (cond
+               ((not (eq behavior 'allow))
                 (harness-resolved
                  (harness-tool-error (harness-tools-denial-message decision session-id request)
                                      :denied t)))
+               ((not (harness-tools--originating-turn-active-p ctx))
+                (harness-resolved (harness-tool-error "Originating turn inactive")))
+               (t
+                (let* ((computer (plist-get decision :computer))
+                       (ctx (if computer
+                                (plist-put (copy-sequence ctx) :computer computer)
+                              ctx)))
+                  (harness-tools--run-handler tool (or (plist-get decision :input) input) ctx))))
               (lambda (result)
                 (let ((result (harness-tools--finish-call session-id call call-id result)))
                   (harness-emit 'tools/finished session-id call result)

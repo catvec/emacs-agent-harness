@@ -1614,7 +1614,7 @@ class Sidecar:
         elif kind == "acknowledgment-cancel":
             self.cancel_acknowledgments()
         elif kind == "interrupt":
-            self.interrupt()
+            self.interrupt(request_id=event.get("id"))
         elif kind == "stop":
             self.finish("sidecar stopped")
         elif kind == "commentary":
@@ -1681,20 +1681,27 @@ class Sidecar:
         self.events.send("speech", active=active, utterance=utterance,
                          reason=reason or ("onset" if active else "hangover"))
 
-    def interrupt(self):
-        """Stop playback now; the agent turn keeps running in Emacs."""
+    def interrupt(self, request_id=None):
+        """Stop playback, never capture; correlate explicit control replies.
+
+        Provider barge-in has no request id.  An explicit client's id is
+        echoed on both events so a delayed acknowledgment cannot interrupt
+        a newer answer or change the state of a later call.
+        """
         if self.player:
             self.player.stop()
         self.held = []
+        self.pending_acknowledgment = None
         self.speaking = False
-        self.announce_listening()
-        self.events.send("interrupted")
+        fields = {"interrupt_id": request_id} if request_id is not None else {}
+        self.events.send("interrupted", **fields)
+        self.announce_listening(**fields)
 
-    def announce_listening(self):
-        """Report that the speaker is silent."""
+    def announce_listening(self, **fields):
+        """Report that the speaker is silent (not that capture stopped)."""
         if self.speaking:
             self.speaking = False
-        self.events.send("listening")
+        self.events.send("listening", **fields)
 
     def announce_speaking(self):
         """Report that audio is playing."""

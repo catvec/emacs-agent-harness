@@ -106,8 +106,9 @@ def main(argv):
         elif kind == "mute":
             log("microphone %s" % ("muted" if event.get("on") else "open"))
         elif kind == "interrupt":
-            send("interrupted")
-            send("listening")
+            fields = {"interrupt_id": event["id"]} if "id" in event else {}
+            send("interrupted", **fields)
+            send("listening", **fields)
         elif kind == "commentary":
             send("speaking")
             if hold_speaking:

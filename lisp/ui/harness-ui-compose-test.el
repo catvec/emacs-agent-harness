@@ -1715,6 +1715,51 @@ start and its file's name, and a wide window shows every name whole."
               (should (= draws harness-ui-compose-test--draws)))
           (delete-window side))))))
 
+(defvar harness-ui-compose-test--control-sightings nil
+  "What the test's control line saw, newest first.")
+
+(ert-deftest harness-ui-compose-a-control-sees-a-host-while-the-box-is-drawn ()
+  "A control line runs before the box's markers exist, and is still a host.
+`harness-compose-live-p' reads those markers, so it answers no while the
+controls above the prompt are drawn: a control that asked it would take
+a box that is being drawn for a buffer with no box at all, which is
+what a workspace's voice control did, drawing \"Voice · no session\"
+over a workspace it could start a call in.  The host predicate is what
+a control asks, and it answers yes for the whole of the draw as well as
+afterwards."
+  (harness-ui-compose-test-with
+    (let ((harness-ui-compose-test--control-sightings nil))
+      ;; A host that draws its box again takes it off first
+      ;; (`harness-compose-hide'), which is when the markers go: this
+      ;; test host redraws over its box instead, and `erase-buffer'
+      ;; leaves the old markers pointing at the buffer's start.
+      (harness-compose-hide)
+      (should-not harness-compose-start)
+      ;; `harness-compose-controls-functions' is a special variable, so a
+      ;; `let' of it is dynamic: the control reads the sightings through
+      ;; a variable of its own rather than a lexical closure.
+      (setq harness-compose-controls-functions
+            (list (lambda ()
+                    (push (list :live (harness-compose-live-p)
+                                :host (harness-compose-host-p)
+                                :start harness-compose-start)
+                          harness-ui-compose-test--control-sightings)
+                    nil)))
+      (harness-compose-redraw)
+      (let ((seen harness-ui-compose-test--control-sightings))
+        (should seen)
+        ;; Every control line ran with no markers placed...
+        (should (cl-every (lambda (entry) (null (plist-get entry :start))) seen))
+        (should (cl-every (lambda (entry) (null (plist-get entry :live))) seen))
+        ;; ...and still saw a compose host.
+        (should (cl-every (lambda (entry) (eq t (plist-get entry :host))) seen)))
+      ;; Once drawn, the box is a host by its markers, and a buffer that
+      ;; only hides a box is no host.
+      (should (harness-compose-live-p))
+      (should (harness-compose-host-p))
+      (harness-compose-hide)
+      (should-not (harness-compose-host-p)))))
+
 (ert-deftest harness-ui-compose-long-names-shorten-in-the-middle ()
   "A name too long keeps its start and its end, a path its file's name."
   (should (equal "notes.txt" (harness-compose--shorten "notes.txt" 9)))

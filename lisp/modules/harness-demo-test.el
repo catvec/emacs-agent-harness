@@ -305,7 +305,14 @@ control and the presenter's session."
 
 (ert-deftest harness-demo-start-without-a-workspace-runs-on-the-host ()
   "A demo bound to no workspace runs where the harness does, and says so."
-  (harness-demo-test-with-world (list)
+  (harness-demo-test-with-world
+      ;; The default demo's command is `python3 serve.py', which exits at
+      ;; once where no `serve.py' is: `harness-demo--state' then answers
+      ;; "stopped" for a process that is simply over, and whether the
+      ;; start answer is read before or after it exits is a race.  This
+      ;; demo sleeps, so "running" is what the run is, not what it was
+      ;; caught doing.
+      (list :demo (list :command (list "sleep" "60")))
     (let* ((answer (harness-call 'demo/start "s1" "demo-1"))
            (run (harness-demo--run (plist-get answer :run))))
       (should (equal "running" (plist-get answer :state)))

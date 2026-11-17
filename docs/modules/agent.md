@@ -49,6 +49,19 @@ A model that stops on its own, with nothing steering, is not let go
 at once: the `agent/stop` filters may answer it with a message of the
 harness's and a step more, a few times at most (`harness-agent--stopped`).
 
+Voice controls are not user prompts.  `agent/voice-control` records a
+hint and a control event: "interrupt" audits playback interruption
+without cancelling work; "cancel" requires the opaque `:turn-id`
+captured from `agent/activity`.  A completed or replaced turn cannot
+cancel the next one.  The result distinguishes an accepted request,
+an already ended turn, a stale token and unavailable control, with
+per-call outcomes for completed tools and unsupported cancellation.
+Only a foreground bash run in the shared runtime currently supplies
+an `agent/tool-canceller`; its closure captures that exact execution
+before the model is cancelled.  Other tools and unshared commands
+have no supported stop.  Neither an accepted request nor a completed
+call promises rollback, undone effects or background jobs stopped.
+
 A tool result may carry pictures for the model (`:images`, as read_file
 on an image gives): a hosted loop is handed them with the result, a
 native one reads them from the transcript with its next request, and
@@ -86,7 +99,7 @@ The loop is entirely event driven: nothing here waits.
 ### Methods
 
 - `agent/activity` (session-id) — Return what SESSION-ID's running turn is doing now, or nil.
-- `agent/cancel` (session-id) — Cancel the running turn of SESSION-ID, if any.
+- `agent/cancel` (session-id &optional turn-id) — Cancel the running turn of SESSION-ID, if any.
 - `agent/note-activity` (session-id activity &optional running) — Announce ACTIVITY as what SESSION-ID's turn does, before the turn starts.
 - `agent/outstanding` (session-id) — Return what runs for SESSION-ID outside its own turn, as a short text, or nil.
 - `agent/prompt` (session-id blocks &optional opts) — Send BLOCKS (content blocks, or a string) to SESSION-ID.
@@ -94,6 +107,7 @@ The loop is entirely event driven: nothing here waits.
 - `agent/send-queue` (session-id &optional qids) — Send the queued messages of SESSION-ID as one turn; return its promise.
 - `agent/show-waiting` (session-id &optional why) — Show the messages the turn of SESSION-ID waits with, as queued ones.
 - `agent/stop-outstanding` (session-id &optional reason) — Stop what runs for SESSION-ID outside its own turn; return what it stopped.
+- `agent/voice-control` (session-id action &optional opts) — Audit voice ACTION for SESSION-ID, optionally requesting turn cancellation.
 - `agent/withdraw` (session-id node-id) — Take back the message NODE-ID of SESSION-ID that its turn has not taken yet.
 
 ### Events
@@ -110,6 +124,7 @@ The loop is entirely event driven: nothing here waits.
 - `agent/tool-result` — (SESSION-ID NODE)
 - `agent/turn-ended` — (SESSION-ID REASON)
 - `agent/turn-started` — (SESSION-ID)
+- `agent/voice-control` — (SESSION-ID RESULT) after an audited playback interruption or turn-scoped cancellation request; RESULT is the structured outcome from `agent/voice-control`, never a user prompt
 
 ### Filter chains it runs
 
@@ -123,6 +138,7 @@ The loop is entirely event driven: nothing here waits.
 - `agent/stop`
 - `agent/stop-outstanding`
 - `agent/system-prompt`
+- `agent/tool-canceller`
 - `tools/output-text`
 
 ### Options
@@ -174,6 +190,7 @@ The loop is entirely event driven: nothing here waits.
 ### Events it handles
 
 - `permission/decided` → `harness-agent--on-permission-decided`
+- `tools/finished` → `harness-agent--on-tool-finished` at 10
 - `tools/note` → `harness-agent--on-tool-note`
 - `tools/progress` → `harness-agent--on-tool-progress`
 
@@ -191,6 +208,7 @@ The loop is entirely event driven: nothing here waits.
 - `agent/tool-result`
 - `agent/turn-ended`
 - `agent/turn-started`
+- `agent/voice-control`
 
 ### Hooks it adds to
 

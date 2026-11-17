@@ -307,6 +307,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/tool-result` | [agent](agent.md) | [agent](agent.md) | [perms](perms.md), [recap](recap.md), [resilience](resilience.md), [tools](tools.md) |  |
 | `agent/turn-ended` | [agent](agent.md) | [agent](agent.md) | [compaction](compaction.md), [cowboy](cowboy.md), [handoff](handoff.md), [merge](merge.md), [otel](otel.md), [perms](perms.md), [pet](pet.md), [recap](recap.md), [redact](redact.md), [resilience](resilience.md), [retry](retry.md), [session](session.md), [supervisor](supervisor.md), [tasks](tasks.md), [thread-reply](thread-reply.md), [todo-sync](todo-sync.md), [tools](tools.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-usage](ui-usage.md), [ui-usage-history](ui-usage-history.md), [ui-workspace](ui-workspace.md), [usage](usage.md), [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md) | yes |
 | `agent/turn-started` | [agent](agent.md) | [agent](agent.md) | [merge](merge.md), [naming](naming.md), [otel](otel.md), [perms](perms.md), [recap](recap.md), [resilience](resilience.md), [retry](retry.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-pet](ui-pet.md), [ui-workspace](ui-workspace.md), [usage](usage.md), [workspace](workspace.md) | yes |
+| `agent/voice-control` | [agent](agent.md) | [agent](agent.md) |  |  |
 | `cache/compacted` | [cache-compact](cache-compact.md) | [cache-compact](cache-compact.md) |  |  |
 | `cache/poor-hit` | [cache](cache.md) | [cache](cache.md) |  |  |
 | `cache/pre-expire` | [cache](cache.md) | [cache](cache.md) | [cache-compact](cache-compact.md), [cache-warm](cache-warm.md) |  |
@@ -408,7 +409,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `tool-slots/changed` | [tool-slots-load](tool-slots-load.md) | [tool-slots-load](tool-slots-load.md) | [ui-slots](ui-slots.md), [ui-tool-slots-load](ui-tool-slots-load.md) | yes |
 | `tool-slots/holders-changed` | [tool-slots](tool-slots.md) | [tool-slots](tool-slots.md) | [tool-slots-load](tool-slots-load.md) |  |
 | `tools/file-written` | [tools](tools.md) | [tools-fs](tools-fs.md) |  | yes |
-| `tools/finished` | [tools](tools.md) | [tools](tools.md) | [otel](otel.md), [perms](perms.md), [supervisor](supervisor.md) |  |
+| `tools/finished` | [tools](tools.md) | [tools](tools.md) | [agent](agent.md), [otel](otel.md), [perms](perms.md), [supervisor](supervisor.md), [tools-shell](tools-shell.md) |  |
 | `tools/note` | [tools](tools.md) | [tools](tools.md) | [agent](agent.md) |  |
 | `tools/progress` | [tools](tools.md) | [tools](tools.md) | [agent](agent.md), [resilience](resilience.md) |  |
 | `tools/started` | [tools](tools.md) | [tools](tools.md) | [otel](otel.md) |  |
@@ -450,6 +451,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/stop` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tasks](tasks.md) (50), [thread-reply](thread-reply.md) (60) |
 | `agent/stop-outstanding` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tools-agent](tools-agent.md) (50), [tools-jobs](tools-jobs.md) (60) |
 | `agent/system-prompt` | [agent](agent.md) | [linking](linking.md) (45), [memory](memory.md) (55), [skills](skills.md) (60), [supervisor](supervisor.md) (900), [tasks](tasks.md) (60), [tools-agent](tools-agent.md) (40), [tools-computers](tools-computers.md) (60), [workspace](workspace.md) (50) |
+| `agent/tool-canceller` | [agent](agent.md) | [tools-shell](tools-shell.md) (50) |
 | `agent/tools` | [tools](tools.md) | [access](access.md) (85), [readonly](readonly.md) (90), [supervisor](supervisor.md) (90), [tasks](tasks.md) (50), [tools-handin](tools-handin.md) (50), [workspace-knowledge](workspace-knowledge.md) (40) |
 | `naming/auto-p` | [naming](naming.md) | [tasks](tasks.md) (50) |
 | `naming/system-prompt` | [naming](naming.md) | [tasks](tasks.md) (60) |

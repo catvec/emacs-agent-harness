@@ -1183,6 +1183,19 @@ output is played by."
 
 ;;;; Entry points
 
+(defun harness-voice--mode-available-p ()
+  "Non-nil when this buffer can host the selected voice capability.
+Live voice uses the transport's route, not a chat's session-id local:
+a workspace names its own selected thread and needs no live episode
+before its first prompt.  WAV spoken replies still require a chat
+with a session, and dictation into other compose hosts stays draft-only.
+A control line runs before the box's markers are placed, so this asks
+`harness-compose-host-p' rather than the markers alone."
+  (if (harness-voice-live-p)
+      (and (harness-compose-host-p)
+           (harness-voice-live--route-of-buffer (current-buffer)))
+    (and harness-ui-session-id (derived-mode-p 'harness-chat-mode))))
+
 ;;;###autoload
 (define-minor-mode harness-voice-mode
   "Speak new assistant replies in this chat, through configurable commands.
@@ -1194,10 +1207,7 @@ automatically.  Enabling another chat gives it exclusive audio
 ownership; disabling stops audio, not work."
   :lighter " Voice" :group 'harness-voice
   (if harness-voice-mode
-      (if (not (and harness-ui-session-id
-                    (or (derived-mode-p 'harness-chat-mode)
-                        (and (harness-voice-live-p)
-                             (harness-compose-live-p)))))
+      (if (not (harness-voice--mode-available-p))
           (progn
             (setq harness-voice-mode nil)
             (user-error "%s" (if (harness-voice-live-p)
@@ -1261,10 +1271,7 @@ threads, questions and permissions in the existing harness workflow."
                (harness-voice-live--target-p)))
       (progn
         (setq harness-voice--controls t)
-        (if (and harness-ui-session-id
-                 (or (derived-mode-p 'harness-chat-mode)
-                     (and (harness-voice-live-p)
-                          (harness-compose-live-p))))
+        (if (harness-voice--mode-available-p)
             (progn
               (harness-voice-mode 1)
               (when (and (harness-voice-live-p)

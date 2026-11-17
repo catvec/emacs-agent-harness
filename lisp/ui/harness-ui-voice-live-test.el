@@ -108,6 +108,10 @@ chat or a workspace looks like to the live transport."
            (harness-voice-live--state nil) (harness-voice-live--error nil)
            (harness-voice-live--notice nil)
            (harness-voice-live--muted nil) (harness-voice-live--working nil)
+           (harness-voice-live--output-suppressed nil)
+           (harness-voice-live--interrupt-seq 0) (harness-voice-live--control-status nil)
+           (harness-voice-live--control-seq 0) (harness-voice-live--agent-turn nil)
+           (harness-voice-live--agent-watch 0)
            (harness-voice-live--turn-active nil) (harness-voice-live--closing nil)
            (harness-voice-live--delegation nil) (harness-voice-live--delegations nil)
            (harness-voice-live--nodes nil) (harness-voice-live--order nil)
@@ -123,6 +127,8 @@ chat or a workspace looks like to the live transport."
            (harness-voice-live--pending-token 0) (harness-voice-live--turn-held nil)
            (harness-voice-live--input-chunks nil) (harness-voice-live--input-seq 0)
            (harness-voice-live--input-anonymous nil)
+           (harness-voice-live--input-overlap nil) (harness-voice-live--submissions nil)
+           (harness-voice-live-submit-functions nil) (harness-voice-live-reset-functions nil)
            (harness-voice-live--caption-hold nil) (harness-voice-live--caption-text "")
            (harness-voice-live--caption-hold-order 0) (harness-voice-live--caption-recovery nil)
            (harness-voice-live--utterance-routes nil)
@@ -144,6 +150,7 @@ chat or a workspace looks like to the live transport."
            (harness-voice-live--route-kind 'session)
            (harness-voice-live--route-workspace nil)
            (harness-voice-live--route-thread nil)
+           (harness-voice-live--route-resolved-thread nil)
            (harness-voice-live--route-name nil)
            (harness-voice-live--route-generation 0)
            (harness-voice-live--pipeline-timer nil)
@@ -180,6 +187,8 @@ chat or a workspace looks like to the live transport."
                             (push (list id method params)
                                   harness-ui-voice-live-test--calls)
                             nil))
+                         ((symbol-function 'harness-ui-fetch-tools)
+                          (lambda () (harness-resolved (make-hash-table :test 'equal))))
                          ((symbol-function 'harness-ui-call)
                           (lambda (method params _callback &optional _on-error)
                             (setq harness-ui-voice-live-test--sends
@@ -1263,7 +1272,8 @@ come, and the burst says why it stopped."
     (harness-test-wait (lambda () (eq harness-voice-live--state 'listening)) 5 "sidecar ready")
     (setq harness-voice-live--working t)
     (harness-voice-live-interrupt)
-    (should (eq harness-voice-live--state 'interrupted))
+    (should (eq harness-voice-live--state 'listening))
+    (should (harness-voice-live--microphone-on-p))
     (should harness-voice-live--working)
     (should-not harness-ui-voice-live-test--notifications)
     (should (harness-ui-voice-live-test--wait-event
@@ -1272,20 +1282,25 @@ come, and the burst says why it stopped."
     (should (equal "Live · Working" (harness-voice-live--status)))))
 
 (ert-deftest harness-ui-voice-live-cancel-is-separate ()
-  "Cancel work uses the ordinary session cancellation, not playback."
+  "Cancel work silences playback and targets the captured turn, not a new one."
   (harness-ui-voice-live-test-with
     (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
     (setq harness-voice-live-command
           (harness-ui-voice-live-test--command "quiet"))
     (harness-voice-live-start)
     (harness-test-wait (lambda () (eq harness-voice-live--state 'listening)) 5 "sidecar ready")
+    (setq harness-voice-live--agent-turn "backend-turn-1"
+          harness-voice-live--working t)
     (harness-voice-live-cancel)
-    (should (equal '(("session/cancel" (:sessionId "live-session")))
-                   harness-ui-voice-live-test--notifications))
-    (should-not (cl-find "interrupt"
-                         (harness-ui-voice-live-test--events
-                          harness-ui-voice-live-test--inbox)
-                         :key (lambda (e) (plist-get e :event)) :test #'equal))
+    (should (equal '("_harness/agent/voice-control"
+                     (:session-id "live-session" :action "cancel"
+                      :opts (:turn-id "backend-turn-1")))
+                   (car (last harness-ui-voice-live-test--sends))))
+    (should-not harness-ui-voice-live-test--notifications)
+    (should-not harness-ui-voice-live-test--calls)
+    (should (harness-ui-voice-live-test--wait-event
+             harness-ui-voice-live-test--inbox "interrupt"))
+    (should (harness-voice-live--microphone-on-p))
     (should (eq harness-voice-live--state 'listening))))
 
 (ert-deftest harness-ui-voice-live-a-camera-provider-is-paused-not-muted ()
@@ -1350,7 +1365,7 @@ input is a camera.  A microphone provider keeps Mute and Muted."
     (should (equal "Live · Muted" (harness-voice-live--status)))
     (should (eq 'muted harness-voice-live--stage))
     (harness-test-wait
-     (lambda () (string-search "\"on\":false"
+     (lambda () (string-search "\"on\":true"
                                (harness-ui-voice-live-test--file-text
                                 harness-ui-voice-live-test--inbox)))
      5 "the mute event")
@@ -1359,7 +1374,7 @@ input is a camera.  A microphone provider keeps Mute and Muted."
     (should (equal "Live · Listening" (harness-voice-live--status)))
     (should (eq 'listening harness-voice-live--stage))
     (harness-test-wait
-     (lambda () (string-search "\"on\":true"
+     (lambda () (string-search "\"on\":false"
                                (harness-ui-voice-live-test--file-text
                                 harness-ui-voice-live-test--inbox)))
      5 "the unmute event")))
@@ -1512,28 +1527,30 @@ a speech server answers with no audio at all."
 (ert-deftest harness-ui-voice-live-stage-line-follows-the-session ()
   "The transcript stage line names every stage the session is in."
   (harness-ui-voice-live-test-with
-    (harness-voice-live--transcript-buffer)
-    (should-not (harness-voice-live--stage-text))
-    (harness-voice-live--handle (list :event "hearing"))
-    (should (string-search "Hearing you" (harness-voice-live--stage-text)))
-    (harness-voice-live--handle (list :event "transcribing"))
-    (should (string-search "Transcribing" (harness-voice-live--stage-text)))
-    (harness-voice-live--handle (list :event "delegation" :id "d-9" :text "Do it."))
-   (should (equal "● Finishing thought" (harness-voice-live--stage-text)))
-   (should-not harness-ui-voice-live-test--calls)
-   ;; This is a renderer-only test with no sidecar.  The live tests cross
-   ;; grace before agent delivery; render the subsequent stage explicitly.
-   (harness-voice-live--pending-cancel "cancelled")
-   (harness-voice-live--stage-set 'thinking)
-    (should (string-search "Working" (harness-voice-live--stage-text)))
-    (setq harness-voice-live--stage-since (- (float-time) 1.4))
-    (harness-voice-live--stage-redraw)
-    (should (string-search "1.4s" (harness-voice-live--status)))
-    (should (string-search "1.4s" (harness-voice-live--stage-text)))
-    (harness-voice-live--handle (list :event "speaking"))
-    (should (string-search "Speaking" (harness-voice-live--stage-text)))
-    (harness-voice-live--handle (list :event "interrupted"))
-    (should (string-search "Listening" (harness-voice-live--stage-text)))))
+    ;; Renderer-only fixture: mock the open sidecar, not the stage logic.
+    (cl-letf (((symbol-function 'harness-voice-live--active-p) (lambda () t))
+              ((symbol-function 'harness-voice-live--send) (lambda (_) t)))
+      (harness-voice-live--transcript-buffer)
+      (should-not (harness-voice-live--stage-text))
+      (harness-voice-live--handle (list :event "hearing"))
+      (should (string-search "Hearing you" (harness-voice-live--stage-text)))
+      (harness-voice-live--handle (list :event "transcribing"))
+      (should (string-search "Transcribing" (harness-voice-live--stage-text)))
+      (harness-voice-live--handle (list :event "delegation" :id "d-9" :text "Do it."))
+      (should (equal "● Finishing thought" (harness-voice-live--stage-text)))
+      (should-not harness-ui-voice-live-test--calls)
+      ;; The live tests cross grace before delivery; render the next stage.
+      (harness-voice-live--pending-cancel "cancelled")
+      (harness-voice-live--stage-set 'thinking)
+      (should (string-search "Working" (harness-voice-live--stage-text)))
+      (setq harness-voice-live--stage-since (- (float-time) 1.4))
+      (harness-voice-live--stage-redraw)
+      (should (string-search "1.4s" (harness-voice-live--status)))
+      (should (string-search "1.4s" (harness-voice-live--stage-text)))
+      (harness-voice-live--handle (list :event "speaking"))
+      (should (string-search "Speaking" (harness-voice-live--stage-text)))
+      (harness-voice-live--handle (list :event "interrupted"))
+      (should (string-search "Listening" (harness-voice-live--stage-text))))))
 
 (ert-deftest harness-ui-voice-live-stage-indicators ()
   "Waiting animates, and each idle stage has its own mark."
@@ -2535,6 +2552,381 @@ a speech server answers with no audio at all."
      5 "both receipts")))
 
 
+(ert-deftest harness-ui-voice-live-submit-arbitrates-before-blocked-turn-queue ()
+  "An input owner can finish a control while the current agent waits."
+  (harness-ui-voice-live-test-clock
+   (let ((active (list :id "active" :session "live-session")) captured complete continue)
+     (setq harness-voice-live--delegation active
+           harness-voice-live--working t
+           harness-voice-live-submit-functions
+           (list (lambda (job pass done)
+                   (setq captured job continue pass complete done) t)))
+     (harness-ui-voice-live-test--utterance 1 "Exact  answer.")
+     (harness-voice-live-send-now)
+     (should (equal "Exact  answer." (plist-get captured :text)))
+     (should-not harness-ui-voice-live-test--calls)
+     (should-not harness-voice-live--delegations)
+     (should-not (harness-voice-conversation-turns harness-voice-live--conversation))
+     (funcall complete)
+     (funcall complete)
+     (funcall continue)
+     (should (eq active harness-voice-live--delegation))
+     (should harness-voice-live--working)
+     (should-not harness-voice-live--submissions)
+     (should-not harness-ui-voice-live-test--calls)
+     (should (= 1 (cl-count "delegate_result" harness-ui-voice-live-test--output
+                             :key (lambda (e) (plist-get e :event)) :test #'equal)))
+     (should (eq 'answered (plist-get (harness-voice-pipeline--segment
+                                     harness-voice-live--pipeline "u-1") :stage))))))
+
+(ert-deftest harness-ui-voice-live-submit-continuation-is-once-only-and-reset-safe ()
+  (harness-ui-voice-live-test-clock
+   (let (continue (resets 0))
+     (setq harness-voice-live-submit-functions
+           (list (lambda (_job pass _done) (setq continue pass) t))
+           harness-voice-live-reset-functions (list (lambda () (cl-incf resets))))
+     (harness-ui-voice-live-test--utterance 1 "Run  exactly this.")
+     (harness-voice-live-send-now)
+     (funcall continue)
+     (funcall continue)
+     (should (equal "Run  exactly this." (harness-ui-voice-live-test--latest-prompt)))
+     (should (= 1 (length harness-ui-voice-live-test--calls)))
+     (harness-voice-live--finish-turn "end-turn")
+     (harness-ui-voice-live-test--utterance 2 "Do not send after reset.")
+     (harness-voice-live-send-now)
+     (harness-voice-live--pending-cancel "retargeted")
+     (should (= 1 resets))
+     (funcall continue)
+     (should (= 1 (length harness-ui-voice-live-test--calls)))
+     (should-not harness-voice-live--submissions))))
+
+(ert-deftest harness-ui-voice-live-submit-captures-playback-overlap-at-onset ()
+  (harness-ui-voice-live-test-clock
+   (let (captured)
+     (setq harness-voice-live-submit-functions
+           (list (lambda (job _pass done) (setq captured job) (funcall done) t))
+           harness-voice-live--state 'speaking)
+     (harness-voice-live--handle '(:event "speech" :utterance 1 :active t))
+     (harness-voice-live--handle '(:event "speech" :utterance 1 :active nil))
+     (harness-voice-live--handle '(:event "listening"))
+     (harness-ui-voice-live-test--utterance 1 "Answer.")
+     (harness-voice-live-send-now)
+     (should (eq t (plist-get captured :playback-overlap)))
+     (harness-ui-voice-live-test--utterance 2 "Fresh answer.")
+     (harness-voice-live-send-now)
+     (should-not (plist-get captured :playback-overlap)))))
+
+;;;; Interruption recovery, control ownership and held-command routing
+
+(ert-deftest harness-ui-voice-live-interruption-keeps-capture-and-input ()
+  "Both sidecar event orders keep capture open; mute and input stay authoritative."
+  (dolist (events '(("listening" "interrupted") ("interrupted" "listening")))
+    (harness-ui-voice-live-test-clock
+     (dotimes (_ 3)
+       (dolist (event events) (harness-voice-live--handle (list :event event)))
+       (should (harness-voice-live--microphone-on-p))
+       (should (eq 'listening harness-voice-live--stage)))
+     (should-not harness-ui-voice-live-test--calls)
+     (should-not (harness-voice-conversation-turns harness-voice-live--conversation))
+     (should-not (string-search "wait, stop what you are doing?"
+                                (harness-ui-voice-live-test--transcript)))
+     (harness-voice-live--handle '(:event "speech" :utterance 1 :active t))
+     (harness-voice-live-interrupt)
+     (should harness-voice-live--speech-active)
+     (should (eq 'hearing harness-voice-live--stage))
+     (harness-voice-live--handle '(:event "speech" :utterance 1 :active nil))
+     (harness-ui-voice-live-test--utterance 1 "Actual  dictation.")
+     (harness-voice-live-send-now)
+     (should (equal "Actual  dictation." (harness-ui-voice-live-test--latest-prompt)))
+     (harness-voice-live--finish-turn "end-turn")
+     (should (harness-voice-live--microphone-on-p))
+     (harness-voice-live-mute)
+     (harness-voice-live-interrupt)
+     (harness-voice-live--handle '(:event "listening"))
+     (should harness-voice-live--muted)
+     (should-not (harness-voice-live--microphone-on-p))
+     (should (eq 'muted harness-voice-live--stage)))))
+
+(ert-deftest harness-ui-voice-live-interrupt-suppresses-completion-not-next-turn ()
+  "Late stream/tool completion stays silent; explicit echoes cannot silence a new turn."
+  (harness-ui-voice-live-test-clock
+   (harness-ui-voice-live-test--utterance 1 "First request.")
+   (harness-voice-live-send-now)
+   (setq harness-voice-live--agent-turn "first-turn")
+   (harness-voice-live-interrupt)
+   (let ((interrupt harness-voice-live--interrupt-seq))
+     (harness-voice-live--speak "Late old sentence." "old-node")
+     (harness-voice-live--handle '(:event "speaking"))
+     (harness-voice-live--finish-turn "end-turn")
+     (should (harness-voice-live--microphone-on-p))
+     (should (eq 'listening harness-voice-live--stage))
+     (should-not (cl-find "commentary" harness-ui-voice-live-test--output
+                         :key (lambda (event) (plist-get event :event)) :test #'equal))
+     (let ((result (cl-find "delegate_result" harness-ui-voice-live-test--output
+                            :key (lambda (event) (plist-get event :event)) :test #'equal)))
+       (should (equal "" (plist-get result :text)))
+       (should-not (plist-get result :error)))
+     (harness-ui-voice-live-test--utterance 2 "Second request.")
+     (harness-voice-live-send-now)
+     (should-not harness-voice-live--output-suppressed)
+     (harness-voice-live--speak "New sentence." "new-node")
+     (should (cl-find "commentary" harness-ui-voice-live-test--output
+                      :key (lambda (event) (plist-get event :event)) :test #'equal))
+     (harness-voice-live--handle '(:event "speaking"))
+     (harness-voice-live--handle (list :event "interrupted" :interrupt_id interrupt))
+     (harness-voice-live--handle (list :event "listening" :interrupt_id interrupt))
+     (should (eq 'speaking harness-voice-live--state))
+     (should-not harness-voice-live--output-suppressed)
+     (setq harness-voice-live--state 'ending)
+     (harness-voice-live--handle '(:event "interrupted"))
+     (harness-voice-live--handle '(:event "listening"))
+     (should (eq 'ending harness-voice-live--state)))))
+
+(ert-deftest harness-ui-voice-live-control-results-exact-copy-and-tooltips ()
+  "Cancellation outcomes and tool capabilities are controls, never user text."
+  (pcase-dolist (`(,status ,copy)
+                 '((requested "Cancellation requested") (completed "Turn completed")
+                   (stale "Cancellation stale") (unavailable "Cancellation unavailable")))
+    (harness-ui-voice-live-test-clock
+     (let (callback)
+       (setq harness-voice-live--agent-turn "turn-a")
+       (cl-letf (((symbol-function 'harness-ui-call)
+                  (lambda (method params success &optional _error)
+                    (should (equal "_harness/agent/voice-control" method))
+                    (should (equal '(:session-id "live-session" :action "cancel"
+                                     :opts (:turn-id "turn-a")) params))
+                    (setq callback success)))
+                 ((symbol-function 'window-body-width) (lambda (&rest _) 500))
+                 ((symbol-function 'harness-compose--room)
+                  (lambda () (* 500 (frame-char-width))))
+                 ((symbol-function 'harness-ui-tool-label) (lambda (_) "Bash"))
+                 ((symbol-function 'format-time-string) (lambda (&rest _) "12:34")))
+         (harness-voice-live-cancel)
+         (funcall callback (list :status status
+                                 :tools '((:tool "bash" :status requested)
+                                          (:tool "bash" :status completed)
+                                          (:tool "bash" :status unavailable))))
+         (should (equal copy harness-voice-live--control-status))
+         (should (equal (concat " Live · Listening · [End] · [Interrupt C-c V] · " copy
+                                " · [Mute C-c v] · [Transcript] · [Setup]")
+                        (car (harness-ui-voice-live-test--control-lines))))
+         (let* ((line (harness-voice-live--controls)) (at (string-search copy line)))
+           (should at)
+           (should (equal copy (get-text-property at 'help-echo line))))
+         (setq harness-voice-live--working t)
+         (let* ((line (harness-voice-live--controls))
+                (at (string-search "[Cancel work]" line)))
+           (should at)
+           (should (equal "Agent turn · cancellation" (get-text-property at 'help-echo line))))
+         (should (string-search (concat "Control · 12:34\n  " copy "\n"
+                                        "  Tool cancellation requested · Bash\n"
+                                        "  Tool completed · Bash\n"
+                                        "  Tool cancellation unavailable · Bash\n")
+                                (harness-ui-voice-live-test--transcript)))
+         (should-not harness-ui-voice-live-test--calls)
+         (should-not (harness-voice-conversation-turns harness-voice-live--conversation)))))))
+
+(ert-deftest harness-ui-voice-live-control-callbacks-and-snapshots-have-owners ()
+  "A result from an old route/turn cannot change newer output or cancellation identity."
+  (harness-ui-voice-live-test-clock
+   (let (callback failure snapshot)
+     (cl-letf (((symbol-function 'harness-ui-call)
+                (lambda (method _params success &optional error)
+                  (if (equal "_harness/agent/activity" method)
+                      (setq snapshot success)
+                    (setq callback success failure error)))))
+       (setq harness-voice-live--working t)
+       (harness-voice-live--capture-agent-turn)
+       (harness-voice-live--clear-turn)
+       (setq harness-voice-live--working t harness-voice-live--agent-turn "new-turn")
+       (funcall snapshot '(:turn-id "old-turn"))
+       (should (equal "new-turn" harness-voice-live--agent-turn))
+       (harness-voice-live-cancel)
+       (cl-incf harness-voice-live--route-generation)
+       (setq harness-voice-live--control-status "New route")
+       (funcall callback '(:status requested))
+       (funcall failure "old error")
+       (should (equal "New route" harness-voice-live--control-status))
+       (harness-voice-live-cancel)
+       (harness-voice-live--clear-turn)
+       (setq harness-voice-live--state 'speaking)
+       (funcall callback '(:status completed))
+       (should-not harness-voice-live--control-status)
+       (should (eq 'speaking harness-voice-live--state))))))
+
+(ert-deftest harness-ui-voice-live-control-tool-label-fetch-is-owner-scoped ()
+  (harness-ui-voice-live-test-clock
+   (let ((fetch (harness-make-promise)) callback)
+     (setq harness-voice-live--agent-turn "turn-a")
+     (cl-letf (((symbol-function 'harness-ui-call)
+                (lambda (_method _params success &optional _error) (setq callback success)))
+               ((symbol-function 'harness-ui-fetch-tools) (lambda () fetch)))
+       (harness-voice-live-cancel)
+       (funcall callback '(:status requested :tools ((:tool "bash" :status requested))))
+       (should (equal "Cancellation requested" harness-voice-live--control-status))
+       (should-not (string-search "Tool cancellation requested"
+                                  (harness-ui-voice-live-test--transcript)))
+       (harness-voice-live--clear-turn)
+       (harness-resolve fetch (make-hash-table :test 'equal))
+       (should-not (string-search "Tool cancellation requested"
+                                  (harness-ui-voice-live-test--transcript)))))))
+
+(ert-deftest harness-ui-voice-live-cancel-without-token-never-targets-new-work ()
+  (harness-ui-voice-live-test-clock
+   (setq harness-voice-live--working t)
+   (harness-voice-live-cancel)
+   (should-not harness-ui-voice-live-test--sends)
+   (should (equal "Cancellation unavailable" harness-voice-live--control-status))
+   (should (harness-voice-live--microphone-on-p))
+   (harness-voice-live--finish-turn "cancelled")
+   (should (eq 'listening harness-voice-live--stage))
+   (should-not harness-ui-voice-live-test--calls)))
+
+(ert-deftest harness-ui-voice-live-turn-standalone-hold-and-explicit-send ()
+  (harness-ui-voice-live-test-clock
+   (harness-ui-voice-live-test--utterance 1 "Fix  only the parser test.")
+   (let ((old harness-voice-live--pending-timer))
+     (harness-ui-voice-live-test--utterance 2 "Hold on.")
+     (should (equal "Fix  only the parser test." (harness-voice-live--pending-text)))
+     (should (eq 'continuation (harness-voice-live--pending-reason)))
+     (should-not harness-voice-live--pending-timer)
+     (harness-ui-voice-live-test--fire old)
+     (should-not harness-ui-voice-live-test--calls)
+     (harness-ui-voice-live-test--utterance 3 "Oh, actually send it.")
+     (should (equal "Fix  only the parser test." (harness-ui-voice-live-test--latest-prompt)))
+     (should (= 1 (length harness-ui-voice-live-test--calls)))
+     (should (string-search "Hold on." (harness-ui-voice-live-test--transcript)))
+     (should (string-search "Oh, actually send it." (harness-ui-voice-live-test--transcript)))
+     (harness-voice-live--handle
+      '(:event "delegation" :id "retry" :utterance 3 :text "Oh, actually send it."))
+     (should (= 1 (length harness-ui-voice-live-test--calls))))))
+
+(ert-deftest harness-ui-voice-live-turn-controls-keep-source-order ()
+  (harness-ui-voice-live-test-clock
+   (dolist (id '("u-1" "u-2" "u-3"))
+     (harness-voice-live--handle (list :event "segment" :id id :state "accepted")))
+   (harness-ui-voice-live-test--utterance 3 "Oh, actually send it.")
+   (harness-ui-voice-live-test--utterance 2 "Hold on.")
+   (should-not harness-ui-voice-live-test--calls)
+   (harness-ui-voice-live-test--utterance 1 "Keep  my spacing.")
+   (should (= 1 (length harness-ui-voice-live-test--calls)))
+   (should (equal "Keep  my spacing." (harness-ui-voice-live-test--latest-prompt)))))
+
+(ert-deftest harness-ui-voice-live-turn-quoted-embedded-and-unbuffered-controls-are-data ()
+  (dolist (text '("\"Oh, actually send it.\"" "The button is named send it."
+                  "Do not send it." "Tell them to send it." "Send it to the printer."
+                  "Say \"hold on\"." "The phrase hold on."))
+    (harness-ui-voice-live-test-clock
+     (harness-ui-voice-live-test--utterance 1 "Fix it, hold on.")
+     (harness-ui-voice-live-test--utterance 2 text)
+     (should (equal (concat "Fix it, hold on. " text) (harness-voice-live--pending-text)))
+     (should-not harness-ui-voice-live-test--calls)))
+  (harness-ui-voice-live-test-clock
+   (harness-ui-voice-live-test--utterance 1 "Oh, actually send it.")
+   (should-not harness-ui-voice-live-test--calls)
+   (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+   (should (equal "Oh, actually send it." (harness-ui-voice-live-test--latest-prompt)))))
+
+(ert-deftest harness-ui-voice-live-workspace-first-episode-before-cache ()
+  "Real workspace compose attaches the first episode before its debounced fetch."
+  (require 'harness-ui-workspace)
+  (dolist (initial-thread '(nil "thread-a"))
+    (harness-ui-voice-live-test-clock
+     (harness-ui-workspace-mode)
+     (setq harness-voice-live-follow-selection t
+           harness-ui-workspace--id "workspace-a"
+           harness-ui-workspace--thread initial-thread
+           harness-ui-workspace--state 'ready
+           harness-ui-workspace--data
+           (list :id "workspace-a" :name "Mock workspace" :root dir
+                 :threads (and initial-thread
+                               (list (list :id initial-thread :title "First thread" :live nil))))
+           harness-ui-workspace--entries nil)
+     (cl-letf (((symbol-function 'harness-compose-fetch-completions) #'ignore))
+       (harness-ui-workspace--render)
+       (harness-voice-live-retarget (current-buffer))
+       (should-not harness-ui-session-id)
+       (should-not harness-voice-live--session)
+       (harness-ui-voice-live-test--utterance 1 "First workspace request.")
+       (harness-voice-live-send-now)
+       (should (equal "_harness/workspace/prompt"
+                      (car (car (last harness-ui-voice-live-test--sends)))))
+       (let ((generation harness-voice-live--route-generation)
+             (thread '(:id "thread-a" :title "First thread" :live "episode-a")))
+         ;; This is the server's actual wire payload; no workspace cache
+         ;; update has happened when the episode starts its agent turn.
+         (harness-voice-live--on-event "workspace/episode-changed"
+                                       (list "workspace-a" thread "episode-a" nil))
+         (should (equal "episode-a" harness-voice-live--session))
+         (should (equal "episode-a" (plist-get harness-voice-live--delegation :session)))
+         (should-not (harness-ui-workspace--live-session))
+         (harness-voice-live--on-event "agent/turn-started" '("episode-a"))
+         (harness-voice-live--on-update
+          "episode-a" '(:sessionUpdate "_harness/activity" :activity (:turn-id "turn-a")))
+         (should (equal "turn-a" harness-voice-live--agent-turn))
+         (harness-voice-live--on-update
+          "episode-a" '(:sessionUpdate "agent_message_chunk" :_harness (:nodeId "reply-a")
+                        :content (:text "Actual workspace response.")))
+         (harness-voice-live--handle '(:event "speech" :utterance 2 :active t))
+         (harness-voice-live--handle '(:event "speech" :utterance 2 :active nil))
+         (harness-ui-voice-live-test--utterance 2 "Second workspace request.")
+         (should (= generation harness-voice-live--route-generation))
+         (should harness-voice-live--pending)
+         (should harness-voice-live--delegation)
+         ;; Simulate the genuine workspace fetch catching up.  Episode
+         ;; metadata is still the same target, never a retarget/drop.
+         (setq harness-ui-workspace--thread "thread-a")
+         (setf (plist-get harness-ui-workspace--data :threads) (list thread))
+         (harness-ui-workspace--render)
+         (harness-voice-live--follow-selection)
+         (should (= generation harness-voice-live--route-generation))
+         (should harness-voice-live--pending)
+         (harness-voice-live--on-event "workspace/episode-changed"
+                                      '("workspace-a" (:id "other-thread") "other-episode" nil))
+         (should (equal "episode-a" harness-voice-live--session))
+         (harness-voice-live--on-event "agent/turn-ended" '("episode-a" "end-turn"))
+         (should-not harness-voice-live--delegation)
+         (should-not harness-voice-live--working)
+         (let ((result (cl-find "delegate_result" harness-ui-voice-live-test--output
+                                :key (lambda (event) (plist-get event :event)) :test #'equal)))
+           (should (equal "Actual workspace response." (plist-get result :text))))
+         (harness-voice-live-send-now)
+         (let ((request (cl-find "_harness/workspace/prompt"
+                                 (reverse harness-ui-voice-live-test--sends) :key #'car :test #'equal)))
+           (should (equal '(:id "workspace-a" :text "Second workspace request."
+                            :opts (:thread "thread-a")) (cadr request))))
+         ;; A real thread switch still invalidates old captured input.
+         (setq harness-ui-workspace--thread "other-thread")
+         (setf (plist-get harness-ui-workspace--data :threads)
+               (list '(:id "other-thread" :title "Other thread" :live nil)))
+         (harness-voice-live--follow-selection)
+         (should (> harness-voice-live--route-generation generation)))))))
+
+(ert-deftest harness-ui-voice-live-unresolved-workspace-cannot-follow-a-retargeted-session ()
+  (harness-ui-voice-live-test-clock
+   (harness-voice-live--route-set
+    (list :kind 'workspace :workspace "old-workspace" :thread "old-thread"
+          :session nil :buffer (current-buffer)))
+   (harness-ui-voice-live-test--utterance 1 "Old request.")
+   (harness-voice-live-send-now)
+   (harness-voice-live--route-set
+    (list :kind 'session :session "new-session" :buffer (current-buffer)))
+   (let ((job harness-voice-live--delegation)
+         (generation harness-voice-live--route-generation))
+     (harness-voice-live--on-event "agent/turn-started" '("new-session"))
+     (harness-voice-live--on-update
+      "new-session" '(:sessionUpdate "_harness/activity" :activity (:turn-id "wrong-token")))
+     (harness-voice-live--on-event "agent/turn-ended" '("new-session" "end-turn"))
+     (should (eq job harness-voice-live--delegation))
+     (should-not harness-voice-live--agent-turn)
+     (harness-voice-live--on-event "workspace/episode-changed"
+                                  '("old-workspace" (:id "old-thread") "old-session" nil))
+     (should (equal "old-session" (plist-get harness-voice-live--delegation :session)))
+     (should (equal "new-session" harness-voice-live--session))
+     (should (= generation harness-voice-live--route-generation))
+     (harness-voice-live--on-event "agent/turn-ended" '("old-session" "end-turn"))
+     (should-not harness-voice-live--delegation))))
+
 ;;;; Taking back a premature voice turn
 
 (defvar harness-ui-voice-live-test--nodes nil
@@ -2545,8 +2937,6 @@ a speech server answers with no audio at all."
   "The heads the recovery asked for, oldest first.")
 (defvar harness-ui-voice-live-test--requests nil
   "The UI calls the recovery made, as (METHOD PARAMS), oldest first.")
-(defvar harness-ui-voice-live-test--timers nil
-  "The timers the transport scheduled, as (TIMER DELAY REPEAT FUNCTION ARGS).")
 
 (defmacro harness-ui-voice-live-test-with-recovery (&rest body)
   "Run BODY in a live call whose recovery can be driven deterministically.
