@@ -651,7 +651,10 @@ class _RoundActionButton extends StatelessWidget {
                 onTap!();
               },
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 160),
+          duration: HarnessMotion.of(
+            context,
+            const Duration(milliseconds: 160),
+          ),
           width: 44,
           height: 44,
           decoration: BoxDecoration(

@@ -1331,6 +1331,27 @@ none.  No page asks for the requests the session waits on."
           (should (equal (sort (copy-sequence (cdr case)) (lambda (a b) (string< (car a) (car b))))
                          (sort (copy-sequence asked) (lambda (a b) (string< (car a) (car b)))))))))))
 
+(ert-deftest harness-ui-access-a-refresh-armed-while-shown-does-not-draw-a-hidden-page ()
+  "A page shown when a change arms its refresh, and hidden before the timer
+fires, waits like any other page nothing shows: the timer must not draw it.
+Otherwise a full run, where the timer has time to fire and its fetch time to
+come back, finds the hidden page already following the change it should have
+missed."
+  (harness-ui-access-test-with
+    (let ((overview (harness-ui-access-test-open sid)))
+      ;; A change arrives while the Overview is shown: its refresh is armed.
+      (harness-ui-access--schedule overview)
+      (should (timerp (buffer-local-value 'harness-ui-access--timer overview)))
+      ;; The page is hidden before the timer fires.
+      (harness-ui-access-show-page 'tools)
+      (should-not (get-buffer-window overview t))
+      (harness-call 'access/set-network sid :false)
+      ;; Long enough for the armed timer to fire and its fetch to come back.
+      (sit-for 1)
+      (with-current-buffer overview
+        (should harness-ui-access--stale)
+        (should (equal "Network (x) On ( ) Off" (harness-ui-access-test-setting 'network)))))))
+
 (ert-deftest harness-ui-access-hidden-pages-follow-the-session-when-shown ()
   "A page nothing shows is not drawn again at every change: it is marked, and
 fetches once a window shows it.  The page that is shown follows at once."

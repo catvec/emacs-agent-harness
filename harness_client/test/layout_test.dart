@@ -167,10 +167,15 @@ void main() {
       (tester) async {
         final rig = await _rig();
         await _pump(tester, rig);
+        // Every row that says who pays: the three on a plan or with a
+        // cost, and s2's, which is part-billed as extra usage.
         final costs = find.byWidgetPredicate(
-          (widget) => widget is Text && (widget.data ?? '').startsWith(r'$'),
+          (widget) =>
+              widget is Text &&
+              ((widget.data ?? '').startsWith(r'$') ||
+                  (widget.data ?? '') == 'Max'),
         );
-        expect(costs, findsAtLeastNWidgets(3));
+        expect(costs, findsAtLeastNWidgets(4));
         final rights = {
           for (var i = 0; i < costs.evaluate().length; i++)
             tester.getTopRight(costs.at(i)).dx.round(),
@@ -260,6 +265,9 @@ void main() {
         'in a sheet', (tester) async {
       final rig = await _rig();
       await _pump(tester, rig);
+      // A queue belongs to one project, so the board is narrowed to one
+      // first: on every project there is no single queue to report.
+      await rig.app.tasks!.load(project: rig.app.projects.first);
       await tester.tap(find.text('Tasks'));
       await _settle(tester);
       // Not a row of pills for the state and the controls alike.

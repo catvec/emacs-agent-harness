@@ -1425,7 +1425,10 @@ class _ThreadTile extends StatelessWidget {
           borderRadius: BorderRadius.circular(10),
           onTap: onTap,
           child: AnimatedContainer(
-            duration: const Duration(milliseconds: 220),
+            duration: HarnessMotion.of(
+              context,
+              const Duration(milliseconds: 220),
+            ),
             curve: Curves.easeOutCubic,
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
             decoration: BoxDecoration(
@@ -1437,7 +1440,10 @@ class _ThreadTile extends StatelessWidget {
             child: Row(
               children: [
                 AnimatedContainer(
-                  duration: const Duration(milliseconds: 220),
+                  duration: HarnessMotion.of(
+                    context,
+                    const Duration(milliseconds: 220),
+                  ),
                   width: 7,
                   height: 7,
                   decoration: BoxDecoration(
@@ -1944,11 +1950,22 @@ class _EntryRevealState extends State<_EntryReveal>
   late final AnimationController _controller = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 280),
-  )..forward();
+  );
   late final Animation<double> _fade = CurvedAnimation(
     parent: _controller,
     curve: Curves.easeOutCubic,
   );
+  bool _started = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Under reduced motion the entry is simply there: the controller is
+    // never run, so the surface holds no live ticker at all.
+    if (_started) return;
+    _started = true;
+    if (HarnessMotion.allowed(context)) _controller.forward();
+  }
 
   @override
   void dispose() {
@@ -1958,7 +1975,7 @@ class _EntryRevealState extends State<_EntryReveal>
 
   @override
   Widget build(BuildContext context) {
-    if (MediaQuery.maybeOf(context)?.disableAnimations ?? false) {
+    if (!HarnessMotion.allowed(context)) {
       return widget.child;
     }
     return FadeTransition(

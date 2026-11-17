@@ -94,6 +94,40 @@
       (should (equal 1 (car status)))
       (should (string-match-p "FAILED: lisp/modules/harness-fixture-test.el" (cdr status))))))
 
+(ert-deftest harness-test-runner-failure-output-says-to-repair-every-failure ()
+  "A failing run must say, itself, that every failure is to be repaired.
+The rule has to reach the agent in the output of the run that failed, not only
+in a document it may not have read, and the run must stay failed while it says
+so: a baseline failure is still a failure."
+  (harness-test-runner-test-with
+    (let ((result (harness-test-runner-test--command root "bash" "scripts/test.sh")))
+      (should (equal 0 (car result)))
+      ;; A passing run is a plain report of what passed.
+      (should-not (string-match-p "TEST FAILURES" (cdr result))))
+    (setenv "HARNESS_TEST_FAKE_STATUS" "1")
+    (let ((result (harness-test-runner-test--command root "bash" "scripts/test.sh")))
+      ;; The directive, and the same nonzero status the run had before.
+      (should (equal 1 (car result)))
+      (should (string-match-p
+               "TEST FAILURES: investigate and repair EVERY one of them"
+               (cdr result)))
+      (should (string-match-p "already on main" (cdr result)))
+      (should (string-match-p
+               "also fails at the branch's base is still a failure" (cdr result)))
+      (should (string-match-p "Do not skip, delete, weaken" (cdr result)))
+      ;; It names the suites to repair, after the summary.
+      (should (string-match-p
+               "failed suites, each to be repaired" (cdr result)))
+      (should (string-match-p "TEST RESULT: FAIL (full run)" (cdr result))))
+    ;; The saved record of the run carries it too, and --status says it while
+    ;; still refusing the run.
+    (should (equal "fail" (plist-get (harness-test-runner-test--stamp root) :result)))
+    (let ((status (harness-test-runner-test--command
+                   root "bash" "scripts/test.sh" "--status")))
+      (should (equal 1 (car status)))
+      (should (string-match-p
+               "investigate and repair EVERY one of them" (cdr status))))))
+
 (ert-deftest harness-test-runner-selected-pass-is-not-a-full-pass ()
   (harness-test-runner-test-with
     (should (equal 0 (car (harness-test-runner-test--command root "bash" "scripts/test.sh"))))
@@ -103,6 +137,26 @@
     (let ((status (harness-test-runner-test--command root "bash" "scripts/test.sh" "--status")))
       (should (equal 1 (car status)))
       (should (string-match-p "selected suites are not a full run" (cdr status))))))
+
+(ert-deftest harness-test-runner-a-stale-pass-names-no-failures ()
+  "A run that passed on another commit has nothing to repair, and says so.
+The directive names failures and tells the reader to repair every one of
+them.  Printed for a run that passed, it points at failures that are not
+there and sends the reader looking through the logs of a green run; what
+such a record needs is the run again, on the commit that is there now."
+  (harness-test-runner-test-with
+    (should (equal 0 (car (harness-test-runner-test--command root "bash" "scripts/test.sh"))))
+    (harness-test-runner-test--write root "notes" "a change after the run\n")
+    (harness-test-runner-test--git root "add" "-A")
+    (harness-test-runner-test--git root "commit" "-qm" "after the run")
+    (let ((status (harness-test-runner-test--command root "bash" "scripts/test.sh" "--status")))
+      ;; It still refuses to call the tree verified.
+      (should (equal 1 (car status)))
+      (should (string-match-p "HEAD changed since the run" (cdr status)))
+      ;; But it does not invent failures, and it says what to do instead.
+      (should-not (string-match-p "TEST FAILURES" (cdr status)))
+      (should-not (string-match-p "investigate and repair" (cdr status)))
+      (should (string-match-p "Run the full suite again on this commit" (cdr status))))))
 
 (ert-deftest harness-test-runner-status-refuses-a-stale-or-dirty-result ()
   (harness-test-runner-test-with

@@ -111,6 +111,28 @@
             (should-not (string-match-p "SECRET" (format "%S" result))))
         (delete-file script)))))
 
+(ert-deftest harness-codex-quota-a-cli-that-dies-is-not-missing ()
+  "A CLI that starts and exits is a broken install, not an absent one.
+`missing' means the program could not be started at all; a run that dies
+is sent to install what it already has when it is called that.  The send
+of the first request is where a CLI that exited is found, and the window
+this holds is the one a slow machine opens: the process is gone, and its
+sentinel has not run yet, so nothing but the send reports it."
+  (let* ((script (harness-codex-quota-test--raw-script "exit 5"))
+         (harness-codex-quota-program script)
+         (start (symbol-function 'make-process)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'make-process)
+                   (lambda (&rest args)
+                     (let ((proc (apply start args)))
+                       ;; The CLI exits, and its sentinel is still queued.
+                       (set-process-sentinel proc #'ignore)
+                       (while (process-live-p proc) (accept-process-output nil 0.01))
+                       proc))))
+          (should (eq 'error
+                      (plist-get (harness-test-await (harness-codex-quota-read)) :status))))
+      (delete-file script))))
+
 (ert-deftest harness-codex-quota-protocol-timeout-terminates-server ()
   "A stuck app-server returns a sanitized timeout rather than hanging the UI."
   (let* ((script (harness-codex-quota-test--raw-script "read init; sleep 2"))

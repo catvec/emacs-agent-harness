@@ -156,7 +156,10 @@ class _ConceptTag extends StatelessWidget {
           borderRadius: BorderRadius.circular(2),
           onTap: onTap,
           child: AnimatedContainer(
-            duration: const Duration(milliseconds: 220),
+            duration: HarnessMotion.of(
+              context,
+              const Duration(milliseconds: 220),
+            ),
             curve: Curves.easeOutCubic,
             padding: const EdgeInsets.fromLTRB(10, 7, 10, 7),
             decoration: BoxDecoration(

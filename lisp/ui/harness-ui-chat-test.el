@@ -11727,6 +11727,20 @@ and the call opens again, its body the report."
 
 ;;;; Timestamps
 
+(defun harness-ui-chat-test--earlier-today (seconds)
+  "Return a float time SECONDS before now, on this day whatever the hour.
+Half an hour before now is yesterday in the half hour after midnight,
+and a sender line names the day of a time that is not today.  A test
+that wants a time on this day asks for it here, so it reads the same
+at every hour: early in the day the time is midnight's instead."
+  (let* ((now (float-time))
+         (since-midnight (- now (float-time (encode-time
+                                             0 0 0
+                                             (decoded-time-day (decode-time now))
+                                             (decoded-time-month (decode-time now))
+                                             (decoded-time-year (decode-time now)))))))
+    (- now (min seconds (max 0 since-midnight)))))
+
 (defun harness-ui-chat-test--append (sid kind content ts &optional plist)
   "Append a node of KIND with CONTENT and TS to SID, with PLIST; return its id."
   (plist-get (harness-call 'session/append sid
@@ -11805,8 +11819,9 @@ none."
 It is absent when that message shows its own timestamp on the line the
 window starts on, and when no message shows."
   (harness-ui-chat-test-with
-    (let* ((now (float-time))
-           (t1 (- now 1800)) (t2 (- now 1700)) (t3 (- now 800))
+    (let* ((t1 (harness-ui-chat-test--earlier-today 1800))
+           (t2 (harness-ui-chat-test--earlier-today 1700))
+           (t3 (harness-ui-chat-test--earlier-today 800))
            (sid (harness-ui-chat-test-session))
            (b1 (harness-ui-chat-test--append sid 'user "one" t1))
            (b2 (harness-ui-chat-test--append sid 'assistant "two" t2))
@@ -11964,12 +11979,16 @@ opens the turn, and the time line under the header repeats it only when
 that line scrolled away."
   (harness-ui-chat-test-with
     (let* ((now (float-time))
-           (t1 (- now 1800))
+           ;; A fixed hour today, not half an hour before now: the agent
+           ;; line carries the sender line's label, which names the day
+           ;; when the time is not today, and half an hour before now is
+           ;; yesterday in the half hour after midnight.
+           (t1 (harness-ui-chat-test--earlier-today 1800))
            (sid (harness-ui-chat-test-session)))
       (harness-ui-chat-test--append sid 'tool-call "call" t1
                                     (list :tool "read_file" :call-id "c1"
                                           :title "Read a.el" :input '(:path "a.el")))
-      (harness-ui-chat-test--append sid 'tool-result "done" (- now 1790)
+      (harness-ui-chat-test--append sid 'tool-result "done" (+ t1 10)
                                     (list :call-id "c1" :output "done"))
       (let ((buf (harness-ui-chat-test-open sid)))
         (with-current-buffer buf

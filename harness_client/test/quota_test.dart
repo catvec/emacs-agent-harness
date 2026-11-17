@@ -219,11 +219,11 @@ void main() {
     test('says how much extra usage the plan allows', () {
       expect(
         _max().extra!.describe(),
-        'Extra usage: off (out of credits), \$0.00 used of \$50.0',
+        'Extra usage: off (out of credits), \$0.00 used of \$50.00',
       );
       expect(
         const QuotaExtra(enabled: true, used: 1.5, limit: 20).describe(),
-        'Extra usage: on, \$1.50 used of \$20.0',
+        'Extra usage: on, \$1.50 used of \$20.00',
       );
       // A reason only explains why it is off.
       expect(
@@ -435,7 +435,7 @@ void main() {
       );
       expect(
         help.last,
-        'Extra usage: off (out of credits), \$0.00 used of \$50.0',
+        'Extra usage: off (out of credits), \$0.00 used of \$50.00',
       );
       // Billed per token there are no windows to list.
       expect(_spend(api, quota: _max()).details, hasLength(1));

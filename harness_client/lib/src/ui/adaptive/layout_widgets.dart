@@ -403,34 +403,50 @@ class HarnessScopeBar extends StatelessWidget {
         ],
       ],
     );
+    final tappable = onTap == null
+        ? scope
+        : Semantics(
+            button: true,
+            label: label,
+            child: HarnessTap(
+              onTap: onTap,
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: scope,
+              ),
+            ),
+          );
     return ConstrainedBox(
       constraints: const BoxConstraints(minHeight: 40),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: HarnessSpace.gutter),
+        // Two halves, each bounded by its share of the line: the scope at
+        // the start, the fact at the far edge, and the slack between them.
+        // A long project name and a long fact cannot both keep their whole
+        // width -- a phone at a large text size is narrower than the two
+        // together -- so each gives way inside its own half rather than
+        // pushing the other off the edge.  The fact goes first: it is a
+        // glance, where the name is what the page is about.
         child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            // The scope is as wide as its label, at the start; what is
-            // after it is at the other end.
-            Expanded(
+            Flexible(
+              flex: trailing == null ? 1 : 2,
               child: Align(
                 alignment: AlignmentDirectional.centerStart,
-                child: onTap == null
-                    ? scope
-                    : Semantics(
-                        button: true,
-                        label: label,
-                        child: HarnessTap(
-                          onTap: onTap,
-                          borderRadius: BorderRadius.circular(8),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 8),
-                            child: scope,
-                          ),
-                        ),
-                      ),
+                child: tappable,
               ),
             ),
-            if (trailing != null) ...[const SizedBox(width: 12), trailing!],
+            if (trailing != null) ...[
+              const SizedBox(width: 12),
+              Flexible(
+                child: Align(
+                  alignment: AlignmentDirectional.centerEnd,
+                  child: trailing!,
+                ),
+              ),
+            ],
           ],
         ),
       ),

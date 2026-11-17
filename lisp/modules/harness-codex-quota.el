@@ -145,29 +145,37 @@ The caller decides whether the CLI account matches its SIWC account."
          (read (make-harness-codex-quota--read :promise promise))
          (stderr (generate-new-buffer " *harness-codex-quota-stderr*" t)))
     (setf (harness-codex-quota--read-stderr read) stderr)
-    (condition-case nil
-        (let ((proc (make-process
+    ;; Only a program that cannot be started is `missing'.  The send below
+    ;; fails too when the CLI started and exited before it read anything --
+    ;; a broken install, not an absent one -- and that is `error': telling
+    ;; somebody the CLI is not installed sends them to install what they
+    ;; already have.
+    (let ((proc (condition-case nil
+                    (make-process
                      :name "harness-codex-quota" :command (list harness-codex-quota-program
-                                                                  "app-server" "--stdio")
+                                                                 "app-server" "--stdio")
                      :coding 'utf-8-unix :connection-type 'pipe :noquery t
                      :stderr stderr
                      :filter (lambda (proc text) (harness-codex-quota--filter read proc text))
                      :sentinel (lambda (proc _event)
                                  (unless (process-live-p proc)
-                                   (harness-codex-quota--finish read '(:status error)))))))
-          (when-let* ((ep (get-buffer-process stderr)))
-            (set-process-query-on-exit-flag ep nil)
-            (set-process-sentinel ep #'ignore))
-          (unless (harness-codex-quota--read-done read)
-            (setf (harness-codex-quota--read-process read) proc
-                  (harness-codex-quota--read-timer read)
-                  (run-at-time harness-codex-quota--timeout nil
-                               (lambda () (harness-codex-quota--finish read '(:status timeout)))))
-            (harness-codex-quota--send
-             read 1 "initialize"
-             '(:clientInfo (:name "emacs-agent-harness" :title "Emacs agent harness"
-                            :version "1.0")))))
-      (error (harness-codex-quota--finish read '(:status missing))))
+                                   (harness-codex-quota--finish read '(:status error)))))
+                  (error (harness-codex-quota--finish read '(:status missing)) nil))))
+      (when proc
+        (when-let* ((ep (get-buffer-process stderr)))
+          (set-process-query-on-exit-flag ep nil)
+          (set-process-sentinel ep #'ignore))
+        (unless (harness-codex-quota--read-done read)
+          (setf (harness-codex-quota--read-process read) proc
+                (harness-codex-quota--read-timer read)
+                (run-at-time harness-codex-quota--timeout nil
+                             (lambda () (harness-codex-quota--finish read '(:status timeout)))))
+          (condition-case nil
+              (harness-codex-quota--send
+               read 1 "initialize"
+               '(:clientInfo (:name "emacs-agent-harness" :title "Emacs agent harness"
+                              :version "1.0")))
+            (error (harness-codex-quota--finish read '(:status error)))))))
     promise))
 
 (provide 'harness-codex-quota)

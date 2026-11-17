@@ -150,6 +150,20 @@ the sandbox's end, which is what is asked about then."
             (not (eq 'running (harness-sandbox-session-state sandbox))))))
      (t (not (process-live-p (plist-get job :process)))))))
 
+(defun harness-tools-jobs-test--free-port ()
+  "Return a TCP port nothing is listening on now.
+A port chosen by hashing the time and the pid is a guess: two suites of a
+full run can pick the same one, and then one test's server answers
+another's call -- a failure that has nothing to do with the code under
+test.  Binding a port asks the kernel, which is the only thing that knows."
+  (let* ((server (make-network-process :name "harness-test-free-port"
+                                        :server t :host "127.0.0.1" :service t
+                                        :family 'ipv4 :noquery t))
+         (port (process-contact server :service)))
+    (delete-process server)
+    (should (integer-or-marker-p port))
+    port))
+
 (defun harness-tools-jobs-test--curl (sid port path)
   "Return what a `bash' call in SID gets from PORT/PATH, as text."
   (plist-get (harness-tools-jobs-test--call-tool
@@ -317,7 +331,7 @@ one PID namespace the session's calls share -- so it outlives the call
 that started it, nothing it leaves reaches where the session may not go,
 and stopping it ends its run while the runtime and the files stay."
   (harness-tools-jobs-test-with-jail
-    (let* ((port (+ 20000 (% (abs (sxhash-equal (format "%s-%s" (float-time) (emacs-pid)))) 20000)))
+    (let* ((port (harness-tools-jobs-test--free-port))
            (script (format "printf 'served-by-the-job\\n' > served.txt\nprintf 'listening\\n'\nexec python3 -m http.server %d --bind 127.0.0.1" port))
            (first (harness-tools-jobs-test--call sid :action "start" :command script :timeout 120))
            (id (harness-tools-jobs-test--job-id first)))
@@ -376,8 +390,16 @@ and stopping it ends its run while the runtime and the files stay."
          (lambda ()
            (not (eq 'running (plist-get (car (harness-tools-jobs-session-entries sid)) :state))))
          5 "the job stopped")
-        (should-not (string-search "served-by-the-job"
-                                   (harness-tools-jobs-test--curl sid port "served.txt")))))))
+        ;; Stopping ends the job's run: the server stops answering.  The
+        ;; record says stopped as soon as the stop is asked for, and the
+        ;; kernel ends the run a moment later, so the answer is waited
+        ;; for rather than read in the same instant -- on a loaded
+        ;; machine the kill has not landed yet when the call returns.
+        (harness-test-wait
+         (lambda ()
+           (not (string-search "served-by-the-job"
+                               (harness-tools-jobs-test--curl sid port "served.txt"))))
+         20 "the stopped job's server to stop answering")))))
 
 (ert-deftest harness-jobs-a-job-is-its-own-sessions ()
   "One session cannot list, read or stop another's job.
@@ -1266,7 +1288,7 @@ that serves a file, proves it answers, pauses the task through the filter
 the tasks module calls, and then proves the port is dead from a call that
 runs afterwards."
   (harness-tools-jobs-test-with-jail
-    (let* ((port (+ 20000 (% (abs (sxhash-equal (format "listen-%s" (float-time)))) 20000)))
+    (let* ((port (harness-tools-jobs-test--free-port))
            (id nil) (proc nil))
       (unwind-protect
           (progn
