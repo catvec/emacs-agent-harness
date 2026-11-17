@@ -822,7 +822,11 @@ image is enlarged.  PROPS go to `create-image'."
                            when value append (list key value)))
            (image (condition-case nil
                       (apply #'create-image
-                             (if data (base64-decode-string data) source)
+                             ;; Emacs searches image-load-path for a relative
+                             ;; :file, not this buffer's default-directory.
+                             ;; Resolve it before deferred redisplay or zoom.
+                             (if data (base64-decode-string data)
+                               (expand-file-name source))
                              type (and data t)
                              :scale scale
                              (append

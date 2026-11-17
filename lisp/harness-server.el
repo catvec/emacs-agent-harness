@@ -18,6 +18,8 @@
 ;;   the UI), serves ACP on an ephemeral port guarded by a per-spawn
 ;;   token, prints the address on stderr and then just runs timers and
 ;;   process output until it is told to stop or its parent goes away.
+;;   Its parent stops it through an authenticated private ACP request,
+;;   so kill hooks run on the main Lisp thread even with IO writers.
 ;;   It starts with SIGPIPE ignored, as the interactive Emacs that runs
 ;;   the UI has it (see `harness-server--sigpipe-shell'): a write to a
 ;;   process whose reader has gone is then an error it logs, not
@@ -53,6 +55,9 @@
 (defvar harness-process)
 (defvar harness-policy-exempt)
 (defvar harness-server--own-variables)  ; Below, with the parent's code.
+(defvar harness-acp--standard-methods)
+(declare-function harness-acp-client-remote-info "harness-acp" (client))
+(declare-function harness-instance-equal-p "harness-instance" (a b))
 (declare-function harness--reload "harness")
 (declare-function harness--extra-module-directories "harness")
 (declare-function harness--ui-module-file-p "harness" (file))
@@ -306,6 +311,31 @@ more: without one, anybody who reaches the port controls the harness."
                    "[server] %s" (match-string 2 line))
     (harness-log 'info "[server] %s" line)))
 
+(defvar harness-server--stop-token nil
+  "Secret for the spawning parent's private shutdown request.")
+
+(defvar harness-server--shutdown-requested nil
+  "Non-nil once a cooperative shutdown has been scheduled.")
+
+(defun harness-server--request-stop (client params)
+  "Schedule shutdown on the main Lisp thread for CLIENT with PARAMS.
+ACP authentication is required as usual, and this method additionally
+requires the spawning parent's separate, per-process secret.  It is
+never registered by a standalone server."
+  (unless (and harness-server--stop-token
+               (not (harness-acp-client-remote-info client))
+               (stringp (plist-get params :token))
+               (harness-instance-equal-p harness-server--stop-token (plist-get params :token)))
+    (signal 'harness-error '("Invalid server shutdown token")))
+  ;; SIGTERM invokes Lisp directly from Emacs's native signal handler.
+  ;; While the main pthread sleeps, the interpreter's current thread and
+  ;; dynamic bindings can still belong to an IO writer.  Dispatching here
+  ;; instead keeps kill hooks on the main Lisp thread, with its lock held.
+  (unless harness-server--shutdown-requested
+    (setq harness-server--shutdown-requested t)
+    (harness-run-soon #'kill-emacs 0))
+  :empty)
+
 (defun harness-server-main ()
   "Run the harness process.  Called by `emacs --batch'; never returns.
 Reads HARNESS_SERVER_CONFIG (a file of forms to load),
@@ -321,9 +351,12 @@ the harness."
   (let* ((config (getenv "HARNESS_SERVER_CONFIG"))
          (parent (let ((p (getenv "HARNESS_SERVER_PARENT"))) (and p (string-to-number p))))
          (token (getenv "HARNESS_SERVER_TOKEN"))
+         (stop-token (and parent (getenv "HARNESS_SERVER_STOP_TOKEN")))
          ;; A child UI's harness serves it on loopback; a server run on its
          ;; own listens where the environment says.
          (address (if parent '("127.0.0.1" 0) (harness-server--standalone-address))))
+    ;; No module, tool or subprocess needs the spawning parent's secret.
+    (setenv "HARNESS_SERVER_STOP_TOKEN" nil)
     (when-let* ((problem (harness-server--public-listening-problem (car address) token)))
       (harness-server--write-stderr (concat "harness: " problem "\n"))
       (kill-emacs 1))
@@ -354,6 +387,10 @@ the harness."
         "Reload the harness process's modules in place, keeping its sessions."
         (harness-server--reload)))
     (harness-start)
+    (when stop-token
+      (setq harness-server--stop-token stop-token)
+      (puthash "_harness/server/stop" #'harness-server--request-stop
+               harness-acp--standard-methods))
     (let ((address (harness-acp-server-address)))
       (unless address
         (harness-server--write-stderr "harness: ACP server did not start\n")
@@ -493,10 +530,12 @@ ON-ADDRESS is called with (ADDRESS TOKEN) once the child listens.
 ON-EXIT is called with the exit status and the process when the child
 ends: a caller that started another meanwhile can tell which one ended."
   (let* ((token (or (bound-and-true-p harness-acp-token) (harness-server--token)))
+         (stop-token (harness-server--token))
          (config (expand-file-name "server-config.el" harness-state-directory))
-         (announced nil)
+         (announced nil) (address nil) (proc nil)
          (process-environment (append (list (concat "HARNESS_SERVER_CONFIG=" config)
                                             (concat "HARNESS_SERVER_TOKEN=" token)
+                                            (concat "HARNESS_SERVER_STOP_TOKEN=" stop-token)
                                             (format "HARNESS_SERVER_PARENT=%d" (emacs-pid)))
                                       process-environment))
          (stderr (make-pipe-process
@@ -510,11 +549,13 @@ ends: a caller that started another meanwhile can tell which one ended."
                                    ((string-empty-p line))
                                    ((string-prefix-p harness-server--address-prefix line)
                                     (unless announced
-                                      (setq announced t)
-                                      (when on-address
-                                        (funcall on-address
-                                                 (substring line (length harness-server--address-prefix))
-                                                 token))))
+                                      (setq announced t
+                                            address (substring line (length harness-server--address-prefix)))
+                                      (when proc
+                                        (process-put proc 'harness-server--address address)
+                                        (when (process-get proc 'harness-server--stopping)
+                                          (harness-server--stop-request proc)))
+                                      (when on-address (funcall on-address address token))))
                                    (t
                                     (harness-server--log-line line))))
                                 (when (> (length pending) harness-server--log-line-max)
@@ -523,22 +564,104 @@ ends: a caller that started another meanwhile can tell which one ended."
                                                  (substring pending (- (length pending)
                                                                        harness-server--log-line-max)))))))))))
     (harness-server--write-config config)
-    (let ((proc (make-process
-                 :name "harness-server"
-                 :command (harness-server--command)
-                 :connection-type 'pipe :noquery t
-                 :stderr stderr
-                 :filter #'ignore
-                 :sentinel (lambda (p _event)
-                             (unless (process-live-p p)
-                               (when on-exit (funcall on-exit (process-exit-status p) p)))))))
-      (process-send-eof proc)
-      proc)))
+    (setq proc (make-process
+                :name "harness-server"
+                :command (harness-server--command)
+                :connection-type 'pipe :noquery t
+                :stderr stderr
+                :filter #'ignore
+                :sentinel (lambda (p _event)
+                            (unless (process-live-p p)
+                              (harness-server--stop-cleanup p)
+                              (when on-exit (funcall on-exit (process-exit-status p) p))))))
+    (process-put proc 'harness-server--address address)
+    (process-put proc 'harness-server--token token)
+    (process-put proc 'harness-server--stop-token stop-token)
+    (process-send-eof proc)
+    proc))
+
+(defvar harness-server--stop-grace 2
+  "Seconds for a cooperative shutdown before SIGTERM is sent.")
+
+(defvar harness-server--kill-grace 3
+  "Seconds after SIGTERM before a still-live server receives SIGKILL.")
+
+(defun harness-server--stop-cleanup (proc)
+  "Cancel PROC's shutdown watchdog and close its private control socket."
+  (when-let* ((timer (process-get proc 'harness-server--stop-timer)))
+    (cancel-timer timer)
+    (process-put proc 'harness-server--stop-timer nil))
+  (when-let* ((socket (process-get proc 'harness-server--stop-socket)))
+    (process-put proc 'harness-server--stop-socket nil)
+    (harness-process-send-cancel socket)
+    (when (process-live-p socket) (delete-process socket))))
+
+(defun harness-server--stop-signal (proc signal)
+  "Escalate PROC's shutdown with SIGNAL if that exact process still lives."
+  (harness-server--stop-cleanup proc)
+  (when (process-live-p proc)
+    ;; Schedule the last resort before sending TERM: neither a failed
+    ;; signal nor a log subscriber can leave an explicitly stopped server
+    ;; alive forever.  Never retain or target a bare, possibly reused PID.
+    (when (eq signal 'term)
+      (process-put proc 'harness-server--stop-timer
+                   (run-at-time harness-server--kill-grace nil
+                                #'harness-server--stop-signal proc 'kill)))
+    (ignore-errors (signal-process proc signal))))
+
+(defun harness-server--stop-send (proc socket)
+  "Send PROC's authenticated private shutdown request on open SOCKET."
+  (when (and (process-live-p proc) (eq (process-status socket) 'open)
+             (not (process-get socket 'harness-server--stop-sent)))
+    (process-put socket 'harness-server--stop-sent t)
+    (harness-process-send-async
+     socket
+     (concat
+      (harness-json-encode
+       (list :jsonrpc "2.0" :method "authenticate"
+             :params (list :methodId "token" :token (process-get proc 'harness-server--token))))
+      "\n"
+      (harness-json-encode
+       (list :jsonrpc "2.0" :method "_harness/server/stop"
+             :params (list :token (process-get proc 'harness-server--stop-token))))
+      "\n"))))
+
+(defun harness-server--stop-request (proc)
+  "Open PROC's private loopback shutdown connection, if its address is known."
+  (when-let* ((address (process-get proc 'harness-server--address)))
+    (when (and (process-live-p proc)
+               (not (process-get proc 'harness-server--stop-socket))
+               (string-match "\\`127\\.0\\.0\\.1:\\([0-9]+\\)\\'" address))
+      (condition-case nil
+          (let ((socket
+                 (make-network-process
+                  :name "harness-server-stop" :host "127.0.0.1"
+                  :service (string-to-number (match-string 1 address))
+                  :family 'ipv4 :nowait t :noquery t :coding 'utf-8-unix
+                  :filter #'ignore
+                  :sentinel (lambda (socket _event)
+                              (if (eq (process-status socket) 'open)
+                                  (ignore-errors (harness-server--stop-send proc socket))
+                                (unless (process-live-p socket)
+                                  (harness-process-send-cancel socket)))))))
+            (process-put proc 'harness-server--stop-socket socket)
+            (harness-server--stop-send proc socket))
+        ;; A server that is not listening or not responding is handled by
+        ;; the independent watchdog, never by blocking this caller.
+        (error nil)))))
 
 (defun harness-server-stop (proc)
-  "Ask the harness process PROC to exit cleanly (SIGTERM runs its kill hooks)."
-  (when (process-live-p proc)
-    (signal-process proc 'term)))
+  "Ask the harness process PROC to exit cleanly, without waiting.
+The private authenticated request runs kill hooks on the main Lisp
+thread.  A server that cannot dispatch it receives SIGTERM after two
+seconds, then SIGKILL after three more.  Repeated stops do not extend
+that deadline; the process's sentinel cancels its watchdog on exit."
+  (when (and (process-live-p proc) (not (process-get proc 'harness-server--stopping)))
+    (process-put proc 'harness-server--stopping t)
+    (process-put proc 'harness-server--stop-timer
+                 (run-at-time harness-server--stop-grace nil
+                              #'harness-server--stop-signal proc 'term))
+    (harness-server--stop-request proc)))
 
 (provide 'harness-server)
 ;;; harness-server.el ends here

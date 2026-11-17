@@ -46,6 +46,7 @@
 (require 'transient)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-latency)
 (require 'harness-acp)
 (require 'harness-server)
 (require 'harness-emacs-endpoint)
@@ -860,7 +861,10 @@ UI's."
        (pcase (plist-get update :sessionUpdate)
          ("_harness/session" (harness-ui--cache-session (plist-get update :session)))
          ("_harness/session_deleted" (harness-ui--forget-session sid)))
-       (run-hook-with-args 'harness-ui-update-functions sid update)))
+       (run-hook-wrapped 'harness-ui-update-functions
+                         (lambda (fn)
+                           (harness-latency-call 'ui-update fn fn sid update)
+                           nil))))
     ("session/request_permission"
      (unless (run-hook-with-args-until-success 'harness-ui-permission-functions params respond)
        (harness-ui--default-permission params respond)))
@@ -924,7 +928,7 @@ learning anything of it either."
   (run-hook-wrapped 'harness-ui-event-functions
                     (lambda (fn)
                       (condition-case err
-                          (funcall fn event args)
+                          (harness-latency-call 'ui-event fn fn event args)
                         (error (harness-log 'error "ui: %s failed on %s: %s"
                                             (if (symbolp fn) fn "a listener")
                                             event (harness-error-short-message err 600))))

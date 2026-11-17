@@ -497,6 +497,10 @@
 (require 'harness-ui-popout)
 (require 'harness-ui-report)
 
+;; Keep knowledge of these entry points in their owning UI module.
+(harness-latency-register-target 'harness-ui-patch-review--draw-tree 'render)
+(harness-latency-register-target 'harness-ui-patch-review--draw-threads-view 'render)
+
 ;; change-review is in lisp/vendor/change-review, which the harness puts
 ;; on `load-path' (`harness--setup-load-path').  A harness older than
 ;; that directory, reloading after an update, first checks that this

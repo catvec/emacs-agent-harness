@@ -1784,7 +1784,7 @@ So it shows while the command it runs prompts or works."
   (puthash key (list :at (float-time) :requests 0) harness-ui-tasks--pressed)
   (when (harness-ui-tasks--board-p (current-buffer))
     (harness-ui-tasks--render t)
-    (redisplay)))
+    (harness-latency-redisplay)))
 
 (defun harness-ui-tasks--let-go (key)
   "Let the button KEY go: it is drawn up again."

@@ -408,6 +408,81 @@ to it, made the harness process exceed `max-lisp-eval-depth'."
       (should (memq client harness-acp--clients))
       (should-not (harness-process-sending-p (harness-acp-client-process client))))))
 
+(ert-deftest harness-acp-tcp-non-reader-isolated-from-healthy-rpc ()
+  "A stopped socket holds no dispatch open; healthy RPC runs in its owner.
+The deadline needs no subsequent send, rejects pending requests once,
+and releases the FIFO, timer and writer thread."
+  (harness-acp-tcp-test-with
+    (let* ((slow (harness-acp-tcp-test-connect port))
+           (_ (harness-test-await (harness-acp-initialize slow)))
+           (client (cl-find 'tcp harness-acp--clients :key #'harness-acp-client-kind))
+           (proc (harness-acp-client-process client))
+           (socket (harness-acp-connection-process slow))
+           (healthy (harness-acp-tcp-test-connect port))
+           (_ (harness-test-await (harness-acp-initialize healthy)))
+           (harness-process-send-timeout 0.6)
+           (owner (current-thread))
+           (pad (make-string (* 16 1024 1024) ?x))
+           (rejected 0)
+           callback-thread sentinel-thread rpc-thread tick-threads state safety tick)
+      (unwind-protect
+          (progn
+            (should (eq owner (process-thread proc)))
+            (let ((sentinel (process-sentinel proc)))
+              (set-process-sentinel proc (lambda (p e)
+                                           (setq sentinel-thread (current-thread))
+                                           (funcall sentinel p e))))
+            (stop-process socket)
+            ;; This request cannot be answered by the non-reading client.
+            (harness-acp--client-request
+             client "_test/owed" nil
+             (lambda (_result error)
+               (setq callback-thread (current-thread))
+               (cl-incf rejected)
+               (should (= harness-acp-error-transport (plist-get error :code)))))
+            ;; Safe even against the old indefinitely-blocking implementation.
+            (setq safety (run-at-time 2 nil #'harness-acp--drop-client client)
+                  tick (run-at-time 0.03 0.03 (lambda () (push (current-thread) tick-threads))))
+            (let ((start (float-time)))
+              (harness-acp--client-notify client "_test/pad" (list :pad pad))
+              (should (< (- (float-time) start) 0.5)))
+            (setq state (process-get proc 'harness--async-send))
+            (harness-test-wait (lambda () (harness--async-send-active state)) 1 "blocked socket")
+            (should (process-live-p proc))
+            (should (eq t (harness-process-sending-p proc)))
+            ;; A real independent RPC, while the slow socket is still blocked.
+            (harness-register-method 'session/test-transport-owner
+                                     (lambda ()
+                                       (setq rpc-thread (current-thread))
+                                       (list :version harness-version)))
+            (let* ((start (float-time))
+                   (result (harness-acp-tcp-test-request healthy "_harness/session/test-transport-owner" nil)))
+              (should (equal harness-version (plist-get result :version)))
+              (should (< (- (float-time) start) 0.5)))
+            (should (process-live-p proc))
+            (harness-test-wait (lambda () (not (memq client harness-acp--clients))) 2 "slow peer deadline")
+            (harness-test-wait (lambda () (not (thread-live-p (harness--async-send-thread state))))
+                               2 "writer exit")
+            (should (= 1 rejected))
+            (should (= 0 (hash-table-count (harness-acp-client-pending client))))
+            (should-not (process-get proc 'harness--async-send))
+            (should-not (harness--async-send-timer state))
+            (should-not (harness--async-send-queue state))
+            (should (= 0 (harness--async-send-bytes state)))
+            (should (eq owner callback-thread))
+            (should (eq owner sentinel-thread))
+            (should (eq owner rpc-thread))
+            (should tick-threads)
+            (should (cl-every (lambda (thread) (eq owner thread)) tick-threads))
+            ;; A repeated disconnect does not reject anything twice.
+            (harness-acp--drop-client client)
+            (should (= 1 rejected))
+            (should (harness-acp-connected-p healthy)))
+        (when safety (cancel-timer safety))
+        (when tick (cancel-timer tick))
+        (harness-acp-close healthy)
+        (harness-acp-close slow)))))
+
 (ert-deftest harness-acp-tcp-refuses-non-loopback-without-opt-in ()
   (harness-acp-tcp-test-with
     (harness-call 'acp/stop)

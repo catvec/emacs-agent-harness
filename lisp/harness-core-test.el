@@ -128,6 +128,72 @@ buffer hundreds of megabytes, and every later entry paid for it."
       (should (string-suffix-p (concat (make-string 300 ?y) "\n") (buffer-string)))
       (should (< (count-lines (point-min) (point-max)) 20)))))
 
+(ert-deftest harness-core-log-counts-only-new-and-removed-text ()
+  "A full log is not scanned on every entry; external edits invalidate the count."
+  (let ((harness-log-buffer-name " *harness-log-count-test*")
+        (harness-log-level 'info) (harness-log-hook nil)
+        (harness-log-filter-function nil)
+        (scanned 0) (count (symbol-function 'count-lines)))
+    (unwind-protect
+        (progn
+          (with-current-buffer (get-buffer-create harness-log-buffer-name)
+            (insert (make-string 3000000 ?x) "\n"))
+          (cl-letf (((symbol-function 'count-lines)
+                     (lambda (start end &rest args)
+                       (cl-incf scanned (- end start))
+                       (apply count start end args))))
+            (dotimes (_ 1000) (harness-log 'info "short entry")))
+          ;; The initial validation may scan 3 MB, not 3 GB.
+          (should (< scanned 3100000))
+          (with-current-buffer harness-log-buffer-name
+            (should (= harness--log-lines (count-lines (point-min) (point-max))))
+            ;; Clearing or manually editing the buffer must not leave a stale count.
+            (erase-buffer)
+            (insert "unfinished"))
+          (harness-log 'info "first\nsecond")
+          (with-current-buffer harness-log-buffer-name
+            (should (= 2 harness--log-lines))
+            (should (= harness--log-lines (count-lines (point-min) (point-max))))))
+      (when (get-buffer harness-log-buffer-name) (kill-buffer harness-log-buffer-name)))))
+
+(ert-deftest harness-core-log-prunes-characters-in-chunks ()
+  "Appending near the byte cap must not shuttle the gap across the log each time."
+  (let ((harness-log-buffer-name " *harness-log-prune-test*")
+        (harness-log-level 'info) (harness-log-hook nil)
+        (harness-log-filter-function nil) (harness--log-max-chars 4000)
+        (deletions 0) (delete (symbol-function 'delete-region)))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'delete-region)
+                     (lambda (start end)
+                       (cl-incf deletions)
+                       (funcall delete start end))))
+            (dotimes (_ 100) (harness-log 'info "%s" (make-string 100 ?x))))
+          (should (< deletions 15))
+          (with-current-buffer harness-log-buffer-name
+            (should (<= (buffer-size) 4000))
+            (should (= harness--log-lines (count-lines (point-min) (point-max))))))
+      (when (get-buffer harness-log-buffer-name) (kill-buffer harness-log-buffer-name)))))
+
+(ert-deftest harness-core-log-multiline-bursts-keep-both-bounds ()
+  "One multiline entry cannot overrun the line bound, even after external edits."
+  (let ((harness-log-buffer-name " *harness-log-bound-test*")
+        (harness-log-level 'info) (harness-log-hook nil)
+        (harness--log-max-lines 20) (harness--log-max-chars 400)
+        (harness-log-filter-function nil))
+    (unwind-protect
+        (progn
+          (harness-log 'warn "%s" (make-string 100 ?\n))
+          (with-current-buffer harness-log-buffer-name
+            (should (<= harness--log-lines 20))
+            (should (= harness--log-lines (count-lines (point-min) (point-max)))))
+          (dotimes (_ 30) (harness-log 'info "%s\nend" (make-string 50 ?x)))
+          (with-current-buffer harness-log-buffer-name
+            (should (<= (buffer-size) 400))
+            (should (<= harness--log-lines 20))
+            (should (= harness--log-lines (count-lines (point-min) (point-max))))))
+      (when (get-buffer harness-log-buffer-name) (kill-buffer harness-log-buffer-name)))))
+
 (ert-deftest harness-core-async-filter-chain-and-final ()
   (harness-test-reset-bus)
   (harness-add-filter 'test/af (lambda (v next) (run-at-time 0.01 nil next (plist-put v :a t))) 10)
@@ -2494,27 +2560,25 @@ died.  End-of-file asked for meanwhile goes out after what waits."
       (delete-file file))))
 
 (ert-deftest harness-util-process-send-gives-up-on-a-peer-that-stopped-reading ()
-  "Past its limit, a write that waits for room gives the process up.
-The write under way fails, so its caller drops the peer -- a phone put
-away -- rather than pile up everything sent to it behind it."
+  "A write deadline works without a subsequent send to enforce it."
   (let* ((proc (make-process :name "never-reads" :noquery t :connection-type 'pipe
                              :command '("sleep" "30")))
          (harness-process-send-slow 0.2)
          (logged nil)
          (log (lambda (level msg) (push (cons level msg) logged)))
+         (start (float-time))
          failed)
     (add-hook 'harness-log-hook log)
     (unwind-protect
         (progn
-          (run-at-time 0.7 nil (lambda () (harness-process-send proc "late" 0.5)))
           (condition-case err
               (harness-process-send proc (make-string 300000 ?a) 0.5)
             (error (setq failed err)))
           (should failed)
           (should-not (process-live-p proc))
           (should-not (harness-process-sending-p proc))
-          (should (cl-find-if (lambda (l) (string-match-p "a write to never-reads has waited" (cdr l))) logged))
-          (should (cl-find-if (lambda (l) (string-match-p "never-reads has not read for" (cdr l))) logged)))
+          (should (< (- (float-time) start) 2))
+          (should (cl-find-if (lambda (l) (string-match-p "a write to never-reads waited" (cdr l))) logged)))
       (remove-hook 'harness-log-hook log)
       (when (process-live-p proc) (delete-process proc)))))
 

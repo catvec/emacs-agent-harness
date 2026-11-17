@@ -7748,6 +7748,13 @@ as in the chat; the one in code is not."
         (should-not (memq 'harness-ui-session-link-face
                           (ensure-list (get-text-property (- (point) 4) 'face))))))))
 
+(ert-deftest harness-ui-patch-review-registers-its-own-render-timing ()
+  "The optional module owns its timing entry points, not the shared recorder."
+  (should (eq 'render (alist-get 'harness-ui-patch-review--draw-tree
+                                harness-latency--extra-targets)))
+  (should (eq 'render (alist-get 'harness-ui-patch-review--draw-threads-view
+                                harness-latency--extra-targets))))
+
 (ert-deftest harness-ui-patch-review-is-known-only-to-its-halves ()
   "No other file of the harness names the review of a task's changes but its
 halves, the reply form's, the review tools and the ACP lists of what a UI

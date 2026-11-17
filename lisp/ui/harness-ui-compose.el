@@ -954,7 +954,7 @@ waits.  Return the timer; the caller cancels it when the target goes."
              (harness-compose--panel-target-delete (car cell))
              (when-let* ((panel (harness-compose--panel-named id)))
                (setcar cell (harness-compose--panel-target-overlays panel))
-               (redisplay t)))))))))
+               (harness-latency-redisplay t)))))))))
 
 (defun harness-compose--panel-up (n)
   "Return the Nth panel above the box, nearest first, as (START . END), or nil."
@@ -1034,7 +1034,7 @@ said, and nothing runs."
              (timer (harness-compose--panel-target-keep id cell)))
         (unwind-protect
             (progn
-              (redisplay t)
+              (harness-latency-redisplay t)
               (let ((read (read-key-sequence
                            (format "Key for the panel above (%s again for the next one up, C-g quits): "
                                    (harness-compose-panel-keys)))))

@@ -35,6 +35,20 @@ in BODY, it would give the windows above its second line."
        (mapc #'kill-buffer (list other chat menu))
        (ignore-errors (delete-other-windows)))))
 
+(ert-deftest harness-ui-update-and-event-listeners-have-named-timing-boundaries ()
+  "A slow listener is identified individually without retaining its input."
+  (let ((harness-ui-update-functions '(ignore))
+        (harness-ui-event-functions '(ignore))
+        seen)
+    (cl-letf (((symbol-function 'harness-latency-call)
+               (lambda (category name fn &rest args)
+                 (push (list category name) seen)
+                 (apply fn args))))
+      (harness-ui--dispatch-ui "session/update"
+                              '(:sessionId "x" :update (:sessionUpdate "test")) nil)
+      (harness-ui--run-event-functions "test" nil))
+    (should (equal '((ui-event ignore) (ui-update ignore)) seen))))
+
 (ert-deftest harness-ui-menu-from-side-window-leaves-other-windows-alone ()
   (harness-ui-test-with-layout
     (let* ((other-window (get-buffer-window other))
