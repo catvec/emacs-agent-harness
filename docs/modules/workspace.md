@@ -100,6 +100,7 @@ No model is asked to place a message.
 - `harness-workspace-router-timeout` — Seconds the semantic re-rank may take before the words decide.
 - `harness-workspace-thinking` — Thinking level a workspace episode runs at, or nil for the session default.
 - `harness-workspace-thread-idle-hours` — Hours after which a message starts a new episode in the same thread.
+- `harness-workspace-thread-model` — Whether a local model may refine a close routing call.
 
 ## Uses
 

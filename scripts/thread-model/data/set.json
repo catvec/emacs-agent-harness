@@ -1,0 +1,58 @@
+{
+ "by-slice": {
+  "in-conversation": 29,
+  "local-reference": 161,
+  "ordinary": 136,
+  "spliced": 119
+ },
+ "by-slice-split": {
+  "test": {
+   "in-conversation": 5,
+   "local-reference": 28,
+   "ordinary": 20,
+   "spliced": 17
+  },
+  "train": {
+   "in-conversation": 17,
+   "local-reference": 112,
+   "ordinary": 98,
+   "spliced": 86
+  },
+  "val": {
+   "in-conversation": 7,
+   "local-reference": 21,
+   "ordinary": 18,
+   "spliced": 16
+  }
+ },
+ "by-source": {
+  "spliced": 119,
+  "synthetic": 326
+ },
+ "cases": 445,
+ "conversations": 68,
+ "read": "sessions/*.nodes.jsonl and workspaces/*.json, read in place",
+ "retention": "the logs stay where the harness keeps them; this set holds only the text a decision reads, and no secret",
+ "splices": 119,
+ "splits": {
+  "test": {
+   "continue": 48,
+   "groups": 70,
+   "n": 70,
+   "switch": 22
+  },
+  "train": {
+   "continue": 210,
+   "groups": 311,
+   "n": 313,
+   "switch": 103
+  },
+  "val": {
+   "continue": 39,
+   "groups": 62,
+   "n": 62,
+   "switch": 23
+  }
+ },
+ "state-directory": null
+}

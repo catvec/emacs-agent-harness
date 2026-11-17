@@ -1,0 +1,701 @@
+{
+ "baselines": {
+  "graph-only": {
+   "accuracy": 0.3143,
+   "auc": 0.5,
+   "brier": 0.6857,
+   "log-loss": 9.4735,
+   "n": 70,
+   "threshold": 0.5
+  },
+  "majority": {
+   "accuracy": 0.6857,
+   "base-rate": 0.6857,
+   "brier": 0.2155,
+   "log-loss": 0.6225,
+   "n": 70
+  },
+  "word-overlap": {
+   "accuracy": 0.4429,
+   "auc": 0.7116,
+   "brier": 0.5454,
+   "log-loss": 3.2904,
+   "n": 70,
+   "threshold": 0.2
+  }
+ },
+ "calibration": {
+  "base-rate": 0.6857,
+  "bins": [
+   {
+    "happened": null,
+    "hi": 0.1,
+    "lo": 0.0,
+    "n": 0,
+    "said": null
+   },
+   {
+    "happened": null,
+    "hi": 0.2,
+    "lo": 0.1,
+    "n": 0,
+    "said": null
+   },
+   {
+    "happened": null,
+    "hi": 0.3,
+    "lo": 0.2,
+    "n": 0,
+    "said": null
+   },
+   {
+    "happened": null,
+    "hi": 0.4,
+    "lo": 0.3,
+    "n": 0,
+    "said": null
+   },
+   {
+    "happened": 0.65,
+    "hi": 0.5,
+    "lo": 0.4,
+    "n": 60,
+    "said": 0.4996
+   },
+   {
+    "happened": 0.9,
+    "hi": 0.6,
+    "lo": 0.5,
+    "n": 10,
+    "said": 0.5001
+   },
+   {
+    "happened": null,
+    "hi": 0.7,
+    "lo": 0.6,
+    "n": 0,
+    "said": null
+   },
+   {
+    "happened": null,
+    "hi": 0.8,
+    "lo": 0.7,
+    "n": 0,
+    "said": null
+   },
+   {
+    "happened": null,
+    "hi": 0.9,
+    "lo": 0.8,
+    "n": 0,
+    "said": null
+   },
+   {
+    "happened": null,
+    "hi": 1.0,
+    "lo": 0.9,
+    "n": 0,
+    "said": null
+   }
+  ],
+  "ece": 0.186,
+  "n": 70
+ },
+ "chosen-on": "val",
+ "counts": {
+  "test": 70,
+  "train": 313,
+  "val": 62
+ },
+ "degraded": {
+  "empty": {
+   "at-threshold": {
+    "accuracy-on-decided": null,
+    "decided": 0,
+    "missed-switch": 0,
+    "share": 0.0,
+    "trust": 0.95,
+    "wrong": 0,
+    "wrong-switch": 0
+   },
+   "readings": {
+    "accuracy": 0.3143,
+    "auc": 0.5,
+    "base-rate": 0.6857,
+    "brier": 0.2517,
+    "log-loss": 0.6966,
+    "mean-said": 0.4954,
+    "n": 70
+   }
+  },
+  "no-context": {
+   "at-threshold": {
+    "accuracy-on-decided": null,
+    "decided": 0,
+    "missed-switch": 0,
+    "share": 0.0,
+    "trust": 0.95,
+    "wrong": 0,
+    "wrong-switch": 0
+   },
+   "readings": {
+    "accuracy": 0.4143,
+    "auc": 0.6657,
+    "base-rate": 0.6857,
+    "brier": 0.2529,
+    "log-loss": 0.699,
+    "mean-said": 0.483,
+    "n": 70
+   }
+  },
+  "no-graph": {
+   "at-threshold": {
+    "accuracy-on-decided": null,
+    "decided": 0,
+    "missed-switch": 0,
+    "share": 0.0,
+    "trust": 0.95,
+    "wrong": 0,
+    "wrong-switch": 0
+   },
+   "readings": {
+    "accuracy": 0.4286,
+    "auc": 0.6809,
+    "base-rate": 0.6857,
+    "brier": 0.2539,
+    "log-loss": 0.7009,
+    "mean-said": 0.479,
+    "n": 70
+   }
+  },
+  "no-title": {
+   "at-threshold": {
+    "accuracy-on-decided": null,
+    "decided": 0,
+    "missed-switch": 0,
+    "share": 0.0,
+    "trust": 0.95,
+    "wrong": 0,
+    "wrong-switch": 0
+   },
+   "readings": {
+    "accuracy": 0.4286,
+    "auc": 0.6714,
+    "base-rate": 0.6857,
+    "brier": 0.2542,
+    "log-loss": 0.7016,
+    "mean-said": 0.4789,
+    "n": 70
+   }
+  },
+  "truncated-message": {
+   "at-threshold": {
+    "accuracy-on-decided": null,
+    "decided": 0,
+    "missed-switch": 0,
+    "share": 0.0,
+    "trust": 0.95,
+    "wrong": 0,
+    "wrong-switch": 0
+   },
+   "readings": {
+    "accuracy": 0.4286,
+    "auc": 0.6132,
+    "base-rate": 0.6857,
+    "brier": 0.2547,
+    "log-loss": 0.7026,
+    "mean-said": 0.4813,
+    "n": 70
+   }
+  }
+ },
+ "model": {
+  "dir": "model",
+  "training": {
+   "base": "sentence-transformers/all-MiniLM-L6-v2",
+   "batch": 16,
+   "best": {
+    "epoch": 4,
+    "train_loss": 0.6596380352973938,
+    "val_auc": 0.7335562987736901,
+    "val_brier": 0.22393918484455316,
+    "val_log_loss": 0.6403103564352501,
+    "val_loss": 0.6403103624620745
+   },
+   "counts": {
+    "test": 70,
+    "train": 313,
+    "val": 62
+   },
+   "epochs": 4.0,
+   "history": [
+    {
+     "epoch": 1,
+     "train_loss": 0.6921650499105454,
+     "val_auc": 0.6889632107023411,
+     "val_brier": 0.2465489392858483,
+     "val_log_loss": 0.6862423252311278,
+     "val_loss": 0.6862423189224736
+    },
+    {
+     "epoch": 2,
+     "train_loss": 0.6855605572462082,
+     "val_auc": 0.6945373467112598,
+     "val_brier": 0.24401262408775057,
+     "val_log_loss": 0.6811569102385264,
+     "val_loss": 0.6811569275394562
+    },
+    {
+     "epoch": 3,
+     "train_loss": 0.672966530919075,
+     "val_auc": 0.7090301003344481,
+     "val_brier": 0.23330760691128716,
+     "val_log_loss": 0.659508818326942,
+     "val_loss": 0.6595088128120669
+    },
+    {
+     "epoch": 4,
+     "train_loss": 0.6596380352973938,
+     "val_auc": 0.7335562987736901,
+     "val_brier": 0.22393918484455316,
+     "val_log_loss": 0.6403103564352501,
+     "val_loss": 0.6403103624620745
+    }
+   ],
+   "lr": 3e-05,
+   "max_tokens": 384,
+   "seconds": 188,
+   "seed": 7,
+   "test": {
+    "accuracy": 0.6428571428571429,
+    "auc": 0.7320075757575758,
+    "brier": 0.22143787599495424,
+    "log_loss": 0.6351911641866562,
+    "loss": 0.6351911408560617
+   },
+   "threads": 8,
+   "trained_at": "2026-11-17T12:34:40Z",
+   "uncertain-weight": 0.5
+  }
+ },
+ "readings": {
+  "accuracy": 0.4286,
+  "auc": 0.6809,
+  "base-rate": 0.6857,
+  "brier": 0.25,
+  "log-loss": 0.6932,
+  "mean-said": 0.4997,
+  "n": 70
+ },
+ "slices": {
+  "in-conversation": {
+   "at-threshold": {
+    "accuracy-on-decided": null,
+    "decided": 0,
+    "missed-switch": 0,
+    "share": 0.0,
+    "trust": 0.95,
+    "wrong": 0,
+    "wrong-switch": 0
+   },
+   "n": 5,
+   "readings": {
+    "accuracy": 1.0,
+    "auc": null,
+    "base-rate": 0.0,
+    "brier": 0.2495,
+    "log-loss": 0.6922,
+    "mean-said": 0.4995,
+    "n": 5
+   }
+  },
+  "local-reference": {
+   "at-threshold": {
+    "accuracy-on-decided": null,
+    "decided": 0,
+    "missed-switch": 0,
+    "share": 0.0,
+    "trust": 0.95,
+    "wrong": 0,
+    "wrong-switch": 0
+   },
+   "n": 28,
+   "readings": {
+    "accuracy": 0.1786,
+    "auc": null,
+    "base-rate": 1.0,
+    "brier": 0.2503,
+    "log-loss": 0.6938,
+    "mean-said": 0.4997,
+    "n": 28
+   }
+  },
+  "ordinary": {
+   "at-threshold": {
+    "accuracy-on-decided": null,
+    "decided": 0,
+    "missed-switch": 0,
+    "share": 0.0,
+    "trust": 0.95,
+    "wrong": 0,
+    "wrong-switch": 0
+   },
+   "n": 20,
+   "readings": {
+    "accuracy": 0.2,
+    "auc": null,
+    "base-rate": 1.0,
+    "brier": 0.2502,
+    "log-loss": 0.6936,
+    "mean-said": 0.4998,
+    "n": 20
+   }
+  },
+  "spliced": {
+   "at-threshold": {
+    "accuracy-on-decided": null,
+    "decided": 0,
+    "missed-switch": 0,
+    "share": 0.0,
+    "trust": 0.95,
+    "wrong": 0,
+    "wrong-switch": 0
+   },
+   "n": 17,
+   "readings": {
+    "accuracy": 0.9412,
+    "auc": null,
+    "base-rate": 0.0,
+    "brier": 0.2496,
+    "log-loss": 0.6923,
+    "mean-said": 0.4996,
+    "n": 17
+   }
+  }
+ },
+ "split": "test",
+ "temperature": 64.0,
+ "threshold": 0.95,
+ "thresholds": [
+  {
+   "accuracy-on-decided": 0.4286,
+   "decided": 70,
+   "missed-switch": 1,
+   "share": 1.0,
+   "trust": 0.5,
+   "wrong": 40,
+   "wrong-switch": 39
+  },
+  {
+   "accuracy-on-decided": null,
+   "decided": 0,
+   "missed-switch": 0,
+   "share": 0.0,
+   "trust": 0.6,
+   "wrong": 0,
+   "wrong-switch": 0
+  },
+  {
+   "accuracy-on-decided": null,
+   "decided": 0,
+   "missed-switch": 0,
+   "share": 0.0,
+   "trust": 0.7,
+   "wrong": 0,
+   "wrong-switch": 0
+  },
+  {
+   "accuracy-on-decided": null,
+   "decided": 0,
+   "missed-switch": 0,
+   "share": 0.0,
+   "trust": 0.8,
+   "wrong": 0,
+   "wrong-switch": 0
+  },
+  {
+   "accuracy-on-decided": null,
+   "decided": 0,
+   "missed-switch": 0,
+   "share": 0.0,
+   "trust": 0.85,
+   "wrong": 0,
+   "wrong-switch": 0
+  },
+  {
+   "accuracy-on-decided": null,
+   "decided": 0,
+   "missed-switch": 0,
+   "share": 0.0,
+   "trust": 0.9,
+   "wrong": 0,
+   "wrong-switch": 0
+  },
+  {
+   "accuracy-on-decided": null,
+   "decided": 0,
+   "missed-switch": 0,
+   "share": 0.0,
+   "trust": 0.95,
+   "wrong": 0,
+   "wrong-switch": 0
+  }
+ ],
+ "uncalibrated": {
+  "calibration": {
+   "base-rate": 0.6857,
+   "bins": [
+    {
+     "happened": null,
+     "hi": 0.1,
+     "lo": 0.0,
+     "n": 0,
+     "said": null
+    },
+    {
+     "happened": null,
+     "hi": 0.2,
+     "lo": 0.1,
+     "n": 0,
+     "said": null
+    },
+    {
+     "happened": null,
+     "hi": 0.3,
+     "lo": 0.2,
+     "n": 0,
+     "said": null
+    },
+    {
+     "happened": null,
+     "hi": 0.4,
+     "lo": 0.3,
+     "n": 0,
+     "said": null
+    },
+    {
+     "happened": 0.65,
+     "hi": 0.5,
+     "lo": 0.4,
+     "n": 60,
+     "said": 0.4746
+    },
+    {
+     "happened": 0.9,
+     "hi": 0.6,
+     "lo": 0.5,
+     "n": 10,
+     "said": 0.5058
+    },
+    {
+     "happened": null,
+     "hi": 0.7,
+     "lo": 0.6,
+     "n": 0,
+     "said": null
+    },
+    {
+     "happened": null,
+     "hi": 0.8,
+     "lo": 0.7,
+     "n": 0,
+     "said": null
+    },
+    {
+     "happened": null,
+     "hi": 0.9,
+     "lo": 0.8,
+     "n": 0,
+     "said": null
+    },
+    {
+     "happened": null,
+     "hi": 1.0,
+     "lo": 0.9,
+     "n": 0,
+     "said": null
+    }
+   ],
+   "ece": 0.2067,
+   "n": 70
+  },
+  "readings": {
+   "accuracy": 0.4286,
+   "auc": 0.6809,
+   "base-rate": 0.6857,
+   "brier": 0.2539,
+   "log-loss": 0.7009,
+   "mean-said": 0.479,
+   "n": 70
+  }
+ },
+ "validation": {
+  "calibration": {
+   "base-rate": 0.629,
+   "bins": [
+    {
+     "happened": null,
+     "hi": 0.1,
+     "lo": 0.0,
+     "n": 0,
+     "said": null
+    },
+    {
+     "happened": null,
+     "hi": 0.2,
+     "lo": 0.1,
+     "n": 0,
+     "said": null
+    },
+    {
+     "happened": null,
+     "hi": 0.3,
+     "lo": 0.2,
+     "n": 0,
+     "said": null
+    },
+    {
+     "happened": null,
+     "hi": 0.4,
+     "lo": 0.3,
+     "n": 0,
+     "said": null
+    },
+    {
+     "happened": 0.5686,
+     "hi": 0.5,
+     "lo": 0.4,
+     "n": 51,
+     "said": 0.4996
+    },
+    {
+     "happened": 0.9091,
+     "hi": 0.6,
+     "lo": 0.5,
+     "n": 11,
+     "said": 0.5002
+    },
+    {
+     "happened": null,
+     "hi": 0.7,
+     "lo": 0.6,
+     "n": 0,
+     "said": null
+    },
+    {
+     "happened": null,
+     "hi": 0.8,
+     "lo": 0.7,
+     "n": 0,
+     "said": null
+    },
+    {
+     "happened": null,
+     "hi": 0.9,
+     "lo": 0.8,
+     "n": 0,
+     "said": null
+    },
+    {
+     "happened": null,
+     "hi": 1.0,
+     "lo": 0.9,
+     "n": 0,
+     "said": null
+    }
+   ],
+   "ece": 0.1293,
+   "n": 62
+  },
+  "readings": {
+   "accuracy": 0.5161,
+   "auc": 0.6132,
+   "base-rate": 0.629,
+   "brier": 0.25,
+   "log-loss": 0.6932,
+   "mean-said": 0.4997,
+   "n": 62
+  },
+  "thresholds": [
+   {
+    "accuracy-on-decided": 0.5161,
+    "decided": 62,
+    "missed-switch": 1,
+    "share": 1.0,
+    "trust": 0.5,
+    "wrong": 30,
+    "wrong-switch": 29
+   },
+   {
+    "accuracy-on-decided": null,
+    "decided": 0,
+    "missed-switch": 0,
+    "share": 0.0,
+    "trust": 0.6,
+    "wrong": 0,
+    "wrong-switch": 0
+   },
+   {
+    "accuracy-on-decided": null,
+    "decided": 0,
+    "missed-switch": 0,
+    "share": 0.0,
+    "trust": 0.7,
+    "wrong": 0,
+    "wrong-switch": 0
+   },
+   {
+    "accuracy-on-decided": null,
+    "decided": 0,
+    "missed-switch": 0,
+    "share": 0.0,
+    "trust": 0.8,
+    "wrong": 0,
+    "wrong-switch": 0
+   },
+   {
+    "accuracy-on-decided": null,
+    "decided": 0,
+    "missed-switch": 0,
+    "share": 0.0,
+    "trust": 0.85,
+    "wrong": 0,
+    "wrong-switch": 0
+   },
+   {
+    "accuracy-on-decided": null,
+    "decided": 0,
+    "missed-switch": 0,
+    "share": 0.0,
+    "trust": 0.9,
+    "wrong": 0,
+    "wrong-switch": 0
+   },
+   {
+    "accuracy-on-decided": null,
+    "decided": 0,
+    "missed-switch": 0,
+    "share": 0.0,
+    "trust": 0.95,
+    "wrong": 0,
+    "wrong-switch": 0
+   }
+  ]
+ },
+ "verdict": {
+  "answer": "unproven",
+  "numbers": {
+   "accuracy": 0.4286,
+   "auc": 0.6809,
+   "decided": 0,
+   "majority": 0.6857,
+   "n": 70,
+   "words-auc": 0.7116
+  },
+  "reasons": [
+   "AUC 0.6809 is not above the word rule's 0.7116",
+   "accuracy 0.4286 is below guessing the majority (0.6857)",
+   "the threshold 0.95 decides no case"
+  ]
+ }
+}

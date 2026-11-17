@@ -1,0 +1,6 @@
+# The trained weights are 88 MB and are rebuilt from data/cases.jsonl by
+# `train.py`, which is what the repository keeps: the set, the report and
+# the model card.  `model/` is where a training run writes them, and where
+# `harness-thread-model-model-directory` reads them.
+model/
+__pycache__/

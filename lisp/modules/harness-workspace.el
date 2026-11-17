@@ -43,6 +43,15 @@
 
 (defvar harness-state-directory)
 
+;; The thread model is optional: the module is loaded only when a
+;; workspace is, and the router asks for a reading only when it is
+;; loaded and has a model.
+(declare-function harness-thread-model-available-p "harness-thread-model" ())
+(declare-function harness-thread-model-render "harness-thread-model" (&rest args))
+(declare-function harness-thread-model-reading-sync "harness-thread-model" (text &optional timeout))
+(defvar harness-thread-model-context)
+(defvar harness-thread-model-timeout)
+
 (defgroup harness-workspace nil
   "Persistent workspace chats."
   :group 'harness
@@ -748,6 +757,25 @@ words alone.  Without an embedding model no model is asked."
   :type 'number
   :group 'harness-workspace)
 
+(defcustom harness-workspace-thread-model nil
+  "Whether a local model may refine a close routing call.
+When non-nil and the thread-model module has a trained model on this
+machine (`harness-thread-model-available-p'), a message the word rule
+does not separate from the current thread is put to that model: its
+probability that the message continues the thread moves the call, above
+`harness-thread-model-trust' towards continuing and below one minus it
+towards a new thread or another one.  Nil keeps routing to the words and
+the meanings alone, and asks no model.  Either way the model never
+overrides an explicit signal: a named thread, a bound thread, `/new', a
+message that says continue and a thread the person picked decide first.
+
+The default is nil because the model that ships is unproven: on its
+held-out cases it does not rank better than the word rule it would
+refine (`scripts/thread-model/MODEL_CARD.md`).  The wiring is here so
+that a model which is better can be turned on, not so that this one is."
+  :type 'boolean
+  :group 'harness-workspace)
+
 (defconst harness-workspace--stop-words
   '("a" "about" "after" "again" "against" "all" "also" "am" "an" "and" "any" "are" "as"
     "at" "be" "because" "been" "before" "being" "below" "between" "both" "but" "by"
@@ -1082,6 +1110,105 @@ stays where the person was writing."
     (when (and best (>= (cdr best) harness-workspace-router-threshold))
       (car best))))
 
+;;;; The thread model
+
+;; A message the word rule does not separate is the one a model can help
+;; with: "the tax colour is still undecided" shares its words with the
+;; taxes thread and its subject with nothing, and "the sink is fixed"
+;; shares its words with the kitchen thread and is about it.  The words
+;; cannot tell those apart, and the model, which reads the message with
+;; the thread, can.  Where the words are already clear the model is not
+;; asked: it is a reflex in front of the ambiguous call, not a second
+;; opinion about every message.
+
+(defun harness-workspace--thread-model-reading (workspace thread text)
+  "Return the thread model's reading of TEXT against THREAD, or nil.
+The reading is `continue', `switch', or nil when the model is sure of
+neither way.  Nil is also what comes back when the module is off, has no
+model, or does not answer within `harness-thread-model-timeout': a
+routing decision is made while the person is typing, so a slow model is
+the same as no model, and the words decide."
+  (when (and harness-workspace-thread-model
+             (fboundp 'harness-thread-model-reading)
+             (fboundp 'harness-thread-model-available-p)
+             (harness-thread-model-available-p)
+             thread)
+    (let* ((context (harness-workspace--recent
+                     workspace thread (bound-and-true-p harness-thread-model-context)))
+           (knowledge (harness-workspace--knowledge-recall workspace thread text))
+           (render (harness-thread-model-render
+                    :task (plist-get workspace :name)
+                    :title (plist-get thread :title)
+                    :context (mapcar (lambda (entry)
+                                       (list :role (if (eq (harness-workspace--entry-role entry)
+                                                           'assistant)
+                                                       'assistant 'user)
+                                             :text (harness-workspace--entry-text entry)))
+                                     context)
+                    :knowledge knowledge
+                    :sender nil
+                    :message text))
+           (answer (condition-case err
+                       (harness-thread-model-reading-sync
+                        render (bound-and-true-p harness-thread-model-timeout))
+                     (error
+                      (harness-log 'warn "workspace router: the thread model failed: %s"
+                                   (error-message-string err))
+                      nil))))
+      (when (and answer (eq (plist-get answer :status) 'ok))
+        (plist-get answer :verdict)))))
+
+(defun harness-workspace--route-close-call-p (index text current scores)
+  "Non-nil when the word rule does not settle TEXT against CURRENT.
+That is: CURRENT holds some of the message but not enough to be sure,
+and no other thread holds it much better.  The model is asked only
+there; a message the current thread clearly holds, and one it holds
+nothing of, are decided by the words alone."
+  (let* ((held (harness-workspace--route-score-of scores current))
+         (best (harness-workspace--route-best scores current))
+         (threshold harness-workspace-router-threshold)
+         (margin harness-workspace--router-margin))
+    (and current
+         (> held 0.0)
+         (<= held (+ threshold margin))
+         (or (null best)
+             (<= (cdr best) (+ held margin)))
+         (not (harness-workspace--fresh-p index text current)))))
+
+(defun harness-workspace--route-with-thread-model (workspace text current scores)
+  "Return the routing of TEXT that the thread model refines, or nil.
+It is the same decision `harness-workspace--route-by-score' makes, with
+one question asked first: does the model say the message continues
+CURRENT, or that it does not?  A `continue' keeps the thread even when
+the words were thin; a `switch' starts a new thread, or goes to a thread
+that holds the message better, exactly as the words would have.  Nil
+means the model gave no reading, and the caller decides as it did
+before.
+
+A model that fails is no reading, not a failed message: the error is
+logged and the router goes on with the words.  A routing decision is not
+a place to lose a message because a subprocess fell over."
+  (let* ((verdict (condition-case err
+                      (harness-workspace--thread-model-reading workspace current text)
+                    (error
+                     (harness-log 'warn "workspace router: the thread model failed: %s"
+                                  (error-message-string err))
+                     nil)))
+         (best (harness-workspace--route-best scores current)))
+    (cond
+     ((null verdict) nil)
+     ((eq verdict 'continue)
+      (list current 'continue 'thread-model))
+     ((eq verdict 'switch)
+      ;; The model says the message does not continue this thread.  It
+      ;; does not say where the message goes: that is the threads'
+      ;; question, and the words answer it when they can.
+      (if (and best (>= (cdr best) harness-workspace-router-threshold))
+          (let ((thread (car best)))
+            (list thread (if (plist-get thread :live) 'continue 'revive) 'thread-model))
+        (list nil 'new 'thread-model)))
+     (t nil))))
+
 (defun harness-workspace--force-continue-p (opts)
   "Non-nil when OPTS name `:force-continue', JSON or not.
 A client that sends the words instead of the option says `/continue'."
@@ -1166,11 +1293,17 @@ from: `explicit', `command', `named', `cue', `selected', `first',
            ((and live (harness-workspace--session-running-p live)
                  (or (< words 3) (> held 0)))
             (list current 'continue 'ranked))
-           ;; Everything else is what the scores say.
-           (t (harness-workspace--route-by-score
-               index text current
-               (or (harness-workspace--router-meaning index text scores)
-                   scores)))))
+           ;; Everything else is what the scores say.  Where they do not
+           ;; settle it, the thread model is asked before they decide:
+           ;; the meanings are blended in once, and the same ranking is
+           ;; given to both readings.
+           (t (let ((ranked (or (harness-workspace--router-meaning index text scores)
+                                scores)))
+                (or (and (harness-workspace--route-close-call-p index text current ranked)
+                         (harness-workspace--route-with-thread-model
+                          workspace text current ranked))
+                    (harness-workspace--route-by-score
+                     index text current ranked))))))
          (action (cadr decide))
          (thread (car decide))
          (why (nth 2 decide)))
