@@ -113,7 +113,11 @@ Held-out split, 70 cases, after temperature scaling fitted on `val`:
   continue".
 - **It is badly calibrated.** ECE 0.186 after temperature scaling, and
   the fit ran to the top of its range (T = 64), which means the head's
-  probabilities carry little more than the ranking does.
+  probabilities carry little more than the ranking does. A temperature
+  of 64 divides the logit by 64, which flattens every answer towards
+  0.5: a live reading is 0.499, and the abstention band catches it. That
+  is the fit saying "these numbers are not probabilities", which is what
+  the caller must know before reading one as one.
 - **The threshold decides nothing.** The largest trust with no wrong
   switch on `val` is 0.95, and no held-out case reaches it: the reflex
   would abstain on every message.

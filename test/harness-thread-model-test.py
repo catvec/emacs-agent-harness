@@ -489,5 +489,65 @@ class SetTest(unittest.TestCase):
         self.assertTrue(clash)
 
 
+class SharedTest(unittest.TestCase):
+    """The arithmetic both System 1 decisions import is one copy."""
+
+    def test_the_shared_module_is_where_the_numbers_come_from(self):
+        sys.path.insert(0, os.path.join(ROOT, "scripts", "system-1"))
+        import common
+        self.assertIs(E.auc, common.auc)
+        self.assertIs(E.log_loss, common.log_loss)
+        self.assertIs(E.brier, common.brier)
+        self.assertIs(E.fit_temperature, common.fit_temperature)
+        self.assertIs(E.reliability, common.reliability)
+
+    def test_the_temperature_fit_is_an_identity_at_one(self):
+        sys.path.insert(0, os.path.join(ROOT, "scripts", "system-1"))
+        import common
+        probs = [0.9, 0.1, 0.8, 0.2]
+        for before, after in zip(probs, common.apply_temperature(probs, 1.0)):
+            self.assertAlmostEqual(before, after, places=9)
+
+    def test_a_temperature_above_one_softens_a_probability(self):
+        sys.path.insert(0, os.path.join(ROOT, "scripts", "system-1"))
+        import common
+        softened = common.apply_temperature([0.99], 10.0)[0]
+        self.assertLess(softened, 0.99)
+        self.assertGreater(softened, 0.5)
+
+    def test_the_fit_softens_an_overconfident_head(self):
+        sys.path.insert(0, os.path.join(ROOT, "scripts", "system-1"))
+        import common
+        # A head that says 0.99 about everything is right half the time:
+        # the fit has to soften it, and the log loss has to fall.
+        probs = [0.99] * 10 + [0.01] * 0
+        labels = [1, 0] * 5
+        temperature = common.fit_temperature(probs, labels)
+        self.assertGreater(temperature, 1.0)
+        self.assertLess(common.log_loss(common.apply_temperature(probs, temperature), labels),
+                        common.log_loss(probs, labels))
+
+    def test_the_training_loader_carries_a_weight(self):
+        """A case the label cannot settle moves the gradient by less.
+
+        The loader needs torch, which the repository's suite does not
+        install, so this holds the two halves that do not: the rows
+        carry the weight, and the shared loader passes a weight through
+        `collate` when the rows have one.  The training run itself is
+        what exercises the tensors.
+        """
+        sys.path.insert(0, os.path.join(ROOT, "scripts", "system-1"))
+        import common
+        rows = [{"text": "a", "label": 1},
+                {"text": "b", "label": 0, "weight": 0.5}]
+        self.assertEqual([r.get("weight", 1.0) for r in rows], [1.0, 0.5])
+        source = open(os.path.join(ROOT, "scripts", "system-1", "common.py"),
+                      encoding="utf-8").read()
+        # The collate the trainer uses hands the weight to the loss.
+        self.assertIn('out["weights"] = torch.stack', source)
+        # And the loader reads it from the row.
+        self.assertIn('item["weights"] = torch.tensor', source)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -43,9 +43,15 @@ import time
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
                           get_linear_schedule_with_warmup)
+
+# The arithmetic a reflex has whatever it is deciding -- the training
+# loader, the ranking, the losses -- lives once in scripts/system-1/.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "system-1"))
+import common  # noqa: E402
 
 BASE = "sentence-transformers/all-MiniLM-L6-v2"
 MAX_TOKENS = 384
@@ -56,81 +62,7 @@ MAX_TOKENS = 384
 UNCERTAIN_WEIGHT = 0.5
 
 
-class Cases(Dataset):
-    """The cases of one split, tokenised once."""
 
-    def __init__(self, rows, tokenizer, max_tokens=MAX_TOKENS):
-        self.rows = rows
-        self.enc = tokenizer([r["text"] for r in rows], truncation=True,
-                             max_length=max_tokens)
-
-    def __len__(self):
-        return len(self.rows)
-
-    def __getitem__(self, i):
-        item = {key: torch.tensor(value[i]) for key, value in self.enc.items()}
-        item["labels"] = torch.tensor(float(self.rows[i]["label"]))
-        item["weights"] = torch.tensor(float(self.rows[i].get("weight", 1.0)))
-        return item
-
-
-def collate(items):
-    """Pad ITEMS to the longest text in the batch."""
-    length = max(len(item["input_ids"]) for item in items)
-    out = {}
-    for key in ("input_ids", "attention_mask", "token_type_ids"):
-        if key not in items[0]:
-            continue
-        pad = 1 if key == "attention_mask" else 0
-        out[key] = torch.stack([torch.nn.functional.pad(
-            item[key], (0, length - len(item[key])), value=pad) for item in items])
-    out["labels"] = torch.stack([item["labels"] for item in items])
-    out["weights"] = torch.stack([item["weights"] for item in items])
-    return out
-
-
-def load(path):
-    rows = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
-    return rows
-
-
-def auc(probs, labels):
-    """Return the area under the ROC curve, by rank, ties sharing a rank."""
-    order = np.argsort(probs, kind="mergesort")
-    ranks = np.empty(len(probs), dtype=float)
-    sorted_probs = np.array(probs)[order]
-    i = 0
-    while i < len(order):
-        j = i
-        while j + 1 < len(order) and sorted_probs[j + 1] == sorted_probs[i]:
-            j += 1
-        ranks[order[i:j + 1]] = (i + j) / 2.0 + 1
-        i = j + 1
-    labels = np.array(labels)
-    positive = labels >= 0.5
-    n_pos, n_neg = positive.sum(), (~positive).sum()
-    if n_pos == 0 or n_neg == 0:
-        return float("nan")
-    return float((ranks[positive].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
-
-
-def log_loss(probs, labels, eps=1e-6):
-    """Return the mean binary log loss of PROBS against LABELS."""
-    p = np.clip(np.array(probs, dtype=float), eps, 1 - eps)
-    y = np.array(labels, dtype=float)
-    return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
-
-
-def brier(probs, labels):
-    """Return the Brier score of PROBS against LABELS."""
-    p = np.array(probs, dtype=float)
-    y = np.array(labels, dtype=float)
-    return float(np.mean((p - y) ** 2))
 
 
 def evaluate(model, loader):
@@ -171,7 +103,7 @@ def main() -> int:
     np.random.seed(args.seed)
     torch.set_num_threads(args.threads)
 
-    rows = load(args.cases)
+    rows = common.read_jsonl(args.cases)
     splits = {name: [r for r in rows if r["split"] == name]
               for name in ("train", "val", "test")}
     print({k: len(v) for k, v in splits.items()}, file=sys.stderr)
@@ -186,9 +118,9 @@ def main() -> int:
     train_rows = splits["train"]
     if args.train_limit and len(train_rows) > args.train_limit:
         train_rows = random.Random(args.seed).sample(train_rows, args.train_limit)
-    train_ds = Cases(train_rows, tokenizer, args.max_tokens)
-    val_ds = Cases(splits["val"], tokenizer, args.max_tokens)
-    test_ds = Cases(splits["test"], tokenizer, args.max_tokens) if splits["test"] else None
+    train_ds = common.Cases(train_rows, tokenizer, args.max_tokens)
+    val_ds = common.Cases(splits["val"], tokenizer, args.max_tokens)
+    test_ds = common.Cases(splits["test"], tokenizer, args.max_tokens) if splits["test"] else None
     positives = sum(1 for r in train_rows if r["label"] == 1)
     negatives = len(train_rows) - positives
     print(f"train: {positives} continue, {negatives} switch", file=sys.stderr)
@@ -206,9 +138,9 @@ def main() -> int:
     sampler = torch.utils.data.WeightedRandomSampler(
         train_weights, num_samples=len(train_rows), replacement=True)
     train_loader = DataLoader(train_ds, batch_size=args.batch, sampler=sampler,
-                              collate_fn=collate)
-    val_loader = DataLoader(val_ds, batch_size=args.batch, collate_fn=collate)
-    test_loader = (DataLoader(test_ds, batch_size=args.batch, collate_fn=collate)
+                              collate_fn=common.collate)
+    val_loader = DataLoader(val_ds, batch_size=args.batch, collate_fn=common.collate)
+    test_loader = (DataLoader(test_ds, batch_size=args.batch, collate_fn=common.collate)
                    if test_ds is not None else None)
 
     steps = int(len(train_loader) * args.epochs)
@@ -242,9 +174,9 @@ def main() -> int:
                       f"loss {running / (i + 1):.4f}", file=sys.stderr)
         val_loss, probs, labels = evaluate(model, val_loader)
         entry = {"epoch": epoch + 1, "train_loss": running / len(train_loader),
-                 "val_loss": val_loss, "val_auc": auc(probs, labels),
-                 "val_brier": brier(probs, labels),
-                 "val_log_loss": log_loss(probs, labels)}
+                 "val_loss": val_loss, "val_auc": common.auc(probs, labels),
+                 "val_brier": common.brier(probs, labels),
+                 "val_log_loss": common.log_loss(probs, labels)}
         history.append(entry)
         print(f"epoch {epoch + 1}: train {running / len(train_loader):.4f} "
               f"val loss {val_loss:.4f} auc {entry['val_auc']:.4f} "
@@ -266,9 +198,9 @@ def main() -> int:
     final = {}
     if test_loader is not None:
         test_loss, probs, labels = evaluate(model, test_loader)
-        final = {"loss": test_loss, "auc": auc(probs, labels),
-                 "brier": brier(probs, labels),
-                 "log_loss": log_loss(probs, labels),
+        final = {"loss": test_loss, "auc": common.auc(probs, labels),
+                 "brier": common.brier(probs, labels),
+                 "log_loss": common.log_loss(probs, labels),
                  "accuracy": float(np.mean((np.array(probs) >= 0.5) ==
                                            (np.array(labels) >= 0.5)))}
         print(f"test: loss {test_loss:.4f} auc {final['auc']:.4f} "

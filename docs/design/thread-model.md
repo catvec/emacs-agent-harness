@@ -202,6 +202,39 @@ empty text. Removing the context costs 0.015 AUC and truncating the
 message 0.068; an empty text is the model's prior, at chance. The router
 routes identically on any of them.
 
+## Reuse, not a second stack
+
+The brief asks for the tool-call classifier's data generation, training,
+evaluation, packaging and inference infrastructure to be reused rather
+than duplicated, with model-specific schemas and objectives kept
+separate. That is what `scripts/system-1/common.py` is: the arithmetic a
+System 1 reflex has whatever it is deciding — the training loader, the
+warm batch predictor, the ranking, the losses, the temperature fit, the
+reliability table. Both decisions import it, and a third reflex would
+too.
+
+What is *not* shared is anything about a decision: no schema, no label,
+no rendering, no threshold. Those live in each model's own directory
+(`scripts/thread-model/schema.py` here, `scripts/system-one/schema.py`
+there), which is what keeps two decisions on one arithmetic from
+becoming one decision.
+
+Two things were not reused, deliberately:
+
+- **the tool-call classifier's `scripts/system-one/` files are not
+  edited.** That directory belongs to another task's branch, and this
+  one was not to modify it. The shared module is new, in a neutral
+  directory, and `scripts/system-one/` still carries its own copies of
+  the same few functions. Moving them onto `common.py` is a follow-up
+  for that task's owner, and a small one: the functions are the same
+  and their signatures match.
+- **the predictor's JSON-lines protocol is shared by convention, not by
+  code.** `predict.py` in each directory speaks `{"id", "text"}` in and
+  `{"id", "prob"}` or `{"id", "error"}` out, and each module's Elisp
+  side speaks it. The protocol is four lines and the two models'
+  calibration steps differ, so a shared server would need a callback
+  for the step and would save nothing a reader could see.
+
 ## Alternatives
 
 - **A completion model per message.** It would answer the same question,
@@ -239,6 +272,9 @@ they carry is not yet worth its latency.
 
 ## The shape of the change
 
+- `scripts/system-1/common.py`: the arithmetic both decisions share —
+  the training loader, the batch predictor, AUC, log loss, Brier,
+  accuracy, the temperature fit, the reliability table.
 - `scripts/thread-model/schema.py`: the decision's contract — the
   rendered text, the labels, the features, the case.
 - `scripts/thread-model/dataset.py`: logs read in place, the label rules,

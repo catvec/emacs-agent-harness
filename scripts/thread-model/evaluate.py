@@ -51,8 +51,22 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from dataset import content_words, STOP_WORDS  # noqa: E402
+from dataset import content_words  # noqa: E402
 from schema import LABELS  # noqa: E402
+
+# The arithmetic a reflex has whatever it is deciding lives once, in
+# scripts/system-1/common.py, and this decision imports it: the same
+# ranking, the same losses, the same temperature fit.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "system-1"))
+import common  # noqa: E402
+
+auc = common.auc
+log_loss = common.log_loss
+brier = common.brier
+fit_temperature = common.fit_temperature
+apply_temperature = common.apply_temperature
+reliability = common.reliability
 
 # The thresholds the report weighs.  The router's own rule decides at
 # 0.2 word overlap; the model's number is a probability, so the
@@ -91,102 +105,10 @@ def predict(model, tokenizer, texts, batch=32, max_tokens=384, threads=8):
     return out
 
 
-def auc(probs, labels):
-    """Return the area under the ROC curve, by rank, ties sharing a rank."""
-    order = np.argsort(probs, kind="mergesort")
-    ranks = np.empty(len(probs), dtype=float)
-    sorted_probs = np.array(probs)[order]
-    i = 0
-    while i < len(order):
-        j = i
-        while j + 1 < len(order) and sorted_probs[j + 1] == sorted_probs[i]:
-            j += 1
-        ranks[order[i:j + 1]] = (i + j) / 2.0 + 1
-        i = j + 1
-    labels = np.array(labels)
-    positive = labels >= 0.5
-    n_pos, n_neg = positive.sum(), (~positive).sum()
-    if n_pos == 0 or n_neg == 0:
-        return float("nan")
-    return float((ranks[positive].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
 
 
-def log_loss(probs, labels, eps=1e-6):
-    """Return the mean binary log loss of PROBS against LABELS."""
-    p = np.clip(np.array(probs, dtype=float), eps, 1 - eps)
-    y = np.array(labels, dtype=float)
-    return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
 
 
-def brier(probs, labels):
-    """Return the Brier score of PROBS against LABELS."""
-    p = np.array(probs, dtype=float)
-    y = np.array(labels, dtype=float)
-    return float(np.mean((p - y) ** 2))
-
-
-def reliability(probs, labels, bins: int = BINS) -> dict:
-    """Return the reliability table, the ECE and the base rate.
-
-    Each bin says how many cases fell in it, what the model said on
-    average, and what happened on average.  A calibrated model's two
-    averages agree in every bin, and the gap is what the expected
-    calibration error weighs.
-    """
-    probs = np.array(probs, dtype=float)
-    labels = np.array(labels, dtype=float)
-    edges = np.linspace(0.0, 1.0, bins + 1)
-    table = []
-    ece = 0.0
-    n = len(probs)
-    for i in range(bins):
-        lo, hi = edges[i], edges[i + 1]
-        mask = (probs >= lo) & (probs < hi if i < bins - 1 else probs <= hi)
-        count = int(mask.sum())
-        if count == 0:
-            table.append({"lo": round(lo, 3), "hi": round(hi, 3), "n": 0,
-                          "said": None, "happened": None})
-            continue
-        said = float(probs[mask].mean())
-        happened = float(labels[mask].mean())
-        ece += count / n * abs(said - happened)
-        table.append({"lo": round(lo, 3), "hi": round(hi, 3), "n": count,
-                      "said": round(said, 4), "happened": round(happened, 4)})
-    return {"bins": table, "ece": round(float(ece), 4),
-            "base-rate": round(float(labels.mean()), 4), "n": n}
-
-
-def fit_temperature(probs, labels) -> float:
-    """Return the temperature that makes PROBS best calibrated on LABELS.
-
-    A head trained on balanced classes answers too near 0.5 for the real
-    ratio, and its numbers are compressed: the ranking is right and the
-    probability is not.  One parameter fixes that -- dividing the logit
-    by T before the sigmoid -- and T is fitted on the validation split,
-    never on the test one, so the test numbers say what a live caller
-    would see.
-
-    The fit is a grid search rather than a gradient: one parameter, a
-    bounded range, and a search that cannot wander off.  T > 1 softens
-    the probabilities; T < 1 sharpens them.
-    """
-    probs = np.clip(np.array(probs, dtype=float), 1e-6, 1 - 1e-6)
-    labels = np.array(labels, dtype=float)
-    logits = np.log(probs / (1 - probs))
-    best_t, best_loss = 1.0, log_loss(probs, labels)
-    for t in np.exp(np.linspace(np.log(0.25), np.log(64.0), 120)):
-        scaled = 1.0 / (1.0 + np.exp(-logits / t))
-        loss = log_loss(scaled, labels)
-        if loss < best_loss:
-            best_t, best_loss = float(t), loss
-    return round(best_t, 4)
-
-
-def apply_temperature(probs, temperature: float) -> list[float]:
-    """Return PROBS recalibrated with TEMPERATURE."""
-    probs = np.clip(np.array(probs, dtype=float), 1e-6, 1 - 1e-6)
-    logits = np.log(probs / (1 - probs))
-    return list(1.0 / (1.0 + np.exp(-logits / max(1e-6, temperature))))
 
 
 def readings(probs, labels) -> dict:
@@ -463,7 +385,7 @@ def main() -> int:
                         "fitted-on": args.choose_on,
                         "cases": len(val),
                         "method": ("temperature scaling: one parameter, "
-                                   "grid search over 0.25..8 on the "
+                                   "grid search over 0.25..64 on the "
                                    "validation split's log loss")})
     chosen = choose_threshold(calibrated[args.choose_on],
                               [r["label"] for r in val],
