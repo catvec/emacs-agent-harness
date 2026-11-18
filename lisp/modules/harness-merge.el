@@ -630,7 +630,7 @@ merged, or when the ref is gone."
                                     (concat (harness-merge--merged-ref branch) "^{commit}"))
                 (lambda (r) (and (eql (plist-get r :exit) 0) (string-trim (plist-get r :stdout))))))
 
-(defun harness-merge--recorded-base (cwd branch tip)
+(defun harness-merge--recorded-base (cwd branch tip head)
   "Return a promise of the base BRANCH's merge was last computed from, or nil.
 CWD is the repository the recorded ref lives in.  The base is the tip
 BRANCH last merged as (`refs/harness/merged/BRANCH'), when it is an
@@ -639,14 +639,26 @@ uses git's own merge base.  A branch that carries on after it was
 squashed in needs its old tip: the target holds its earlier work as one
 commit, not as history, so git's merge base is its old fork point and
 the merge would replay -- and conflict with -- work the target already
-has."
+has.
+
+The recorded tip is not the base when HEAD, the target's commit, is
+already an ancestor of TIP.  A branch that merged the target into
+itself -- what a conflict resolver does -- then holds the target's work
+as history, so git's own merge base is HEAD itself.  Forcing the older
+recorded tip there would replay everything both sides already have, and
+report conflicts in work nobody disagrees about, which is how a branch
+stays in conflict with a target that has nothing left to conflict over."
   (harness-then
    (harness-merge--last-merged-tip cwd branch)
    (lambda (recorded)
      (when recorded
        (harness-then
-        (harness-merge--git cwd "merge-base" "--is-ancestor" recorded tip)
-        (lambda (r) (and (eql (plist-get r :exit) 0) recorded)))))))
+        (harness-all (list (harness-merge--git cwd "merge-base" "--is-ancestor" recorded tip)
+                           (harness-merge--git cwd "merge-base" "--is-ancestor" head tip)))
+        (lambda (results)
+          (let ((carried-on (plist-get (nth 0 results) :exit))
+                (holds-target (plist-get (nth 1 results) :exit)))
+            (and (eql carried-on 0) (not (eql holds-target 0)) recorded))))))))
 
 (defun harness-merge--record-merged-tip (cwd branch tip)
   "Record TIP as the tip of BRANCH the target has now merged.
@@ -779,7 +791,7 @@ counts the fresh attempts left when the target moves meanwhile."
                          (when (harness-merge--live-p entry)
                            (harness-merge--finish entry 'merged))
                        (harness-then
-                        (harness-merge--recorded-base cwd branch tip)
+                        (harness-merge--recorded-base cwd branch tip head)
                         (lambda (base)
                           (harness-then
                            (apply #'harness-merge--git cwd

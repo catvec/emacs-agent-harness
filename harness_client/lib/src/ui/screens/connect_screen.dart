@@ -14,6 +14,7 @@ import '../adaptive/mark.dart';
 import '../app_scope.dart';
 import '../format.dart';
 import '../theme/harness_theme.dart';
+import '../widgets/connection_stage.dart';
 
 class ConnectScreen extends StatefulWidget {
   const ConnectScreen({super.key, required this.app});
@@ -520,6 +521,16 @@ class _ResumeCard extends StatelessWidget {
                           color: theme.colorScheme.onSurfaceVariant,
                         ),
                       ),
+                      // The step it is on, and how long it has been there:
+                      // a slow harness says what it is doing.
+                      const SizedBox(height: 4),
+                      ConnectionStageLine(
+                        app: app,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+
                     ],
                   ),
                 ),

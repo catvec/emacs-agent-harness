@@ -4,6 +4,7 @@ import '../../state/app_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
 import '../theme/harness_theme.dart';
+import 'connection_stage.dart';
 
 /// Says, quietly, that the connection to the harness was lost and is being
 /// got back.  Nothing else on the screen changes: what was typed is still
@@ -35,17 +36,30 @@ class ConnectionBanner extends StatelessWidget {
       builder: (context, _) {
         if (!app.isReconnecting) return const SizedBox.shrink();
         final color = HarnessColors.amber;
-        // What the last attempt said, else why the connection went.
+        // The stage the app is in and how long it has been there, so
+        // that a slow harness says what it is doing instead of looking
+        // stuck; then what the last attempt said, else why the
+        // connection went.
+        final stage = app.stage;
         final detail = app.reconnectError ?? app.lostReason;
         // Announced when it comes up, to somebody who cannot see it.
         final banner = Semantics(
           container: true,
           liveRegion: true,
-          label: 'Connection lost · reconnecting',
+          label: stage == null
+              ? 'Connection lost · reconnecting'
+              : 'Connection lost · ${stageLabel(stage)}',
           child: HarnessNotice(
             key: const Key('connection-banner'),
             leading: HarnessActivity(radius: 8, color: color),
             message: 'Connection lost. Reconnecting…',
+            // The stage and how long it has been going, ticking, where a
+            // person looks for the reason: a wait that goes on says so.
+            detailWidget: ConnectionStageLine(
+              app: app,
+              style: HarnessText.caption(context),
+              color: color,
+            ),
             detail: detail,
             color: color,
             actionLabel: app.waitingToRetry ? 'Retry now' : null,

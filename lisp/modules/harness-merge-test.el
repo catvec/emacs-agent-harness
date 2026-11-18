@@ -250,6 +250,49 @@ base would replay it and conflict; the tip it last merged, kept in
         (should (= 1 (length (split-string (harness-merge-test--git root "log" "-1" "--format=%P") " " t))))
         (should (equal "3" (string-trim (harness-merge-test--git root "rev-list" "--count" "HEAD"))))))))
 
+(ert-deftest harness-merge-recorded-base-yields-to-a-target-the-branch-holds ()
+  "The recorded tip is not the base once the branch holds the target's commit.
+A conflict resolver merges the target into the branch, so the branch
+carries the target's work as history and git's own merge base is the
+target's HEAD.  Forcing the older recorded tip then replays work both
+sides already have and reports conflicts in files nobody disagrees
+about, which leaves the branch stuck in conflict with a target that has
+nothing left to conflict over."
+  (harness-merge-test-with
+    ;; The branch is merged once, so a tip is recorded for it.
+    (harness-merge-test--write wt "feature.txt" "one\n")
+    (harness-merge-test--commit wt "add feature" "feature.txt")
+    (let ((finished nil))
+      (harness-on 'merge/finished (lambda (c _p s) (push (cons c s) finished)))
+      (harness-call 'merge/enqueue child parent)
+      (harness-test-wait (lambda () finished) 10 "the first merge")
+      (should (equal (cons child 'merged) (car finished)))
+      (let ((recorded (string-trim (harness-merge-test--git root "rev-parse"
+                                                             (concat "refs/harness/merged/" "child")))))
+        ;; Before the branch merges the target in, the recorded tip is the
+        ;; base: the branch carries on from it, and the target has moved on.
+        (harness-merge-test--write wt "branch.txt" "branch work\n")
+        (harness-merge-test--commit wt "branch moves on" "branch.txt")
+        (harness-merge-test--write root "other.txt" "target work\n")
+        (harness-merge-test--commit root "target moves on" "other.txt")
+        (let ((head (string-trim (harness-merge-test--git root "rev-parse" "HEAD")))
+              (tip (string-trim (harness-merge-test--git wt "rev-parse" "HEAD"))))
+          (should (equal recorded
+                         (harness-test-await
+                          (harness-merge--recorded-base root "child" tip head))))
+          ;; The branch merges the target in, as a conflict resolver does:
+          ;; it now holds the target's commit as history.
+          (harness-merge-test--git wt "merge" "-q" "--no-edit" "main")
+          (setq tip (string-trim (harness-merge-test--git wt "rev-parse" "HEAD")))
+          (should (eql 0 (call-process "git" nil nil nil "-C" wt "merge-base" "--is-ancestor"
+                                       head "HEAD")))
+          ;; The recorded tip is still an ancestor, but it is no longer the
+          ;; base: the target's commit is, so git's own base must be used.
+          (should (eql 0 (call-process "git" nil nil nil "-C" wt "merge-base" "--is-ancestor"
+                                       recorded "HEAD")))
+          (should (null (harness-test-await
+                         (harness-merge--recorded-base root "child" tip head)))))))))
+
 (ert-deftest harness-merge-dirty-child-is-told-to-commit ()
   (harness-merge-test-with
     (harness-merge-test--write wt "feature.txt" "uncommitted\n")

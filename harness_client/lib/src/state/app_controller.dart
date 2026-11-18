@@ -78,6 +78,36 @@ const List<Duration> defaultReconnectDelays = <Duration>[
   Duration(seconds: 15),
 ];
 
+/// The step of going back into a harness that the app is in, while it is
+/// getting a connection back or opening: what a person is waiting for, named
+/// on the screen so that a slow harness is not a blank wait.  Each stage lasts
+/// from when it is entered until the next one begins ([stageAge] says how
+/// long that has been); there is no stage while the app is connected.
+enum ConnectionStage {
+  /// Asking a connection that looks open whether it still answers, before
+  /// trusting it with what a person asks for.
+  checking,
+
+  /// Opening the socket, over the network the device is on.
+  connecting,
+
+  /// The socket is open; the harness has not answered `initialize` yet.
+  handshaking,
+
+  /// The harness asked this device to sign in, and it is being signed in.
+  signingIn,
+
+  /// The harness's list of sessions is being read.
+  readingSessions,
+
+  /// The projects the sessions work for are being worked out.
+  readingProjects,
+
+  /// An attempt failed, and the next one waits its turn: the app will try
+  /// again by itself, and a person may bring it forward ([retryNow]).
+  waiting,
+}
+
 /// How an attempt to connect again ended.
 enum _Attempt {
   /// The connection is back.
@@ -104,6 +134,8 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     this.reconnectDelays = defaultReconnectDelays,
     this.handshakeTimeout = const Duration(seconds: 12),
     this.probeTimeout = const Duration(seconds: 5),
+    this.resumeProbeTimeout = const Duration(seconds: 2),
+    this.connectTimeout = const Duration(seconds: 10),
     this.workspaceBuddyBackendFactory,
     BuddyWindowService? buddyWindow,
     MediaCaptureSession? media,
@@ -131,10 +163,20 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
   /// just opened, when the app is connecting again.
   final Duration handshakeTimeout;
 
-  /// How long a connection that looks open has to answer a probe, when the
-  /// app returns to the foreground.
+  /// How long a connection that looks open has to answer a probe.
   final Duration probeTimeout;
 
+  /// How long it has, when the app comes back to the foreground: a phone
+  /// that was away may hold a socket that died without a word, and every
+  /// second of waiting for the dead one is a second before the app begins
+  /// to connect again.  A harness that is there answers in milliseconds.
+  final Duration resumeProbeTimeout;
+
+  /// How long opening the socket may take, on the way back in: a network
+  /// that has gone (a VPN reconnecting, a phone between cells) can leave a
+  /// connect pending far longer than a person will wait, and the next
+  /// attempt would be better made than the first left hanging.
+  final Duration connectTimeout;
   /// What the workspace buddy opens its microphone and provider with.  The
   /// app leaves null for the real voice backends; a test passes a scripted
   /// factory so no platform channel is loaded.
@@ -201,6 +243,36 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
   /// stays while the attempts go on, so what the screen says does not blink
   /// with each one.
   String? resumeError;
+
+  /// The step of going back in the app is in, and when it began: what a
+  /// person is waiting for while the app is not connected (see
+  /// [ConnectionStage]).  Null while the app is connected, and before it
+  /// starts.
+  ConnectionStage? stage;
+  DateTime? _stageSince;
+
+  /// How long the app has been in [stage], which the screens say beside it so
+  /// that a wait that goes on says so instead of looking stuck.
+  /// [now] is for a caller with a clock of its own (a test): the age is
+  /// the difference between when the stage began and it.
+  Duration stageAge([DateTime? now]) {
+    final since = _stageSince;
+    return since == null
+        ? Duration.zero
+        : (now ?? DateTime.now()).difference(since);
+  }
+
+  /// Enter [next], the step the app is on now, and say so.  A stage that is
+  /// entered again (another attempt to connect) starts its age over.
+  void _enterStage(ConnectionStage? next) {
+    // A stage that is entered again is a new step of a new attempt (the
+    // socket of the next try): it says so, and its age starts over.  Only
+    // leaving a stage, or staying in none, changes nothing to say.
+    if (stage == next && next == null) return;
+    stage = next;
+    _stageSince = next == null ? null : DateTime.now();
+    _notify();
+  }
 
   /// The session secret this device is signed in with, to present on the
   /// next connection: the harness replaces it every so often, and the
@@ -582,9 +654,12 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
       // What is shown and remembered never carries the secret in its URL.
       final shown = target.isTcp ? address : target.webSocketUri.toString();
       this.address = shown;
-      final transport =
-          await (_connector?.call(target, secret) ??
-              target.connect(token: secret));
+      final transport = await _open(
+        target,
+        secret,
+        connectTimeout,
+        stage: ConnectionStage.connecting,
+      );
       if (generation != _connectionGeneration) {
         await transport.close();
         return;
@@ -595,6 +670,7 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
       );
       _client = client;
       _subscription = client.notifications.listen(_onNotification);
+      _enterStage(ConnectionStage.handshaking);
       await mobileComputer.ready();
       final initialized = await client.initialize(
         clientTitle: deviceName(),
@@ -685,6 +761,7 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     if (generation != _connectionGeneration) return;
     signingInWith = null;
     phase = ConnectionPhase.connected;
+    _enterStage(null);
     error = null;
     _secret = secret;
     final client = _client;
@@ -751,6 +828,7 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
           _notify();
         }
       }
+      _enterStage(ConnectionStage.signingIn);
       final answer = await client.authenticate(methodId: method.id);
       if (generation != _connectionGeneration) return;
       final secret = await _signedIn(client, shown, '', answer);
@@ -810,6 +888,7 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     error = null;
     _notify();
     try {
+      _enterStage(ConnectionStage.signingIn);
       final answer = await client.authenticate(methodId: 'token', token: token);
       final secret = await _signedIn(client, shown, token, answer);
       await _enter(generation, shown, secret);
@@ -845,7 +924,9 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
   }
 
   Future<void> _loadInitial({bool throwOnAuth = false}) async {
+    _enterStage(ConnectionStage.readingSessions);
     await refreshSessions(throwOnAuth: throwOnAuth);
+    _enterStage(ConnectionStage.readingProjects);
     await refreshProjects();
   }
 
@@ -1494,6 +1575,7 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
   void _stopResuming() {
     _resuming = false;
     resumeError = null;
+    if (!isConnected) _enterStage(null);
   }
 
   /// The person does not want the app to go back into the harness it
@@ -1585,7 +1667,32 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
       }
       if (outcome != _Attempt.failed || !_reconnecting(generation)) return;
       await _waitToRetry(++failures);
+      if (!_reconnecting(generation)) return;
     }
+  }
+
+  /// Open the socket to [target], with [secret], and wait no longer than
+  /// [timeout] for it: a connect that never completes is one the next attempt
+  /// would be better spent on.  [target] is the connection the person gave,
+  /// or the one the device remembers.  A connector of a test is bounded the
+  /// same way, so what a test sees is what a device does.
+  Future<AcpTransport> _open(
+    ConnectionTarget target,
+    String secret,
+    Duration timeout, {
+    required ConnectionStage stage,
+  }) {
+    _enterStage(stage);
+    final opening =
+        _connector?.call(target, secret) ?? target.connect(token: secret);
+    return opening.timeout(
+      timeout,
+      onTimeout: () => throw TimeoutException(
+        'The connection to ${target.label} took longer than '
+        '${timeout.inSeconds}s.',
+        timeout,
+      ),
+    );
   }
 
   Future<_Attempt> _reconnectOnce(int generation) async {
@@ -1595,9 +1702,12 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     try {
       final target = ConnectionTarget.parse(shown, web: kIsWeb);
       final presented = _secret;
-      final transport =
-          await (_connector?.call(target, presented) ??
-              target.connect(token: presented));
+      final transport = await _open(
+        target,
+        presented,
+        connectTimeout,
+        stage: ConnectionStage.connecting,
+      );
       if (!_reconnecting(generation)) {
         await transport.close();
         return _Attempt.superseded;
@@ -1606,6 +1716,7 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
         transport,
         logger: kDebugMode ? (message) => debugPrint('ACP $message') : null,
       );
+      _enterStage(ConnectionStage.handshaking);
       var initialized = await client.initialize(
         clientTitle: deviceName(),
         timeout: handshakeTimeout,
@@ -1626,6 +1737,7 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
             presented.isNotEmpty &&
             caps.authMethods.any((method) => method.isToken)) {
           try {
+            _enterStage(ConnectionStage.signingIn);
             final answer = await client.authenticate(
               methodId: 'token',
               token: presented,
@@ -1741,17 +1853,29 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     reconnectAttempt = 0;
     error = null;
     phase = ConnectionPhase.connected;
+    _enterStage(null);
     _watch(client, generation);
     _notify();
   }
 
   /// Read again what the screens show, which may have changed while the
   /// connection was out.
+  ///
+  /// The sessions come first, and alone: they are the first screen a person
+  /// sees, and the rest of the app is built on them (a project is the
+  /// project of a session).  Everything else that does not need them is
+  /// read at the same time, so a slow harness costs the longest of those
+  /// reads rather than their sum.  Each read that is started after the
+  /// connection went again must not be applied to the one that replaced
+  /// it: they go through [refreshProjects] and the controllers, which
+  /// already ignore an answer that comes after their connection.
   Future<void> _refreshAfterReconnect(int generation) async {
     _ensureControllers();
+    _enterStage(ConnectionStage.readingSessions);
     await refreshSessions();
     if (generation != _connectionGeneration || !isConnected) return;
-    await refreshProjects();
+    _enterStage(ConnectionStage.readingProjects);
+    final projects = refreshProjects();
     if (tasks != null) {
       unawaited(tasks!.reload(showSpinner: false));
     }
@@ -1768,6 +1892,10 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     // themselves again when they are opened.
     final open = activeSession;
     if (open != null) unawaited(open.open());
+    await projects;
+    if (generation == _connectionGeneration && isConnected) {
+      _enterStage(null);
+    }
   }
 
   /// A harness that came back with more to offer than it had.
@@ -1795,6 +1923,9 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
     final delay = reconnectDelays.isEmpty
         ? const Duration(seconds: 15)
         : reconnectDelays[index];
+    // A wait with a name and an age: a person who is told how long until
+    // the next try can tell a slow harness from a stuck one.
+    _enterStage(ConnectionStage.waiting);
     final wake = Completer<void>();
     _reconnectWake = wake;
     _reconnectTimer = Timer(delay, () {
@@ -1876,7 +2007,7 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
   /// at once.  A phone puts a connection to sleep without a word while the
   /// app is away, and a request for something real only finds out after
   /// minutes.
-  Future<void> checkConnection() async {
+  Future<void> checkConnection({Duration? probe}) async {
     if (isReconnecting || resuming) {
       retryNow();
       return;
@@ -1887,22 +2018,49 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
       _lose(client.closeReason ?? 'The connection was closed.');
       return;
     }
-    final alive = await client.probe(timeout: probeTimeout);
-    if (!alive && identical(client, _client) && isConnected) {
-      _lose(client.closeReason ?? 'The harness did not answer.');
+    // A stage of its own: the app is still connected while it asks, so
+    // nothing else on the screens says what it is waiting for.
+    _enterStage(ConnectionStage.checking);
+    final alive = await client.probe(timeout: probe ?? probeTimeout);
+    if (identical(client, _client) && isConnected) {
+      if (alive) {
+        _enterStage(null);
+      } else {
+        _lose(client.closeReason ?? 'The harness did not answer.');
+      }
     }
   }
 
-  /// The app came back to the foreground.
-  Future<void> resumed() {
+  /// The app came back to the foreground.  A phone that was away comes back
+  /// with a connection that may have died without a word, so it is asked
+  /// first ([checkConnection]); that ask is what a person waits through
+  /// before anything is read again, so it is bounded by [resumeProbeTimeout]
+  /// rather than by the patience a probe of a working app gets.
+  Future<void> resumed() async {
     setForeground(true);
-    return checkConnection();
+    final generation = _connectionGeneration;
+    await checkConnection(probe: resumeProbeTimeout);
+    // A connection found dead is got back before this returns, so that
+    // what comes after a resume (the screen reading again) knows whether
+    // it has a connection to read over.
+    if (isReconnecting && generation == _connectionGeneration) {
+      await _settled(generation);
+    }
+  }
+
+  /// Wait until the app is no longer reconnecting (or something else took
+  /// over), for a caller that must know which it is.
+  Future<void> _settled(int generation) async {
+    while (_reconnecting(generation)) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
   }
 
   Future<void> _teardown({bool keepPhase = false}) async {
     _sessionRefresh?.cancel();
     _sessionRefresh = null;
     _wakeReconnect();
+    _enterStage(null);
     lostReason = null;
     reconnectError = null;
     reconnectAttempt = 0;

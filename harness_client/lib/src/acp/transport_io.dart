@@ -20,6 +20,9 @@ WebSocketChannel _openWithPings(Uri uri, List<String> protocols) =>
       pingInterval: webSocketPingInterval,
     );
 
+/// How long opening the socket may take, where nothing else bounds it.
+const Duration connectTimeout = Duration(seconds: 10);
+
 Future<AcpTransport> openAcpTransport(
   ConnectionTarget target,
   String token,
@@ -28,10 +31,18 @@ Future<AcpTransport> openAcpTransport(
     return WebSocketAcpTransport.connect(
       target.webSocketUri!,
       token: token,
+      timeout: connectTimeout,
       opener: _openWithPings,
     );
   }
-  final socket = await Socket.connect(target.tcpHost!, target.tcpPort!);
+  // A connect that goes nowhere (a phone between cells, a VPN reconnecting)
+  // can hang far longer than the platform's own patience; give up in time
+  // for the next attempt to be made.
+  final socket = await Socket.connect(
+    target.tcpHost!,
+    target.tcpPort!,
+    timeout: connectTimeout,
+  );
   return TcpAcpTransport._(socket);
 }
 

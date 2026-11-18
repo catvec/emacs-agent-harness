@@ -4,6 +4,20 @@ import 'package:intl/intl.dart';
 import '../acp/acp_message.dart';
 import '../models/project_roots.dart';
 
+/// How long a wait has gone on, for beside what is being waited for: "3s",
+/// "1m 04s".  A wait of under a second says "now", which is the truth
+/// a person needs from it: it is still going, and it has only begun.
+String waitAge(Duration age) {
+  if (age.inSeconds < 1) return 'now';
+  if (age.inSeconds < 60) return '${age.inSeconds}s';
+  final minutes = age.inMinutes;
+  final seconds = age.inSeconds % 60;
+  if (minutes < 60) {
+    return '${minutes}m ${seconds.toString().padLeft(2, '0')}s';
+  }
+  return '${age.inHours}h ${minutes % 60}m';
+}
+
 String relativeTime(DateTime? time) {
   if (time == null) return '';
   final now = DateTime.now();

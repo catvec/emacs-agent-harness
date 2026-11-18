@@ -384,6 +384,17 @@ class HarnessScopeBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final muted = theme.colorScheme.onSurfaceVariant;
+    // The marks of the scope: its icon, the gaps, and the chevron that says
+    // the project can be chosen.  They are never squeezed: a Row given less
+    // than them overflows.
+    final marks = 17.0 + 8.0 + (onTap != null ? 2.0 + 18.0 : 0.0);
+    // Past its marks, the scope keeps this much for the label: enough to
+    // read a project's name.
+    const labelRoom = 72.0;
+    // What is at the far end needs this much to say anything.  Less than it,
+    // it goes under the scope rather than being squeezed to nothing.
+    const trailingMin = 56.0;
+    const gap = 12.0;
     final scope = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -403,7 +414,7 @@ class HarnessScopeBar extends StatelessWidget {
         ],
       ],
     );
-    final tappable = onTap == null
+    final scopeWidget = onTap == null
         ? scope
         : Semantics(
             button: true,
@@ -417,37 +428,60 @@ class HarnessScopeBar extends StatelessWidget {
               ),
             ),
           );
+    final fact = trailing;
     return ConstrainedBox(
       constraints: const BoxConstraints(minHeight: 40),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: HarnessSpace.gutter),
-        // Two halves, each bounded by its share of the line: the scope at
-        // the start, the fact at the far edge, and the slack between them.
-        // A long project name and a long fact cannot both keep their whole
-        // width -- a phone at a large text size is narrower than the two
-        // together -- so each gives way inside its own half rather than
-        // pushing the other off the edge.  The fact goes first: it is a
-        // glance, where the name is what the page is about.
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Flexible(
-              flex: trailing == null ? 1 : 2,
-              child: Align(
-                alignment: AlignmentDirectional.centerStart,
-                child: tappable,
-              ),
-            ),
-            if (trailing != null) ...[
-              const SizedBox(width: 12),
-              Flexible(
-                child: Align(
-                  alignment: AlignmentDirectional.centerEnd,
-                  child: trailing!,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final room = constraints.maxWidth;
+            // The scope comes first: it keeps its marks and room for its
+            // label.  What is left is the short fact's, and no more than
+            // half the row.  It used to take whatever it wanted, which on a
+            // phone (or in the test font, which is wider than a phone's)
+            // left the scope narrower than its marks and overflowed it.
+            final keepForScope = math.min(room, marks + labelRoom);
+            final trailingMax = math.max(
+              0.0,
+              math.min(room - gap - keepForScope, room / 2),
+            );
+            final atEnd = fact != null && trailingMax >= trailingMin;
+            final scopeRow = Row(
+              children: [
+                // The scope is as wide as its label, at the start; what is
+                // after it is at the other end.
+                Expanded(
+                  child: Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: scopeWidget,
+                  ),
                 ),
-              ),
-            ],
-          ],
+                if (atEnd) ...[
+                  const SizedBox(width: gap),
+                  // Bounded, so the fact ellipsizes its own text instead of
+                  // taking the room the scope needs.  It stays whole to a
+                  // tap and to a screen reader, and keeps its tooltip.
+                  ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: trailingMax),
+                    child: fact,
+                  ),
+                ],
+              ],
+            );
+            if (fact == null || atEnd) return scopeRow;
+            // Too narrow to hold both on one line: the fact keeps a line of
+            // its own under the scope, at full width, where it is still
+            // whole and still tapped -- rather than beside it and lost.
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                scopeRow,
+                Padding(padding: const EdgeInsets.only(top: 6), child: fact),
+              ],
+            );
+          },
         ),
       ),
     );
@@ -464,6 +498,7 @@ class HarnessNotice extends StatelessWidget {
     this.leading,
     required this.message,
     this.detail,
+    this.detailWidget,
     this.color,
     this.onTap,
     this.actionLabel,
@@ -484,6 +519,11 @@ class HarnessNotice extends StatelessWidget {
   final Widget? leading;
   final String message;
   final String? detail;
+
+  /// A second line of its own, for what changes while it shows (a
+  /// stage and how long it has been going, ticking): drawn instead of
+  /// [detail], which is then not used.
+  final Widget? detailWidget;
 
   /// How many lines [detail] may take before it is cut short.  A notice that
   /// only hints at something keeps to two; one whose detail is the point
@@ -534,13 +574,38 @@ class HarnessNotice extends StatelessWidget {
                             context,
                           ).copyWith(fontWeight: FontWeight.w600, height: 1.3),
                         ),
-                        if (detail != null && detail!.isNotEmpty) ...[
+                        // One line for what is happening and why, so that a
+                        // notice says both without taking another line of a
+                        // narrow screen.
+                        if (detailWidget != null ||
+                            (detail != null && detail!.isNotEmpty)) ...[
                           const SizedBox(height: 2),
-                          Text(
-                            detail!,
-                            maxLines: detailLines,
-                            overflow: TextOverflow.ellipsis,
-                            style: HarnessText.caption(context),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              // The stage keeps its line and its age, and gives
+                              // way only to what is beside it: it is the part
+                              // that changes while a person waits.
+                              if (detailWidget != null)
+                                Flexible(
+                                  flex: 2,
+                                  fit: FlexFit.loose,
+                                  child: detailWidget!,
+                                ),
+                              if (detailWidget != null &&
+                                  detail != null &&
+                                  detail!.isNotEmpty)
+                                const SizedBox(width: 6),
+                              if (detail != null && detail!.isNotEmpty)
+                                Expanded(
+                                  child: Text(
+                                    detail!,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: HarnessText.caption(context),
+                                  ),
+                                ),
+                            ],
                           ),
                         ],
                       ],

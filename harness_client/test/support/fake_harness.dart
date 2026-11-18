@@ -537,6 +537,15 @@ class FakeHarness {
   /// How many of the next connections are silent from the start: the
   /// harness takes the connection and never answers on it.
   int silentConnects = 0;
+
+  /// How long each stage takes before it answers, as a harness reached over a
+  /// phone's network does: opening the socket, `initialize`, `authenticate`,
+  /// and every other request.  Zero by default, so a test that says nothing
+  /// of them answers as at once as before.
+  Duration connectDelay = Duration.zero;
+  Duration initializeDelay = Duration.zero;
+  Duration authenticateDelay = Duration.zero;
+  Duration answerDelay = Duration.zero;
   final methods = <String>{};
   final events = <String>{};
   bool authenticated = false;
@@ -629,6 +638,7 @@ class FakeHarness {
 
   Future<AcpTransport> Function(ConnectionTarget target, String token)
   get connector => (ConnectionTarget target, String token) async {
+    if (connectDelay > Duration.zero) await Future<void>.delayed(connectDelay);
     if (refuseConnects > 0) {
       refuseConnects--;
       throw Exception('Connection refused');
@@ -1683,6 +1693,9 @@ class FakeHarness {
   Future<void> _request(String method, JsonMap params, Object? id) async {
     try {
       if (method == 'initialize') {
+        if (initializeDelay > Duration.zero) {
+          await Future<void>.delayed(initializeDelay);
+        }
         final reduced = reducedBeforeAuth && token != null && !authenticated;
         final asked =
             asMap(
@@ -1702,6 +1715,9 @@ class FakeHarness {
         return;
       }
       if (signIn && method == 'authenticate') {
+        if (authenticateDelay > Duration.zero) {
+          await Future<void>.delayed(authenticateDelay);
+        }
         await _signIn(id, params);
         return;
       }
@@ -1731,6 +1747,7 @@ class FakeHarness {
         _respondError(id, -32601, 'Method not found: $method');
         return;
       }
+      if (answerDelay > Duration.zero) await Future<void>.delayed(answerDelay);
       if (beforeAnswer != null) await beforeAnswer!(method, params);
       if (method == 'session/list') {
         if (failSessionList) {
