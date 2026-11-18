@@ -8054,5 +8054,87 @@ C-c . presses its keys, and the board is as it was once it is answered."
       (with-current-buffer board
         (should-not (harness-ui-carry-position))))))
 
+;;;; A board of a big project over a socket
+
+(ert-deftest harness-ui-tasks-big-board-and-startup-fan-out-keep-the-connection ()
+  "A board of hundreds of tasks, refreshed from everywhere at once, sends one answer at a time.
+Connecting refreshes the sessions, opening the board refreshes them and
+asks for the tasks, the review count asks for every project's tasks,
+and events refresh the board again: on a project this size each answer
+is megabytes, and they all go out at the same moment.  A socket's
+writer holds a bounded backlog (`harness-process-send-max-bytes'), and
+the UI busy drawing the board does not read it, so the answers piled up
+past the bound and the harness closed the connection -- \"write backlog
+exceeded\" -- while it stayed healthy.  Now one listing is on the way
+at a time, and every view still gets its own whole answer."
+  (harness-ui-tasks-test-with
+    (let* ((harness-tasks-max-running 0)
+           (port (plist-get (harness-call 'acp/start :port 0) :port))
+           (address (format "127.0.0.1:%d" port))
+           (prompt (make-string 4000 ?x))
+           (n 300)
+           (outstanding 0)
+           (most 0)
+           (answered 0))
+      (unwind-protect
+          (progn
+            (dotimes (i n)
+              (harness-call 'task/submit default-directory (format "%d %s" i prompt)))
+            (harness-test-wait (lambda () (= n (length (harness-call 'task/list))))
+                               60 "the tasks submitted")
+            (harness-connect-remote address)
+            (harness-test-wait (lambda () (eq 'tcp (harness-acp-connection-kind harness-ui-connection)))
+                               10 "the socket")
+            ;; Count the big listings on their way to the socket together.
+            (let ((request (symbol-function 'harness-acp-request)))
+              (cl-letf (((symbol-function 'harness-acp-request)
+                         (lambda (conn method params)
+                           (if (member method harness-ui--bulk-methods)
+                               (let ((promise (funcall request conn method params)))
+                                 (setq most (max most (cl-incf outstanding)))
+                                 (harness-then promise
+                                               (lambda (v) (cl-decf outstanding) (cl-incf answered) v)
+                                               (lambda (e) (cl-decf outstanding)
+                                                 (signal (car-safe e) (cdr-safe e)))))
+                             (funcall request conn method params)))))
+                ;; The fan-out of a start: every view asks at once, as the
+                ;; connection's hooks and the board's do.
+                (with-current-buffer board
+                  (setq harness-ui-tasks--dir default-directory
+                        harness-ui-tasks--all nil
+                        harness-ui-tasks--loading t)
+                  (dolist (ask (list (lambda () (harness-ui-refresh-sessions))
+                                     (lambda () (harness-ui-tasks--fetch-review))
+                                     (lambda () (with-current-buffer board
+                                                  (harness-ui-tasks--fetch (current-buffer))))
+                                     (lambda () (harness-ui-tasks--fetch-review))
+                                     (lambda () (harness-ui-refresh-sessions))))
+                    (run-at-time 0 nil ask))
+                  (harness-test-wait
+                   (lambda ()
+                     (with-current-buffer board
+                       (and (not harness-ui-tasks--loading)
+                            (= n (length harness-ui-tasks--tasks)))))
+                   60 "the board of every task")
+                  (harness-test-wait (lambda () (zerop outstanding)) 30 "every answer"))))
+            ;; One listing on the way at a time, and every answer came whole.
+            (should (> answered 1))
+            (should (= 1 most))
+            (should (harness-acp-connected-p harness-ui-connection))
+            (should (eq 'open (process-status (harness-acp-connection-process
+                                               harness-ui-connection))))
+            (should (= n (length (harness-ui-user-sessions))))
+            (should (= n (length (harness-call 'task/list))))
+            ;; Nothing waits in the socket's writer: every answer went out.
+            (when-let* ((state (process-get (harness-acp-connection-process
+                                             harness-ui-connection)
+                                            'harness--async-send)))
+              (should (= 0 (harness--async-send-bytes state)))
+              (should (= 0 (harness--async-send-count state)))
+              (should-not (harness--async-send-queue state))))
+        (harness-call 'acp/stop)
+        (ignore-errors (harness-acp-close harness-ui-connection))
+        (setq harness-ui-connection-address nil)))))
+
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here
