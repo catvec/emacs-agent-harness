@@ -2039,8 +2039,8 @@ Return the session's chat buffer."
 (defun harness-media-shot-chat ()
   "The first picture: the board in the fullscreen layout, a task beside it.
 The task is in review after it was sent back once: its session shows
-the feedback, the work that answered it, its hand_in call folded, and
-the report it handed in again in the review banner."
+the feedback, the work that answered it, and its hand_in call open on
+the report it handed in again, the review of that round with it."
   (harness-media--fullscreen-layout :slow)
   (harness-media--capture "chat"))
 
@@ -4672,7 +4672,7 @@ pictures after."
       (harness-media--settle 0.5))))
 
 (defun harness-media-shot-review-banner ()
-  "The session of the task in review, its banner showing the changes: the files as a tree, the threads below.
+  "The session of the task in review, its hand_in call showing the changes: the files as a tree, the threads below.
 The work is looked over where it was handed in, with no click on
 [Review Changes]: the tree has the marks of the files already looked at
 and approved, the threads the user's comments and the agent's answers,
@@ -4699,16 +4699,16 @@ and [Verify] and [Send back] are under them."
     (harness-ui-patch-review--refresh review t)
     (harness-media--settle 1.5)
     (let ((window (get-buffer-window buffer)))
-      ;; The banner from its changes to the box, in a window as high as that.
+      ;; The review from its changes to the box, in a window as high as that.
       (with-current-buffer buffer
-        (goto-char harness-chat--transcript-end)
+        (goto-char (point-min))
         (re-search-forward "^[▾▸] Changes (")
         (beginning-of-line)
         (let ((lines (count-screen-lines (point) (point-max) nil window)))
           (set-frame-size nil harness-media-columns (min harness-media-lines (+ 4 lines)))))
       (harness-media--settle 1)
       (with-selected-window window
-        (goto-char harness-chat--transcript-end)
+        (goto-char (point-min))
         (re-search-forward "^[▾▸] Changes (")
         (beginning-of-line)
         (set-window-start window (point))

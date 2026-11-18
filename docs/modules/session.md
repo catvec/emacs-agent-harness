@@ -148,6 +148,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/internal-start` (&rest plist) — Start an internal session, the record of one model call; return its id.
 - `session/interrupted` — Return the sessions the start of this harness found cut short.
 - `session/list` (&optional filter) — Return session plists matching FILTER, newest first.
+- `session/media` (id) — Return what session ID can receive from a live camera or screen capture.
 - `session/messages` (id) — Return provider messages (:role :content BLOCKS) for the transcript of ID.
 - `session/messages-from` (id node-id) — Return the provider messages the nodes after NODE-ID add to a request.
 - `session/move` (id dir &rest options) — Move session ID to the working directory DIR, and to DIR's project.

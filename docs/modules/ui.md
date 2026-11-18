@@ -149,6 +149,7 @@ provides:
 - `session/set-all` ([session](session.md))
 - `session/update` ([session](session.md))
 - `task/get` ([tasks](tasks.md))
+- `task/list` ([tasks](tasks.md))
 - `task/set-all` ([tasks](tasks.md))
 - `tools/list` ([tools](tools.md))
 - `usage/live-all` ([usage](usage.md))

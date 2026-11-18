@@ -22,33 +22,31 @@ the session, from
              one; the board's item at point (`SPC`, through the
              shared `harness-ui-popout-at-point-functions`) on a
              card of any column;
-  the chat   the review banner's [Review Changes] button.
+  the chat   the hand_in call's [Review Changes] button.
 
 The button reads [Review Changes], to look the changes and the work
 over, not [Report], which reads as reporting the agent for something
 bad.
 
-Inside the task's session the report is not behind a button: while
-the task waits for review, the review banner shows it in full,
-expanded, between its heading and its buttons
-(`harness-ui-report-string`), and the hand_in call above the banner
-stays folded then, so the report is read once.
+Inside the task's session the report is not behind a button: the
+hand_in call of the round that waits for review opens expanded, and
+shows the report in full, between the review's heading and its buttons
+(`harness-ui-report-string`).  The call is the review: once the work is
+decided it folds, and its report is read when the reader opens it.
 
 The transcript's hand_in calls draw it too, each call its own round's
 report, expanded with the call.  What the review draws with a report
 -- the files and threads of its changes -- is added through
-`harness-ui-report-hand-in-functions`, so a hand_in call reads as the
-review banner does; the review module adds the one drawing both use
-(`harness-ui-review--hand-in`).  A fold in either draws where it is
-again: the call's buttons draw the call
-(`harness-ui-report--redraw-function`), the banner's draw the chat's
-tail, and a popout's draw the popout.
+`harness-ui-report-hand-in-functions`; the review module adds the one
+drawing both use (`harness-ui-review--hand-in-call`).  A fold draws
+where it is again: a call's buttons draw the call
+(`harness-ui-report--redraw-function`), and a popout's draw the popout.
 
 The report is drawn from the task record the harness holds: the board
 and the chat both pass the record they already have, and a popout
 follows `task/changed` so what it shows is current.  Once the task
 is verified or sent back its popout closes, wherever that was done --
-the board, the session's banner, turning review off, an agent: the
+the board, the hand_in call, turning review off, an agent: the
 review the report was opened for is over.  The report of a task
 decided before it opened, a done one, stays open.  A referenced tool
 call is the link it is, drawn as the chat draws calls: its title and
@@ -85,16 +83,16 @@ Dragging one, from either, drops its file into another application,
 a chat app or a browser, to pass the evidence on (harness-ui-drag.el).
 The popout opens before its images are drawn -- a line says each is
 loading -- because decoding a screenshot of a whole frame takes a
-moment (`harness-ui-image-load`).  The report a session's banner
+moment (`harness-ui-image-load`).  The report a session's hand_in call
 shows is drawn into a string, where nothing can draw later: its
 images are drawn with it.
 
 Other modules add to the popout as they add to a chat:
 `harness-ui-report-panel-functions` draws a panel at the end of the
 report and `harness-ui-report-compose-functions` gives it a compose
-box.  The review module puts the banner a task's session shows there,
-[Verify] and [Send back], with the box taking the feedback, so work
-can be accepted from its report.
+box.  The review module puts the review banner there, [Verify] and
+[Send back], with the box taking the feedback, so work can be accepted
+from its report.
 
 What cannot be drawn does not take the rest down.  A piece of evidence
 that fails says so in a line and the others draw; a report that fails

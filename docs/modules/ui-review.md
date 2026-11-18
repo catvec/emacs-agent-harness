@@ -12,59 +12,53 @@ Reviewing a task where it is looked at: its report in full in its session; verif
 
 ## About
 
-A task waiting for review shows a banner wherever its work is looked
-at: that the work is done and waits for the user, and the buttons that
-act on it -- [Verify], which accepts the work and merges its branch,
-[Send back], which sends it with the feedback in the box, and
-[Keep working], which takes it out of review into the working phase
-(`harness-tasks-working-phase`): the agent goes on with the task, the
-report kept for its next hand-in, and no feedback is recorded.  It is
-the board's Ready for review: the same mark and the same wording, so
-accepting work is one action wherever the user is.  One banner, one
-set of commands and keys, in two places:
+A task waiting for review says so where its work is read: in the
+hand_in call of its session's transcript, and in the banner at the end
+of its report popout.  It says that the work is done and waits for the
+user, and it has the buttons that act on it -- [Verify], which accepts
+the work and merges its branch, [Send back], which sends it with the
+feedback in the box, and [Keep working], which takes it out of review
+into the working phase (`harness-tasks-working-phase`): the agent goes
+on with the task, the report kept for its next hand-in, and no feedback
+is recorded.  It is the board's Ready for review: the same mark and the
+same wording, so accepting work is one action wherever the user is.
 
-  the session  above its compose box, a chat panel
-               (`harness-chat-panel-functions`), with [Review Changes] too,
-               which pops the report out;
-               in the session's own window, in a BTW over it, and in
-               a task's session opened from the board -- the width is
-               the window's;
-  the report   at the end of its report popout, after the evidence
-               (`harness-ui-report-panel-functions`), so the work is
-               accepted or sent back where it is read.
+The hand_in call is where the review is read.  While the report the
+call handed in is the one the task waits for review on -- the task
+names it by its `:call-id` -- the call opens expanded, and draws what
+the banner of the session drew: the mark, the task's title, the report
+in full, the changes and threads of the review, and the buttons with
+their keys, on the review's background.  Once the work is decided --
+verified, sent back, or taken back to work -- the call folds, and its
+report is read when the reader opens it; so does every earlier round's
+call, which draws its report and changes alone.  That is the chat's
+doing, on the word of `harness-ui-review--hand-in-open-p`
+(`harness-chat-hand-in-open-functions`): the review says which call is
+its own, and the chat folds or opens the calls to it.
 
-Inside the session the report is not behind a button either: it is
-shown in full and always expanded, between the heading and the
-buttons.  It is the one drawing of a hand-in
-(`harness-ui-review--hand-in`): the report, then the changes and
-threads of the review below it.  The hand_in calls in the transcript
-draw it too, through `harness-ui-report-hand-in-functions`, each its
-own report, with the same changes and threads, so a previous call
-reads as the current hand-in does; a fold in either draws both again.
-The hand_in call above the banner stays folded while it shows, its
-body that same report (`harness-chat-hand-in-fold-functions`): the
-work is read once, in the banner, and the call opens again when the
-banner goes.
-A round whose turn ended without `hand_in` has no report, only what
-the harness recorded for it (`harness-tasks--missing-report`): the
-banner says in a line that nothing was handed in, its last message
-being right above, and has no [Review Changes].
+A round whose turn ended without `hand_in` has no report and no call
+(`harness-tasks--missing-report`).  There is nothing in the transcript
+to hold its review, so the session's tail says it in a line -- the
+last message of the session is right above -- and offers the buttons
+there (`harness-ui-review--chat-panel`).  The report popout draws the
+banner too: it has no call of its own, and the work is accepted or
+sent back where it is read.
 
 What the task changed is not behind a button either.  Under the report
-the banner has what `harness-ui-review-changes-functions` draw for the
+the review has what `harness-ui-review-changes-functions` draw for the
 task, indented as its text: the review module puts the files its
 branch changes there, as a tree, and the threads of comments below it,
 so the work is looked over where it is handed in and then verified or
-sent back.  The banner draws again when what the changes are read from
--- the task's branch, what it was made from, its project -- changes.
+sent back.  It draws again when what the changes are read from -- the
+task's branch, what it was made from, its project -- changes.
 Changes or a report that cannot be drawn say so in one short line --
 whatever the error carries, a review holds the task's hand-in -- and
-the banner stays, its buttons with it; a chat panel that fails leaves
+the review stays, its buttons with it; a chat panel that fails leaves
 the others and the compose box (`harness-chat-panel-functions`), and a
-listener of the UI's events that fails leaves the banner hearing its
+listener of the UI's events that fails leaves the review hearing its
 task (`harness-ui-event-functions`).
 
-Under the banner the compose box writes the feedback that sends the
+Under the review the compose box writes the feedback that sends the
 task back: C-c C-c takes what the box holds to the task's session,
 which works on it again and comes back for review.  The session's box
 needs nothing of its own: the harness takes any message the user
@@ -80,22 +74,23 @@ send it looks like.  The report's box sends it back itself
 and there the review is loaded, so it can say there is nothing to
 send before sending.  Its keys,
 C-c C-v to verify, C-c C-x to send back and C-c C-g to keep working,
-are those of `harness-ui-review-minor-mode`, on only while the banner
-shows: the rest of the time the buffer's own keys stand, C-c C-v
-attaching the clipboard.  The banner disappears when the task leaves
+are those of `harness-ui-review-minor-mode`, on only while the task
+waits for review: the rest of the time the buffer's own keys stand,
+C-c C-v attaching the clipboard.  The review goes when the task leaves
 review, whoever moved it -- verified, sent back, taken back to work by
 its [Keep working], or put back at work by `task/force-review` -- and
-its keys with it.  A task put in review by hand, without `hand_in`
-(`task/force-review`, the board's [Put in review]), shows the banner
-with the report it handed in last, or says that none came if it
-handed none in.
+its keys with it: the call folds, and the banner at the end of the
+report goes.  A task put in review by hand, without `hand_in`
+(`task/force-review`, the board's [Put in review]), shows the review in
+the call of the report it handed in last, or says in its session that
+none came if it handed none in.
 
 ## Provides
 
 ### Hooks
 
 - `harness-chat-panel-functions`
-- `harness-ui-review-changes-functions` — Functions that draw the changes of a task under review in its banner.
+- `harness-ui-review-changes-functions` — Functions that draw the changes of a task under review with its hand-in.
 - `harness-ui-review-pending-functions` — Functions that say a review has something to send besides the box's words.
 - `harness-ui-review-pending-known-functions` — Functions that say whether a review's drafts are known to this Emacs.
 
@@ -123,9 +118,9 @@ handed none in.
 
 ### Hooks it adds to
 
-- `harness-chat-hand-in-fold-functions` → `harness-ui-review--hand-in-folded-p`
+- `harness-chat-hand-in-open-functions` → `harness-ui-review--hand-in-open-p`
 - `harness-chat-mode-hook` → `harness-ui-review--setup`
-- `harness-chat-panel-functions` → `harness-ui-review--panel`
+- `harness-chat-panel-functions` → `harness-ui-review--chat-panel`
 - `harness-ui-event-functions` → `harness-ui-review--on-event`
 - `harness-ui-report-compose-functions` → `harness-ui-review--report-compose`
 - `harness-ui-report-hand-in-functions` → `harness-ui-review--hand-in-call`

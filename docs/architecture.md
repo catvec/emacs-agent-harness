@@ -8601,8 +8601,8 @@ priority).
   task that has not started, stops a running turn or write-up),
   `task/delete ID &optional DELETE-SESSION` (keeps the worktree),
   `task/for-session SESSION-ID` (the task of a session, or nil, which
-  `hand_in` and the session's review banner use; the banner at the end
-  of a report popout has the task already) and
+  `hand_in` and the hand_in call of the session's review use; the banner
+  at the end of a report popout has the task already) and
   `task/hand-in ID REPORT` (record `:summary`, `:design`, `:evidence`
   and `:walkthrough` as the
   work ID handed in; the write-up tool's `:end-turn` ends its turn, which
@@ -8661,7 +8661,8 @@ priority).
   report, a missing one too (`harness-tasks--missing-recorded-p`):
   the reply it ends with is to that session.  The board's button for
   a missing report reads [No report], its popout says "Not handed
-  in", and the session's review banner says so in a line.
+  in", and the session's tail says so in a line, there being no call
+  to hold the review.
 - Events `task/changed TASK`, `task/deleted ID`, `task/review TASK` (its
   work waits for the user's review), `task/done TASK HOW` (it became
   done; HOW is `merged` when the merge queue merged its branch,
@@ -14219,7 +14220,7 @@ its own under `harness-state-directory/clips/` deduplicated by the
 SHA-1 of the bytes, which `M-y` goes back through and
 `C-u M-x harness-compose-attach-clipboard` picks from; `yank-media`
 attaches them too (`harness-compose-yank-media`).  The box binds no
-`C-c C-v`: in a chat that is the review banner's [Verify], so the two
+`C-c C-v`: in a chat that is the review's [Verify], so the two
 never fight, and other MIME types are chosen from with
 `M-x harness-compose-attach-clipboard`.
 Inline chips and tokens: an attachment gets a token in the text, where
@@ -14450,7 +14451,7 @@ harness: the box is only the composition it quotes into.
   message that is the host says: text it marks with a `compose-quote`
   property, a string, is quoted as that Markdown (a report's summary
   carries it, `harness-ui-report--insert-message`, into the chat's
-  review banner too), and elsewhere the buffer-local
+  hand_in call too), and elsewhere the buffer-local
   `compose-quote-function` returns it -- the chat's
   `harness-chat--quote-at-point` the response, plan or thinking point is
   on, else the nearest response or plan above point, so the last one
@@ -15217,8 +15218,9 @@ clicked.  `config/changed` brings every board the new values.  RET opens the ses
 directory the session works in; elsewhere a task's worktree belongs to
 the main checkout's board (`harness-files-main-root`).  A click on a
 card, or RET, opens its task's session in whatever column the task is:
-the session is where a task is handled.  Above its compose box a task in
-review has the review banner, a task waiting in the backlog its own, and
+the session is where a task is handled.  In its transcript a task in
+review has the review of its round, in the hand_in call it was handed in
+with, a task waiting in the backlog its own banner, and
 every other task's state is on the session's settings line, in the
 board's words, with the buttons that move it through the queue --
 [Start], [Pause] and [Resume] (`harness-ui-tasks--queue-items',
@@ -16760,7 +16762,7 @@ opens its file, its thread and its directory as it is written
 it cut (`change-review-ui--trimmed`): `TAB` goes one line, conversation,
 all of it when it did, one line again.
 `change-review-ui-thread-line` is the same thread as one row of a list.  The threads of the report, of
-the review banner and of the tree beside Ediff
+the review and of the tree beside Ediff
 (`change-review-ui-threads-string`, the body of the threads view as a
 string, and `change-review-ui-threads-heading`, the line with the
 filter's buttons), the threads view (`change-review-open-threads`, which
@@ -17021,7 +17023,7 @@ its buttons draw that buffer again, and an operation that changed the
 set draws every surface through the library's own refresh):
 
 - the report: the panel is on `harness-ui-report-panel-functions` at depth
-  -10, before the review banner, and returns the changes of a task in
+  -10, before the review's banner, and returns the changes of a task in
   review that has a branch, and nothing for any other task.  A task that
   left review can still show its changes: `harness-ui-patch-review-open`,
   on C-c C-d in a task's session or on a board card
@@ -17033,14 +17035,14 @@ set draws every surface through the library's own refresh):
   it is in; a report opened anew, a popout buffer it has not drawn in yet,
   reads the branch again (`harness-ui-patch-review--ensure-loaded`),
   unless it opens only for the box beside Ediff.
-- the review banner of the task's session: `ui-review` has a hook of its
+- the hand_in call of the task's session: `ui-review` has a hook of its
   own, `harness-ui-review-changes-functions`, called in the chat buffer on
-  every draw of the banner's tail with the task, whose strings go between
-  the report the task handed in and [Verify], indented as the banner's
-  text (a function that fails says so in a line and the banner stays);
-  the module's function (`harness-ui-patch-review--banner-panel`) draws
-  the changes of a task in review that has a branch, remembers the chat
-  buffer in the review (`banners`) and starts reading the branch if no
+  every draw of the review with the task, whose strings go between the
+  report the task handed in and [Verify], indented as the review's text
+  (a function that fails says so in a line and the review stays); the
+  module's function (`harness-ui-patch-review--chat-changes`) draws the
+  changes of a task in review that has a branch, remembers the chat
+  buffer in the review (`chats`) and starts reading the branch if no
   surface did.  `harness-ui-review--shown` includes the task's branch,
   base and project, so the tail draws again when what the changes are
   read from changes, not for any other change of the record.  The tail of
@@ -17075,9 +17077,9 @@ its older definition made wrong -- the slots after the new one are shifted
 by one, and the last ones lie past the end -- so the report failed with
 `args-out-of-range`, whose message printed the whole review (the task, its
 hand-in, the files with their patches); the panel's failure took the
-panels after it, the review banner with [Verify] and [Send back], out of
-the report; and the module's listener of `task/changed` and `task/review`,
-ahead of the review banner's own in `harness-ui-event-functions`, failed
+panels after it, the review with [Verify] and [Send back], out of the
+report; and the module's listener of `task/changed` and `task/review`,
+ahead of the review's own in `harness-ui-event-functions`, failed
 on the task's events and kept the banner from hearing the task was handed
 in.  A review therefore remembers, in a weak table beside it
 (`harness-ui-patch-review--made-with`, not in a slot, which a review of
@@ -17333,8 +17335,8 @@ beside Ediff
 the side windows go too (`ignore-window-parameters`).  Ediff starts in
 the frame of the window the review was started from, which git's
 answer may reach when another frame is the selected one: the report's,
-else the window of the review banner's chat.  q sets the configuration
-back.  The buffer the Ediff was started from, when it is a review banner
+else the window of the review's chat.  q sets the configuration
+back.  The buffer the Ediff was started from, when it is a hand_in call
 (`origin`), gets point on the row of the next file to review, in sight,
 and the report, drawn again meanwhile, gets its window start and point
 anew, since its markers in the configuration went with the text they

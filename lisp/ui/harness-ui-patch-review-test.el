@@ -468,7 +468,7 @@ Return the popout, its window selected."
 
 (ert-deftest harness-ui-patch-review-report-shows-the-changes ()
   "The report of a task in review with a branch shows its changes after the
-evidence, before the review banner: what is compared, a row per file.
+evidence, before the review: what is compared, a row per file.
 Nothing else does: the board has no button for them."
   (harness-ui-patch-review-test-with-task
     (let ((popout (harness-ui-patch-review-test--report board id)))
@@ -4135,25 +4135,25 @@ directory approves its files, and stops approving them when they all are."
       (with-current-buffer popout
         (should (eql 3 (cdr (harness-ui-patch-review--at-point))))))))
 
-;;;; In the review banner of the task's session
+;;;; In the hand_in call of the task's session
 
 (defun harness-ui-patch-review-test--banner (board id sid)
   "Give task ID its branch and open its session's chat; return the chat buffer.
-The chat is in the selected window, with the review banner showing the
-changes once the branch is read."
+The chat is in the selected window, the hand_in call of its round showing
+the changes once the branch is read."
   (harness-ui-patch-review-test--give-branch board id)
   (let ((chat (harness-ui-display-session sid)))
     (set-window-buffer (selected-window) chat)
     (harness-test-wait (lambda () (harness-ui-review--task sid)) 5 "the session's task")
-    ;; The hand_in call above the banner draws the changes too: wait for the
-    ;; banner's, which is the tail's.
-    (let ((tail (lambda ()
-                  (with-current-buffer chat
-                    (buffer-substring-no-properties harness-chat--transcript-end (point-max))))))
-      (harness-test-wait (lambda () (string-match-p "^▾ Changes (6)" (funcall tail)))
-                         5 "the banner to show the changes")
-      (harness-test-wait (lambda () (string-match-p "^    M  a\\.el" (funcall tail)))
-                         5 "the banner to show the first file"))
+    ;; The changes are drawn in the call of the round under review.
+    (let ((details (lambda ()
+                     (with-current-buffer chat
+                       (when-let* ((block (harness-ui-patch-review-test--hand-in-block chat)))
+                         (harness-ui-patch-review-test--block-details block))))))
+      (harness-test-wait (lambda () (string-match-p "^▾ Changes (6)" (or (funcall details) "")))
+                         5 "the call to show the changes")
+      (harness-test-wait (lambda () (string-match-p "^    M  a\\.el" (or (funcall details) "")))
+                         5 "the call to show the first file"))
     chat))
 
 (defun harness-ui-patch-review-test--hand-in-block (buffer)
@@ -4929,7 +4929,7 @@ sends it as the message the agent answers in the thread it starts."
         (should-not (plist-get (harness-call 'task/get id) :feedback))))))
 
 (ert-deftest harness-ui-patch-review-shows-the-changes-in-the-banner ()
-  "The review banner of the task's session shows the changes -- the tree and the
+  "The hand_in call of the task's session shows the changes -- the tree and the
 threads -- between the report and [Verify], with no click on [Review Changes]:
 its rows have the keys of the report's, and it follows what happens to the
 review, an approval or a thread."
@@ -4938,7 +4938,7 @@ review, an approval or a thread."
            (review (gethash id harness-ui-patch-review--reviews))
            (set (harness-ui-patch-review--r-set review))
            (text (harness-ui-patch-review-test--text chat)))
-      (should (memq chat (harness-ui-patch-review--r-banners review)))
+      (should (memq chat (harness-ui-patch-review--r-chats review)))
       (should (< (string-match "^Handed in" text)
                  (string-match "^▾ Changes (6)   0 of 6 files viewed, 6 left" text)
                  (string-match "^    M  a\\.el +\\+2 −2$" text)
@@ -4995,14 +4995,14 @@ review, an approval or a thread."
       (let ((task (with-current-buffer board (harness-ui-tasks--find id))))
         (setf (harness-ui-patch-review--r-task review) (plist-put (copy-sequence task) :state "active"))
         (harness-ui-patch-review--refresh review)
-        (should-not (harness-ui-patch-review--r-banners review))
+        (should-not (harness-ui-patch-review--r-chats review))
         (setf (harness-ui-patch-review--r-task review) task)
-        (cl-pushnew chat (harness-ui-patch-review--r-banners review)))
+        (cl-pushnew chat (harness-ui-patch-review--r-chats review)))
       ;; [Review Changes] still pops the report out, with the changes too.
       (let ((popout (progn (harness-ui-report-popout (with-current-buffer board (harness-ui-tasks--find id)))
                            (harness-ui-popout-buffer (list 'report id)))))
         (harness-ui-patch-review-test--wait-text popout "^▾ Changes (6)")
-        (should (memq chat (harness-ui-patch-review--r-banners review)))
+        (should (memq chat (harness-ui-patch-review--r-chats review)))
         (should (eq popout (harness-ui-patch-review--r-popout review)))))))
 
 (ert-deftest harness-ui-patch-review-shows-the-changes-in-the-hand-in-call ()
@@ -5063,9 +5063,9 @@ that is gone, on the line where it was, and the window shows it where it did."
           (should (eql 1 (cdr (harness-ui-patch-review--at-point))))
           (should (= line (count-screen-lines (window-start) (point)))))
         ;; On a comment of a thread: closing the thread takes it from the open ones,
-        ;; and point stays among the threads, not in the box.  The threads show
-        ;; in the hand_in call above too: the banner's copy is the tail's.
-        (goto-char (or harness-chat--transcript-end (point-min)))
+        ;; and point stays among the threads, not in the box.  The threads are
+        ;; the hand_in call's, which is where the review is.
+        (goto-char (harness-chat-block-start (harness-ui-patch-review-test--hand-in-block chat)))
         (re-search-forward "^    ┃      Why two\\?$")
         (should (< (point) harness-compose-start))
         (call-interactively (key-binding "x")))
@@ -5370,7 +5370,7 @@ as one of the review's own does."
   "An update of the harness reloads it with the reviews it holds, and one an older
 layout made is read wrong: the report that showed the changes failed with an
 `args-out-of-range' that printed the whole review, the task's hand-in with it,
-and the review banner with [Verify] and [Send back] went with it.  The new
+and the hand_in call with [Verify] and [Send back] went with it.  The new
 definitions drop the review, and the report and the banner, drawn again, make a
 new one: the changes, the threads and the buttons are there."
   (harness-ui-patch-review-test-with-task
@@ -5379,7 +5379,7 @@ new one: the changes, the threads and the buttons are there."
            (review (gethash id harness-ui-patch-review--reviews))
            (older (harness-ui-patch-review-test--older-review review)))
       (ignore popout)
-      (should (memq chat (harness-ui-patch-review--r-banners review)))
+      (should (memq chat (harness-ui-patch-review--r-chats review)))
       ;; The update: what the table holds is an older version's review.
       (puthash id older harness-ui-patch-review--reviews)
       (should (equal (list id) (harness-ui-patch-review--drop-stale-reviews)))
@@ -5400,19 +5400,26 @@ new one: the changes, the threads and the buttons are there."
         (should-not (string-search "could not be drawn" tail))
         (should (string-search "[Verify]  C-c C-v" tail))
         (should (string-search "[Review Changes]" tail)))
+      ;; A draw of the surfaces makes the review again, which is the one the
+      ;; call shows: the tail alone holds no report any more.
+      (remhash id harness-ui-patch-review--reviews)
+      (harness-ui-patch-review--redraw-surfaces id)
+      (harness-ui-patch-review-test--wait-text chat "^▾ Changes (6)")
+      (should-not (string-search "could not be drawn" (harness-ui-patch-review-test--text chat)))
       ;; A new review, of this layout, that the surfaces show.
       (let ((new (gethash id harness-ui-patch-review--reviews)))
         (should new)
         (should-not (eq new older))
         (should-not (harness-ui-patch-review--stale-p new))
-        (should (memq chat (harness-ui-patch-review--r-banners new)))))))
+        (should (memq chat (harness-ui-patch-review--r-chats new)))))))
 
 (ert-deftest harness-ui-patch-review-draws-over-a-stale-review-that-got-in ()
   "A review of an older layout that is in the table when the report draws -- the
 load that should have dropped it did not run, or ran too early -- does not fail
 the report: it is dropped as the report asks for it, and the changes are made
-anew.  The banner of the session and an event about the task too: a listener
-that signalled on it would keep the others from hearing the task's events."
+anew.  The hand_in call of the session and an event about the task too: a
+listener that signalled on it would keep the others from hearing the task's
+events."
   (harness-ui-patch-review-test-with-task
     (let* ((popout (harness-ui-patch-review-test--changes board id))
            (chat (harness-ui-patch-review-test--banner board id sid))
@@ -5431,11 +5438,12 @@ that signalled on it would keep the others from hearing the task's events."
         (should-not (string-search "Could not draw" text))
         (should (string-search "[Verify]" text)))
       (should-not (harness-ui-patch-review--stale-p (gethash id harness-ui-patch-review--reviews)))
-      ;; And the banner.
+      ;; And the hand_in call, which is where the session draws the review.
       (puthash id (harness-ui-patch-review-test--older-review
                    (gethash id harness-ui-patch-review--reviews))
                harness-ui-patch-review--reviews)
-      (with-current-buffer chat (funcall harness-compose-redraw-function))
+      (with-current-buffer chat
+        (harness-ui-patch-review--redraw-chat-with-hand-ins (current-buffer)))
       (harness-ui-patch-review-test--wait-text chat "^▾ Changes (6)")
       (should-not (string-search "could not be drawn" (harness-ui-patch-review-test--text chat)))
       (should-not (harness-ui-patch-review--stale-p (gethash id harness-ui-patch-review--reviews))))))

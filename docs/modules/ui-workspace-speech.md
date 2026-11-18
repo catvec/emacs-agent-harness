@@ -33,10 +33,10 @@ The lines, and nothing else:
   Solo · Kitchen renovation              [Leave solo]
 
 They are nouns and adjectives, as this repository's interface copy
-is; the tooltips say what a control does in the same shape.  A thread
-the user may not see is not named: the harness answers the floor for
-this client, and a thread that is not in it is not in the panel
-either.
+is, and so are the tooltips: `Speech · solo`, not a sentence about
+soloing.  A thread the user may not see is not named: the harness
+answers the floor for this client, and a thread that is not in it is
+not in the panel either.
 
 The speaker.  Playing the floor is the existing voice path, not a
 second one: the words are synthesized by `speech/synthesize` over ACP

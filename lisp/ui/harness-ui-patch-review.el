@@ -3,7 +3,7 @@
 ;;; Commentary:
 
 ;; A task waiting for review is a patch waiting for its reviewer.  This
-;; module puts the patch in the review: in the review banner of the task's
+;; module puts the patch in the review: in the hand_in call of the task's
 ;; session, where its work is handed in, and in its report (the popout
 ;; [Review Changes] opens on the board and in the session), and reviews it
 ;; file by file in Ediff, with the comments made on it kept as threads.
@@ -19,7 +19,7 @@
 ;; (THE LAST CLOSE).
 ;; The compose view's threads have the buttons their headers have
 ;; elsewhere, and the keys and the line over them do the same; the review
-;; banner leaves its copy of them out while they show there.
+;; leaves its copy of them out while they show there.
 ;; [Diff] rereads the worktree's current HEAD on each click while the task
 ;; works; historical source links stay at the commit they name.  These
 ;; live views are local, not new hand-ins or baselines for the last review.
@@ -46,15 +46,13 @@
 ;;                conversation;
 ;;   authors      the user, by name; the agent, by session and tool call.
 ;;
-;; THE CHANGES, drawn the same on four surfaces: in the review banner of
+;; THE CHANGES, drawn the same on three surfaces: in the hand_in call of
 ;; the task's session, between the report the agent handed in and
 ;; [Verify], so the work is looked over where it is handed in, with no
-;; click on [Review Changes] (the banner asks for them through
-;; `harness-ui-review-changes-functions'); in a hand_in call in the
-;; transcript, under that round's report, the same hand-in the banner
-;; draws (`harness-ui-report-hand-in-functions'), with the folds and the
-;; threads working there too; in the report, under the evidence, above
-;; the review banner and its box; and in the column beside Ediff (below).
+;; click on [Review Changes] (the call asks for them through
+;; `harness-ui-review-changes-functions', as the review draws them); in
+;; the report, under the evidence, above the review banner and its box;
+;; and in the column beside Ediff (below).
 ;; What the task's branch changes against its merge base with the branch
 ;; it was made from -- what merging it brings in, not what that branch
 ;; did since -- or the diff the reviewer chooses instead (see THE DIFF
@@ -84,7 +82,7 @@
 ;;   directories the files group under the directories that hold them,
 ;;               with how many files each holds and the lines they add
 ;;               and delete, as a file tree shows them.  They start
-;;               folded in the report and the banner -- not in the narrow
+;;               folded in the report and the call -- not in the narrow
 ;;               tree beside Ediff -- for each round of the review, so a
 ;;               review of many directories is a line each; a directory
 ;;               holding a file the user commented on, or has a draft on,
@@ -125,7 +123,7 @@
 ;;               the card stays in it until it is sent.
 ;;
 ;; The folds are the review's, for the task and the round: a report or a
-;; banner drawn again, and the tree beside Ediff, keep what the reader
+;; hand_in call drawn again, and the tree beside Ediff, keep what the reader
 ;; opened or folded, and the round after starts from the defaults, where
 ;; the comments and drafts of the user have opened what they wrote in.
 ;;
@@ -181,7 +179,7 @@
 ;;   Ediff       the file at the merge base against the file on the
 ;;               branch, in the frame of the report or the session, the
 ;;               report small at the bottom of it with its feedback box
-;;               (opened for it from the banner, closed with the Ediff),
+;;               (opened for it from the call, closed with the Ediff),
 ;;               and on the left a column of two panes, one above the
 ;;               other, as if one buffer were split in two
 ;;               (`harness-ui-patch-review-ediff-tree',
@@ -452,12 +450,12 @@
 ;; (`harness-ui-patch-review--layout'), and loading this file drops every
 ;; one made under another layout, a version that kept none included
 ;; (`harness-ui-patch-review--drop-stale-reviews'); the report and the
-;; banner that showed it are drawn again once the module starts, which
+;; call that showed it are drawn again once the module starts, which
 ;; makes the review again, from the threads and the files viewed the
 ;; harness keeps and from the branch.  Changes that cannot be drawn for
 ;; any other reason say so in one short line with a [Try again] button,
 ;; which makes the review again, and the rest of the report -- [Verify]
-;; and [Send back] -- and of the banner is drawn all the same.
+;; and [Send back] -- and of the call is drawn all the same.
 ;;
 ;; A LINK TO A THREAD.  An agent that answers a thread, or points at one,
 ;; writes a link to it (harness:thread/ID, lisp/harness-links.el), and a
@@ -472,7 +470,7 @@
 ;;
 ;; From a task's session history -- or a board card -- C-c C-d opens the
 ;; report with the changes, even after the task left review, when it shows
-;; them without the review banner (`harness-ui-patch-review-mode').  C-u
+;; them without the review (`harness-ui-patch-review-mode').  C-u
 ;; C-c C-d asks which diff to open it at, as d does in the report.
 ;;
 ;; Git runs here, in the Emacs that shows the UI, in the task's
@@ -480,10 +478,10 @@
 ;; machine, so not for a harness on another one.
 ;;
 ;; The module draws in the report through the hook the report has for
-;; panels (`harness-ui-report-panel-functions'), in the banner through
+;; panels (`harness-ui-report-panel-functions'), in the session through
 ;; the review's own (`harness-ui-review-changes-functions'), and leaves
 ;; sending to the review's box.  Disabled (`harness-disabled-modules'),
-;; it takes its part of the report and the banner out.
+;; it takes its part of the report and the review out.
 
 ;;; Code:
 
@@ -548,6 +546,7 @@
 (defvar evil-local-mode)
 (defvar window-restore-killed-buffer-windows)
 (declare-function change-review-ui--overlay-selection "change-review-ui" ())
+(declare-function harness-chat-refresh-hand-ins "harness-ui-chat" (&optional open-only))
 (declare-function ediff-buffers "ediff" (buffer-a buffer-b &optional startup-hooks job-name))
 (declare-function ediff-setup-windows-plain "ediff-wind" (buffer-a buffer-b buffer-c control-buffer))
 (declare-function ediff-really-quit "ediff-util" (reverse-default-keep-variants))
@@ -600,7 +599,7 @@ shows, as the whole frame is Ediff's then."
 
 (defcustom harness-ui-patch-review-closed-threads nil
   "Whether the threads below the files start by showing the closed ones too.
-The threads of the changes -- in the report, in the review banner and in
+The threads of the changes -- in the report, in the hand_in call and in
 the column beside Ediff -- show the open ones at first; the closed ones,
 the good ending, only count in the file's row until the filter's buttons
 show them.  Non-nil starts each of them on all the threads.  The
@@ -745,8 +744,8 @@ task's worktree has changes not committed.  LOADING is non-nil while the
 branch is read, ERROR what the last reading failed with.  STARTED is
 non-nil once the review asked for the branch and the threads, LOADED-AT
 when the branch was last read.  The changes show on SURFACES: POPOUT is
-the report they show in, BANNERS the chat buffers whose review banner
-shows them, TREE-BUFFER the tree beside Ediff.  ORIGIN is the buffer an
+the report they show in, CHATS the chat buffers whose hand_in call draws
+them, TREE-BUFFER the tree beside Ediff.  ORIGIN is the buffer an
 Ediff was started from, where point goes back to when it ends.  EDIFF is
 the comparison under way: a plist of :index, the buffers :a, :b and
 :control, the :windows to give back as it ends, the first line :start
@@ -776,7 +775,7 @@ about its code, which the branch has gone past."
   (folded (make-hash-table :test 'equal))
   fold-round
   show dirty loading error started
-  popout banners tree-buffer origin ediff gone
+  popout chats tree-buffer origin ediff gone
   (snapshots (make-hash-table :test 'equal))
   snapshot)
 
@@ -904,7 +903,7 @@ from the repository."
 ;; another, or past its end, "args out of range" -- and every draw of the
 ;; review, every event about its task, runs into it: the report fails to
 ;; draw, and a listener that fails keeps the ones after it from hearing
-;; what the task did, the review banner's among them.  So a review keeps
+;; what the task did, the review's own among them.  So a review keeps
 ;; the layout of the structs it is made of as it was made, and a load drops
 ;; every review made under another, whichever version it came from: one
 ;; made by a version that did not keep this has nothing to say for it, and
@@ -1306,8 +1305,8 @@ come with them."
      (lambda (err)
        (message "Could not read the threads of the review: %s" (harness-error-message err))))))
 
-;; The threads of a set drawn in a surface -- the report, the banner, the
-;; tree beside Ediff -- are a view of the set like the library's own
+;; The threads of a set drawn in a surface -- the report, the hand_in
+;; call, the tree beside Ediff -- are a view of the set like the library's own
 ;; (`change-review-ui--redraw-function' of the surface's buffer), so an
 ;; operation that changed the set draws them again through the library
 ;; (`change-review-changed-functions').
@@ -2088,27 +2087,27 @@ Ediff, which shows the feedback box, goes on showing it."
 
 (defun harness-ui-patch-review--refresh (review &optional now)
   "Draw again every surface the changes of REVIEW show on that is open.
-That is the report, the review banners of the task's session and the
-tree beside Ediff.  Not while one draws: what it draws is current then.
-The banners are drawn once however often this is asked for, a moment
-later, as the tail of a chat is long to draw; at once with NOW."
+That is the report, the hand_in call of the task's session and the tree
+beside Ediff.  Not while one draws: what it draws is current then.  The
+chats are drawn once however often this is asked for, a moment later, as
+the report a call holds is long to draw; at once with NOW."
   (unless harness-ui-patch-review--drawing
     (harness-ui-patch-review--refresh-popout review)
     (harness-ui-patch-review--draw-tree review)
-    ;; A task that left review has no banner to draw: its chats forget it.
-    (setf (harness-ui-patch-review--r-banners review)
+    ;; A task that left review has no call to draw: its chats forget it.
+    (setf (harness-ui-patch-review--r-chats review)
           (and (harness-ui-patch-review--reviewing-p (harness-ui-patch-review--r-task review))
-               (cl-remove-if-not #'buffer-live-p (harness-ui-patch-review--r-banners review))))
-    (when (harness-ui-patch-review--r-banners review)
+               (cl-remove-if-not #'buffer-live-p (harness-ui-patch-review--r-chats review))))
+    (when (harness-ui-patch-review--r-chats review)
       (if now
-          (harness-ui-patch-review--redraw-banners review)
+          (harness-ui-patch-review--redraw-chats review)
         (harness-debounce (list 'harness-ui-patch-review-banner (harness-ui-patch-review--r-id review))
-                          0.05 #'harness-ui-patch-review--redraw-banners review)))))
+                          0.05 #'harness-ui-patch-review--redraw-chats review)))))
 
-(defun harness-ui-patch-review--redraw-banners (review)
-  "Draw the review banners of REVIEW's task again, in the chats that show them."
+(defun harness-ui-patch-review--redraw-chats (review)
+  "Draw the hand_in calls of REVIEW's task again, in the chats that show them."
   (when (eq review (gethash (harness-ui-patch-review--r-id review) harness-ui-patch-review--reviews))
-    (dolist (buffer (harness-ui-patch-review--r-banners review))
+    (dolist (buffer (harness-ui-patch-review--r-chats review))
       (when (buffer-live-p buffer)
         (harness-ui-patch-review--redraw-chat-with-hand-ins buffer)))))
 
@@ -3025,7 +3024,7 @@ snapshot's is the review's own."
 ;;;; The changes in the report
 
 ;; The changes are drawn the same on every surface -- the report, the
-;; review banner of the task's session, the tree beside Ediff -- as a
+;; hand_in call of the task's session, the tree beside Ediff -- as a
 ;; string of rows that carry their keys as text properties.  The buffer of
 ;; a surface is a view of the review's set, as the library's own views
 ;; are (`change-review-ui--set', `change-review-ui--redraw-function'): the
@@ -3781,7 +3780,7 @@ line that hides them.  Every thread has its buttons, as the report's
 do, and the view says how many replies wait in one line with the way to
 send them.  TRAILING, a string, ends the heading line: the chat puts
 its [Compose] button there.
-The report and the banner start the threads of each file and each thread
+The report and the call start the threads of each file and each thread
 folded for the round, but where the user commented (`--file-folded-p',
 `--thread-fold'); COMPACT, the tree beside Ediff, and ALWAYS-OPEN draw
 them as they were."
@@ -4272,7 +4271,7 @@ A folded directory shows its own row alone."
 
 (defun harness-ui-patch-review--review-here ()
   "Return the review of the changes at point, or nil.
-In a surface of the changes -- the report, the review banner of a task's
+In a surface of the changes -- the report, the hand_in call of a task's
 session, the tree beside Ediff -- from any row of them, and anywhere in
 the report or the session of the task."
   (or (car (harness-ui-patch-review--at-point))
@@ -4312,8 +4311,8 @@ the report and in a version."
 
 (defun harness-ui-patch-review-threads (&optional filter)
   "Go to the threads of the review at point: below its files.
-In the report of a task's changes and in its session's review banner,
-point goes to the heading of the threads in the same buffer.  From Ediff,
+In the report of a task's changes and in its session's review, point
+goes to the heading of the threads in the same buffer.  From Ediff,
 in the control panel or in either version, the threads show in the column
 beside it, in a pane below the tree of the files
 \(`harness-ui-patch-review-ediff-tree' shows that column; the pane is the
@@ -4403,8 +4402,8 @@ Return non-nil when one was folded."
 
 (defun harness-ui-patch-review-toggle-directory ()
   "Fold the directory of the row at point, or unfold it.
-Its files go from the changes, and come back, in the report, the review
-banner and the tree beside Ediff alike."
+Its files go from the changes, and come back, in the report, the
+hand_in call and the tree beside Ediff alike."
   (interactive)
   (pcase-let ((`(,review . ,path) (or (harness-ui-patch-review--dir-at-point)
                                       (user-error "No directory on this line"))))
@@ -4672,7 +4671,8 @@ away, and what is folded still says how far through them the reader is."
                       "")
                     " " (harness-ui-patch-review--threads-button))
           "")))
-     'harness-ui-patch-review-task (harness-ui-patch-review--r-id review))
+     'harness-ui-patch-review-task (harness-ui-patch-review--r-id review)
+     'harness-ui-patch-review-heading (harness-ui-patch-review--r-id review))
      harness-ui-patch-review--common-map)))
 
 (defun harness-ui-patch-review--to-review-button (count)
@@ -5167,7 +5167,7 @@ the buffer again; a change of the set draws it too
               change-review-ui--redraw-function redraw
               change-review-ui-read-hint-function #'harness-ui-patch-review--read-hint)
   ;; C-c > replies to the comment at point or in the region, wherever the
-  ;; review draws its threads: the report, the banner, the threads view.
+  ;; review draws its threads: the report, the call, the threads view.
   ;; It comes before the view's own target, so a comment wins over the
   ;; message or report it is drawn in.
   (setq-local harness-quote-target-functions
@@ -5197,7 +5197,9 @@ the buffer again; a change of the set draws it too
   "Draw again what shows the changes of task ID: its report and its chats.
 For the surfaces of a review the next draw makes again, as one dropped
 for being stale (`harness-ui-patch-review--known') or one that failed
-to draw."
+to draw.  A chat shows them in the hand_in call of its round, which is
+drawn again with the tail, so the review the draw makes is the one the
+call holds."
   (let ((key (list 'report id)))
     (when (harness-ui-popout-buffer key)
       (harness-ui-popout-refresh key)))
@@ -5208,7 +5210,9 @@ to draw."
                    (bound-and-true-p harness-ui-session-id)
                    (functionp harness-compose-redraw-function)
                    (equal id (plist-get (harness-ui-review--task harness-ui-session-id) :id)))
-          (funcall harness-compose-redraw-function))))))
+          ;; The calls and the tail, as any draw of the changes: the call the
+          ;; task waits for review on is the one that makes the review again.
+          (harness-ui-patch-review--redraw-chat-with-hand-ins (current-buffer)))))))
 
 (defun harness-ui-patch-review--try-again (id)
   "Make the review of task ID again, from the branch and the harness, and draw it.
@@ -5291,16 +5295,16 @@ drawn say so in a line, and the report goes on."
              review (lambda () (harness-ui-patch-review--refresh-popout review)))
             (harness-ui-patch-review--section review (harness-ui-patch-review--counts review))))))))
 
-(defun harness-ui-patch-review--banner-panel (task)
-  "Return the changes of TASK for the review banner of its session.
+(defun harness-ui-patch-review--chat-changes (task)
+  "Return the changes of TASK for the review in its session.
 On `harness-ui-review-changes-functions', called in the chat buffer on
-every draw of its tail while TASK waits for review: the tree and the
-threads, so the work is looked over where it is handed in, without
-opening the report.  The threads are left out while the chat shows them
-in place of its compose box, so they are in one place.  Nil for a task
-with no branch of its own; for one
-whose repository is not on this machine, a line saying so.  Changes
-that cannot be drawn say so in a line, and the banner goes on."
+every draw of the review -- the hand_in call of the round TASK waits for
+review on -- while it waits: the tree and the threads, so the work is
+looked over where it is handed in, without opening the report.  The
+threads are left out while the chat shows them in place of its compose
+box, so they are in one place.  Nil for a task with no branch of its
+own; for one whose repository is not on this machine, a line saying so.
+Changes that cannot be drawn say so in a line, and the review goes on."
   (harness-ui-patch-review--drawing-safely task
     (when (and harness-ui-patch-review--active
                (derived-mode-p 'harness-chat-mode)
@@ -5310,7 +5314,7 @@ that cannot be drawn say so in a line, and the banner goes on."
           (harness-ui-patch-review--unavailable task)
         (let ((review (harness-ui-patch-review--review-for task))
               (harness-ui-patch-review--drawing t))
-          (cl-pushnew (current-buffer) (harness-ui-patch-review--r-banners review))
+          (cl-pushnew (current-buffer) (harness-ui-patch-review--r-chats review))
           (harness-ui-patch-review--ensure-loaded review)
           (harness-ui-patch-review--view
            review (lambda ()
@@ -5322,14 +5326,48 @@ that cannot be drawn say so in a line, and the banner goes on."
 
 ;;;;; Keeping the reader's place in a chat
 
+(defconst harness-ui-patch-review--section-property 'harness-ui-patch-review-heading
+  "What marks the heading of the changes with the task they are of.
+One per section: a buffer shows the changes once, and a chat draws them in
+the hand_in call of each round that has some, the heading of each on its
+first line.")
+
+(defun harness-ui-patch-review--section-starts ()
+  "Return where the sections of the changes in this buffer start, in order.
+A section starts at its heading, the line that carries
+`harness-ui-patch-review--section-property': a buffer shows one, and a chat
+draws one in the hand_in call of each round that has changes to show."
+  (save-excursion
+    (goto-char (point-min))
+    (let (starts)
+      (while (< (point) (point-max))
+        (when (get-text-property (point) harness-ui-patch-review--section-property)
+          (push (harness-ui-patch-review--run-start
+                 (point) harness-ui-patch-review--section-property)
+                starts))
+        (goto-char (or (next-single-property-change
+                        (point) harness-ui-patch-review--section-property nil (point-max))
+                       (point-max))))
+      (nreverse starts))))
+
 (defun harness-ui-patch-review--section-start ()
-  "Return where the changes can start in this buffer.
-In a chat that is the end of the transcript, the tail being where the
-review banner draws them; else the start of the buffer."
-  (if (and (derived-mode-p 'harness-chat-mode) (boundp 'harness-chat--transcript-end)
-           (markerp harness-chat--transcript-end) (marker-position harness-chat--transcript-end))
-      (marker-position harness-chat--transcript-end)
-    (point-min)))
+  "Return where the changes at point start in this buffer, or nil.
+A chat draws them in the hand_in call of a round, and an earlier call may
+draw its own: it is the section point is on, the last one above it, and
+the last of them when point is past them all, the newest round being at
+the end of the transcript.  Elsewhere -- the report, the tree beside
+Ediff, the threads -- the buffer is one view of the changes, and they
+start at its start."
+  (if (not (and (derived-mode-p 'harness-chat-mode)
+                (boundp 'harness-chat--transcript-end)))
+      (point-min)
+    (let ((starts (harness-ui-patch-review--section-starts))
+          (here (line-beginning-position)))
+      (or (car (last (cl-remove-if (lambda (start) (> start here)) starts)))
+          (car starts)
+          (and (markerp harness-chat--transcript-end)
+               (marker-position harness-chat--transcript-end))
+          (point-min)))))
 
 (defun harness-ui-patch-review--find-property (property value start)
   "Return where text with PROPERTY equal to VALUE first starts after START, or nil."
@@ -5354,20 +5392,21 @@ review banner draws them; else the start of the buffer."
 
 (defun harness-ui-patch-review--anchor-at (pos)
   "Return where POS is in the changes, to find it again after a redraw, or nil.
-It is (PROPERTY VALUE LINES COLUMN ID OFFSET): the comment, thread, file,
-directory or heading of the threads the line of POS is on, how many
-lines under its start POS is, and the column; and, for when what it
-names is gone from the redraw (a thread closed under a filter that hides
-closed ones), the id of the task whose changes these are and how many
-lines POS is under their first line.  Nil when POS is not on a row of
-the changes."
+It is (PROPERTY VALUE LINES COLUMN ID OFFSET SECTION): the comment,
+thread, file, directory or heading of the threads the line of POS is on,
+how many lines under its start POS is, and the column; and, for when
+what it names is gone from the redraw (a thread closed under a filter
+that hides closed ones), the id of the task whose changes these are, how
+many lines POS is under their first line, and which section of them in
+the buffer they are -- a chat draws them in the hand_in call of each
+round that has changes to show.  Nil when POS is not on a row of the
+changes."
   (save-excursion
     (goto-char pos)
     (let* ((bol (line-beginning-position))
            (column (current-column))
            (id (get-text-property bol 'harness-ui-patch-review-task))
-           (base (and id (harness-ui-patch-review--find-property
-                          'harness-ui-patch-review-task id (harness-ui-patch-review--section-start)))))
+           (base (and id (harness-ui-patch-review--section-start))))
       (when (and id base)
         (let ((offset (- (line-number-at-pos bol) (line-number-at-pos base))))
           (or (cl-loop for property in harness-ui-patch-review--anchor-properties
@@ -5376,8 +5415,26 @@ the changes."
                        return (list property value
                                     (- (line-number-at-pos bol)
                                        (line-number-at-pos (harness-ui-patch-review--run-start bol property)))
-                                    column id offset))
-              (list nil nil 0 column id offset)))))))
+                                    column id offset
+                                    (harness-ui-patch-review--section-index base id)))
+              (list nil nil 0 column id offset
+                    (harness-ui-patch-review--section-index base id))))))))
+
+(defun harness-ui-patch-review--sections (id)
+  "Return where the changes of task ID start in this buffer, in the order drawn.
+A chat draws the changes of a task in the hand_in call of each round that
+has some, so there may be more than one; another buffer draws them once."
+  (cl-remove-if-not
+   (lambda (start)
+     (equal (get-text-property start harness-ui-patch-review--section-property) id))
+   (harness-ui-patch-review--section-starts)))
+
+(defun harness-ui-patch-review--section-index (base id)
+  "Return which of the changes of task ID in this buffer BASE is.
+The first is 0, and each round's own after it."
+  (let ((starts (harness-ui-patch-review--sections id)))
+    (or (cl-position base starts)
+        (1- (cl-count-if (lambda (start) (< start base)) starts)))))
 
 (defun harness-ui-patch-review--goto-anchor (anchor)
   "Put point where ANCHOR, from `harness-ui-patch-review--anchor-at', says.
@@ -5385,10 +5442,11 @@ On the very row, comment or thread when it is still drawn; else on the
 same line under the first line of the changes, which is the next row
 when one went (a thread closed), and the last line of them at the most.
 Return the position, or nil when the changes are not drawn at all."
-  (pcase-let ((`(,property ,value ,lines ,column ,id ,offset) anchor))
-    (let ((found (and property
-                      (harness-ui-patch-review--find-property
-                       property value (harness-ui-patch-review--section-start)))))
+  (pcase-let ((`(,property ,value ,lines ,column ,id ,offset ,index) anchor))
+    (let* ((base (and id (or (nth index (harness-ui-patch-review--sections id))
+                             (harness-ui-patch-review--section-start))))
+           (found (and property
+                       (harness-ui-patch-review--find-property property value base))))
       (if found
           (progn (goto-char found)
                  (forward-line lines)
@@ -5402,9 +5460,7 @@ Return the position, or nil when the changes are not drawn at all."
                      (forward-line 1)))
                  (move-to-column column)
                  (point))
-        (when-let* ((base (and id (harness-ui-patch-review--find-property
-                                   'harness-ui-patch-review-task id
-                                   (harness-ui-patch-review--section-start)))))
+        (when base
           (goto-char base)
           (forward-line offset)
           ;; Not past the changes: back to the last line that has them.
@@ -5450,16 +5506,32 @@ window."
                 (recenter line)))))))))
 
 (defun harness-ui-patch-review--redraw-chat-with-hand-ins (buffer)
-  "Draw chat BUFFER's tail and the hand_in calls in its transcript again.
-A hand_in call in the transcript draws the same changes and threads as
-the review banner.  A fold, an approval or a comment in either shows in
-both, so both are drawn again; the reader keeps their place in the tail
-\(`harness-ui-patch-review--redraw-chat')."
+  "Draw the hand_in calls of chat BUFFER again, and its tail.
+A hand_in call in the transcript draws the changes and the threads of
+the task's review.  A fold, an approval or a comment shows in it, so it
+is drawn again; the reader keeps their place in it, on the row or the
+thread they were on, or on the line where it was when that went
+\(`harness-ui-patch-review--anchor-at').  The tail is drawn again too,
+for the threads view and the box."
   (harness-ui-patch-review--redraw-chat buffer)
   (when (and (buffer-live-p buffer)
              (fboundp 'harness-chat-refresh-hand-ins))
     (with-current-buffer buffer
-      (harness-chat-refresh-hand-ins))))
+      (let* ((window (or (and (eq (window-buffer (selected-window)) buffer) (selected-window))
+                         (car (get-buffer-window-list buffer nil t))))
+             (pos (and window (if (eq window (selected-window)) (point) (window-point window))))
+             (anchor (and pos (harness-ui-patch-review--anchor-at pos)))
+             (line (and anchor (harness-ui-patch-review--screen-line window pos))))
+        ;; The calls the reader has open are the ones whose body shows; a
+        ;; folded call is drawn again when it opens.
+        (harness-chat-refresh-hand-ins t)
+        (when (and anchor (window-live-p window) (eq (window-buffer window) buffer))
+          (when-let* ((found (save-excursion (harness-ui-patch-review--goto-anchor anchor))))
+            (if (eq window (selected-window))
+                (goto-char found)
+              (set-window-point window found))
+            (with-selected-window window
+              (recenter line))))))))
 
 (defun harness-ui-patch-review--string-shows-media-p (text id)
   "Non-nil when the overlay string TEXT shows media ID."
@@ -6742,20 +6814,20 @@ The threads below the tree go and come with it, one column."
                      (change-review-file-old-mode file) (change-review-file-new-mode file)))))))
 
 (defun harness-ui-patch-review--note-origin (review)
-  "Note the buffer an Ediff of REVIEW is started from, when it is a banner.
+  "Note the buffer an Ediff of REVIEW is started from, when it is a chat.
 That is where point goes back to when Ediff ends; from the report, the
 tree beside Ediff or anywhere else it is the report.  Not while an Ediff
 is under way: it began where it began."
   (unless (harness-ui-patch-review--r-ediff review)
     (setf (harness-ui-patch-review--r-origin review)
-          (and (memq (current-buffer) (harness-ui-patch-review--r-banners review))
+          (and (memq (current-buffer) (harness-ui-patch-review--r-chats review))
                (current-buffer)))))
 
 (defun harness-ui-patch-review-ediff (&optional review index goto)
   "Compare the file of the row at point in Ediff, before the change and after.
 For the default diff that is the merge base and the branch; the report
 chooses another (\\[harness-ui-patch-review-select-diff]).
-On the changes in a task's report, in its session's review banner and in
+On the changes in a task's report, in its session's hand_in call and in
 the tree beside Ediff.  In Ediff, c comments on the current difference,
 into the report's box, N and P go on to the next or previous file, M-n
 and M-p to the next or previous thread of it, and q comes back to where
@@ -7183,7 +7255,7 @@ GOTO, (SIDE . LINE), that line is in sight in the version of SIDE."
           (when-let* ((window (get-buffer-window (plist-get before :control) t)))
             (select-window window))
           (harness-ui-patch-review--end-ediff review t))
-      ;; The box beside Ediff is the report's: from the review banner of
+      ;; The box beside Ediff is the report's: from the hand_in call of
       ;; the task's session the report is not open yet.
       (setq made (harness-ui-patch-review--ensure-box review))
       ;; In any frame: this runs once git has answered, when the frame
@@ -7192,7 +7264,7 @@ GOTO, (SIDE . LINE), that line is in sight in the version of SIDE."
              (report (and (buffer-live-p popout)
                           (or (harness-ui-patch-review--box-window popout t)
                               (get-buffer-window popout t))))
-             ;; Else the window of the review banner Ediff was started from.
+             ;; Else the window of the hand_in call Ediff was started from.
              (window (or report
                          (let ((origin (harness-ui-patch-review--r-origin review)))
                            (and (buffer-live-p origin) (get-buffer-window origin t))))))
@@ -7350,7 +7422,7 @@ difference with a thread shows it in the tree beside Ediff."
 
 (defun harness-ui-patch-review--ensure-box (review)
   "Open the report of REVIEW's task out of sight, when it is not open.
-The feedback box beside Ediff is the report's.  From the review banner of
+The feedback box beside Ediff is the report's.  From the hand_in call of
 the task's session there is no report open yet; none to open for a task
 that is not in review, which has no box.  Return non-nil when it opened
 the report, which closes as the Ediff ends."
@@ -7682,10 +7754,10 @@ An Ediff of it on show stays until q gives the windows back."
 
 (defun harness-ui-patch-review--surface-live-p (review)
   "Non-nil when a surface that shows REVIEW's changes is open.
-The report, the review banner of the task's session, or the tree beside
+The report, the hand_in call of the task's session, or the tree beside
 Ediff."
   (or (buffer-live-p (harness-ui-patch-review--r-popout review))
-      (cl-some #'buffer-live-p (harness-ui-patch-review--r-banners review))
+      (cl-some #'buffer-live-p (harness-ui-patch-review--r-chats review))
       (buffer-live-p (harness-ui-patch-review--r-tree-buffer review))))
 
 ;;;; The harness's messages, waiting with the drafts
@@ -7997,7 +8069,7 @@ point of the board."
   (let ((review (harness-ui-patch-review--review-for task)))
     ;; A task no longer waiting for review -- done, or sent back and at
     ;; work -- is still the reviewer's to look at from its session's
-    ;; history: the changes show, without the review banner.
+    ;; history: the changes show, without the review.
     (unless (harness-ui-patch-review--reviewing-p task)
       (setf (harness-ui-patch-review--r-show review) t))
     (harness-ui-report-popout task)))
@@ -8084,7 +8156,7 @@ or has left it."
 
 (defun harness-ui-patch-review--setup-existing-buffers ()
   "Offer the review's key in chats and boards that are open already.
-A chat whose task waits for review draws its banner again, with the
+A chat whose task waits for review draws its review again, with the
 changes."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
@@ -8467,9 +8539,9 @@ No approvals, comments, feedback or other reviewer decisions are made."
   "Draw again what showed the reviews dropped for being stale.
 A reload drops the reviews an older layout of the structs made as the
 file loads (`harness-ui-patch-review--drop-stale-reviews'), when little
-of the module is there to draw: the report and the banner that showed
-one hold what it drew until now, and are drawn again here, which makes
-the review again."
+of the module is there to draw: the report and the hand_in call that
+showed one hold what it drew until now, and are drawn again here, which
+makes the review again."
   (let ((ids (prog1 harness-ui-patch-review--dropped
                (setq harness-ui-patch-review--dropped nil))))
     (dolist (id ids)
@@ -8487,8 +8559,8 @@ the review again."
   ;; is left as it is.
   (when (eq change-review-ui-read-function #'change-review-ui-read-with-string-edit)
     (setq change-review-ui-read-function #'harness-ui-patch-review--read-with-string-edit))
-  ;; Before the review banner: the changes are read, then the work is
-  ;; verified or sent back.
+  ;; Before the review: the changes are read, then the work is verified
+  ;; or sent back.
   (add-hook 'harness-ui-report-panel-functions #'harness-ui-patch-review--panel -10)
   (add-hook 'harness-ui-event-functions #'harness-ui-patch-review--on-event)
   ;; A comment the reviewer writes on an approved file takes the approval off.
@@ -8496,7 +8568,7 @@ the review again."
   (with-eval-after-load 'harness-ui-review
     (add-hook 'harness-ui-review-pending-functions #'harness-ui-patch-review--pending-p)
     (add-hook 'harness-ui-review-pending-known-functions #'harness-ui-patch-review--pending-known-p)
-    (add-hook 'harness-ui-review-changes-functions #'harness-ui-patch-review--banner-panel))
+    (add-hook 'harness-ui-review-changes-functions #'harness-ui-patch-review--chat-changes))
   (with-eval-after-load 'harness-ui-chat
     (add-hook 'harness-chat-mode-hook #'harness-ui-patch-review--setup-chat))
   ;; A player in a comment is drawn again with the review around it.
@@ -8521,7 +8593,7 @@ the review again."
   (remove-hook 'change-review-changed-functions #'harness-ui-patch-review--on-comment)
   (remove-hook 'harness-ui-review-pending-functions #'harness-ui-patch-review--pending-p)
   (remove-hook 'harness-ui-review-pending-known-functions #'harness-ui-patch-review--pending-known-p)
-  (remove-hook 'harness-ui-review-changes-functions #'harness-ui-patch-review--banner-panel)
+  (remove-hook 'harness-ui-review-changes-functions #'harness-ui-patch-review--chat-changes)
   (remove-hook 'harness-chat-mode-hook #'harness-ui-patch-review--setup-chat)
   (when (boundp 'harness-ui-media-rerender-functions)
     (remove-hook 'harness-ui-media-rerender-functions #'harness-ui-patch-review--rerender-media))
@@ -8534,10 +8606,10 @@ the review again."
       (when (and (bound-and-true-p harness-ui-patch-review-mode)
                  (derived-mode-p 'harness-chat-mode 'harness-ui-tasks-mode 'harness-ui-popout-mode))
         (harness-ui-patch-review-mode -1))))
-  (let (popouts banners)
+  (let (popouts chats)
     (maphash (lambda (_id review)
                (push (harness-ui-patch-review--r-popout review) popouts)
-               (setq banners (append (harness-ui-patch-review--r-banners review) banners))
+               (setq chats (append (harness-ui-patch-review--r-chats review) chats))
                (harness-ui-patch-review--forget review))
              (copy-hash-table harness-ui-patch-review--reviews))
     (dolist (popout popouts)
@@ -8545,10 +8617,10 @@ the review again."
         (with-current-buffer popout
           (kill-local-variable 'change-review-ui--redraw-function))
         (harness-ui-popout-refresh (buffer-local-value 'harness-ui-popout-key popout))))
-    ;; The review banners lose the changes with the next draw of their tail.
-    (dolist (banner banners)
-      (when (buffer-live-p banner)
-        (with-current-buffer banner
+    ;; The hand_in calls lose the changes with the next draw of the review.
+    (dolist (chat chats)
+      (when (buffer-live-p chat)
+        (with-current-buffer chat
           (kill-local-variable 'change-review-ui--redraw-function)
           (when (functionp harness-compose-redraw-function)
             (funcall harness-compose-redraw-function)))))))

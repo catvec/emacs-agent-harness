@@ -13,7 +13,7 @@ A task's changes where its work is handed in and in its report: a file tree with
 ## About
 
 A task waiting for review is a patch waiting for its reviewer.  This
-module puts the patch in the review: in the review banner of the task's
+module puts the patch in the review: in the hand_in call of the task's
 session, where its work is handed in, and in its report (the popout
 [Review Changes] opens on the board and in the session), and reviews it
 file by file in Ediff, with the comments made on it kept as threads.
@@ -29,7 +29,7 @@ left to review wait with them
 (THE LAST CLOSE).
 The compose view's threads have the buttons their headers have
 elsewhere, and the keys and the line over them do the same; the review
-banner leaves its copy of them out while they show there.
+leaves its copy of them out while they show there.
 [Diff] rereads the worktree's current HEAD on each click while the task
 works; historical source links stay at the commit they name.  These
 live views are local, not new hand-ins or baselines for the last review.
@@ -56,15 +56,13 @@ is the adapter that gives that library a task to review, in this Emacs:
                conversation;
   authors      the user, by name; the agent, by session and tool call.
 
-THE CHANGES, drawn the same on four surfaces: in the review banner of
+THE CHANGES, drawn the same on three surfaces: in the hand_in call of
 the task's session, between the report the agent handed in and
 [Verify], so the work is looked over where it is handed in, with no
-click on [Review Changes] (the banner asks for them through
-`harness-ui-review-changes-functions`); in a hand_in call in the
-transcript, under that round's report, the same hand-in the banner
-draws (`harness-ui-report-hand-in-functions`), with the folds and the
-threads working there too; in the report, under the evidence, above
-the review banner and its box; and in the column beside Ediff (below).
+click on [Review Changes] (the call asks for them through
+`harness-ui-review-changes-functions`, as the review draws them); in
+the report, under the evidence, above the review banner and its box;
+and in the column beside Ediff (below).
 What the task's branch changes against its merge base with the branch
 it was made from -- what merging it brings in, not what that branch
 did since -- or the diff the reviewer chooses instead (see THE DIFF
@@ -94,7 +92,7 @@ it the threads:
   directories the files group under the directories that hold them,
               with how many files each holds and the lines they add
               and delete, as a file tree shows them.  They start
-              folded in the report and the banner -- not in the narrow
+              folded in the report and the call -- not in the narrow
               tree beside Ediff -- for each round of the review, so a
               review of many directories is a line each; a directory
               holding a file the user commented on, or has a draft on,
@@ -135,7 +133,7 @@ it the threads:
               the card stays in it until it is sent.
 
 The folds are the review's, for the task and the round: a report or a
-banner drawn again, and the tree beside Ediff, keep what the reader
+hand_in call drawn again, and the tree beside Ediff, keep what the reader
 opened or folded, and the round after starts from the defaults, where
 the comments and drafts of the user have opened what they wrote in.
 
@@ -191,7 +189,7 @@ bottom, else the diff's -- so the next file is the one on the next row.
   Ediff       the file at the merge base against the file on the
               branch, in the frame of the report or the session, the
               report small at the bottom of it with its feedback box
-              (opened for it from the banner, closed with the Ediff),
+              (opened for it from the call, closed with the Ediff),
               and on the left a column of two panes, one above the
               other, as if one buffer were split in two
               (`harness-ui-patch-review-ediff-tree`,
@@ -462,12 +460,12 @@ remembers the layout of the structs it is made of when it was made
 (`harness-ui-patch-review--layout`), and loading this file drops every
 one made under another layout, a version that kept none included
 (`harness-ui-patch-review--drop-stale-reviews`); the report and the
-banner that showed it are drawn again once the module starts, which
+call that showed it are drawn again once the module starts, which
 makes the review again, from the threads and the files viewed the
 harness keeps and from the branch.  Changes that cannot be drawn for
 any other reason say so in one short line with a [Try again] button,
 which makes the review again, and the rest of the report -- [Verify]
-and [Send back] -- and of the banner is drawn all the same.
+and [Send back] -- and of the call is drawn all the same.
 
 A LINK TO A THREAD.  An agent that answers a thread, or points at one,
 writes a link to it (harness:thread/ID, lisp/harness-links.el), and a
@@ -482,7 +480,7 @@ threads, and the session a review's links are written in.
 
 From a task's session history -- or a board card -- C-c C-d opens the
 report with the changes, even after the task left review, when it shows
-them without the review banner (`harness-ui-patch-review-mode`).  C-u
+them without the review (`harness-ui-patch-review-mode`).  C-u
 C-c C-d asks which diff to open it at, as d does in the report.
 
 Git runs here, in the Emacs that shows the UI, in the task's
@@ -490,10 +488,10 @@ repository: the changes show where that is a directory of this
 machine, so not for a harness on another one.
 
 The module draws in the report through the hook the report has for
-panels (`harness-ui-report-panel-functions`), in the banner through
+panels (`harness-ui-report-panel-functions`), in the session through
 the review's own (`harness-ui-review-changes-functions`), and leaves
 sending to the review's box.  Disabled (`harness-disabled-modules`),
-it takes its part of the report and the banner out.
+it takes its part of the report and the review out.
 
 ## Provides
 
@@ -599,7 +597,7 @@ it takes its part of the report and the banner out.
 - `harness-ui-linking-context-functions` → `harness-ui-patch-review--link-context`
 - `harness-ui-media-rerender-functions` → `harness-ui-patch-review--rerender-media`
 - `harness-ui-report-panel-functions` → `harness-ui-patch-review--panel`
-- `harness-ui-review-changes-functions` → `harness-ui-patch-review--banner-panel`
+- `harness-ui-review-changes-functions` → `harness-ui-patch-review--chat-changes`
 - `harness-ui-review-pending-functions` → `harness-ui-patch-review--pending-p`
 - `harness-ui-review-pending-known-functions` → `harness-ui-patch-review--pending-known-p`
 - `post-command-hook` → `harness-ui-patch-review--side-command`

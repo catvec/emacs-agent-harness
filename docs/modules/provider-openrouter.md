@@ -122,13 +122,16 @@ behaviour of filter-then-cheapest, not a special case.
 
 ### Methods
 
+- `openrouter/catalogue-hold` (&optional model) — Return why work routed by MODEL's policy cannot be sent now, or nil.
 - `openrouter/route` (session-id) — Return SESSION-ID's pinned OpenRouter route, or nil.
 - `provider/admission-identity` (request) — Return the pool REQUEST of OpenRouter belongs to, or nil.
 
 ### Events
 
 - `openrouter/catalogue-degraded` — (SESSION-ID READING DETAIL) when a dispatch uses a reading whose refresh failed.
+- `openrouter/catalogue-recovered` — (MODEL) when a catalogue read settled, so a failure episode it ended is over.
 - `openrouter/catalogue-revalidating` — (SESSION-ID READING DETAIL) when a dispatch uses a reading a fresh one is being read beside.
+- `openrouter/catalogue-waiting` — (SESSION-ID DETAIL) when a step waits for a catalogue outage to end.
 - `openrouter/response-mismatch` — (SESSION-ID DETAIL) when an answer came from another endpoint.
 - `openrouter/route-paused` — (SESSION-ID REASON DETAIL) when a pinned session may not send.
 - `openrouter/route-selected` — (SESSION-ID ROUTE) when a session is pinned to an endpoint.
@@ -152,6 +155,7 @@ behaviour of filter-then-cheapest, not a special case.
 - `harness-openrouter-catalogue-retry-max-delay` — Longest wait between background re-reads of a failed catalogue.
 - `harness-openrouter-catalogue-timeout` — Seconds a fetch of the endpoint catalogue may take.
 - `harness-openrouter-catalogue-ttl` — Seconds one shared reading of a model's endpoint catalogue is reused.
+- `harness-openrouter-catalogue-wait` — Seconds a step of a turn waits for a catalogue outage to end.
 - `harness-openrouter-list-models` — Whether this provider lists OpenRouter's model catalogue.
 - `harness-openrouter-routing` — Opt-in price-aware endpoint policy for one OpenRouter model; nil is off.
 
@@ -167,7 +171,9 @@ behaviour of filter-then-cheapest, not a special case.
 ### Events it emits
 
 - `openrouter/catalogue-degraded`
+- `openrouter/catalogue-recovered`
 - `openrouter/catalogue-revalidating`
+- `openrouter/catalogue-waiting`
 - `openrouter/response-mismatch`
 - `openrouter/route-paused`
 - `openrouter/route-selected`

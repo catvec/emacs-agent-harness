@@ -343,6 +343,10 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `naming/done` | [naming](naming.md) | [naming](naming.md) |  |  |
 | `naming/failed` | [naming](naming.md) | [naming](naming.md) |  |  |
 | `notification/sent` | [notifications](notifications.md) | [notifications](notifications.md) |  |  |
+| `openrouter/catalogue-degraded` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
+| `openrouter/catalogue-recovered` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) | [tasks](tasks.md) |  |
+| `openrouter/catalogue-revalidating` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
+| `openrouter/catalogue-waiting` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
 | `openrouter/response-mismatch` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
 | `openrouter/route-paused` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
 | `openrouter/route-selected` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
@@ -481,7 +485,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | Hook | Defined by | Added to by |
 |---|---|---|
 | `after-change-functions` |  | [ui-compose](ui-compose.md) |
-| `after-load-functions` |  | [ui-quick-search](ui-quick-search.md) |
+| `after-load-functions` |  | [ui-quick-search](ui-quick-search.md), `harness-latency.el` |
 | `before-change-functions` |  | [ui-compose](ui-compose.md) |
 | `change-review-changed-functions` | `change-review.el` | [patch-review](patch-review.md), [ui-patch-review](ui-patch-review.md), `change-review-ui.el` |
 | `completion-at-point-functions` |  | [ui-compose](ui-compose.md) |
@@ -500,7 +504,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-acp-initialized-functions` | [acp](acp.md) | [acp](acp.md), [computers](computers.md) |
 | `harness-acp-received-hook` | [acp](acp.md) | [ui-chat](ui-chat.md) |
 | `harness-admission-pool-functions` | [admission](admission.md) |  |
-| `harness-chat-hand-in-fold-functions` | [ui-chat](ui-chat.md) | [ui-review](ui-review.md) |
+| `harness-chat-hand-in-open-functions` | [ui-chat](ui-chat.md) | [ui-review](ui-review.md) |
 | `harness-chat-header-end-functions` | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md) | [ui-cache-warm](ui-cache-warm.md), [ui-version](ui-version.md) |
 | `harness-chat-header-functions` | [ui-btw](ui-btw.md), [ui-chat](ui-chat.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) | [ui-btw](ui-btw.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) |
 | `harness-chat-mode-hook` | [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-watches](ui-watches.md) | [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-sticky-compose](ui-sticky-compose.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-watches](ui-watches.md) |
@@ -569,11 +573,12 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-update-hook` | [ui-version](ui-version.md), `harness.el` | [ui-version](ui-version.md) |
 | `harness-websearch-ready-functions` | [tools-web](tools-web.md) |  |
 | `kill-buffer-hook` |  | [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-popout](ui-popout.md), [ui-provider-check](ui-provider-check.md), [ui-server](ui-server.md), [ui-voice](ui-voice.md), [ui-workspace](ui-workspace.md) |
-| `kill-emacs-hook` |  | [agent](agent.md), [mcp](mcp.md), [pet](pet.md), [provider-demo](provider-demo.md), [sandbox-session](sandbox-session.md), [session](session.md), [speech](speech.md), [tasks](tasks.md), [tools-jobs](tools-jobs.md), [ui](ui.md), [ui-voice](ui-voice.md), [ui-workspace-speech](ui-workspace-speech.md) |
+| `kill-emacs-hook` |  | [agent](agent.md), [mcp](mcp.md), [pet](pet.md), [provider-demo](provider-demo.md), [sandbox-session](sandbox-session.md), [session](session.md), [speech](speech.md), [tasks](tasks.md), [tools-jobs](tools-jobs.md), [ui](ui.md), [ui-voice](ui-voice.md), [ui-workspace-speech](ui-workspace-speech.md), `harness-latency.el` |
 | `message-sent-hook` | `change-review-mail.el` | `change-review-mail.el` |
 | `post-command-hook` |  | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-patch-review](ui-patch-review.md), [ui-sticky-compose](ui-sticky-compose.md), `compose-quote.el`, `change-review-ui.el` |
+| `post-gc-hook` |  | `harness-latency.el` |
 | `pre-command-hook` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md) |
-| `pre-redisplay-functions` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-popout](ui-popout.md), [ui-sticky-compose](ui-sticky-compose.md), `change-review-ui.el` |
+| `pre-redisplay-functions` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-popout](ui-popout.md), [ui-sticky-compose](ui-sticky-compose.md), `harness-latency.el`, `change-review-ui.el` |
 | `project-find-functions` |  | `worktree-assume.el` |
 | `string-edit-mode-hook` | `change-review-ui.el` |  |
 | `tabulated-list-revert-hook` |  | [ui-sessions](ui-sessions.md), [ui-worktree](ui-worktree.md) |

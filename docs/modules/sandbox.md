@@ -268,10 +268,9 @@ no engine socket, a socket this user may not use, a policy that
 runs nothing confined, or a host that shows the jail no /sys and no
 cgroup file system.  `:containers` on `sandbox/wrap` shows a
 command what an engine needs and no more -- a private /run of its
-own, /sys read-only (which carries /sys/fs/cgroup), and the
-engine's socket read-only at the path it has -- and
-`sandbox/containers` answers which of the five it is, with one
-line of what to do about it.  Neither adds a capability,
+own, /sys read-only, and the engine's socket read-only at the path
+it has -- and `sandbox/containers` answers which of the five it is,
+with one line of what to do about it.  Neither adds a capability,
 binds a socket writable, binds /run whole nor makes a container
 privileged: what a command reaches is the authority its user
 already had.

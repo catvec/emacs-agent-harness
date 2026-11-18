@@ -54,13 +54,13 @@
 ;; compaction summaries and runs of coalescable tools (with the thinking
 ;; between their calls) collapse under overlays that isearch opens, so
 ;; every word of the conversation stays searchable; a hand_in call that
-;; succeeds opens expanded once its result is in, its body the hand-in
-;; the review draws -- the report, and the changes and threads of the
-;; task's review (`harness-ui-report-hand-in-functions') -- and a fold in
-;; it draws the call again (`harness-chat-refresh-hand-ins').  It stays
-;; folded while something else shows that report already, the review
-;; banner of a task waiting for review
-;; (`harness-chat-hand-in-fold-functions').  An agent answers a thread
+;; succeeds opens expanded when a module says its report waits for the
+;; user's review (`harness-chat-hand-in-open-functions'), its body the
+;; hand-in the review draws -- the report, the changes and threads of the
+;; task's review, and the buttons that decide it
+;; (`harness-ui-report-hand-in-functions') -- and a fold in it draws the
+;; call again (`harness-chat-refresh-hand-ins').  Once the work is
+;; decided the call folds, the review over.  An agent answers a thread
 ;; in a <thread> block of its message, which draws as the card a reply
 ;; in a thread is (`harness-chat--render-thread-tag'); a call of the
 ;; reply tool that was removed, `review_comment', with words is drawn as
@@ -3670,13 +3670,19 @@ below it is a target too, but a long one lighting up whole is jarring."
     ;; a thread in it is one of its own: C-c > on the card quotes what
     ;; the card quotes, not the message around it (`harness-quote-reply').
     ;; The first line shows the target under the mouse; the body does not
-    ;; flash whole, which a long message would make jarring.
-    (harness-quote--mark
-     0 (length text)
-     (lambda (from to)
-       (when-let* ((ref (harness-chat--block-ref block from to)))
-         (list ref)))
-     nil text)
+    ;; flash whole, which a long message would make jarring.  A hand_in
+    ;; call whose report shows is no target whole: the report is, its own
+    ;; words marked where they are drawn, and C-c > on one quotes that,
+    ;; not the call around it.
+    (unless (and (harness-chat--hand-in-p block)
+                 (let ((result (harness-chat-block-result block)))
+                   (and result (eq 'ok (harness-ui-tool-outcome result)))))
+      (harness-quote--mark
+       0 (length text)
+       (lambda (from to)
+         (when-let* ((ref (harness-chat--block-ref block from to)))
+           (list ref)))
+       nil text))
     (harness-chat--mark-thread-cards text)
     ;; A call that started a sub-agent opens its session from anywhere on
     ;; the block, not only from its session line: mouse-1 or RET on the
@@ -3772,21 +3778,31 @@ reader's place in a long report stays."
 
 (defun harness-chat-sync-hand-in-folds ()
   "Fold or open this buffer's hand_in calls as their reports are shown.
-A successful hand_in call opens expanded, its body the report it handed
-in.  Functions on `harness-chat-hand-in-fold-functions' keep a call
-folded while something else shows that report, as the review banner of a
-task waiting for review does below the transcript; this folds or opens
-the calls in the buffer to what they say now.  A module that knows the
-answer changed calls it."
-  (let (changed)
+A successful hand_in call opens expanded while a module says its report
+waits for the user's review, its body the review itself: the report and
+the buttons that decide it (`harness-chat-hand-in-open-functions').  Once
+the work is decided -- verified, sent back, or back in the working phase
+-- nothing says so any more, and the call folds, its report read when
+the reader opens it.  This folds or opens the calls in the buffer to
+what the functions say now, drawing a call it opens again, so that the
+review it shows is the one that is now.  A module that knows the answer
+changed calls it.  Return non-nil when a call changed."
+  (let ((harness-chat--batch t)
+        (changed nil))
     (dolist (id harness-chat--order)
       (when-let* ((block (gethash id harness-chat--blocks)))
         (let ((result (harness-chat-block-result block)))
           (when (and result (harness-chat--hand-in-p block)
                      (eq 'ok (harness-ui-tool-outcome result)))
-            (let ((folded (harness-chat--hand-in-folded-p block result)))
-              (unless (eq folded (and (harness-chat-block-collapsed block) t))
-                (harness-chat--set-block-collapsed block folded)
+            (let ((open (harness-chat--hand-in-open-p block result)))
+              (unless (eq (not open) (and (harness-chat-block-collapsed block) t))
+                (if open
+                    ;; Opened for a review: what it holds may have come in
+                    ;; after the call was drawn, so it is drawn again.
+                    (progn
+                      (setf (harness-chat-block-collapsed block) nil)
+                      (harness-chat--rerender block))
+                  (harness-chat--set-block-collapsed block t))
                 (setq changed t)))))))
     changed))
 
@@ -3935,30 +3951,34 @@ before it draws again, to keep them so."
 (defun harness-chat--hand-in-p (block)
   "Non-nil when BLOCK is a hand_in call.
 Its result carries the report the task handed in, which is worth
-seeing whole: once the hand-in succeeds the call opens expanded,
-unless something else shows that report already."
+seeing whole: once the hand-in succeeds the call opens expanded while a
+module says that report waits for the user's review, and folds again
+when the work is decided."
   (and (harness-chat-block-p block)
        (equal (harness-chat-block-kind block) "tool-call")
        (equal (plist-get (harness-chat-block-node block) :tool) "hand_in")))
 
-(defun harness-chat--hand-in-folded-p (block result)
-  "Non-nil when hand_in BLOCK, whose RESULT is in, stays folded.
-That is when a function on `harness-chat-hand-in-fold-functions' says
-something else shows the report the call handed in."
+(defun harness-chat--hand-in-open-p (block result)
+  "Non-nil when hand_in BLOCK, whose RESULT is in, opens expanded.
+That is when a function on `harness-chat-hand-in-open-functions' says
+the report the call handed in waits for the user's review."
   (and (eq 'ok (harness-ui-tool-outcome result))
        (run-hook-with-args-until-success
-        'harness-chat-hand-in-fold-functions block result)
+        'harness-chat-hand-in-open-functions block result)
        t))
 
-(defun harness-chat-refresh-hand-ins ()
+(defun harness-chat-refresh-hand-ins (&optional open-only)
   "Draw the hand_in calls in this buffer again, as the review shows them now.
 A hand_in call draws the report the review draws, with the changes and
 threads of the task's review (`harness-ui-report-hand-in-functions').
 A fold of the review, a comment or an approval changes what they hold,
 and the calls in the transcript are drawn again to it, so a previous
-hand-in reads as the current one does.  Nothing scrolls and no window
-follows the end: the reader's place stays.  Return non-nil when a block
-was drawn again."
+hand-in reads as the current one does.  OPEN-ONLY draws the calls the
+reader has open, which are the ones whose body shows: a folded call is
+drawn again when it opens (`harness-chat-toggle-block'), so what it
+holds then is current without every round's report drawn on each change
+of the review.  Nothing scrolls and no window follows the end: the
+reader's place stays.  Return non-nil when a block was drawn again."
   (let ((harness-chat--batch t)
         (ids (and harness-chat--order (copy-sequence harness-chat--order)))
         (changed nil))
@@ -3966,7 +3986,9 @@ was drawn again."
       (let ((block (and harness-chat--blocks
                         (gethash id harness-chat--blocks))))
         (when (and block (harness-chat--hand-in-p block)
-                   (harness-chat-block-result block))
+                   (harness-chat-block-result block)
+                   (or (not open-only)
+                       (not (harness-chat-block-collapsed block))))
           (harness-chat--rerender block)
           (setq changed t))))
     changed))
@@ -3974,14 +3996,15 @@ was drawn again."
 (defun harness-chat--attach-result (call result)
   "Render RESULT, a tool-result node, in CALL, the block of its call.
 The result's id then finds the call's block, whose call has finished.
-A successful hand_in call opens expanded, its body the report, unless
-the module that knows says the report shows elsewhere
-\(`harness-chat-hand-in-fold-functions')."
+A successful hand_in call opens expanded while the module that knows
+says the report it handed in waits for the user's review
+\(`harness-chat-hand-in-open-functions'); it folds once the work is
+decided."
   (setf (harness-chat-block-result call) result)
   (when (and (harness-chat--hand-in-p call)
              (eq 'ok (harness-ui-tool-outcome result)))
     (setf (harness-chat-block-collapsed call)
-          (harness-chat--hand-in-folded-p call result)))
+          (not (harness-chat--hand-in-open-p call result))))
   (setq harness-chat--unfinished (delete (harness-chat-block-id call) harness-chat--unfinished))
   (puthash (plist-get result :id) call harness-chat--blocks)
   (harness-chat--rerender call))
@@ -4474,7 +4497,7 @@ both places."
       (when (and (harness-chat--hand-in-p block)
                  (eq 'ok (harness-ui-tool-outcome node)))
         (setf (harness-chat-block-collapsed block)
-              (harness-chat--hand-in-folded-p block node)))
+              (not (harness-chat--hand-in-open-p block node))))
       (harness-chat--rerender block)
       (harness-chat--maybe-coalesce (harness-chat-block-id block))
       (harness-chat--refresh-group-of block))
@@ -5115,10 +5138,10 @@ Each is called without arguments in the chat buffer on every render of
 the tail and returns a string, or nil for nothing.  The strings go
 between the queue and the attachments, in order, read-only and above
 the compose box.  Add to it buffer-locally, with a symbol, so a reload
-redefines it.  The task modules show their review and backlog banners
-this way.  A function that signals an error leaves a line saying so
-where its panel would be, and the others and the box are drawn all the
-same.")
+redefines it.  The task modules show their backlog banner, and the
+review of a round that handed no report in, this way.  A function that
+signals an error leaves a line saying so where its panel would be, and
+the others and the box are drawn all the same.")
 
 (defvar harness-chat-tool-body-functions nil
   "Functions giving a tool call block a body of their own.
@@ -5128,16 +5151,18 @@ to let the generic rendering show them.  The header, the one-line
 summary, the status and the fold stay the chat's either way.  The report
 module shows the report a hand_in call handed in this way.")
 
-(defvar harness-chat-hand-in-fold-functions nil
-  "Functions that say a hand_in call stays folded.
+(defvar harness-chat-hand-in-open-functions nil
+  "Functions that say a hand_in call opens expanded.
 Each is called in the chat buffer with the call's BLOCK and its RESULT
-node, once the result is in, and returns non-nil when something else
-shows the report the call handed in: the review banner of a task waiting
-for review shows it below the transcript, and the call above must not
-show it again.  With none, a successful hand_in call opens expanded.
-A module that knows the answer changed calls
-`harness-chat-sync-hand-in-folds', which folds or opens the calls that
-are in the buffer to what the functions now say.")
+node, once the result is in, and returns non-nil when the report the
+call handed in waits for the user's review: the call then draws the
+review itself -- the report, the changes and threads, and the buttons
+that decide the work (`harness-ui-report-hand-in-functions') -- and
+folds once the work is decided.  With none, a successful hand_in call
+folds, its report read when the reader opens it.  A module that knows
+the answer changed calls `harness-chat-sync-hand-in-folds', which folds
+or opens the calls that are in the buffer to what the functions now
+say.")
 
 (defun harness-chat--insert-panels ()
   "Insert what `harness-chat-panel-functions' return, in order.
@@ -5179,14 +5204,14 @@ takes a task as well as a file (task:ID)."
 
 ;;;; The threads of the review, in place of the box
 
-;; In a chat, the threads of the task's review are in the review banner,
+;; In a chat, the threads of the task's review are in the hand_in call,
 ;; under the report and the changes; when the reader works through them,
 ;; the box has what they answer with.  `harness-chat-show-threads'
 ;; (C-c T) puts the threads view a UI draws -- the same view the report
 ;; holds, with the same filter and the same keys, its own heading line
 ;; where [Compose] brings the box back -- where the compose box was: the
 ;; threads are at hand without scrolling past the report and the files,
-;; and the words in the box are kept.  The banner's own copy of the
+;; and the words in the box are kept.  The review's own copy of the
 ;; threads is left out while they show there, so the threads are in one
 ;; place.  C-c T or [Compose] brings the box back, with its words and
 ;; attachments.  It works in the working phase too, when the task has a
@@ -7771,7 +7796,11 @@ part of, is what a reply in a thread quotes."
                  (or (and (get-text-property beg 'compose-quote) beg)
                      (next-single-property-change beg 'compose-quote nil end))
                (point)))
-         (text (and at (< at (point-max)) (get-text-property at 'compose-quote))))
+         ;; Point just after the report's words is on them: the words are
+         ;; drawn with a newline after them, and the reader's point stays
+         ;; where the reading left it.
+         (text (or (and at (< at (point-max)) (get-text-property at 'compose-quote))
+                   (and at (> at (point-min)) (get-text-property (1- at) 'compose-quote)))))
     (when (stringp text)
       (let ((selected (and beg end (string-trim (buffer-substring-no-properties beg end)))))
         (list (list :kind "chat" :who "report" :label "hand-in report"
@@ -7779,9 +7808,10 @@ part of, is what a reply in a thread quotes."
 
 (defun harness-chat--default-refs ()
   "Return the reference to the message to reply to without a region.
-The node point is on, whole; else the report text at point; else, from
-the box or anywhere that is no node, the agent's last message: a
-response, a plan, or its words in a thread."
+The report's words at point -- a report drawn in a tool call's body is a
+message of its own, quotable there -- else the node point is on, whole;
+else, from the box or anywhere that is no node, the agent's last
+message: a response, a plan, or its words in a thread."
   (let* ((id (get-text-property (point) 'harness-chat-node))
          (here (and id (not (harness-compose-in-p)) (gethash id harness-chat--blocks)))
          (block (or here
@@ -7790,11 +7820,11 @@ response, a plan, or its words in a thread."
                              when (and older (or (member (harness-chat-block-kind older) '("assistant" "plan"))
                                                  (harness-chat--thread-message-p older)))
                              return older))))
-    (or (and block
+    (or (harness-chat--quote-ref nil nil)
+        (and block
              (when-let* ((ref (harness-chat--block-ref block (marker-position (harness-chat-block-start block))
                                                        (marker-position (harness-chat-block-end block)))))
-               (list ref)))
-        (harness-chat--quote-ref nil nil))))
+               (list ref))))))
 
 (defun harness-chat--thread-refs-in (beg end)
   "Return the references of the cards of replies in threads from BEG to END.
@@ -7814,8 +7844,9 @@ reaches past a card quotes the message around it, not the card alone."
   "Return the references C-c > quotes from BEG to END in this chat.
 A card of a reply in a thread, in the transcript or in the box, quotes
 what the card says; a region of the transcript the messages it covers;
-point on a message that message; from the box the agent's last.  A
-region in the box is the box's own to quote, and is left to the command."
+point on a message that message, or on the report a tool call draws the
+report's words; from the box the agent's last.  A region in the box is
+the box's own to quote, and is left to the command."
   (cond
    ((and (harness-compose-in-p beg) (> end beg)) nil)
    ((harness-compose-in-p beg)
@@ -7823,7 +7854,9 @@ region in the box is the box's own to quote, and is left to the command."
           (harness-thread-refs (plist-get att :thread)))
         (harness-chat--default-refs)))
    ((> end beg)
-    (or (harness-chat--thread-refs-in beg end)
+    (or (and (get-text-property beg 'compose-quote)
+             (harness-chat--quote-ref beg end))
+        (harness-chat--thread-refs-in beg end)
         (harness-chat--region-refs beg end)
         (harness-chat--quote-ref beg end)))
    (t (harness-chat--default-refs))))
