@@ -1722,7 +1722,8 @@ would put a queue's button at the start of the next line."
 
 (ert-deftest harness-ui-slots-queues-next-in-line-names-the-hold ()
   "A waiting task that something holds back says what, short, in Next in line.
-A return for quota or a budget has its noun when nothing holds it."
+A return for quota, a budget or the endpoint catalogue has its noun when
+nothing holds it."
   (let* ((queue (list (list :id "t-q1" :title "Paused one" :priority "medium" :since 1000.0 :reason "returned"
                             :hold (list :kind "paused"))
                       (list :id "t-q2" :title "Waits for quota" :priority "medium" :since 1000.0 :reason "quota"
@@ -1740,6 +1741,10 @@ A return for quota or a budget has its noun when nothing holds it."
     (should (harness-ui-slots-test--line-with lines "Over the budget · budget +"))
     (should (harness-ui-slots-test--line-with lines "Parked, hold over · budget"))
     (should (harness-ui-slots-test--line-with lines "Parked for quota · quota"))
+    ;; A task parked for the endpoint catalogue names it too; the page lists
+    ;; the first five, so the note is asked for directly.
+    (should (equal "catalogue"
+                   (harness-ui-slots--note (list :id "t-q6" :reason "catalogue"))))
     ;; A hold is not a return reason too.
     (should-not (harness-ui-slots-test--line-with lines "Paused one · returned"))))
 

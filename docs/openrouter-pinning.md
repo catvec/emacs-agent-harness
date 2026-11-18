@@ -362,13 +362,60 @@ reading stays in place and the next lookup is answered from it, marked
   and the dispatch says so -- an `openrouter/catalogue-degraded` event and
   a hint naming the failed refresh and the age of the reading used;
 - when the reading is outside `:freshness`, or there is no reading at
-  all, the session pauses with `catalogue-unavailable` and what failed,
-  exactly as before.  There is no invented reading and no extended bound.
+  all, what happens next depends on what failed (see *An outage is waited
+  out* below).  There is no invented reading and no extended bound.
+
+**An outage is waited out; a refusal is not.**  A read that failed
+*transiently* -- a connection that never opened, a transfer that stalled
+(this is the watchdog's `HTTP 200: request timed out after 20s`, the
+failure that stopped nine tasks on 2026-11-17), a 408, 425, 429 or 5xx, a
+2xx that was not JSON -- says nothing about the request, the model or the
+operator's policy.  So a step of a turn with no reading its policy admits
+waits for the episode's own re-reads, bounded by
+`harness-openrouter-catalogue-wait` (**180 s**):
+
+- every waiting step joins one wait per model
+  (`harness-openrouter--catalogue-waiters`), and the episode's re-read is
+  what settles it, so a burst of sessions during an outage costs one read
+  and one wait, never one each;
+- the reading that settles is what the step then sends on, checked
+  against the whole policy as any dispatch is: the pin, the allowlist, the
+  recorded price, the freshness bound and the privacy fields.  Waiting
+  widens nothing and decides nothing by itself;
+- the wait is bounded, and a step still waiting at the bound ends with
+  `catalogue-unavailable` and "still unavailable after N s of retrying" --
+  fail-closed, with the episode's burst and heartbeat carrying on for the
+  next turn;
+- a cancelled turn stops waiting at once and sends nothing when a reading
+  arrives (`harness-openrouter--catalogue-wait-abandon`), so a cancelled step
+  holds no timer and leaves no waiter behind;
+- a *refusal* -- a 401, a 403, a 404, a catalogue whose body is an `error`
+  object or names no endpoints -- is the catalogue's answer about what was
+  asked, and reading again would get it again, so it is never waited for:
+  the step ends at once with what the catalogue said;
+- a one-off call (`:ephemeral`, the permission judge above all) never
+  waits here: it keeps its own short bound
+  (`harness-openrouter-catalogue-ephemeral-wait`) and is refused as it was,
+  which is a call with no verdict and never a permission.
+
+**A task waits in its queue rather than among the failures.**  Task mode
+asks `openrouter/catalogue-hold` the same way it asks `fallback/blocked`
+for quota: while the catalogue is *out* -- a transient failure with no
+reading inside `:freshness` -- a task whose turn stops is parked, back in
+the pending queue with `:return-reason catalogue`, its slot free for the
+task behind it and its session, branch and worktree kept.  A reading that
+settles starts it again by priority and within the limit
+(`openrouter/catalogue-recovered`), told by
+`harness-tasks--catalogue-message` why it waited.  A pause stays a pause:
+a reading coming back is not the user's resume.  A refusal is not a hold,
+so a refused catalogue waits where a failure of the work waits -- in front
+of a person, with the status and the message.
 
 **An outage costs one read, not one per caller.**  While a failure
 episode is live, an ordinary lookup never adds a read: it is answered
 from the reading in hand, or, with nothing inside the bound, from the
-failure already found.  The episode's own re-reads are the only reads.
+failure already found -- or, for a step, from the wait that failure
+started.  The episode's own re-reads are the only reads.
 
 **The re-reads are a burst, then a heartbeat.**  A failed read schedules
 another in the background: the first

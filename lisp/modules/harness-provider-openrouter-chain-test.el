@@ -95,7 +95,9 @@ whether the step was sent again."
            (harness-openrouter--fetching (make-hash-table :test 'equal))
            (harness-openrouter--catalogue-failures (make-hash-table :test 'equal))
            (harness-openrouter-test--requests nil)
-           (harness-openrouter-test--responses nil))
+           (harness-openrouter-test--responses nil)
+           (harness-openrouter-test--catalogue-script nil)
+           (harness-openrouter-test--catalogue-reads-served 0))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
        ;; Somewhere for a fallback to go, so a test can prove it does not:
@@ -433,6 +435,81 @@ under the policy is disclosed nowhere else because of any of them."
             ;; neither repeated nor re-pointed.
             (should (= (1+ before)
                        (length (harness-openrouter-test--completion-requests))))))))))
+
+;;;; An outage is waited out inside a real turn
+
+(ert-deftest harness-provider-openrouter-a-turn-waits-out-a-catalogue-outage ()
+  "A real turn waits for a transient catalogue outage instead of failing.
+This is the reported failure in its own terms: the turn's step found the
+catalogue unreadable, and the turn ended `error' with
+`catalogue-unavailable' -- every time, for nine tasks at once.  The step
+now waits for the episode's own re-read, and when the catalogue comes
+back the turn goes on and ends as any turn does.  No other provider is
+asked, nothing is retried elsewhere, and the pin is the one the settled
+reading allows."
+  (harness-openrouter-test-with-chain
+    (setq harness-openrouter-routing (harness-openrouter-test-policy))
+    (setq harness-openrouter-catalogue-wait 10)
+    ;; The first catalogue read fails as the live one did; the re-read the
+    ;; wait starts is answered from the fixture.
+    ;; The first catalogue read stalls; the episode's own re-read answers.
+    (setq harness-openrouter-test--catalogue-script
+          (lambda (read)
+            (if (= read 1)
+                '(:error (http-error 200 (timeout "request timed out after 20s")))
+              (list :body (harness-openrouter-test--catalogue-json)))))
+    (let ((sid (harness-openrouter-test--chain-session)))
+      ;; The pin the session already holds is outside the policy's bound,
+      ;; so this step must read the catalogue, and it is out.
+      (harness-call 'session/set-ext sid :openrouter-route
+                    (harness-openrouter-test--route '(:catalogue-at 0.0)))
+      (let ((result (harness-test-await (harness-call 'agent/prompt sid "go") 30)))
+        (should (eq 'end-turn (plist-get result :stop-reason)))
+        (should-not (plist-get result :error)))
+      ;; One completion, to the pinned endpoint, after the catalogue came
+      ;; back; nothing went to the other provider.
+      (should (= 1 (length (harness-openrouter-test--completion-requests))))
+      (should (= 0 (length (harness-openrouter-test--other-provider-sends))))
+      (should (cl-some (lambda (h) (string-match-p "catalogue unavailable" h))
+                       (harness-openrouter-test--chain-hints sid))))))
+
+(ert-deftest harness-provider-openrouter-a-cancelled-turn-does-not-wait-out-an-outage ()
+  "A turn cancelled while it waits for the catalogue is not sent afterwards.
+The wait is the step's, and a cancelled turn stops waiting at once: when
+the reading arrives nothing is sent for that turn, and no completion goes
+out at all."
+  (harness-openrouter-test-with-chain
+    (setq harness-openrouter-routing (harness-openrouter-test-policy))
+    (setq harness-openrouter-catalogue-wait 10)
+    (setq harness-openrouter-test--catalogue-script
+          (lambda (read)
+            (if (= read 1)
+                '(:error (http-error 200 (timeout "request timed out after 20s")))
+              ;; The re-read is held, so the turn is still waiting when it
+              ;; is cancelled; the test answers it afterwards, and nothing
+              ;; may be sent for the cancelled turn.
+              :hold)))
+    (let* ((sid (harness-openrouter-test--chain-session)))
+      ;; The pin is stale before the turn starts, so the first step must
+      ;; read the catalogue, and it is out.
+      (harness-call 'session/set-ext sid :openrouter-route
+                    (harness-openrouter-test--route '(:catalogue-at 0.0)))
+      (let ((turn (harness-call 'agent/prompt sid "go")))
+        (harness-test-wait
+         (lambda () (> (plist-get (harness-openrouter-catalogue-status) :waiting) 0))
+         10 "the turn to wait for the catalogue")
+        (harness-call 'agent/cancel sid)
+        (let ((result (harness-test-await turn 20)))
+          (should (memq (plist-get result :stop-reason) '(cancelled error))))
+        ;; The step left the wait when it was cancelled: nothing of it is
+        ;; waiting, whatever the catalogue answers now.
+        (should (zerop (plist-get (harness-openrouter-catalogue-status) :waiting)))
+        (harness-test-wait (lambda () harness-openrouter-test--held-catalogues)
+                           10 "the re-read the wait started")
+        (harness-openrouter-test--answer-catalogue)
+        (sit-for 0.2)
+        ;; Nothing was sent for the cancelled turn.
+        (should (= 0 (length (harness-openrouter-test--completion-requests))))))))
 
 (provide 'harness-provider-openrouter-chain-test)
 ;;; harness-provider-openrouter-chain-test.el ends here

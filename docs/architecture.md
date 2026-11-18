@@ -7678,7 +7678,7 @@ Task mode: one session per task.  TASK =
 :error "…" :duplicate-of ID :main-tree BOOL :worktree DIR :branch NAME :base NAME :merge-target TARGET :merge-status nil|queued|merging|conflict
 :merge-queued F :conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
 :queued-at F :waits ((:at F :seconds F :priority "low|medium|high") ...)
-:paused nil|F :return-reason returned|preempted|reclaimed|sent-back|quota|budget
+:paused nil|F :return-reason returned|preempted|reclaimed|sent-back|quota|budget|catalogue
 :verified BOOL :verified-at F :feedback ((:text "..." :at F) ...))`, and a
 read of a queued task also has `:hold` (below) while something holds it back.
 `:base` is the task's merge base: the branch checked out where it was
@@ -8284,7 +8284,7 @@ priority).
   seconds), so a task submitted into a free slot -- started before its
   title can come -- is named after it too; no other part of a start waits.
 - Holds.  A queued task (`harness-tasks--queued-p`) can be held:
-  `harness-tasks--hold TASK` is nil or `(:kind paused|quota|budget
+  `harness-tasks--hold TASK` is nil or `(:kind paused|quota|budget|catalogue
   :reason TEXT :until F :guess BOOL :items (…) [:since F])`, the view's
   `:hold`.  The scheduler leaves a held task in the queue, taking no
   slot from the tasks behind it.
@@ -8299,17 +8299,29 @@ priority).
   - `budget`: a hard budget covering the session is spent
     (`usage/budget-hold`); `:until` is when its period ends, nil when only
     an edit lets go, `:items` the budgets.
-  Quota and budget holds are worked out, not stored: the table
+  - `catalogue`: OpenRouter's endpoint catalogue cannot be read
+    (`openrouter/catalogue-hold`, only for a session on an OpenRouter
+    model): a read that failed *transiently*, with no reading inside the
+    policy's `:freshness`, so no price can be read and nothing can be
+    sent.  `:until` is when the episode's next re-read is due (nil when
+    one is already under way, so the recovery starts the tasks),
+    `:items` the model whose catalogue is out.  A refusal -- a 401, a
+    body that is an `error` object -- is not a hold: it is the
+    catalogue's answer, and the task waits for a person instead.  See
+    `docs/openrouter-pinning.md`.
+  Quota, budget and catalogue holds are worked out, not stored: the table
   `harness-tasks--holds` (id → hold) is refreshed at the start of every
   scheduling pass (`harness-tasks--refresh-holds`), for tasks that never
   started as much as for parked ones, so a restart needs nothing kept to
   find them again; a hold that began, changed or ended is announced as a
   `task/changed` with the new `:hold`.  A quota hold comes before a
-  budget hold for a task out of both.  The pass is run again
+  budget hold for a task out of both, and the catalogue last, since it
+  stops the work whatever the account can do.  The pass is run again
   when something that decides a hold changes: `fallback/changed` (a mark
   ended or was cleared, a quota report moved one, a session switched
-  model) and `usage/budgets-changed`, debounced
-  (`harness-tasks--on-hold-event`); `config/changed` for
+  model), `usage/budgets-changed` and `openrouter/catalogue-recovered`
+  (a reading settled), debounced (`harness-tasks--on-hold-event`,
+  `harness-tasks--on-catalogue-recovered`); `config/changed` for
   `harness-fallback-models` and `harness-budget`; and a timer set to the
   earliest `:until` of all holds plus a second, never sooner than two
   seconds on (`harness-tasks--arm-hold-timer`, `harness-tasks--hold-due`).
@@ -8317,27 +8329,30 @@ priority).
   the limit, not while its queue is suspended.  `task/start` ignores holds
   as it ignores the limit; a message to a held task through `task/prompt`
   is kept (`:queued`) for its start like one to a task in a suspended
-  queue; work sent back from review into a quota or budget hold waits
-  in the queue with its feedback (`harness-tasks--make-room` finds no
-  room: `harness-tasks--hold-back`).
+  queue; work sent back from review into a quota, budget or catalogue
+  hold waits in the queue with its feedback (`harness-tasks--make-room`
+  finds no room: `harness-tasks--hold-back`).
 - Parking.  A turn that ends `error` or `blocked`
   (`harness-tasks--on-turn-ended`) while its task is not in the merge queue
-  and a quota or budget hold stands now (`harness-tasks--compute-hold`) is
-  no failure of the task: every provider it could run on ran out, or the
-  budget gate stopped the turn before it began or between two steps of
-  a running one (the `agent/before-turn` and `agent/step` gates of
-  usage).  `harness-tasks--park` returns the task to pending as
-  `task/return-to-pending` does -- session, branch and worktree kept, first
-  of its priority, `:returned` set -- with `:return-reason` `quota` or
-  `budget`, the hold in the table so the `task/changed` that announces
-  it already says why, a hint in its session ("Back in the queue until
-  it can go on: …"), and what its session left running outside its turn
-  stopped (the reason "its task waits for quota" / "for its budget").  The
-  turn is over, so nothing is cancelled and the scheduling pass leaves
+  and a quota, budget or catalogue hold stands now
+  (`harness-tasks--compute-hold`) is no failure of the task: every
+  provider it could run on ran out, the budget gate stopped the turn
+  before it began or between two steps of a running one (the
+  `agent/before-turn` and `agent/step` gates of usage), or OpenRouter's
+  catalogue could not be read at all.  `harness-tasks--park` returns the
+  task to pending as `task/return-to-pending` does -- session, branch and
+  worktree kept, first of its priority, `:returned` set -- with
+  `:return-reason` `quota`, `budget` or `catalogue`, the hold in the table
+  so the `task/changed` that announces it already says why, a hint in its
+  session ("Back in the queue until it can go on: …"), and what its
+  session left running outside its turn stopped (the reason "its task
+  waits for quota" / "for its budget" / "for the endpoint catalogue").
+  The turn is over, so nothing is cancelled and the scheduling pass leaves
   the task out as a return does.  When the hold ends the start prompts the
-  session with `harness-tasks--quota-message` or
-  `harness-tasks--budget-message`, and `fallback`'s `agent/before-turn`
-  moves it to the first entry of the list that works, as before any turn.
+  session with `harness-tasks--quota-message',
+  `harness-tasks--budget-message` or `harness-tasks--catalogue-message`,
+  and `fallback`'s `agent/before-turn` moves it to the first entry of the
+  list that works, as before any turn.
   A turn that failed for another reason stays an `error` outcome in
   needs-input, as before.
 - Pausing.  `task/pause ID` is the board's Pause, and it sticks: a task at

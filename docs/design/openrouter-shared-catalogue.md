@@ -75,8 +75,12 @@ under.
 When the background read fails, the last reading stays and the next
 lookup is answered from it, marked `:stale` with what failed, while the
 failure episode is live.  A dispatch on it says so.  Outside
-`:freshness`, or with no reading at all, the session pauses with
-`catalogue-unavailable` -- exactly as before, and nothing is invented.
+`:freshness`, or with no reading at all, a step of a turn waits for the
+episode's own re-reads, bounded by `harness-openrouter-catalogue-wait`
+(see *An outage is waited out* in `docs/openrouter-pinning.md`); past
+that bound it ends with `catalogue-unavailable`, and nothing is invented.
+A refusal -- a 401, a body that is an `error` object -- is never waited
+for: it is the catalogue's answer, and reading again would get it again.
 
 While an episode is live an ordinary lookup never adds a read: an outage
 costs one failed read, not one per caller.

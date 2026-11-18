@@ -6889,6 +6889,14 @@ and the short form leaves the names out."
                     (list :kind "quota" :until soon :guess :false
                           :items (vector (list :label "Alpha") (list :key "beta") (list :label "Alpha")
                                          (list :id "b1"))))))
+    ;; A catalogue that cannot be read holds a task the same way, and its
+    ;; next read is the harness's guess, so it says retry.
+    (should (equal (format "catalogue · OpenRouter catalogue (m) · retry %s"
+                           (harness-ui-tasks-test--hh-mm soon))
+                   (harness-ui-tasks--hold-text
+                    (list :kind "catalogue" :until soon :guess t
+                          :items (list (list :label "OpenRouter catalogue (m)" :key "m"))))))
+    (should (equal "catalogue" (harness-ui-tasks--hold-text '(:kind "catalogue" :until nil) t)))
     ;; No end, and no names to give.
     (should (equal "budget · session"
                    (harness-ui-tasks--hold-text (list :kind "budget" :until nil
@@ -6974,9 +6982,10 @@ and the buttons on a second line under the title -- keeps both."
         (should (string-match-p "queued" (cadr lines)))))))
 
 (ert-deftest harness-ui-tasks-says-why-a-parked-task-waits ()
-  "A task that waited for quota or a budget names which, as nouns."
+  "A task that waited for quota, a budget or the catalogue names which, as nouns."
   (should (equal "quota" (harness-ui-tasks--returned-why '(:returned t :return-reason "quota"))))
   (should (equal "budget" (harness-ui-tasks--returned-why '(:returned t :return-reason "budget"))))
+  (should (equal "catalogue" (harness-ui-tasks--returned-why '(:returned t :return-reason "catalogue"))))
   (should (equal "paused" (harness-ui-tasks--returned-why '(:returned t :return-reason "returned")))))
 
 (ert-deftest harness-ui-tasks-card-actions-resume-and-pause ()

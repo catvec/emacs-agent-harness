@@ -39,6 +39,22 @@ fail and the next answer.")
 (defvar harness-openrouter-test--completions 0
   "How many completion requests the fake has served in this test.")
 
+(defvar harness-openrouter-test--catalogue-reads-served 0
+  "How many catalogue requests the fake has served in this test.")
+
+(defvar harness-openrouter-test--catalogue-script nil
+  "Function of a catalogue read's number returning its response, or nil.
+When set, it answers the `endpoints' requests instead of
+`harness-openrouter-test--responses', so a test can make the first read
+fail and a later one -- the episode's own re-read -- answer, which is what
+an outage that ends looks like.  The argument is 1 for the first read.
+
+A read it answers with `:hold' is recorded and left unanswered, as
+`harness-openrouter-test--hold-catalogue' leaves every one of them: the
+test answers that read itself (`harness-openrouter-test--answer-catalogue'
+or `harness-openrouter-test--fail-catalogue'), which is how it keeps a
+re-read in flight while the steps waiting for it join.")
+
 (defvar harness-openrouter-test--hold nil
   "URL regexps whose requests the fake starts but never answers.
 A matching request is recorded and its handle returned, while its
@@ -59,7 +75,11 @@ no network.")
 
 (defun harness-openrouter-test--fake-request (url &rest args)
   "Record a request to URL with ARGS and replay the matching canned response."
-  (let* ((response (or (and harness-openrouter-test--completion-script
+  (let* ((catalogue (string-match-p "/endpoints\\'" url))
+         (served (and catalogue (cl-incf harness-openrouter-test--catalogue-reads-served)))
+         (response (or (and catalogue harness-openrouter-test--catalogue-script
+                            (funcall harness-openrouter-test--catalogue-script served))
+                       (and harness-openrouter-test--completion-script
                             (string-match-p "chat/completions" url)
                             (funcall harness-openrouter-test--completion-script
                                      (cl-incf harness-openrouter-test--completions)))
@@ -74,8 +94,8 @@ no network.")
                 :headers (plist-get args :headers) :json (plist-get args :json) :args args)
           harness-openrouter-test--requests)
     (cond
-     ((and harness-openrouter-test--hold-catalogue
-           (string-match-p "/endpoints\\'" url))
+     ((and catalogue
+           (or harness-openrouter-test--hold-catalogue (eq response :hold)))
       (setq harness-openrouter-test--held-catalogues
             (append harness-openrouter-test--held-catalogues (list args))))
      (held nil)
@@ -128,6 +148,9 @@ unanswered, so a test can cancel one mid-transport."
          (harness-openrouter-test--hold nil)
          (harness-openrouter-test--hold-catalogue nil)
          (harness-openrouter-test--held-catalogues nil)
+         (harness-openrouter-test--catalogue-script nil)
+         (harness-openrouter-test--catalogue-reads-served 0)
+         (harness-openrouter-test--completions 0)
          (auth-sources nil))
      (cl-letf (((symbol-function 'harness-http-request) #'harness-openrouter-test--fake-request))
        ,@body)))
@@ -359,6 +382,44 @@ bus, so `provider/complete' still works."
 
 (defvar harness-openrouter-test--session-value nil
   "The session a stubbed `session/get' answers.")
+
+(defmacro harness-openrouter-test-with-sessions (sessions &rest body)
+  "Run BODY with the session bus answering for each of SESSIONS.
+`session/get' answers the session of that id, `session/set-ext' records
+the route it was given in `harness-openrouter-test--stored' (and in the
+session it belongs to), hints are collected in
+`harness-openrouter-test--hints', and every other call goes to the real
+bus.  Unlike `harness-openrouter-test-with-session', the answer is for
+several sessions at once and stays in place for the whole of BODY: a
+test whose callbacks arrive after the steps that started them -- a wait
+shared by five sessions, answered once -- is still answered for each of
+them, and no late callback reaches a bus that does not hold them."
+  (declare (indent 1))
+  `(let* ((harness-openrouter-test--stored nil)
+          (harness-openrouter-test--hints nil)
+          (harness-openrouter-test--session-value nil)
+          (sessions (mapcar (lambda (s) (cons (plist-get s :id) (copy-sequence s)))
+                            ,sessions))
+          (real (symbol-function 'harness-call)))
+     (cl-letf (((symbol-function 'harness-call)
+                (lambda (method &rest args)
+                  (pcase method
+                    ('session/get (cdr (assoc (car args) sessions)))
+                    ('session/exists-p (and (assoc (car args) sessions) t))
+                    ('session/set-ext
+                     (let* ((id (nth 0 args))
+                            (route (nth 2 args))
+                            (cell (assoc id sessions)))
+                       (setq harness-openrouter-test--stored route)
+                       (when cell
+                         (setcdr cell (plist-put (cdr cell) :ext
+                                                 (list :openrouter-route route))))
+                       args))
+                    ('session/hint
+                     (push (nth 1 args) harness-openrouter-test--hints)
+                     args)
+                    (_ (apply real method args))))))
+       ,@body)))
 
 (defun harness-openrouter-test--session (id &optional ext)
   "Return a session plist with ID and EXT, as the bus would return one."

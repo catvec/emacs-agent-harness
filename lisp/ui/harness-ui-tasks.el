@@ -1134,8 +1134,9 @@ back from review that took its slot (`:return-reason' preempted), named
 by its title when the board has it; \"slot taken back by\" the task
 waiting on you whose slot it worked in, once you answered (reclaimed);
 \"sent back from review\" for one the user sent back while no slot
-could take it; \"quota\" or \"budget\" for one whose turn stopped for
-lack of either.  Each carries on where it stopped when it starts again."
+could take it; \"quota\", \"budget\" or \"catalogue\" for one whose turn
+stopped for lack of either, or for an endpoint catalogue that could not
+be read.  Each carries on where it stopped when it starts again."
   (pcase (format "%s" (or (plist-get task :return-reason) "returned"))
     ("preempted"
      (format "pre-empted by %s"
@@ -1146,6 +1147,7 @@ lack of either.  Each carries on where it stopped when it starts again."
     ("sent-back" "sent back from review")
     ("quota" "quota")
     ("budget" "budget")
+    ("catalogue" "catalogue")
     (_ "paused")))
 
 ;;;; What holds a task back
@@ -1206,7 +1208,8 @@ line of a card.  See `harness-ui-tasks--clock'."
   "The fact on TASK's card in COLUMN that says what holds it back, or nil.
 Only a queued task in Pending has one: its hold, short
 \(`harness-ui-tasks--hold-text'), in the held face while it waits for
-quota or a budget, dim while it is only paused."
+quota, a budget or the endpoint catalogue, dim while it is only
+paused."
   (when-let* (((eq column 'pending))
               (hold (plist-get task :hold)))
     (propertize (harness-ui-tasks--hold-text hold t)
@@ -1324,7 +1327,7 @@ cost -- is in the tooltip of the title instead
 \(`harness-ui-tasks--figures').  Its priority is not among them: the
 arrow before the title says that (`harness-ui-tasks--priority-mark').
 A cell is dimmed (`harness-dim-face'), the hold's apart: it stands out
-while a task waits for quota or a budget."
+while a task waits for quota, a budget or the endpoint catalogue."
   (let* ((todos (harness-ui-tasks--todos session))
          (started (plist-get task :started))
          (cells
@@ -5471,8 +5474,9 @@ written up or planned for the backlog (`harness-ui-tasks--new-opts')."
                          "Kept for when the task starts (queue suspended)")
                         ((and returned (equal (format "%s" (plist-get task :return-reason)) "sent-back"))
                          "Kept for when the task starts")
-                        ;; Paused, or waiting for quota or a budget: the
-                        ;; harness keeps the message for the start too.
+                        ;; Paused, or waiting for quota, a budget or the
+                        ;; endpoint catalogue: the harness keeps the message
+                        ;; for the start too.
                         ((and returned (plist-get task :hold))
                          "Kept for when the task starts")
                         (t "Sent")))))
