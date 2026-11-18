@@ -1150,6 +1150,45 @@ were, and only what it adds is new."
                         'utf-8)))))))
 
 
+(ert-deftest harness-replay-unicode-persisted-prefix-keeps-exact-wire-bytes ()
+  "Nested JSON survives disk as text, and reaches HTTP as the same UTF-8."
+  (harness-replay-test-with
+    (let* ((id (harness-replay-test-session))
+           (request (list :session (list :id id)))
+           (body '(:model "m" :messages [(:role "system" :content "Unicode → café 日本語 🐈")
+                                        (:role "user" :content "Résumé: é; \"quote\"\nline")]
+                          :tools [(:type "function" :function
+                                  (:name "read" :description "Lisez → 文件"
+                                         :parameters (:type "object" :properties
+                                                            (:日本語 (:type "string")))))]))
+           (text (harness-replay--piece-text (harness-replay--piece body))))
+      (should (equal (encode-coding-string text 'utf-8 t) (harness-json-encode body)))
+      ;; Exercise the actual curl body-file writer, not just our encoding.
+      (let ((file (harness-http--write-body text nil)))
+        (unwind-protect
+            (with-temp-buffer
+              (set-buffer-multibyte nil)
+              (insert-file-contents-literally file)
+              (should (equal (buffer-string) (harness-json-encode body))))
+          (delete-file file)))
+      (harness-replay-seam-keep request "m" "route" body)
+      (should (= (plist-get (harness-call 'replay/frozen-status id) :bytes)
+                 (length (harness-json-encode body))))
+      ;; Every call reads the persisted record again, not an in-memory piece.
+      (dotimes (_ 3)
+        (let* ((decision (harness-call 'replay/frozen-splice id "m" "route" body))
+               (seam (harness-replay-seam request "m" "route" body)))
+          (should (plist-get decision :spliced))
+          (should-not (cdr seam))
+          (should (equal (encode-coding-string (car seam) 'utf-8 t)
+                         (harness-json-encode body)))
+          (harness-replay-seam-keep request "m" "route" body)))
+      (let ((changed (copy-tree body t)))
+        (setf (plist-get (aref (plist-get changed :messages) 0) :content)
+              "Unicode → café 日本語 🐕")
+        (should (string-match-p "messages\\[0\\]\\.content"
+                                (cdr (harness-replay-seam request "m" "route" changed))))))))
+
 ;;; What may become the prefix the session continues
 
 (ert-deftest harness-replay-a-one-off-call-is-not-the-conversations-prefix ()

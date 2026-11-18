@@ -56,6 +56,22 @@
              (make-string (* 2 samples) 0))
      t)))
 
+(defmacro harness-speech-test-with-runtime (&rest body)
+  "Run BODY with a stopped fixture stack, never the host's containers.
+Tests that exercise start failures override the fake runner explicitly.
+A status query returns an empty compose listing; a real command is an
+error, so removing command URLs cannot discover the user's voice stack."
+  (declare (indent 0))
+  `(let ((harness-stacks--states (make-hash-table :test 'eq))
+         (harness-stacks--commands (make-hash-table :test 'eq))
+         (harness-stacks--failures (make-hash-table :test 'eq)))
+     (cl-letf (((symbol-function 'harness-compose-stack-available-p) (lambda () t))
+               ((symbol-function 'harness-stacks--exec-for-stack)
+                (lambda (&rest _) (cons 0 "[]")))
+               ((symbol-function 'harness-stacks--run)
+                (lambda (&rest _) (error "Unexpected container command in speech test"))))
+       ,@body)))
+
 (defmacro harness-speech-test-with (bindings &rest body)
   "Run BODY with the speech module loaded, and BINDINGS inside it.
 The pipeline runs the fixture on two free ports, which is how a test
@@ -66,7 +82,8 @@ asks a container runtime for anything."
      (harness-test-reset-bus)
      (dolist (m '(store project config container-runtime stacks speech))
        (harness-test-load-module m))
-     (let* ((harness-speech-test--stt-port (harness-speech-test--port))
+     (harness-speech-test-with-runtime
+      (let* ((harness-speech-test--stt-port (harness-speech-test--port))
             (harness-speech-test--tts-port (harness-speech-test--port))
             (harness-speech-local-stt-command
              (list (or (executable-find "python3") "python3")
@@ -88,7 +105,7 @@ asks a container runtime for anything."
        (let ,bindings
          (unwind-protect
              (progn ,@body)
-           (harness-speech--stop-all))))))
+           (harness-speech--stop-all)))))))
 
 (defmacro harness-speech-test-with-stack (&rest body)
   "Run BODY with the bundled compose stack, and its runtime stubbed out."
@@ -97,14 +114,15 @@ asks a container runtime for anything."
      (harness-test-reset-bus)
      (dolist (m '(store project config container-runtime stacks speech))
        (harness-test-load-module m))
-     (let ((harness-speech-local-stt-command nil)
+     (harness-speech-test-with-runtime
+      (let ((harness-speech-local-stt-command nil)
            (harness-speech-local-tts-command nil)
            (harness-speech-local-stt-url nil)
            (harness-speech-local-tts-url nil)
            (harness-stacks--states (make-hash-table :test 'eq))
            (harness-stacks--commands (make-hash-table :test 'eq))
            (harness-speech--status nil))
-       ,@body)))
+       ,@body))))
 
 ;;;; The stack it declares
 

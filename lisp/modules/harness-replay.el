@@ -306,7 +306,7 @@ that only grew keeps every byte it had; anything else is its own bytes."
    ((and (consp value) (proper-list-p value))
     (list :kind "array"
           :items (harness-json-array (mapcar #'harness-replay--piece value))))
-   (t (list :kind "scalar" :bytes (harness-json-encode value)))))
+   (t (list :kind "scalar" :bytes (harness-json-encode-text value)))))
 
 (defconst harness-replay--piece-kinds '("scalar" "array" "object")
   "The kinds a piece can be.  A plist whose `:kind' is one of them is a
@@ -341,7 +341,8 @@ piece, never a body: a body's fields are the request's own names.")
   (plist-get field :piece))
 
 (defun harness-replay--piece-text (piece)
-  "Return PIECE as the JSON bytes it is sent as."
+  "Return PIECE as JSON text; the HTTP transport encodes it as UTF-8.
+The fragments are text because pieces are themselves stored inside JSON."
   (pcase (plist-get piece :kind)
     ("scalar" (or (plist-get piece :bytes) "null"))
     ("array" (concat "["
@@ -351,7 +352,7 @@ piece, never a body: a body's fields are the request's own names.")
                      "]"))
     ("object" (concat "{"
                       (mapconcat (lambda (field)
-                                   (concat (harness-json-encode
+                                   (concat (harness-json-encode-text
                                             (harness-replay--field-name field))
                                            ":"
                                            (harness-replay--piece-text
@@ -524,7 +525,7 @@ Nothing in it is a prompt's text."
             :reset (plist-get record :reset)
             :at (plist-get record :at)
             :bytes (if (harness-replay--piece-fields body)
-                       (length (harness-replay--piece-text body))
+                       (string-bytes (harness-replay--piece-text body))
                      0)))))
 
 (harness-defmethod replay/frozen-record (id body &optional model route)
@@ -612,7 +613,7 @@ that were encoded fresh as metadata."
               :generation (plist-get old :generation)
               ;; How much of this request's prompt came from the kept bytes,
               ;; which is what a telemetry line reports as the prefix.
-              :prefix-bytes (length (harness-replay--piece-text kept))
+              :prefix-bytes (string-bytes (harness-replay--piece-text kept))
               :metadata metadata))))))
 
 (defun harness-replay--with-metadata (prompt body)
@@ -687,7 +688,7 @@ kept for one route is not spliced into another's."
 
 (defun harness-replay--prompt-bytes (piece)
   "Return the bytes of PIECE, a body's prompt, as it is sent."
-  (length (harness-replay--piece-text (harness-replay--prompt-only piece))))
+  (string-bytes (harness-replay--piece-text (harness-replay--prompt-only piece))))
 
 (defun harness-replay--telemetry (_id model route frozen body)
   "Return the content-free record of one request's prefix decision.

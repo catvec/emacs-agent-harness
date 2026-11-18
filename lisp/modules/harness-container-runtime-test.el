@@ -397,13 +397,15 @@ in whichever buffer the command was typed in."
       (cl-letf (((symbol-function 'harness-container-runtime-available-p)
                  (lambda (&optional _id) nil))
                 ((symbol-function 'harness-container-runtime--found-socket)
-                 (lambda () nil)))
+                 (lambda () nil))
+                ((symbol-function 'harness-container-runtime-socket-usable-p)
+                 (lambda (&optional _id) nil)))
         (harness-container-runtimes)
         (unwind-protect
             (with-current-buffer "*harness runtimes*"
               (should (derived-mode-p 'harness-container-runtime-mode))
               (should (string-search "Docker" (buffer-string)))
-              (should (string-search "Socket unavailable · /var/run/docker.sock"
+              (should (string-search "  Socket  ✕ /var/run/docker.sock  [Request]\n"
                                      (buffer-string))))
           (kill-buffer "*harness runtimes*"))))))
 
