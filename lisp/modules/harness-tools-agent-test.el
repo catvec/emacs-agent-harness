@@ -495,6 +495,15 @@ spawn_agent call."
                                      :finish_reason "tool_calls")))
                    "[DONE]"))))))
 
+(defun harness-tools-agent-test--body (args)
+  "Return the body a request went out with, as the harness holds it.
+A body given as text is what the transport sends, byte for byte; it is
+read back here, so a server answers what actually went on the wire."
+  (or (plist-get args :json)
+      (let ((text (plist-get args :body)))
+        (and (stringp text) (not (string-blank-p text))
+             (harness-json-parse (decode-coding-string text 'utf-8))))))
+
 (defun harness-tools-agent-test--strict-request (url &rest args)
   "Answer the request to URL with ARGS as the strict server would, soon.
 The model list is empty; chat completions are recorded and answered by
@@ -507,8 +516,9 @@ The model list is empty; chat completions are recorded and answered by
          (pcase-let ((`(,status . ,text)
                       (if (string-match-p "/models\\'" url)
                           (cons 200 "{\"data\":[]}")
-                        (push (plist-get args :json) harness-tools-agent-test--bodies)
-                        (harness-tools-agent-test--strict-reply (plist-get args :json)))))
+                        (let ((body (harness-tools-agent-test--body args)))
+                        (push body harness-tools-agent-test--bodies)
+                        (harness-tools-agent-test--strict-reply body)))))
            (when (plist-get args :on-headers) (funcall (plist-get args :on-headers) status nil))
            (if (plist-get args :on-chunk)
                (progn (funcall (plist-get args :on-chunk) text)
@@ -916,8 +926,9 @@ Chat completion bodies are recorded in `harness-tools-agent-test--parallel-bodie
          (pcase-let ((`(,status . ,text)
                       (if (string-match-p "/models\\'" url)
                           (cons 200 "{\"data\":[]}")
-                        (push (plist-get args :json) harness-tools-agent-test--parallel-bodies)
-                        (harness-tools-agent-test--parallel-reply (plist-get args :json)))))
+                        (let ((body (harness-tools-agent-test--body args)))
+                        (push body harness-tools-agent-test--parallel-bodies)
+                        (harness-tools-agent-test--parallel-reply body)))))
            (when (plist-get args :on-headers) (funcall (plist-get args :on-headers) status nil))
            (if (plist-get args :on-chunk)
                (progn (funcall (plist-get args :on-chunk) text)

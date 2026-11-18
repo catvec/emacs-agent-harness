@@ -40,6 +40,28 @@ A test that wants nobody signed in binds it to nil.")
 It is a literal, not a credential, and the tests check it goes in the
 `Authorization' header and nowhere else.")
 
+(defun harness-responses-test--thaw (value)
+  "Return VALUE, read as raw JSON, as the harness holds a body.
+An empty array stays a vector and an empty object `:empty', so a body
+read back is the one the adapter built."
+  (cond
+   ((hash-table-p value)
+    (if (zerop (hash-table-count value))
+        :empty
+      (let (out)
+        (maphash (lambda (key item)
+                   (push (intern (concat ":" key)) out)
+                   (push (harness-responses-test--thaw item) out))
+                 value)
+        (nreverse out))))
+   ((vectorp value)
+    ;; An empty array stays one: the adapter builds its arrays as vectors so
+    ;; that `[]' never encodes as `null', and a test compares it with one.
+    (if (zerop (length value))
+        []
+      (mapcar #'harness-responses-test--thaw (append value nil))))
+   (t value)))
+
 (defun harness-responses-test--fake-request (url &rest args)
   "Record a request to URL with ARGS and replay the matching canned response.
 A response that is `(:function FN)' is asked for the response to replay,
@@ -52,8 +74,18 @@ which lets a test answer differently on each request to the same URL."
          (handle (make-harness-http-handle :url url :callback (plist-get args :callback)
                                            :on-chunk (plist-get args :on-chunk)
                                            :started (float-time))))
+    ;; A body given as text is what the transport sends, byte for byte;
+    ;; :json is that body as the harness holds it, so a test reads either.
     (push (list :url url :method (or (plist-get args :method) "GET")
-                :headers (plist-get args :headers) :json (plist-get args :json) :args args)
+                :headers (plist-get args :headers)
+                :json (or (plist-get args :json)
+                          (harness-responses-test--thaw
+                           (and (stringp (plist-get args :body))
+                                (json-parse-string
+                                 (decode-coding-string (plist-get args :body) 'utf-8)
+                                 :object-type 'hash-table :array-type 'array
+                                 :null-object nil :false-object :false))))
+                :body (plist-get args :body) :args args)
           harness-responses-test--requests)
     (unless (plist-get response :hang)
       (harness-run-soon
@@ -63,8 +95,10 @@ which lets a test answer differently on each request to the same URL."
              (when (plist-get args :on-headers)
                (funcall (plist-get args :on-headers) status (plist-get response :headers)))
              (dolist (chunk (or (plist-get response :chunks)
-                                (and (plist-get response :body) (list (plist-get response :body)))))
-               (when (plist-get args :on-chunk) (funcall (plist-get args :on-chunk) chunk)))
+                                (and (plist-get response :body)
+                                     (list (plist-get response :body)))))
+               (when (plist-get args :on-chunk)
+                 (funcall (plist-get args :on-chunk) chunk)))
              (when (plist-get args :callback)
                (funcall (plist-get args :callback) status nil
                         (or (plist-get response :body) "") nil)))))))
@@ -350,7 +384,10 @@ merely be ignored."
       ;; `store: false' and `stream: true' are required, not optional.
       (should (eq :false (plist-get body :store)))
       (should (eq t (plist-get body :stream)))
-      (should (equal ["reasoning.encrypted_content"] (plist-get body :include)))
+      ;; The body is read back from the bytes that went out, where every
+      ;; JSON array is a list; the adapter's own `[]' is checked where a
+      ;; test compares what it built.
+      (should (equal '("reasoning.encrypted_content") (plist-get body :include)))
       ;; Thinking of medium is asked for as an effort, with a summary,
       ;; which is what reaches the chat as thinking.
       (should (equal '(:effort "medium" :summary "auto") (plist-get body :reasoning)))

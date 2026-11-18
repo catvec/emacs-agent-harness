@@ -167,7 +167,7 @@ and supervisor load only when they are named.
 | [readonly](readonly.md) | by default | [session](session.md), [tools](tools.md) | Read-only sessions: the sessions a module's policy names (a supervisor, a task's write-up or plan) get only reading tools and read-only, offline bash, enforced by the harness. |
 | [recap](recap.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md), [tasks](tasks.md) | Write the recaps task cards and running chats show, with a short model call. |
 | [redact](redact.md) |  | [secrets](secrets.md), [session](session.md), [store](store.md) | Takes a secret out of the transcripts and every other copy the harness keeps. |
-| [replay](replay.md) | by default | [store](store.md), [session](session.md) | Keeps what a session's model was sent: the responses it made and the payload of its last request, so that a restart and a change of the rendering code keep the prompt cache. |
+| [replay](replay.md) | by default | [store](store.md), [session](session.md) | Keeps what a session's model was sent: the responses it made, the payload of its last request, and the exact body of the final request field by field, so that a restart, a change of the rendering code and a change of the adapter's serialization keep the prompt cache; a body that changed with no recorded reset is refused before it is sent. |
 | [resilience](resilience.md) | by default | [session](session.md), [agent](agent.md), [tools](tools.md) | Carry on sessions a stopped harness cut short, tell the parent and the user when a sub-agent waits for them, answer its unanswered prompts by default, and report stalled turns. |
 | [retry](retry.md) | by default | [session](session.md), [agent](agent.md) | Try a step again after a transient network or rate-limit failure, within the bounds one place sets. |
 | [sandbox](sandbox.md) | by default | [config](config.md) | Kernel sandbox (bwrap / systemd-run / MXC on macOS, or NVIDIA OpenShell on request) for spawned tool processes. |
@@ -297,6 +297,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/activity-changed` | [agent](agent.md) | [agent](agent.md) | [acp](acp.md), [cache-warm](cache-warm.md), [resilience](resilience.md), [tools](tools.md), [usage](usage.md) |  |
 | `agent/call-usage` | [agent](agent.md) | [agent](agent.md) | [usage](usage.md) |  |
 | `agent/cancelling` | [agent](agent.md) | [agent](agent.md) | [compaction](compaction.md), [cowboy](cowboy.md), [resilience](resilience.md) |  |
+| `agent/images-pruned` | [agent](agent.md) | [agent](agent.md) | [replay](replay.md) |  |
 | `agent/quota` | [agent](agent.md) | [agent](agent.md) |  | yes |
 | `agent/spawned` | [tools-agent](tools-agent.md) | [tools-agent](tools-agent.md) |  |  |
 | `agent/steered` | [agent](agent.md) | [agent](agent.md) | [resilience](resilience.md) |  |
@@ -312,7 +313,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `cache/poor-hit` | [cache](cache.md) | [cache](cache.md) |  |  |
 | `cache/pre-expire` | [cache](cache.md) | [cache](cache.md) | [cache-compact](cache-compact.md), [cache-warm](cache-warm.md) |  |
 | `cache/presence-changed` | [cache](cache.md) | [cache](cache.md) | [cache-warm](cache-warm.md) |  |
-| `cache/reuse` | [cache](cache.md) | [session](session.md) | [cache](cache.md) |  |
+| `cache/reuse` | [cache](cache.md) | [session](session.md) | [cache](cache.md), [replay](replay.md) |  |
 | `cache/warm-changed` | [cache-warm](cache-warm.md) | [cache-warm](cache-warm.md) | [ui-cache-warm](ui-cache-warm.md) | yes |
 | `chatgpt-plan/accounts-changed` | [chatgpt-plan](chatgpt-plan.md) | [chatgpt-plan](chatgpt-plan.md) | [provider-responses](provider-responses.md), [ui-chatgpt-plan](ui-chatgpt-plan.md) | yes |
 | `compaction/asked` | [compaction](compaction.md) | [compaction](compaction.md) |  |  |
@@ -365,6 +366,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `recap/failed` | [recap](recap.md) | [recap](recap.md) |  |  |
 | `recap/session-done` | [recap](recap.md) | [recap](recap.md) | [pet](pet.md), [tools](tools.md) |  |
 | `recap/session-failed` | [recap](recap.md) | [recap](recap.md) |  |  |
+| `replay/prefix` | [replay](replay.md) | [replay](replay.md) | [replay](replay.md) |  |
 | `resilience/prompt-timed-out` | [resilience](resilience.md) | [resilience](resilience.md) |  |  |
 | `resilience/recovered` | [resilience](resilience.md) | [resilience](resilience.md) |  |  |
 | `resilience/stalled` | [resilience](resilience.md) | [resilience](resilience.md) |  |  |
@@ -394,7 +396,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `session/status` | [session](session.md) | [session](session.md) | [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md), [ui-workspace](ui-workspace.md) | yes |
 | `session/steering-changed` | [session](session.md) | [session](session.md) |  | yes |
 | `session/todos` | [session](session.md) | [session](session.md) | [acp](acp.md), [todo-sync](todo-sync.md) |  |
-| `session/updated` | [session](session.md) | [session](session.md) | [access](access.md), [acp](acp.md), [cache-warm](cache-warm.md), [fallback](fallback.md), [perms](perms.md), [pet](pet.md) |  |
+| `session/updated` | [session](session.md) | [session](session.md) | [access](access.md), [acp](acp.md), [cache-warm](cache-warm.md), [fallback](fallback.md), [perms](perms.md), [pet](pet.md), [replay](replay.md) |  |
 | `session/usage` | [session](session.md) | [session](session.md) | [cache-warm](cache-warm.md), [tools](tools.md), [usage](usage.md) |  |
 | `speech/changed` | [speech](speech.md) | [speech](speech.md) |  | yes |
 | `supervisor/changed` | [supervisor](supervisor.md) | [supervisor](supervisor.md) |  | yes |

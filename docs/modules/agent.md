@@ -115,6 +115,7 @@ The loop is entirely event driven: nothing here waits.
 - `agent/activity-changed` — (SESSION-ID ACTIVITY) when what a running turn does changes; ACTIVITY nil once it ends (see `agent/activity`)
 - `agent/call-usage` — (SESSION-ID USAGE) when a model call of a hosted loop's turn reports its usage, (:output N), with `:context` N, the size of the call's prompt, when the provider knows it; the turn's `usage` event counts it
 - `agent/cancelling` — (SESSION-ID) when the running turn is cancelled, before it ends: a gate holding the turn up lets it go
+- `agent/images-pruned` — (SESSION-ID TOTAL LIMIT) when a request's history was cut back to LIMIT pictures, TOTAL being how many it held: what the provider was sent is no longer what the session sends
 - `agent/quota` — (SESSION-ID WINDOWS)
 - `agent/steered` — (SESSION-ID)
 - `agent/step-ended` — (SESSION-ID INFO) when a logical step of a turn is over, once per step however many attempts it took: INFO has `:model`, `:reason` (the provider's stop reason, `cancelled` or `error`), `:attempt`, `:step`, `:duration`, `:cancelled`, and, when the provider reported them, `:input` `:output` `:cache-read` `:cache-write` and `:cache-read-known`, the step's own counts and no session total; `:error-kind` says what kind of failure it was, and its text is never included
@@ -199,6 +200,7 @@ The loop is entirely event driven: nothing here waits.
 - `agent/activity-changed`
 - `agent/call-usage`
 - `agent/cancelling`
+- `agent/images-pruned`
 - `agent/quota`
 - `agent/steered`
 - `agent/step-ended`

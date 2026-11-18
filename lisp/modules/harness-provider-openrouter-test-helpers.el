@@ -73,6 +73,26 @@ no network.")
 (defvar harness-openrouter-test--held-catalogues nil
   "The ARGS of the catalogue requests the fake is holding, oldest first.")
 
+(defun harness-openrouter-test--thaw (value)
+  "Return VALUE, read as raw JSON, as the harness holds a body.
+An empty array stays a vector and an empty object `:empty', so a body
+read back is the one the adapter built."
+  (cond
+   ((hash-table-p value)
+    (if (zerop (hash-table-count value))
+        :empty
+      (let (out)
+        (maphash (lambda (key item)
+                   (push (intern (concat ":" key)) out)
+                   (push (harness-openrouter-test--thaw item) out))
+                 value)
+        (nreverse out))))
+   ((vectorp value)
+    (if (zerop (length value))
+        []
+      (mapcar #'harness-openrouter-test--thaw (append value nil))))
+   (t value)))
+
 (defun harness-openrouter-test--fake-request (url &rest args)
   "Record a request to URL with ARGS and replay the matching canned response."
   (let* ((catalogue (string-match-p "/endpoints\\'" url))
@@ -91,7 +111,18 @@ no network.")
                                            :on-chunk (plist-get args :on-chunk)
                                            :started (float-time))))
     (push (list :url url :method (or (plist-get args :method) "GET")
-                :headers (plist-get args :headers) :json (plist-get args :json) :args args)
+                :headers (plist-get args :headers)
+                ;; A body given as text is what the transport sends, byte for
+                ;; byte; :json is that body as the harness holds it, so a test
+                ;; reads either.
+                :json (or (plist-get args :json)
+                          (harness-openrouter-test--thaw
+                           (and (stringp (plist-get args :body))
+                                (json-parse-string
+                                 (decode-coding-string (plist-get args :body) 'utf-8)
+                                 :object-type 'hash-table :array-type 'array
+                                 :null-object nil :false-object :false))))
+                :body (plist-get args :body) :args args)
           harness-openrouter-test--requests)
     (cond
      ((and catalogue

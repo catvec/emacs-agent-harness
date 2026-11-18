@@ -23,6 +23,26 @@
 RESPONSE is (:status N :chunks (STRING…)) for streamed replies or
 \(:status N :body STRING) for plain ones; :hang t never answers.")
 
+(defun harness-openai-test--thaw (value)
+  "Return VALUE, read as raw JSON, as the harness holds a body.
+An empty array stays a vector and an empty object `:empty', so a body read
+back is the one the adapter built."
+  (cond
+   ((hash-table-p value)
+    (if (zerop (hash-table-count value))
+        :empty
+      (let (out)
+        (maphash (lambda (key item)
+                   (push (intern (concat ":" key)) out)
+                   (push (harness-openai-test--thaw item) out))
+                 value)
+        (nreverse out))))
+   ((vectorp value)
+    (if (zerop (length value))
+        []
+      (mapcar #'harness-openai-test--thaw (append value nil))))
+   (t value)))
+
 (defun harness-openai-test--fake-request (url &rest args)
   "Record a request to URL with ARGS and replay the matching canned response."
   (let* ((response (cdr (cl-find-if (lambda (cell) (string-match-p (car cell) url))
@@ -30,8 +50,21 @@ RESPONSE is (:status N :chunks (STRING…)) for streamed replies or
          (handle (make-harness-http-handle :url url :callback (plist-get args :callback)
                                            :on-chunk (plist-get args :on-chunk)
                                            :started (float-time))))
+    ;; A body given as text is what the transport sends, byte for byte;
+    ;; :json is that body as the harness holds it, so a test reads either.
     (push (list :url url :method (or (plist-get args :method) "GET")
-                :headers (plist-get args :headers) :json (plist-get args :json) :args args)
+                :headers (plist-get args :headers)
+                :json (or (plist-get args :json)
+                          ;; Read back as the harness holds a body: an
+                          ;; empty array stays one, so a test comparing it
+                          ;; with the plist the adapter built sees the same.
+                          (harness-openai-test--thaw
+                           (and (stringp (plist-get args :body))
+                                (json-parse-string
+                                 (decode-coding-string (plist-get args :body) 'utf-8)
+                                 :object-type 'hash-table :array-type 'array
+                                 :null-object nil :false-object :false))))
+                :body (plist-get args :body) :args args)
           harness-openai-test--requests)
     (unless (plist-get response :hang)
       (harness-run-soon
@@ -516,8 +549,10 @@ that names none sends no such field at all."
                                           '(:choices ((:index 0 :delta (:content "{\"decision\":\"allow\"}")
                                                        :finish_reason "stop")))
                                           "[DONE]")))))
-    (let ((schema '(:type "object" :properties (:decision (:type "string" :enum ["allow" "deny"]))
-                    :required ["decision"] :additionalProperties :false)))
+    ;; Written as lists: the body is read back from the bytes that went
+    ;; out, where every JSON array is a list again.
+    (let ((schema '(:type "object" :properties (:decision (:type "string" :enum ("allow" "deny")))
+                    :required ("decision") :additionalProperties :false)))
       ;; No schema named: no field.
       (harness-openai-test--complete harness-openai-test-openai-endpoint
                                      '(:model "testopenai:gpt-x"
@@ -532,7 +567,8 @@ that names none sends no such field at all."
       (let ((format (plist-get (harness-openai-test--last-request-json) :response_format)))
         (should (equal "json_schema" (plist-get format :type)))
         (should (equal "verdict" (plist-get (plist-get format :json_schema) :name)))
-        (should (equal t (plist-get (plist-get format :json_schema) :strict)))
+        ;; JSON's `true', which is `t' here: a keyword would encode as a string.
+        (should (eq t (plist-get (plist-get format :json_schema) :strict)))
         (should (equal schema (plist-get (plist-get format :json_schema) :schema)))
         ;; The strictness must be the JSON boolean `true' on the wire, not
         ;; the string ":true": DeepInfra refused the latter with HTTP 422

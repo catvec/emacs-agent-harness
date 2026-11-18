@@ -974,6 +974,11 @@ for a model of SESSION that reads no images, which is sent none."
         (if (or (<= total limit) (not (harness-agent--vision-p session)))
             messages
           (let ((chunk (max 1 (/ limit 2))))
+            ;; A request that lost pictures is not the one the provider
+            ;; read: the results that held them are rewritten.  The session
+            ;; is told, so a body kept for it is dropped with its reason
+            ;; rather than refused at the transport.
+            (harness-emit 'agent/images-pruned (plist-get session :id) total limit)
             (harness-agent--drop-oldest-images
              messages (min total (* chunk (ceiling (- total limit) chunk))))))))))
 
@@ -3168,7 +3173,9 @@ stopped work sends reach an idle session."
               (agent/call-usage
                . "(SESSION-ID USAGE) when a model call of a hosted loop's turn reports its usage, (:output N), with `:context' N, the size of the call's prompt, when the provider knows it; the turn's `usage' event counts it")
               (agent/activity-changed
-               . "(SESSION-ID ACTIVITY) when what a running turn does changes; ACTIVITY nil once it ends (see `agent/activity')")))
+               . "(SESSION-ID ACTIVITY) when what a running turn does changes; ACTIVITY nil once it ends (see `agent/activity')")
+              (agent/images-pruned
+               . "(SESSION-ID TOTAL LIMIT) when a request's history was cut back to LIMIT pictures, TOTAL being how many it held: what the provider was sent is no longer what the session sends")))
   (harness-declare-event (car ev) (cdr ev)))
 
 ;;;; Exit

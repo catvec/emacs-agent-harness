@@ -1,0 +1,304 @@
+<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1154" height="1833" viewBox="0 0 1154 1833">
+<rect width="100%" height="100%" fill="white"/>
+<text x="12" y="28" font-family="DejaVu Sans Mono,monospace" font-size="18" font-weight="bold">What was fixed, behaviour by behaviour (t-sp1j60ii branch)</text>
+<text x="12" y="56" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Behaviour</text>
+<text x="242" y="56" font-family="DejaVu Sans Mono,monospace" font-size="13">State</text>
+<text x="332" y="56" font-family="DejaVu Sans Mono,monospace" font-size="13">Evidence</text>
+<text x="762" y="56" font-family="DejaVu Sans Mono,monospace" font-size="13">Fix</text>
+<text x="1012" y="56" font-family="DejaVu Sans Mono,monospace" font-size="13">Blocker</text>
+<line x1="12" y1="77" x2="1142" y2="77" stroke="#e2e2e2"/>
+<text x="12" y="83" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Final adapter body is</text>
+<text x="12" y="100" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">frozen, field by field, and</text>
+<text x="12" y="117" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">the sent bytes are the kept</text>
+<text x="12" y="134" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">bytes</text>
+<text x="242" y="83" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="100" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="83" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-the-frozen-body-is-what-was-sent,</text>
+<text x="332" y="100" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-the-sent-body-is-the-kept-one;</text>
+<text x="332" y="117" font-family="DejaVu Sans Mono,monospace" font-size="13">replay suite 48/48</text>
+<text x="762" y="83" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay.el (pieces,</text>
+<text x="762" y="100" font-family="DejaVu Sans Mono,monospace" font-size="13">splice, text),</text>
+<text x="762" y="117" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-provider-openai.el</text>
+<text x="762" y="134" font-family="DejaVu Sans Mono,monospace" font-size="13">(--frozen-body),</text>
+<text x="762" y="151" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-provider-responses.el</text>
+<text x="762" y="168" font-family="DejaVu Sans Mono,monospace" font-size="13">(--frozen-body)</text>
+<text x="1012" y="83" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="189" x2="1142" y2="189" stroke="#e2e2e2"/>
+<text x="12" y="195" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">The invariant is the</text>
+<text x="12" y="212" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">prompt, not the whole</text>
+<text x="12" y="229" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">request body</text>
+<text x="242" y="195" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="212" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="195" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-a-metadata-field-is-not-a-prompt-change</text>
+<text x="332" y="212" font-family="DejaVu Sans Mono,monospace" font-size="13">(a budget added: spliced, sent, not refused)</text>
+<text x="332" y="229" font-family="DejaVu Sans Mono,monospace" font-size="13">and -a-prompt-field-changed-is-still-refused</text>
+<text x="332" y="246" font-family="DejaVu Sans Mono,monospace" font-size="13">(a changed message: refused).</text>
+<text x="332" y="263" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-prompt-fields names what is</text>
+<text x="332" y="280" font-family="DejaVu Sans Mono,monospace" font-size="13">frozen</text>
+<text x="762" y="195" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay--prompt-only,</text>
+<text x="762" y="212" font-family="DejaVu Sans Mono,monospace" font-size="13">--metadata-fields,</text>
+<text x="762" y="229" font-family="DejaVu Sans Mono,monospace" font-size="13">--with-metadata</text>
+<text x="1012" y="195" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="301" x2="1142" y2="301" stroke="#e2e2e2"/>
+<text x="12" y="307" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Content-free prefix</text>
+<text x="12" y="324" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">telemetry per request</text>
+<text x="242" y="307" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="324" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="307" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-a-decision-says-what-it-did-with-the-prefix</text>
+<text x="332" y="324" font-family="DejaVu Sans Mono,monospace" font-size="13">asserts decision, prefix-bytes,</text>
+<text x="332" y="341" font-family="DejaVu Sans Mono,monospace" font-size="13">appended-bytes, and that no message text or</text>
+<text x="332" y="358" font-family="DejaVu Sans Mono,monospace" font-size="13">digest appears; replay/prefix is a declared</text>
+<text x="332" y="375" font-family="DejaVu Sans Mono,monospace" font-size="13">event</text>
+<text x="762" y="307" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay--telemetry,</text>
+<text x="762" y="324" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-declare-event</text>
+<text x="762" y="341" font-family="DejaVu Sans Mono,monospace" font-size="13">'replay/prefix</text>
+<text x="1012" y="307" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="396" x2="1142" y2="396" stroke="#e2e2e2"/>
+<text x="12" y="402" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">A provider miss on</text>
+<text x="12" y="419" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">identical bytes is bounded,</text>
+<text x="12" y="436" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">not acted on</text>
+<text x="242" y="402" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="419" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="402" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-a-miss-on-identical-bytes-is-the-providers</text>
+<text x="332" y="419" font-family="DejaVu Sans Mono,monospace" font-size="13">(returns provider, generation and bytes</text>
+<text x="332" y="436" font-family="DejaVu Sans Mono,monospace" font-size="13">unchanged, next request still splices) and</text>
+<text x="332" y="453" font-family="DejaVu Sans Mono,monospace" font-size="13">-a-miss-with-no-identical-prefix-is-unexplained</text>
+<text x="762" y="402" font-family="DejaVu Sans Mono,monospace" font-size="13">replay/miss-note,</text>
+<text x="762" y="419" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay--on-reuse</text>
+<text x="1012" y="402" font-family="DejaVu Sans Mono,monospace" font-size="13">no live provider</text>
+<text x="1012" y="419" font-family="DejaVu Sans Mono,monospace" font-size="13">miss was</text>
+<text x="1012" y="436" font-family="DejaVu Sans Mono,monospace" font-size="13">observed this</text>
+<text x="1012" y="453" font-family="DejaVu Sans Mono,monospace" font-size="13">revision</text>
+<line x1="12" y1="474" x2="1142" y2="474" stroke="#e2e2e2"/>
+<text x="12" y="480" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">An appended message changes</text>
+<text x="12" y="497" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">nothing before it</text>
+<text x="242" y="480" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="497" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="480" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-an-appended-message-changes-nothing-before-it</text>
+<text x="332" y="497" font-family="DejaVu Sans Mono,monospace" font-size="13">asserts the second body equals a fresh</text>
+<text x="332" y="514" font-family="DejaVu Sans Mono,monospace" font-size="13">encode of the two-message body</text>
+<text x="762" y="480" font-family="DejaVu Sans Mono,monospace" font-size="13">same</text>
+<text x="1012" y="480" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="535" x2="1142" y2="535" stroke="#e2e2e2"/>
+<text x="12" y="541" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Unexplained mutation fails</text>
+<text x="12" y="558" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">closed, with no HTTP send</text>
+<text x="242" y="541" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="558" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="541" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-a-mutation-stops-before-the-transport:</text>
+<text x="332" y="558" font-family="DejaVu Sans Mono,monospace" font-size="13">(= 0 (length</text>
+<text x="332" y="575" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-test--requests)), complaint</text>
+<text x="332" y="592" font-family="DejaVu Sans Mono,monospace" font-size="13">names messages[0].content and never the text</text>
+<text x="762" y="541" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-openai--complete sets</text>
+<text x="762" y="558" font-family="DejaVu Sans Mono,monospace" font-size="13">:error-kind 'permanent;</text>
+<text x="762" y="575" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-responses--start refuses</text>
+<text x="762" y="592" font-family="DejaVu Sans Mono,monospace" font-size="13">the same way</text>
+<text x="1012" y="541" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="613" x2="1142" y2="613" stroke="#e2e2e2"/>
+<text x="12" y="619" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Recorded reset explains a</text>
+<text x="12" y="636" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">change</text>
+<text x="242" y="619" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="636" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="619" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-a-recorded-reset-explains-the-change,</text>
+<text x="332" y="636" font-family="DejaVu Sans Mono,monospace" font-size="13">-a-compaction-records-its-reset,</text>
+<text x="332" y="653" font-family="DejaVu Sans Mono,monospace" font-size="13">-a-session-setting-records-its-own-reset,</text>
+<text x="332" y="670" font-family="DejaVu Sans Mono,monospace" font-size="13">-a-pruned-picture-records-its-reset</text>
+<text x="762" y="619" font-family="DejaVu Sans Mono,monospace" font-size="13">replay/frozen-reset,</text>
+<text x="762" y="636" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-reset-on-change,</text>
+<text x="762" y="653" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay--on-images-pruned</text>
+<text x="1012" y="619" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="691" x2="1142" y2="691" stroke="#e2e2e2"/>
+<text x="12" y="697" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Compaction / system / tools</text>
+<text x="12" y="714" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">/ model / route / redaction</text>
+<text x="12" y="731" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">resets are explicit</text>
+<text x="242" y="697" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="714" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="697" font-family="DejaVu Sans Mono,monospace" font-size="13">the four tests above plus</text>
+<text x="332" y="714" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-a-redaction-drops-the-frozen-body</text>
+<text x="762" y="697" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-frozen-reset-reasons,</text>
+<text x="762" y="714" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-reset-changes</text>
+<text x="1012" y="697" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="752" x2="1142" y2="752" stroke="#e2e2e2"/>
+<text x="12" y="758" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Reasoning and tool items</text>
+<text x="12" y="775" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">replay byte for byte</text>
+<text x="242" y="758" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="775" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="758" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-reasoning-and-tool-items-go-back-as-they-came;</text>
+<text x="332" y="775" font-family="DejaVu Sans Mono,monospace" font-size="13">Responses suite 54/54 including</text>
+<text x="332" y="792" font-family="DejaVu Sans Mono,monospace" font-size="13">...-body-replays-remembered-reasoning</text>
+<text x="762" y="758" font-family="DejaVu Sans Mono,monospace" font-size="13">item-wise array pieces keep each</text>
+<text x="762" y="775" font-family="DejaVu Sans Mono,monospace" font-size="13">item's bytes</text>
+<text x="1012" y="758" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="813" x2="1142" y2="813" stroke="#e2e2e2"/>
+<text x="12" y="819" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Pictures are kept, not</text>
+<text x="12" y="836" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">vetoed; pruning is a</text>
+<text x="12" y="853" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">recorded reset</text>
+<text x="242" y="819" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="836" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="819" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-a-picture-is-kept-as-the-tool-returned-it</text>
+<text x="332" y="836" font-family="DejaVu Sans Mono,monospace" font-size="13">(replaces the old "not kept" test),</text>
+<text x="332" y="853" font-family="DejaVu Sans Mono,monospace" font-size="13">-a-pruned-picture-records-its-reset</text>
+<text x="762" y="819" font-family="DejaVu Sans Mono,monospace" font-size="13">replay/save-request no longer</text>
+<text x="762" y="836" font-family="DejaVu Sans Mono,monospace" font-size="13">refuses image bytes;</text>
+<text x="762" y="853" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-agent--cap-images emits</text>
+<text x="762" y="870" font-family="DejaVu Sans Mono,monospace" font-size="13">agent/images-pruned</text>
+<text x="1012" y="819" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="891" x2="1142" y2="891" stroke="#e2e2e2"/>
+<text x="12" y="897" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Restart keeps the frozen</text>
+<text x="12" y="914" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">body</text>
+<text x="242" y="897" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="914" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="897" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-a-frozen-body-survives-a-restart</text>
+<text x="762" y="897" font-family="DejaVu Sans Mono,monospace" font-size="13">file-backed replay/frozen-record,</text>
+<text x="762" y="914" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay--thaw keeps [] and</text>
+<text x="762" y="931" font-family="DejaVu Sans Mono,monospace" font-size="13">{} apart</text>
+<text x="1012" y="897" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="952" x2="1142" y2="952" stroke="#e2e2e2"/>
+<text x="12" y="958" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Large payload is not kept,</text>
+<text x="12" y="975" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">and says so</text>
+<text x="242" y="958" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="975" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="958" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-a-large-body-is-not-kept</text>
+<text x="332" y="975" font-family="DejaVu Sans Mono,monospace" font-size="13">(:reset is too-large, :bytes 0)</text>
+<text x="762" y="958" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-frozen-max-bytes</text>
+<text x="1012" y="958" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="996" x2="1142" y2="996" stroke="#e2e2e2"/>
+<text x="12" y="1002" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">A store that cannot write</text>
+<text x="12" y="1019" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">keeps nothing rather than a</text>
+<text x="12" y="1036" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">wrong body</text>
+<text x="242" y="1002" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="1019" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="1002" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-a-store-that-cannot-write-keeps-nothing</text>
+<text x="762" y="1002" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay--frozen-write</text>
+<text x="762" y="1019" font-family="DejaVu Sans Mono,monospace" font-size="13">returns nil, caller records</text>
+<text x="762" y="1036" font-family="DejaVu Sans Mono,monospace" font-size="13">storage-failure</text>
+<text x="1012" y="1002" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="1057" x2="1142" y2="1057" stroke="#e2e2e2"/>
+<text x="12" y="1063" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Retry sends the same bytes</text>
+<text x="242" y="1063" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="1080" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="1063" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-a-body-sent-twice-is-sent-the-same-bytes</text>
+<text x="332" y="1080" font-family="DejaVu Sans Mono,monospace" font-size="13">(two sends, one body, idempotent keep)</text>
+<text x="762" y="1063" font-family="DejaVu Sans Mono,monospace" font-size="13">the frozen body is a pure</text>
+<text x="762" y="1080" font-family="DejaVu Sans Mono,monospace" font-size="13">function of the kept record</text>
+<text x="1012" y="1063" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="1101" x2="1142" y2="1101" stroke="#e2e2e2"/>
+<text x="12" y="1107" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Two sessions never share a</text>
+<text x="12" y="1124" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">frozen body</text>
+<text x="242" y="1107" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="1124" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="1107" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-two-sessions-do-not-share-a-frozen-body</text>
+<text x="762" y="1107" font-family="DejaVu Sans Mono,monospace" font-size="13">keyed by session id</text>
+<text x="1012" y="1107" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="1145" x2="1142" y2="1145" stroke="#e2e2e2"/>
+<text x="12" y="1151" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Concurrency: two sessions</text>
+<text x="12" y="1168" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">interleaved</text>
+<text x="242" y="1151" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="1168" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="1151" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-two-sessions-interleaved-keep-their-own-bytes:</text>
+<text x="332" y="1168" font-family="DejaVu Sans Mono,monospace" font-size="13">two conversations' requests interleave, each</text>
+<text x="332" y="1185" font-family="DejaVu Sans Mono,monospace" font-size="13">continues from its own body, and a reset of</text>
+<text x="332" y="1202" font-family="DejaVu Sans Mono,monospace" font-size="13">one leaves the other's bytes alone</text>
+<text x="762" y="1151" font-family="DejaVu Sans Mono,monospace" font-size="13">keyed by session id</text>
+<text x="1012" y="1151" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="1223" x2="1142" y2="1223" stroke="#e2e2e2"/>
+<text x="12" y="1229" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Redaction drops the frozen</text>
+<text x="12" y="1246" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">body and counts it</text>
+<text x="242" y="1229" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="1246" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="1229" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-replay-a-redaction-cleans-what-the-provider-was-sent</text>
+<text x="332" y="1246" font-family="DejaVu Sans Mono,monospace" font-size="13">(:payload-count includes it)</text>
+<text x="762" y="1229" font-family="DejaVu Sans Mono,monospace" font-size="13">replay/redact binds the frozen</text>
+<text x="762" y="1246" font-family="DejaVu Sans Mono,monospace" font-size="13">file</text>
+<text x="1012" y="1229" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="1267" x2="1142" y2="1267" stroke="#e2e2e2"/>
+<text x="12" y="1273" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">ChatGPT-plan (Responses)</text>
+<text x="12" y="1290" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">route freezes and checks</text>
+<text x="242" y="1273" font-family="DejaVu Sans Mono,monospace" font-size="13">working</text>
+<text x="242" y="1290" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="1273" font-family="DejaVu Sans Mono,monospace" font-size="13">Responses suite 54/54, including the</text>
+<text x="332" y="1290" font-family="DejaVu Sans Mono,monospace" font-size="13">:body-sent assertions the fake now reads</text>
+<text x="332" y="1307" font-family="DejaVu Sans Mono,monospace" font-size="13">back</text>
+<text x="762" y="1273" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-responses--start sends</text>
+<text x="762" y="1290" font-family="DejaVu Sans Mono,monospace" font-size="13">:body bytes with Content-Type</text>
+<text x="1012" y="1273" font-family="DejaVu Sans Mono,monospace" font-size="13">no live ChatGPT</text>
+<text x="1012" y="1290" font-family="DejaVu Sans Mono,monospace" font-size="13">request was</text>
+<text x="1012" y="1307" font-family="DejaVu Sans Mono,monospace" font-size="13">made; see below</text>
+<line x1="12" y1="1328" x2="1142" y2="1328" stroke="#e2e2e2"/>
+<text x="12" y="1334" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">The wire body is the body</text>
+<text x="12" y="1351" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">object, not a JSON string</text>
+<text x="12" y="1368" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">literal</text>
+<text x="242" y="1334" font-family="DejaVu Sans Mono,monospace" font-size="13">fixed</text>
+<text x="242" y="1351" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="1334" font-family="DejaVu Sans Mono,monospace" font-size="13">this was the bug t-jibzilj2 independently</text>
+<text x="332" y="1351" font-family="DejaVu Sans Mono,monospace" font-size="13">reported at 18616b4;</text>
+<text x="332" y="1368" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-provider-openai-test 56/56 asserts</text>
+<text x="332" y="1385" font-family="DejaVu Sans Mono,monospace" font-size="13">what the transport received</text>
+<text x="762" y="1334" font-family="DejaVu Sans Mono,monospace" font-size="13">adapters pass :body, never :json</text>
+<text x="1012" y="1334" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="1406" x2="1142" y2="1406" stroke="#e2e2e2"/>
+<text x="12" y="1412" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">The Responses keep-guard</text>
+<text x="12" y="1429" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">records a body</text>
+<text x="242" y="1412" font-family="DejaVu Sans Mono,monospace" font-size="13">fixed</text>
+<text x="242" y="1429" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="1412" font-family="DejaVu Sans Mono,monospace" font-size="13">same report: the guard compared the</text>
+<text x="332" y="1429" font-family="DejaVu Sans Mono,monospace" font-size="13">transport's text with the adapter's plist</text>
+<text x="332" y="1446" font-family="DejaVu Sans Mono,monospace" font-size="13">and kept nothing. It now rebuilds the plist</text>
+<text x="332" y="1463" font-family="DejaVu Sans Mono,monospace" font-size="13">and compares like with like</text>
+<text x="762" y="1412" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-responses--frozen-keep</text>
+<text x="1012" y="1412" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<line x1="12" y1="1484" x2="1142" y2="1484" stroke="#e2e2e2"/>
+<text x="12" y="1490" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Cache alert does not call a</text>
+<text x="12" y="1507" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">good read a miss</text>
+<text x="242" y="1490" font-family="DejaVu Sans Mono,monospace" font-size="13">fixed</text>
+<text x="242" y="1507" font-family="DejaVu Sans Mono,monospace" font-size="13">(branch)</text>
+<text x="332" y="1490" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-cache-health-does-not-call-a-good-read-a-miss</text>
+<text x="332" y="1507" font-family="DejaVu Sans Mono,monospace" font-size="13">asserts the exact rendered line and that</text>
+<text x="332" y="1524" font-family="DejaVu Sans Mono,monospace" font-size="13">"miss" appears in neither the hint nor the</text>
+<text x="332" y="1541" font-family="DejaVu Sans Mono,monospace" font-size="13">notification title; cache suite 23/23</text>
+<text x="762" y="1490" font-family="DejaVu Sans Mono,monospace" font-size="13">harness-cache--alert wording,</text>
+<text x="762" y="1507" font-family="DejaVu Sans Mono,monospace" font-size="13">Cache reuse low</text>
+<text x="1012" y="1490" font-family="DejaVu Sans Mono,monospace" font-size="13">the 0.99</text>
+<text x="1012" y="1507" font-family="DejaVu Sans Mono,monospace" font-size="13">threshold itself</text>
+<text x="1012" y="1524" font-family="DejaVu Sans Mono,monospace" font-size="13">is unchanged</text>
+<text x="1012" y="1541" font-family="DejaVu Sans Mono,monospace" font-size="13">(see appendix)</text>
+<line x1="12" y1="1562" x2="1142" y2="1562" stroke="#e2e2e2"/>
+<text x="12" y="1568" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Full suite green</text>
+<text x="242" y="1568" font-family="DejaVu Sans Mono,monospace" font-size="13">1 failure,</text>
+<text x="242" y="1585" font-family="DejaVu Sans Mono,monospace" font-size="13">not this</text>
+<text x="242" y="1602" font-family="DejaVu Sans Mono,monospace" font-size="13">branch's</text>
+<text x="332" y="1568" font-family="DejaVu Sans Mono,monospace" font-size="13">scripts/test.sh: 218 files, 1 failed,</text>
+<text x="332" y="1585" font-family="DejaVu Sans Mono,monospace" font-size="13">lisp/harness-skills-scan-test.el. The</text>
+<text x="332" y="1602" font-family="DejaVu Sans Mono,monospace" font-size="13">failure is main's own fix that this branch</text>
+<text x="332" y="1619" font-family="DejaVu Sans Mono,monospace" font-size="13">predates (main has 384cbf1/c78d4ee, the</text>
+<text x="332" y="1636" font-family="DejaVu Sans Mono,monospace" font-size="13">sorted walk plus its test; this branch does</text>
+<text x="332" y="1653" font-family="DejaVu Sans Mono,monospace" font-size="13">not). Reproduced on a clean copy of main as</text>
+<text x="332" y="1670" font-family="DejaVu Sans Mono,monospace" font-size="13">green and here as red</text>
+<text x="762" y="1568" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<text x="1012" y="1568" font-family="DejaVu Sans Mono,monospace" font-size="13">the merge queue</text>
+<text x="1012" y="1585" font-family="DejaVu Sans Mono,monospace" font-size="13">brings main in</text>
+<line x1="12" y1="1691" x2="1142" y2="1691" stroke="#e2e2e2"/>
+<text x="12" y="1697" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Live ChatGPT-plan cache</text>
+<text x="12" y="1714" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">behaviour</text>
+<text x="242" y="1697" font-family="DejaVu Sans Mono,monospace" font-size="13">unverified</text>
+<text x="332" y="1697" font-family="DejaVu Sans Mono,monospace" font-size="13">no live ChatGPT request was made in this</text>
+<text x="332" y="1714" font-family="DejaVu Sans Mono,monospace" font-size="13">revision, by instruction</text>
+<text x="762" y="1697" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<text x="1012" y="1697" font-family="DejaVu Sans Mono,monospace" font-size="13">a separately</text>
+<text x="1012" y="1714" font-family="DejaVu Sans Mono,monospace" font-size="13">authorised</text>
+<text x="1012" y="1731" font-family="DejaVu Sans Mono,monospace" font-size="13">bounded smoke</text>
+<line x1="12" y1="1752" x2="1142" y2="1752" stroke="#e2e2e2"/>
+<text x="12" y="1758" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">Live OpenRouter DeepSeek</text>
+<text x="12" y="1775" font-family="DejaVu Sans Mono,monospace" font-size="13" font-weight="bold">cache behaviour</text>
+<text x="242" y="1758" font-family="DejaVu Sans Mono,monospace" font-size="13">unverified</text>
+<text x="242" y="1775" font-family="DejaVu Sans Mono,monospace" font-size="13">this</text>
+<text x="242" y="1792" font-family="DejaVu Sans Mono,monospace" font-size="13">revision</text>
+<text x="332" y="1758" font-family="DejaVu Sans Mono,monospace" font-size="13">the 2026-11-09 Particle/Morph observations</text>
+<text x="332" y="1775" font-family="DejaVu Sans Mono,monospace" font-size="13">are dated, and are not DeepInfra or ChatGPT</text>
+<text x="332" y="1792" font-family="DejaVu Sans Mono,monospace" font-size="13">evidence today</text>
+<text x="762" y="1758" font-family="DejaVu Sans Mono,monospace" font-size="13">—</text>
+<text x="1012" y="1758" font-family="DejaVu Sans Mono,monospace" font-size="13">a separately</text>
+<text x="1012" y="1775" font-family="DejaVu Sans Mono,monospace" font-size="13">authorised</text>
+<text x="1012" y="1792" font-family="DejaVu Sans Mono,monospace" font-size="13">bounded smoke</text>
+<line x1="12" y1="1813" x2="1142" y2="1813" stroke="#e2e2e2"/>
+</svg>

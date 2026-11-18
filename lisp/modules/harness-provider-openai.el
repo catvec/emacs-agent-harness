@@ -347,6 +347,13 @@ A dialect may add headers of its own (`:headers' of
               (funcall extra endpoint key))
             (plist-get endpoint :headers))))
 
+(defun harness-openai--body-headers (endpoint key)
+  "Return the headers of a request whose body is the bytes frozen for it.
+ENDPOINT's own headers, with the content type a JSON body needs: a body
+given as text is not the transport's to describe."
+  (append (harness-openai--headers endpoint key)
+          (list (cons "Content-Type" "application/json"))))
+
 (defun harness-openai-add-endpoint (&rest plist)
   "Add or replace the endpoint described by PLIST (keyed by its :id).
 See `harness-openai-endpoints' for the keys.  The provider is
@@ -845,6 +852,8 @@ mean if it has checked: the field goes out as `json_schema', under
        (dialect nil)                    ; this dialect takes none here
        ((listp schema)
         (list :type "json_schema"
+              ;; `t', not `:true': a keyword here encodes as the string
+              ;; ":true", and the route reads a schema's strictness as a boolean.
               :json_schema (list :name name :strict t :schema schema)))))))
 
 (defun harness-openai--body (endpoint name request)
@@ -893,6 +902,51 @@ alone keep the shape."
       (dolist (pair (funcall extra endpoint name request))
         (setq body (plist-put body (car pair) (cdr pair)))))
     body))
+
+;;;; The body, frozen where it may be
+
+(defconst harness-openai--replay-mutation-error 'harness-replay-mutation
+  "The condition a body that may not be sent signals.
+It carries the complaint, the request and the body, so that the caller
+can say which component changed and send nothing.")
+
+(define-error 'harness-replay-mutation "A prompt component changed with no recorded reset")
+
+;; The seam lives in harness-replay.el, which is loaded after this
+;; module and may not be loaded at all: it is reached by name, as the
+;; replay module is, and never required from here.
+(declare-function harness-replay-seam "harness-replay")
+(declare-function harness-replay-seam-keep "harness-replay")
+(declare-function harness-replay-route "harness-replay")
+
+(defun harness-openai--frozen-body (endpoint name request)
+  "Return (TEXT . BODY) for REQUEST at ENDPOINT, frozen where it may be.
+BODY is what `harness-openai--body' builds; TEXT is what a transport sends:
+every field an earlier request of the same session sent, put back as the
+bytes that request sent (see harness-replay.el).  A body that may not be
+sent at all -- a prompt component changed and no recorded reset explains it
+-- signals `harness-replay-mutation', and nothing goes on the wire."
+  (let* ((body (harness-openai--body endpoint name request))
+         (seam (if (fboundp 'harness-replay-seam)
+                   (harness-replay-seam request
+                                        (format "%s:%s" (plist-get endpoint :id) name)
+                                        (harness-replay-route request endpoint)
+                                        body)
+                 (cons (harness-json-encode body) nil))))
+    (when (cdr seam)
+      (signal 'harness-replay-mutation (list (cdr seam) request body)))
+    (cons (car seam) body)))
+
+(defun harness-openai--frozen-keep (endpoint name request)
+  "Keep the body just sent for REQUEST at ENDPOINT, as what it sent.
+The body is built again here rather than handed over: the seam returns
+the bytes to send, and what is kept is the adapter's own fields, so a
+request that changed under the adapter is caught by the check that
+follows rather than compared with something it never sent."
+  (when (fboundp 'harness-replay-seam-keep)
+    (harness-replay-seam-keep request (format "%s:%s" (plist-get endpoint :id) name)
+                              (harness-replay-route request endpoint)
+                              (harness-openai--body endpoint name request))))
 
 ;;;; Streaming
 
@@ -1315,7 +1369,7 @@ An ordinary request carries none, and its events are unchanged."
                         :dialect-state (harness-openai--stream-state endpoint request)))
                (key (harness-openai--api-key endpoint))
                (url (concat (harness-openai--base-url endpoint) "/chat/completions"))
-               (status nil) (raw "")
+               (status nil) (raw "") (frozen nil)
                (sse (harness-http-sse-parser
                      (lambda (_event data) (harness-openai--stream-chunk stream data)))))
     (funcall on-event (list :type 'start))
@@ -1326,13 +1380,26 @@ An ordinary request carries none, and its events are unchanged."
                              (plist-get endpoint :id) (plist-get endpoint :api-key-env)
                              (harness-openai--host endpoint))))
      (t
-      (condition-case err
+      ;; The body is frozen where it may be, and checked at the boundary
+      ;; before anything is sent: a component that changed with no recorded
+      ;; reset stops the request here, and the wire sees nothing.
+      (setq frozen (condition-case err
+                       (harness-openai--frozen-body endpoint name request)
+                     (harness-replay-mutation
+                      (setf (harness-openai--stream-error-kind stream) 'permanent)
+                      (harness-openai--stream-finish stream 'error (nth 1 err))
+                      'refused)))
+      (unless (eq frozen 'refused)
+       (condition-case err
           (setf (harness-openai--stream-http stream)
                 (harness-http-request
                  url
                  :method "POST"
-                 :headers (harness-openai--headers endpoint key)
-                 :json (harness-openai--body endpoint name request)
+                 :headers (harness-openai--body-headers endpoint key)
+                 ;; The body goes out as the bytes it was frozen as, not as a
+                 ;; plist a transport encodes again: that encoding is what
+                 ;; changed the prefix the provider had cached.
+                 :body (car frozen)
                  :timeout harness-openai--request-timeout
                  ;; A completion is worth repeating: a connection reset
                  ;; before any of the answer arrived is tried again by the
@@ -1355,6 +1422,9 @@ An ordinary request carries none, and its events are unchanged."
                                ;; A refused answer carries the plan's windows
                                ;; too, which is how a turn learns when the
                                ;; limit it ran into resets.
+                               ;; The body went out: it is what this session sent,
+                               ;; and the next request is continued from it.
+                               (harness-openai--frozen-keep endpoint name request)
                                (harness-openai--note-plan-headers endpoint on-event headers))
                  :on-chunk (lambda (chunk)
                              (if (and status (or (< status 200) (>= status 300)))
@@ -1387,7 +1457,7 @@ An ordinary request carries none, and its events are unchanged."
                                             (or (harness-openai--error-detail endpoint text s)
                                                 "")))))
                                 (t (harness-openai--stream-complete stream)))))))
-        (error (harness-openai--stream-finish stream 'error (harness-error-message err))))))
+        (error (harness-openai--stream-finish stream 'error (harness-error-message err)))))))
     (list :cancel (lambda ()
                     (unless (harness-openai--stream-finished stream)
                       (when-let* ((h (harness-openai--stream-http stream)))

@@ -511,14 +511,18 @@ module is loaded, a warning in the log, and `cache/poor-hit'.  With
          (ratio (plist-get info :ratio))
          (summary (format "%d calls · %s tokens re-sent"
                           streak (harness-format-tokens-compact wasted)))
-         (hint (format "Prompt cache miss · %d%% cached · %s"
+         ;; What was measured, not a verdict on it: the share is of the
+         ;; previous prompt, and a request that read most of it from the
+         ;; cache is not a miss.  The threshold decides when this is worth
+         ;; saying; the wording must not decide it again, wrongly.
+         (hint (format "Cache reuse low · %d%% cached · %s"
                        (round (* 100 (or ratio 0))) summary)))
     (when session
       (harness-call 'session/hint sid hint)
       (when (harness-method-exists-p 'notification/send)
         (harness-catch
          (harness-call-async 'notification/send
-                             (list :title "Prompt cache miss"
+                             (list :title "Cache reuse low"
                                    :body (format "%s · %s" name summary)
                                    :urgency 'normal
                                    :source "cache" :kind "cache-health"
