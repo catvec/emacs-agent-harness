@@ -72,6 +72,7 @@
 (require 'harness-util)
 (require 'harness-http)
 (require 'harness-provider)
+(require 'harness-provider-diagnostics)
 ;; The shared retry layer says how many times the transport may replay a
 ;; request, and reads a provider's own typed failures.  It requires none
 ;; of the providers, so a provider may load it.
@@ -1078,6 +1079,11 @@ any of its fields.  An endpoint without a dialect adds nothing."
   status                 ; HTTP status of the response, once headers arrived
   error-kind             ; transport failure the HTTP layer reported
   retry-after            ; seconds a rate limit asked the caller to wait
+  diagnostics            ; `harness-provider-diagnostics-attempt', or nil
+  response-id            ; the id the response supplied, or nil
+  request-id             ; a request id an HTTP header supplied, or nil
+  served-provider        ; the provider the response named, or nil
+  served-model           ; the model the response named, or nil
   dialect-state          ; what a dialect's `:chunk' hook keeps of the response
   tool-names)            ; request-owned wire-to-original tool-name map
 
@@ -1134,6 +1140,28 @@ server sends."
            (on-event (harness-openai--stream-on-event stream))
            (dialect (harness-openai--dialect (harness-openai--stream-endpoint stream)))
            (handled nil))
+      ;; What the response itself says served it.  Only a value another
+      ;; chunk did not already supply is kept; a missing one stays
+      ;; unknown, never inferred from the configured endpoint.  A dialect
+      ;; reads the same payload below, and what it handles is still an
+      ;; observation of the wire.
+      (when (listp json)
+        (when-let* ((id (plist-get json :id)))
+          (when (and (stringp id) (not (string-empty-p id)))
+            (unless (harness-openai--stream-response-id stream)
+              (setf (harness-openai--stream-response-id stream) id))))
+        (when-let* ((model (plist-get json :model)))
+          (when (and (stringp model) (not (string-empty-p model)))
+            (unless (harness-openai--stream-served-model stream)
+              (setf (harness-openai--stream-served-model stream) model))))
+        (let* ((metadata (plist-get json :openrouter_metadata))
+               (provider (or (plist-get json :provider)
+                             (and (listp metadata)
+                                  (or (plist-get metadata :provider_name)
+                                      (plist-get metadata :provider))))))
+          (when (and (stringp provider) (not (string-empty-p provider)))
+            (unless (harness-openai--stream-served-provider stream)
+              (setf (harness-openai--stream-served-provider stream) provider)))))
       (when-let* ((hook (plist-get dialect :chunk)))
         (setq handled (funcall hook json stream)))
       (unless handled
@@ -1368,10 +1396,12 @@ reply from an endpoint it did not choose."
             reason 'error))
     (setf (harness-openai--stream-finished stream) t)
     (let ((on-event (harness-openai--stream-on-event stream))
-          (calls (harness-openai--stream-calls stream)))
+          (calls (harness-openai--stream-calls stream))
+          (usage-event nil))
       (when-let* ((usage (harness-openai--stream-usage stream)))
         (unless (eq reason 'cancelled)
-          (funcall on-event (harness-openai--usage-event usage (harness-openai--stream-endpoint stream)))))
+          (setq usage-event (harness-openai--usage-event usage (harness-openai--stream-endpoint stream)))
+          (funcall on-event usage-event)))
       (when (eq reason 'tool-use)
         (dolist (slot calls)
           (let ((call (cdr slot)))
@@ -1380,20 +1410,48 @@ reply from an endpoint it did not choose."
                                     :name (harness-openai--stream-tool-name stream (plist-get call :name))
                                     :input (harness-openai--parse-arguments (plist-get call :arguments))
                                     :respond nil)))))
-      (funcall on-event (if error
-                            (append (list :type 'done :stop-reason reason :error error)
-                                    (when-let* ((kind (harness-openai--failure-kind stream error)))
-                                      (list :error-kind kind))
-                                    (when-let* ((after (harness-openai--stream-retry-after stream)))
-                                      (list :retry-after after))
-                                    ;; How far the limit reaches, when the
-                                    ;; provider's own fields say: a pool
-                                    ;; above the provider rests on it.
-                                    (when-let* ((scope (and (eq (harness-openai--failure-kind stream error)
-                                                                'rate-limit)
-                                                            (harness-openai--dialect-limit-scope stream error))))
-                                      (list :limit-scope scope)))
-                          (list :type 'done :stop-reason reason))))))
+      (let ((done (if error
+                      (append (list :type 'done :stop-reason reason :error error)
+                              (when-let* ((kind (harness-openai--failure-kind stream error)))
+                                (list :error-kind kind))
+                              (when-let* ((after (harness-openai--stream-retry-after stream)))
+                                (list :retry-after after))
+                              ;; How far the limit reaches, when the
+                              ;; provider's own fields say: a pool
+                              ;; above the provider rests on it.
+                              (when-let* ((scope (and (eq (harness-openai--failure-kind stream error)
+                                                          'rate-limit)
+                                                      (harness-openai--dialect-limit-scope stream error))))
+                                (list :limit-scope scope)))
+                    (list :type 'done :stop-reason reason))))
+        ;; The diagnostic reads the attempt's own raw usage and the event
+        ;; emitted above; it never adds usage or sends a request.  The
+        ;; finish is once, so the response line is once.
+        (when-let* ((attempt (harness-openai--stream-diagnostics stream)))
+          (harness-provider-diagnostics-response
+           attempt
+           :status (harness-openai--stream-status stream)
+           :generation (harness-openai--stream-response-id stream)
+           :request-id (harness-openai--stream-request-id stream)
+           :provider (harness-openai--stream-served-provider stream)
+           :served-model (harness-openai--stream-served-model stream)
+           :usage (harness-openai--stream-usage stream)
+           :usage-event usage-event
+           ;; OpenRouter reports costs in dollars; a dialect that says it
+           ;; is OpenRouter's is priced in USD, and any other route leaves
+           ;; the currency unknown rather than assuming one.
+           :currency (and (eq (harness-openai--flavor (harness-openai--stream-endpoint stream))
+                              'openrouter)
+                          "USD")
+           :outcome (cond ((eq reason 'cancelled) 'cancelled)
+                          (error 'error)
+                          (t 'ok))
+           :stop reason
+           :error-kind (and error (harness-openai--failure-kind stream error))
+           :retry-after (harness-openai--stream-retry-after stream)
+           :http-retries (when-let* ((http (harness-openai--stream-http stream)))
+                           (harness-http-handle-retries http))))
+        (funcall on-event done)))))
 
 (defun harness-openai--stream-complete (stream)
   "Finish STREAM after a successful response, choosing the stop reason."
@@ -1428,7 +1486,7 @@ An ordinary request carries none, and its events are unchanged."
                         :dialect-state (harness-openai--stream-state endpoint request)))
                (key (harness-openai--api-key endpoint))
                (url (concat (harness-openai--base-url endpoint) "/chat/completions"))
-               (status nil) (raw "") (frozen nil)
+               (status nil) (raw "") (body nil) (frozen nil)
                (sse (harness-http-sse-parser
                      (lambda (_event data) (harness-openai--stream-chunk stream data)))))
     (funcall on-event (list :type 'start))
@@ -1449,6 +1507,19 @@ An ordinary request carries none, and its events are unchanged."
                       (harness-openai--stream-finish stream 'error (nth 1 err))
                       'refused)))
       (unless (eq frozen 'refused)
+       ;; The prefix is logged before the request goes out, from the same
+       ;; body that goes on the wire, so a failure to send still has its
+       ;; request line.  A nil attempt (diagnostics off or no key) changes
+       ;; nothing.
+       (setq body (cdr frozen))
+       (setf (harness-openai--stream-diagnostics stream)
+             (harness-provider-diagnostics-request
+              body request
+              :configured (format "%s:%s"
+                                  (or (plist-get endpoint :id) "unknown")
+                                  (or (plist-get body :model) "unknown"))
+              :route (harness-openai--flavor endpoint)
+              :host (harness-openai--host endpoint)))
        (condition-case err
           (setf (harness-openai--stream-http stream)
                 (harness-http-request
@@ -1471,6 +1542,9 @@ An ordinary request carries none, and its events are unchanged."
                  :on-headers (lambda (s headers)
                                (setq status s)
                                (setf (harness-openai--stream-status stream) s)
+                               (when-let* ((request-id (cdr (assoc-string "x-request-id" headers t))))
+                                 (when (and (stringp request-id) (not (string-empty-p request-id)))
+                                   (setf (harness-openai--stream-request-id stream) request-id)))
                                ;; Both forms of Retry-After are read,
                                ;; a number of seconds and an HTTP-date: a
                                ;; provider that names a time is asking for

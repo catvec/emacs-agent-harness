@@ -464,14 +464,19 @@ first miss says nothing, and one inside the cooldown does not repeat it."
                                      (lambda (node) (eq (plist-get node :kind) 'hint))
                                      nodes)))))
               (should hint)
-              (should (equal "Cache reuse low · 25% cached · 2 calls · 70k tokens re-sent"
+              ;; The cause is unknown here: this suite loads no provider
+              ;; diagnostics, so the hint says so rather than blaming the
+              ;; provider's cache or a prefix break.
+              (should (equal (concat "Cache reuse low · 25% cached · 2 calls"
+                                     " · 70k tokens re-sent · cause unknown")
                              (plist-get hint :content))))
             (should (= 1 (length notified)))
             (let ((notification (car notified)))
               ;; The alert says what was measured, never that the cache missed:
               ;; a request that read 80% of its previous prompt did not.
               (should (equal "Cache reuse low" (plist-get notification :title)))
-              (should (equal "Session · 2 calls · 70k tokens re-sent"
+              (should (equal (concat "Session · 2 calls · 70k tokens re-sent"
+                                     " · cause unknown")
                              (plist-get notification :body)))
               (should (equal sid (plist-get notification :session))))
             ;; A third miss, below the streak again, says nothing more.
@@ -534,7 +539,8 @@ were at 90% cached or better, each one calling a working cache broken."
                          (harness-call 'session/nodes sid)))
             (should (= 1 (length hints)))
             ;; The exact rendered line: the share, never a verdict.
-            (should (equal "Cache reuse low · 40% cached · 2 calls · 48k tokens re-sent"
+            (should (equal (concat "Cache reuse low · 40% cached · 2 calls"
+                                   " · 48k tokens re-sent · cause unknown")
                            (plist-get (car hints) :content)))
             (should-not (string-match-p "miss" (plist-get (car hints) :content)))
             (should (= 1 (length notified)))
@@ -634,4 +640,65 @@ so it stops paying before the next step; the alert itself still comes."
         (harness-unregister-method 'agent/cancel)))))
 
 (provide 'harness-cache-test)
+(ert-deftest harness-cache-health-names-the-cause-diagnostics-record ()
+
+  "A miss alert names the cause the diagnostics recorded, or unknown.
+
+A miss alone proves neither client drift nor provider eviction.  When
+
+provider diagnostics have a record of the session's last request, the
+
+alert says what it labelled; without one it says unknown, never a guess
+
+and never a provider blame."
+
+  (harness-cache-test-with
+
+    (let ((harness-cache-health-streak 1)
+
+          (harness-cache-health-min-context 1000)
+
+          (harness-provider-diagnostics-enabled t)
+
+          (alerts nil))
+
+      (harness-on 'cache/poor-hit (lambda (sid info) (push (cons sid info) alerts)))
+
+      (let ((sid (harness-cache-test-session 300 0)))
+
+        ;; No diagnostics record: the cause is unknown.
+
+        (harness-cache-test--reuse sid :previous 40000 :wasted 40000)
+
+        (should (equal "unknown" (plist-get (cdar alerts) :cause)))
+
+        (should (= 1 (length alerts)))
+
+        ;; A record that says the harness preserved the prefix and no client
+
+        ;; cause was recorded is the provider-side case.
+
+        (let ((harness-cache-health-cooldown 0))
+
+          (cl-letf (((symbol-function 'harness-provider-diagnostics-miss-cause)
+
+                     (lambda (_session) "warm")))
+
+            (harness-cache-test--reuse sid :previous 40000 :wasted 40000)))
+
+        (should (equal "warm" (plist-get (cdar alerts) :cause)))
+
+        ;; A record that names a client cause says that instead.
+
+        (let ((harness-cache-health-cooldown 0))
+
+          (cl-letf (((symbol-function 'harness-provider-diagnostics-miss-cause)
+
+                     (lambda (_session) "tools-change")))
+
+            (harness-cache-test--reuse sid :previous 40000 :wasted 40000)))
+
+        (should (equal "tools-change" (plist-get (cdar alerts) :cause)))))))
+
+
 ;;; harness-cache-test.el ends here

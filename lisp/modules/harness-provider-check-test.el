@@ -503,10 +503,19 @@ unverified, and the detail says so."
                            :repeats '(0))))
       (should (eq 'skip (car result)))
       (should (string-match-p "1/2 repeat samples" (cdr result))))
+    ;; A control that read cached tokens is ambiguous; a run with no
+    ;; control reading at all measured nothing about isolation.  They
+    ;; are different skips and the detail says which.
     (let ((result (funcall verdict :telemetry 'present :repeat-samples 2
-                           :repeats '(0 0) :controls-clean nil)))
+                           :repeats '(0 0) :controls-clean nil
+                           :control '(:prime 1000 :resume nil :mismatch 0))))
       (should (eq 'skip (car result)))
       (should (string-match-p "control prefix warm" (cdr result))))
+    (let ((result (funcall verdict :telemetry 'present :repeat-samples 2
+                           :repeats '(0 0) :controls-clean nil
+                           :control '(:prime nil :resume nil :mismatch nil))))
+      (should (eq 'skip (car result)))
+      (should (string-match-p "no cold control" (cdr result))))
     ;; A complete measurement is a pass or a fail, never a skip.
     (let ((result (funcall verdict :telemetry 'present :repeat-samples 2
                            :repeats '(1000 1000) :repeat-hits 2
@@ -535,7 +544,9 @@ serial-only hit or partial reuse are failures of the run."
          (base '(:telemetry present :prefix-count 4 :cached-count 4
                  :baseline-hits 4 :round-1-hits 4 :round-2-hits 4
                  :control-hits 0 :peak-concurrency 4 :distinct-sessions t
-                 :actual 18 :errors 0 :throttled 0 :identity-mismatches 0)))
+                 :actual 18 :errors 0 :throttled 0 :identity-mismatches 0
+                 :controls ((:index 0 :cache-read 0)
+                            (:index 1 :cache-read 0)))))
     (let ((result (apply verdict (plist-put (copy-sequence base)
                                             :environment '(transport)))))
       (should (eq 'skip (car result)))
@@ -564,6 +575,14 @@ serial-only hit or partial reuse are failures of the run."
     (let ((result (apply verdict (plist-put (copy-sequence base) :control-hits 1))))
       (should (eq 'skip (car result)))
       (should (string-match-p "isolation ambiguous" (cdr result))))
+    ;; No control reading at all measured nothing about isolation, and
+    ;; the detail says that rather than calling the control warm.
+    (let* ((evidence (plist-put (copy-sequence base) :controls
+                                 '((:index 0 :cache-read nil)
+                                   (:index 1 :cache-read nil))))
+           (result (apply verdict evidence)))
+      (should (eq 'skip (car result)))
+      (should (string-match-p "isolation unmeasured" (cdr result))))
     (let ((result (apply verdict (plist-put (copy-sequence base)
                                             :peak-concurrency 1))))
       (should (eq 'skip (car result)))
@@ -1748,5 +1767,253 @@ the request bound without raising it."
           (should (eq 'skip (plist-get result :status)))
           (should (string-match-p "unavailable" (plist-get result :detail))))))))
 
-(provide 'harness-provider-check-test)
+(ert-deftest harness-provider-check-cache-detail-keeps-unknown-unknown ()
+  "A reading the probes did not report is unknown in the detail, not zero.
+A run with no cache telemetry must not read as `0/0 cached': that would
+say the cache was asked and missed, when nothing measured it."
+  (let ((detail (harness-provider-check--cache-detail
+                 '(:telemetry missing
+                   :repeats (nil nil)
+                   :repeat-samples nil
+                   :repeat-hits nil
+                   :controls-clean nil
+                   :keep-warm (:refresh nil :refresh-samples nil
+                                :refresh-hits nil :resume nil)
+                   :persistence (:wait 0)
+                   :cost (:observed nil :estimated nil :source nil)))))
+    (should (string-match-p "repeats unknown/unknown cached" detail))
+    (should (string-match-p "keep-warm unknown/unknown cached" detail))
+    (should (string-match-p "resume unknown" detail))
+    (should (string-match-p "prompt unknown · cached unknown · output unknown" detail))
+    (should (string-match-p "controls ambiguous" detail))
+    (should-not (string-match-p "repeats 0/0" detail))))
+
+(ert-deftest harness-provider-check-independent-detail-keeps-unknown-unknown ()
+
+  "The independent-prefix detail says unknown for a reading it did not have."
+
+  (let ((detail (harness-provider-check--independent-detail
+
+                 '(:prefix-count nil :cached-count nil :baseline-hits nil
+
+                   :round-1-hits nil :round-2-hits nil
+
+                   :control-samples nil :control-hits nil
+
+                   :sessions nil :requested-sessions nil
+
+                   :distinct-sessions nil :peak-concurrency nil :throttled nil
+
+                   :errors nil :median-seconds nil
+
+                   :context nil :cache-read nil :output nil
+
+                   :cost (:observed nil :estimated nil :source nil)))))
+
+    (should (string-match-p "independent prefixes unknown/unknown cached" detail))
+
+    (should (string-match-p "controls unknown/unknown cached" detail))
+
+    (should (string-match-p "peak unknown parallel" detail))
+
+    (should (string-match-p "prompt unknown · cached unknown · output unknown" detail))
+
+    (should-not (string-match-p "prefixes 0/0" detail))))
+
+
+
+(ert-deftest harness-provider-check-cache-detail-names-the-observed-provider ()
+
+  "The detail says which provider the responses named, never the route.
+
+A probe that named no provider reads unknown; a provider name is not a
+
+geography and the detail does not imply one."
+
+  (let ((detail (harness-provider-check--cache-detail
+
+                 '(:telemetry present :repeat-samples 2 :repeat-hits 2
+
+                   :controls-clean t :context 100 :cache-read 50 :output 5
+
+                   :cost (:observed nil :estimated nil :source nil)
+
+                   :serving (:providers ("Morph" "Particle") :unknown 1)))))
+
+    (should (string-match-p "served Morph, Particle · 1 unknown" detail)))
+
+  (let ((detail (harness-provider-check--cache-detail
+
+                 '(:telemetry present :repeat-samples 2 :repeat-hits 0
+
+                   :controls-clean t
+
+                   :serving (:providers nil :unknown 3)))))
+
+    (should (string-match-p "served unknown" detail)))
+
+  (let ((detail (harness-provider-check--cache-detail '(:telemetry present))))
+
+    (should (string-match-p "served not probed" detail))))
+
+
+(ert-deftest harness-provider-check-serving-counts-what-the-response-named ()
+
+  "Only a provider the response supplied counts as observed.
+
+A probe with no diagnostics record, or one whose response named no
+
+provider, is unknown; `:observed' needs every probe to have named one."
+
+  (let ((serving (harness-provider-check--serving
+
+                  (list (list :diagnostics (list :response (list :provider "Morph"
+
+                                                                  :served-model "deepseek/x")))
+
+                        (list :diagnostics (list :response (list :provider "Morph"
+
+                                                                  :served-model "deepseek/x")))))))
+
+    (should (equal '("Morph") (plist-get serving :providers)))
+
+    (should (equal '("deepseek/x") (plist-get serving :models)))
+
+    (should (= 2 (plist-get serving :reported)))
+
+    (should (= 0 (plist-get serving :unknown)))
+
+    (should (plist-get serving :observed)))
+
+  ;; One probe with no record makes the set unobserved, and it stays unknown.
+
+  (let ((serving (harness-provider-check--serving
+
+                  (list (list :diagnostics (list :response (list :provider "Morph")))
+
+                        (list :diagnostics nil)))))
+
+    (should (= 1 (plist-get serving :reported)))
+
+    (should (= 1 (plist-get serving :unknown)))
+
+    (should-not (plist-get serving :observed)))
+
+  ;; Nothing named a provider: unknown, and the configured route is not put in.
+
+  (let ((serving (harness-provider-check--serving (list (list :diagnostics nil)))))
+
+    (should-not (plist-get serving :providers))
+
+    (should (= 1 (plist-get serving :unknown)))
+
+    (should-not (plist-get serving :observed))))
+
+
+
+(ert-deftest harness-provider-check-evidence-record-keeps-the-observed-provider ()
+
+  "The capability record keeps the provider names the responses supplied."
+
+  (let* ((cache (list :serving (list :providers '("Morph") :models '("deepseek/x")
+
+                                     :reported 2 :unknown 0)))
+
+         (cross (list :serving (list :providers '("Particle") :models nil
+
+                                     :reported 3 :unknown 1)))
+
+         (serving (harness-provider-check--record-serving cache cross)))
+
+    (should (equal '("Morph" "Particle") (plist-get serving :providers)))
+
+    (should (equal '("deepseek/x") (plist-get serving :models)))
+
+    (should (= 5 (plist-get serving :reported)))
+
+    (should (= 1 (plist-get serving :unknown)))))
+
+
+(ert-deftest harness-provider-check-estimate-announces-the-enforced-budget ()
+
+  "The announced request bound is the one the job enforces.
+
+A plan that asks for more than `harness-provider-check-max-requests' is
+
+cut to it, says so, and its cost is priced for the requests it can
+
+actually make."
+
+  (let* ((harness-provider-check-max-requests 4)
+
+         (plan '((:id "a" :requests 10)))
+
+         (estimate (harness-provider-check--estimate "checkfake:model" plan)))
+
+    (should (= 4 (plist-get estimate :requests)))
+
+    (should (= 10 (plist-get estimate :planned-requests)))
+
+    (should (= 4 (plist-get estimate :budget)))
+
+    (should (plist-get estimate :over-budget))
+
+    (should (string-match-p "request budget applied"
+
+                            (plist-get estimate :basis))))
+
+  (let* ((harness-provider-check-max-requests 64)
+
+         (estimate (harness-provider-check--estimate "checkfake:model"
+
+                                                     '((:id "a" :requests 3)))))
+
+    (should (= 3 (plist-get estimate :requests)))
+
+    (should-not (plist-get estimate :over-budget))))
+
+
+
+(ert-deftest harness-provider-check-evidence-that-cannot-be-kept-is-a-skip ()
+
+  "A capability record that was not written is a SKIP, not a pass.
+
+The findings are only useful if `provider/cache-evidence' can read them
+
+back; a pass about a record nothing kept would be misleading."
+
+  (harness-provider-check-test-with
+
+    (let ((harness-state-directory nil))
+
+      (let* ((results (harness-provider-check-test-run "checkfake:model" 'provider))
+
+             (evidence (harness-provider-check-test-by-name
+
+                        results "Cache capability evidence")))
+
+        (should (eq 'skip (plist-get evidence :status)))
+
+        (should (string-match-p "not saved (no state directory)"
+
+                                (plist-get evidence :detail)))))))
+
+
 ;;; harness-provider-check-test.el ends here
+
+(ert-deftest harness-provider-check-cache-detail-shows-a-real-zero ()
+  "A zero a probe reported stays zero; only a missing reading is unknown."
+  (let ((detail (harness-provider-check--cache-detail
+                 '(:telemetry present
+                   :repeats (0 0)
+                   :repeat-samples 2
+                   :repeat-hits 0
+                   :controls-clean t
+                   :keep-warm (:refresh (0 0) :refresh-samples 2
+                                :refresh-hits 0 :resume 0)
+                   :persistence (:wait 0)
+                   :cost (:observed nil :estimated nil :source nil)))))
+    (should (string-match-p "repeats 0/2 cached" detail))
+    (should (string-match-p "keep-warm 0/2 cached" detail))
+    (should (string-match-p "resume not cached" detail))))
+(provide 'harness-provider-check-test)

@@ -1,0 +1,269 @@
+Independent check of the quota/prefix branch, 2026-11-14
+=======================================================
+
+Task: t-jibzilj2 (readiness/diagnostics) verifying t-sp1j60ii's commit
+dc18b8d "Freeze the final provider body, field by field, and refuse an
+unexplained change" without editing any of its files.
+
+Method: extract the branch to a scratch tree with git archive, then run
+its own suites there. No provider request, no network.
+
+    tmp=$(mktemp -d)
+    git archive task/investigate-overnight-chatgpt-quota-sp1j60ii | tar -x -C "$tmp"
+    cd "$tmp" && scripts/test.sh lisp/modules/harness-replay-test.el
+
+Result 1 -- the branch's own replay suite passes:
+
+    Ran 35 tests, 35 results as expected, 0 unexpected
+    TEST RESULT: PASS (selected run)
+
+Result 2 -- the chat-completions adapter suite fails on that branch:
+
+    cd "$tmp" && scripts/test.sh lisp/modules/harness-provider-openai-test.el
+
+    Ran 56 tests, 44 results as expected, 10 unexpected, 2 skipped
+    10 unexpected results:
+       FAILED  harness-provider-openai-body-fits-the-effort-to-the-model
+       FAILED  harness-provider-openai-deepseek-dialect-body
+       FAILED  harness-provider-openai-deepseek-efforts-in-the-body
+       FAILED  harness-provider-openai-deepseek-host-replays-reasoning-content
+       FAILED  harness-provider-openai-deepseek-replays-reasoning-content
+       FAILED  harness-provider-openai-no-thinking-in-the-body
+       FAILED  harness-provider-openai-request-body-plain-openai-dialect
+       FAILED  harness-provider-openai-request-body-shape
+       FAILED  harness-provider-openai-response-schema-only-when-asked
+       FAILED  harness-provider-openai-tool-result-images-go-out-for-every-dialect
+
+    The first failure is (plist-get body :model) => nil: what the adapter
+    hands the transport as :json is a string, not a plist.
+
+Result 3 -- the same suite at that branch's merge base cb5621e, and on
+main 322e52c, passes:
+
+    cb5621e: Ran 56 tests, 54 results as expected, 0 unexpected, 2 skipped
+    main:    Ran 58 tests, 56 results as expected, 0 unexpected, 2 skipped
+
+So the failures are introduced by dc18b8d, not present before it.
+
+Cause -- a JSON body encoded twice:
+
+    harness-replay-seam returns JSON *text* (harness-replay--piece-text),
+    and both adapters pass it to harness-http-request as :json:
+      lisp/modules/harness-provider-openai.el    :json (car frozen)
+      lisp/modules/harness-provider-responses.el :json frozen
+    harness-http-request encodes :json with harness-json-encode
+    (lisp/harness-http.el:456-457), so a string is encoded as a JSON
+    string literal and the wire body is "{\"model\":...}" rather than
+    {"model":...}.
+
+    Probe on that branch (no session, replay loaded):
+      seam car type: string
+      seam car prefix: {"model":"m","messages":[{"rol
+      re-encoded by :json as: "{\"model\":\"m\",\"messages\":[{\"role\
+
+    With harness-replay not loaded the chat-completions adapter's own
+    fallback does the same: (cons (harness-json-encode body) nil) is
+    text, handed to :json. The Responses adapter's fallback returns
+    the plist, so that path is only wrong when replay is loaded.
+
+Why the branch's suite does not catch it -- it asserts the encoding:
+
+    harness-replay-the-sent-body-is-the-kept-one compares
+      (plist-get request :json)
+    with
+      (harness-json-encode (harness-openai--body ...))
+    so it requires :json to be the pre-encoded string, which is exactly
+    what the transport encodes a second time.
+
+Result 4 -- the Responses adapter keeps nothing on that branch:
+
+    harness-responses--frozen-keep only keeps a body that equals
+    (harness-responses--body name request). The transport is handed
+    the seam's text, so the guard is false and no frozen body is
+    ever recorded. Probe on that branch, harness-state-directory in
+    a temp dir:
+
+        body type: cons
+        kept after text (what the transport is given): nil
+        kept after the plist body: t
+
+    So the ChatGPT-plan adapter's freeze records nothing at all, and
+    its next request has no frozen body to be continued from or
+    checked against.
+
+Ownership: the fix belongs to t-sp1j60ii (adapter body construction and
+the transport boundary are its exclusive scope). This task reports it
+and will rerun these three checks after that commit changes; it has not
+edited harness-replay.el, either adapter or their tests.
+
+
+Second pass -- the new revision, 8df2fe1 (2026-11-14, later the same day)
+=======================================================================
+
+The quota task handed in ef092ed, 18a79d6 and 8df2fe1, claiming replay
+48/48, OpenAI 56/56 and Responses 54/54.  Reverified here from scratch,
+not taken on trust.  Branch tip is 8df2fe1; ac77340 ("Send the frozen
+body as bytes on every adapter, and say what the cache alert measured")
+is the commit that answers the two defects above.
+
+Method, unchanged: git archive of 8df2fe1 into a fresh scratch tree, run
+its own suites there, then run probes of this task's own that ask what
+the transport is handed.  Nothing of the branch was edited.
+
+    git archive 8df2fe1 | tar -x -C "$tmp"
+    cd "$tmp" && scripts/test.sh \
+        lisp/modules/harness-replay-test.el \
+        lisp/modules/harness-provider-openai-test.el \
+        lisp/modules/harness-provider-responses-test.el
+
+Result 1 -- the three suites the hand-in named, at 8df2fe1:
+
+    ok  harness-replay-test.el             Ran 48 tests, 48 as expected, 0 unexpected
+    ok  harness-provider-openai-test.el    Ran 56 tests, 54 as expected, 0 unexpected, 2 skipped
+    ok  harness-provider-responses-test.el Ran 54 tests, 54 as expected, 0 unexpected
+    TEST RESULT: PASS (selected run)
+
+    So the hand-in's numbers are right: 48/48 replay, and the OpenAI
+    suite is 56 tests of which 54 pass and 2 are skipped by design --
+    "56/56 passing" counts the two skips as passes, which is the only
+    inaccuracy, and it is in the branch's favour, not a failure.
+
+Result 2 -- the five other suites the same hand-in named:
+
+    ok  harness-provider-openrouter-test.el        Ran 84 tests, 84 as expected
+    ok  harness-provider-openrouter-chain-test.el  Ran 10 tests, 10 as expected
+    ok  harness-cache-test.el                      Ran 22 tests, 22 as expected
+    ok  harness-agent-test.el                      Ran 102 tests, 102 as expected
+    ok  harness-module-docs-test.el                Ran 11 tests, 11 as expected
+
+    The note says "Cache 23/23"; the suite has 22 tests and ran 22.  A
+    miscount in the note, not a failing test.
+
+Result 3 -- both reported defects are fixed.  Probed here, with this
+task's own fake transport, not the branch's tests:
+
+    chat completions
+      PASS  the body goes out as :body text, not as :json
+      PASS  the wire body parses back to an object with a model
+      PASS  the wire body is not a JSON string literal
+      PASS  content-type is application/json on a text body
+      PASS  the second request repeats the first message byte for byte
+      PASS  sending the same conversation again sends the same bytes
+    the Responses adapter
+      PASS  the body goes out as :body text, not as :json
+      PASS  the wire body parses back to an object
+      PASS  a frozen body was recorded after the send
+            (:generation 1 :reset nil :bytes 120)
+
+    The last one is the finding from the first pass: the ChatGPT-plan
+    adapter now records the body it sent.  It recorded nothing before.
+
+Result 4 -- the prefix invariants, probed here against the real adapter:
+
+    PASS  append: the second request keeps the first request's bytes as its prefix
+    PASS  append: the metadata the adapter always sends is still on the wire
+    PASS  metadata: a changed temperature still sends (spliced, not refused)
+    PASS  metadata: the request finished without an error
+    PASS  metadata: the new field is on the wire
+    PASS  mutation: a changed prompt sends nothing at all
+    PASS  mutation: the step ends as an error naming the field
+    PASS  telemetry: no prompt or answer text in the decision records
+    PASS  telemetry: a decision was recorded for every request
+    PASS  telemetry: every record names its decision
+    PASS  telemetry: no digest of the prompt is in a record
+
+    The mutation refusal names messages[0].content and the transport is
+    never called -- the fail-closed promise holds at the boundary the
+    transport actually sees, which is what the first pass could not
+    establish.
+
+Where the two branches will meet
+--------------------------------
+
+Both branches change the same adapter regions, so the merge is not
+clean.  `git merge-tree --write-tree HEAD 8df2fe1` reports five
+conflicting files:
+
+    lisp/modules/harness-provider-openai.el      5 conflict hunks
+    lisp/modules/harness-provider-responses.el   2 conflict hunks
+    lisp/modules/harness-cache.el                2 conflict hunks
+    lisp/modules/harness-cache-test.el           1 conflict hunk
+    docs/modules/provider-openai.md              1 conflict hunk
+
+This task does not resolve them: the adapters' body construction and the
+transport boundary are t-sp1j60ii's, and this branch's own edits to
+those files are the diagnostics the response reading is built on.  The
+conflicts are mechanical (the same harness-http-request call, the same
+harness-cache alarm wording, the same module-doc dependency line), but
+resolving them is a decision about whose version of the boundary wins,
+and that decision belongs to the merge queue with the quota owner's
+branch, not to a verification task.  Recorded here so it is not a
+surprise at merge time.
+
+What is still unverified, stated plainly
+----------------------------------------
+
+- No live request on either branch.  Everything above is offline: a
+  fake transport, no credential read, no network.  Live cache reuse,
+  the provider's real prefix behaviour and the ChatGPT plan's quota unit
+  remain unverified, and no probe here can change that.
+- The branch's own 48 replay tests assert the body the transport is
+  handed, but they do not assert that a second adapter call reuses the
+  first one's bytes at the transport, only that the seam returns them.
+  This task's Result 4 probe does check that, and passes; the owner may
+  want it as a test.
+- The freeze is not deployed.  Nothing here is in main yet; the merge
+  queue is what brings either branch in.
+
+What would have caught it (for the owner to add to its own suite)
+----------------------------------------------------------------
+
+The transport fake records :json. Assert the type the transport will
+see, not the bytes the seam returns:
+
+    ;; what goes on the wire is an object, not a JSON string literal
+    (should (listp (plist-get (car harness-replay-test--requests) :json)))
+    (should (equal "m" (plist-get (plist-get (car harness-replay-test--requests)
+                                               :json) :model)))
+
+or, at the HTTP layer, that the encoded body parses back to the same
+plist:
+
+    (should (equal body (harness-json-parse
+                         (harness-json-encode (plist-get request :json)))))
+
+Either fails today with (plist-get body :model) => nil, and would pass
+once the seam's text reaches the transport as :body, or the adapter
+hands over a plist rather than text.
+
+
+The full suite at 8df2fe1, and what it means
+-------------------------------------------
+
+The branch's note says its full suite has one failure,
+harness-skills-scan-test, which main fixed in a commit the branch
+predates.  Not reverified here: this task ran the full suite of its OWN
+branch (204 suites, in four batches, because one invocation outlives a
+tool call), not the quota branch's.  What this task can say about the
+quota branch is the eight suites above, all of which pass, and that it
+is the same merge base (5022581) as this branch, so the layout-test
+failure this branch shows would be its too.
+
+On this task's own full run: 3 of 204 failed, and only one of them is
+interesting.
+
+  test/harness-test-layout-test.el       the merge base's, not the branch's
+  harness-tools-shell-tramp-test.el      fails on main too (hangs)
+  harness-ui-patch-review-test.el        1 of 163, passes 163/163 alone
+
+The layout failure is the one worth stating precisely, because it looks
+like the branch broke something and it did not.  The test finds two
+suites in test/ that its own list does not name -- harness-images-test.el
+and harness-ui-model-picker-test.el.  Both are present at the merge base
+5022581, which is also the quota branch's merge base.  main has since
+deleted both (5020e5f, "Fix missing harness-test-helpers load file")
+and added one entry to the list, so the same test passes on main (3/3,
+run here in a git archive of main) and fails on a branch that predates
+that commit.  Neither branch changes anything under test/.  The merge
+queue's merge into main takes main's copy, which is why this is reported
+as a failing run rather than explained away.

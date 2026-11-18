@@ -536,5 +536,58 @@ with several calls offers one button each, oldest first."
     (should (memq #'harness-ui-provider-check--on-event
                   harness-ui-event-functions))))
 
+(ert-deftest harness-ui-provider-check-cache-copy-is-noun-phrases ()
+  "The cache lines the page draws are noun phrases.
+A check's detail is authored copy, so it says the state and not a story
+about it: `repeats unknown/unknown cached', `controls ambiguous',
+`served unknown' and `no cold control reported; isolation unmeasured'
+are what a reader sees."
+  (harness-ui-provider-check-test-with
+    (harness-ui-provider-check-test-session "s1" "checkfake:model")
+    (with-temp-buffer
+      (setq-local harness-ui-session-id "s1")
+      (let ((harness-ui-provider-check-confirm nil)
+            (harness-ui-provider-check-test--checks
+             '((:id "catalogue" :suite "provider"
+                :name "Registry and model catalogue")
+               (:id "cache" :suite "provider"
+                :name "Exact-prefix cache reuse and keep-warm")
+               (:id "cache-evidence" :suite "provider"
+                :name "Cache capability evidence"))))
+        (harness-ui-provider-check-test-recording (harness-provider-check)))
+      (with-current-buffer (harness-ui-provider-check-test-buffer)
+        (let ((job harness-ui-provider-check--job))
+          (harness-ui-provider-check-test-dispatch
+           "provider-check/result" job
+           '(:id "catalogue" :suite "provider"
+             :name "Registry and model catalogue" :status "pass"
+             :detail "Listed with model id and context window.")
+           1 3)
+          (harness-ui-provider-check-test-dispatch
+           "provider-check/result" job
+           (list :id "cache" :suite "provider"
+                 :name "Exact-prefix cache reuse and keep-warm" :status "skip"
+                 :detail (concat "repeats unknown/unknown cached"
+                                 " · controls ambiguous"
+                                 " · served unknown"
+                                 " · no cold control · isolation unmeasured"))
+           2 3)
+          (harness-ui-provider-check-test-dispatch
+           "provider-check/result" job
+           '(:id "cache-evidence" :suite "provider"
+             :name "Cache capability evidence" :status "skip"
+             :detail "observed none · unsupported none · unverified exact-prefix reuse · advertised TTL none · served unknown · record not saved (no state directory)")
+           3 3)
+          (let ((text (harness-ui-provider-check-test-text)))
+            (should (string-match-p (regexp-quote "repeats unknown/unknown cached") text))
+            (should (string-match-p (regexp-quote "controls ambiguous") text))
+            (should (string-match-p (regexp-quote "served unknown") text))
+            (should (string-match-p
+                     (regexp-quote "no cold control · isolation unmeasured")
+                     text))
+            (should (string-match-p
+                     (regexp-quote "record not saved (no state directory)")
+                     text))))))))
+
 (provide 'harness-ui-provider-check-test)
 ;;; harness-ui-provider-check-test.el ends here

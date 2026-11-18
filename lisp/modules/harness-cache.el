@@ -503,40 +503,67 @@ paying for a cache that does not work.  See
 INFO is the `cache/reuse' plist with `:streak' and `:wasted' added.  The
 alert is a hint in the transcript, a notification when the notifications
 module is loaded, a warning in the log, and `cache/poor-hit'.  With
-`harness-cache-health-action' `stop', the running turn is cancelled too."
+`harness-cache-health-action' `stop', the running turn is cancelled too.
+
+The alert names what is known and what is not.  When the provider
+diagnostics (`harness-provider-diagnostics') have a record of the
+session's last request, the hint names the cause it labels: a client
+change (`model-change', `tools-change', `system-change',
+`settings-change', `prefix-diverged', `compaction', `idle') or `warm'
+with a zero cache read, which is the provider-side case.  Otherwise it
+says the cause is unknown, and never blames the provider's cache or a
+prefix break on its own: a miss alone proves neither."
   (let* ((session (ignore-errors (harness-call 'session/get sid)))
          (name (or (and session (plist-get session :name)) "Session"))
          (streak (plist-get info :streak))
          (wasted (plist-get info :wasted))
          (ratio (plist-get info :ratio))
+         (cause (harness-cache--miss-cause sid))
          (summary (format "%d calls · %s tokens re-sent"
                           streak (harness-format-tokens-compact wasted)))
          ;; What was measured, not a verdict on it: the share is of the
          ;; previous prompt, and a request that read most of it from the
          ;; cache is not a miss.  The threshold decides when this is worth
-         ;; saying; the wording must not decide it again, wrongly.
-         (hint (format "Cache reuse low · %d%% cached · %s"
-                       (round (* 100 (or ratio 0))) summary)))
+         ;; saying; the wording must not decide it again, wrongly.  The
+         ;; cause is the one the diagnostics recorded, or unknown.
+         (hint (format "Cache reuse low · %d%% cached · %s · cause %s"
+                       (round (* 100 (or ratio 0))) summary cause)))
     (when session
       (harness-call 'session/hint sid hint)
       (when (harness-method-exists-p 'notification/send)
         (harness-catch
          (harness-call-async 'notification/send
                              (list :title "Cache reuse low"
-                                   :body (format "%s · %s" name summary)
+                                   :body (format "%s · %s · cause %s" name summary cause)
                                    :urgency 'normal
                                    :source "cache" :kind "cache-health"
                                    :session sid :project (plist-get session :project)))
          (lambda (err) (harness-log 'warn "cache: notifying failed: %s"
                                     (harness-error-message err)))))
-      (harness-log 'warn "cache: %s read %d%% of its previous prompt; %s over %d calls"
+      (harness-log 'warn "cache: %s read %d%% of its previous prompt; %s over %d calls; cause %s"
                    sid (round (* 100 (or ratio 0)))
-                   (harness-format-tokens wasted) streak)
-      (harness-emit 'cache/poor-hit sid info)
+                   (harness-format-tokens wasted) streak cause)
+      (harness-emit 'cache/poor-hit sid (plist-put (copy-sequence info) :cause cause))
       (when (eq harness-cache-health-action 'stop)
         (when (harness-method-exists-p 'agent/cancel)
           (harness-call 'agent/cancel sid)))))
   info)
+
+(defun harness-cache--miss-cause (sid)
+  "Return the cause label the diagnostics give SID's last request, or `unknown'.
+A miss says the cache did not serve the previous prompt; it does not say
+why.  The provider diagnostics keep, per attempt, whether the harness's
+own prefix was preserved (`warm') or changed (`model-change',
+`tools-change', `system-change', `settings-change', `prefix-diverged'),
+whether there was an earlier request at all (`first'), whether the
+session said its cache was reset (`compaction') or its lifetime passed
+(`idle').  This reads that label; without a record it answers `unknown'
+rather than guessing.  It sends no request."
+  (if (fboundp 'harness-provider-diagnostics-miss-cause)
+      (condition-case nil
+          (harness-provider-diagnostics-miss-cause sid)
+        (error "unknown"))
+    "unknown"))
 
 (defun harness-cache--on-reuse (sid info)
   "Watch the reuse of SESSION-ID's prompt cache from INFO, a `cache/reuse'.

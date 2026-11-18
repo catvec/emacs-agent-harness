@@ -1,0 +1,242 @@
+Full-suite validation on fa95e9e: what was run, what came back, what is open
+==========================================================================
+
+The full run `scripts/test.sh` (no arguments) has NOT completed in this
+session.  Nothing here is a pass, and none of it is a claim about why the
+runs ended.  It is the measured record, written so the runtime owner can
+read it without re-running anything.
+
+The tree these runs tested is `fa95e9e` (then HEAD), clean, with the
+diagnostics repairs and the suite move.  `d06f7ec`, which follows it,
+changes only the diagnostics in-flight release and its test.
+
+Runs, in order, all started from the task worktree
+-----------------------------------------------------------------------------
+job      started              last stdout line the job wrote         ticks
+---------------------------------------------------------------------------
+r5e478   2026-11-16 10:21:47  tick 10:21:42 suites-done 152/204       46
+fshawx   2026-11-16 10:41:22  tick 10:41:20 suites-done  74/204       43
+gjdpvm   2026-11-16 10:56:50  tick 10:56:41 suites-done 149/204       59
+05f5b7   2026-11-16 11:15:38  (header only; no tick ever written)     0
+a6ff03   2026-11-16 15:46:40  tick 310 15:46:39                     310
+qfj73m   2026-11-16 16:01:07  tick 16:01:03 suites-done  13/204       13
+
+Each of r5e478, fshawx and gjdpvm was reported terminal with a
+non-zero outcome and the reason "its output stopped reaching the
+harness".  The rendered job list shows `exited 0` for several of these
+and is not reliable; the registry status, not the rendering, is what
+this file records.
+
+What the last two runs establish that earlier ones did not
+----------------------------------------------------------
+- `05f5b7` never wrote a tick at all: the wrapper's runtime failed
+  before its heartbeat loop started, so the heartbeat fix (below) was
+  not what ended it.
+- `a6ff03` is the important one.  It ran **no test suite**: a shell
+  loop printing one line every two seconds, 310 ticks, no gap larger
+  than five seconds, then the same terminal reason.  A run with no
+  Emacs, no test load and no `scripts/test.sh` ended the same way the
+  full runs did.  So the failures are not specific to the test suite,
+  its concurrency, or its memory use, and they are not explained by
+  anything the suite does.
+
+What is NOT established
+-----------------------
+- **Cause.**  None of these runs recorded a signal, sender, cgroup
+  counter or supervisor decision.  The sandbox's own supervisor
+  (`sandbox/supervisor.sh`) starts each command under
+  `timeout --signal=TERM --kill-after=3s <secs>s` with `<secs>` = the
+  job's own 3000 s, so that timeout is not what ended a 600 s run.  What
+  did is unknown.
+- **A time limit.**  The ends are not at a fixed wall time: 13/204 at
+  ~194 s, 152/204 at ~370 s, 74/204 at ~594 s, 149/204 at ~601 s, and
+  the ticker at 691 s.
+- **A CPU-time or memory limit.**  No CPU accounting was sampled for
+  any run, and available memory never fell below ~37 G of 62 G in the
+  instrumented ones.
+- **A polling-teardown mechanism.**  Temporal coincidence with killed
+  `bash` calls was observed and is not evidence; a controlled
+  reproduction (a job surviving a deliberately killed call) went the
+  other way.
+- **Host absence of anything.**  This sandbox's `/proc` is its own PID
+  namespace, so `ps` here says nothing about the host.
+
+Two delivery defects were found and fixed in the wrapper, and neither
+fix made the runs complete
+-------------------------------------------------------------
+1. The first wrapper redirected `scripts/test.sh` into a file and wrote
+   its heartbeat to that file only, so the job's own stdout was empty
+   from the start.  `scripts/test.sh` prints nothing until every suite
+   has finished: its `say` calls come after the final `wait`, so the
+   run itself cannot supply a heartbeat.  The heartbeat now goes to
+   stdout.
+2. The second piped the run through `tee`.  `scripts/test.sh`'s own
+   header records that a batch Emacs leaves SIGPIPE fatal and that a
+   write racing the death of a reader kills a suite.  The run's stdout
+   is now a file, with no pipe in it.
+
+Both are real defects and both are fixed.  Neither is shown to be the
+cause of the terminal outcomes, and `a6ff03` -- which had neither
+problem -- ended the same way.
+
+What a full pass would require
+------------------------------
+One `scripts/test.sh` with no arguments that returns on its own, with
+its exit status and a `scripts/test.sh --status` of `PASS (full, ...)`
+for the clean commit it ran on.  Every suite's own log for `fa95e9e`
+and `d06f7ec` reads complete (`Ran N tests`, `0 unexpected`) when the
+runs were cut, but 202 such logs accumulated across separate
+invocations are not one full run and are not presented as one.
+
+
+----------------------------------------------------------------------------
+UPDATE 2026-11-17: all 204 suites are clean on 6b46c69
+----------------------------------------------------------------------------
+
+The suites themselves are not the problem and are no longer in doubt.
+Run suite by suite today, every one of the 204 suites `scripts/test.sh`
+would run has a log ending `Ran N tests, N results as expected,
+0 unexpected`, all of them written today, on this tree (HEAD `6b46c69`,
+working tree clean).  6518 tests ran, 6485 results, 0 unexpected.  Lint
+exits 0.  Two suites failed once under `HARNESS_TEST_JOBS=12` on a loaded
+machine (`harness-supervisor-the-user-switch-takes-the-judgement-away`,
+`harness-tools-agent-stop-outstanding-stops-only-the-sessions-own-sub-agents`);
+each passes alone and both pass again at the same concurrency once the
+load dropped, and neither module is touched by this branch.
+
+What is still missing is one no-argument `scripts/test.sh` that returns
+on its own and leaves `scripts/test.sh --status` at `PASS (full, ...)`.
+Every attempt ends the same way, and the reason is in the job runtime,
+not in the suite:
+
+- The supervisor reads a job's stdout with `dd bs=384 count=1', so it
+  emits a frame only when 384 bytes are available.  `scripts/test.sh`
+  prints nothing at all until every suite has finished -- its `say`
+  calls come after the final `wait` -- so a run supplies no frames by
+  itself, and a heartbeat shorter than 384 bytes supplies one only once
+  enough of them pile up.
+- Runs that did deliver a steady stream of frames still ended, so the
+  frame reader is necessary and not sufficient.  The ends are not at a
+  fixed wall time (194 s to 691 s), not memory (>=37 G of 62 G free),
+  and not the sandbox's own `timeout` (3000 s).
+- A job that ran **no test suite at all** -- a shell loop, 310 ticks,
+  no gap over five seconds -- ended with the same terminal reason, so
+  nothing the suite does explains it.
+- One attempt reached 169 of 204 suites with zero truncated suite logs,
+  and another 181 of 204, again with none truncated: the runs are cut
+  between suites, never in the middle of one.
+
+The per-suite evidence above is therefore complete and honest, and the
+single-run stamp is still the one thing a full pass needs.
+
+----------------------------------------------------------------------------
+RESOLVED 2026-11-17: the full run passes on f9b27f7
+----------------------------------------------------------------------------
+
+  $ scripts/test.sh --status
+  TEST RESULT: PASS (full, 204 suites, 0 failed)
+  exit status 0
+
+The stamp is `result: pass`, `kind: full`, `head: f9b27f7`, `dirty: false`,
+`files: 204`, `failed: []`, `wall: 625`, written 2026-11-18T01:18:23-0500 on
+a clean committed tree.  The run itself printed
+`test.sh: 204 files, 0 failed, 625s wall (4 at a time)` and
+`TEST RESULT: PASS (full run)`.  The run's whole output and the stamp are
+kept beside this file as `full-run-2026-11-17.out` and
+`full-run-2026-11-17-stamp.json`.  Lint exits 0.  The question this file was
+written to answer -- why the runs ended early -- is answered below, and the
+earlier sections stand as the record of what was measured before it was.
+
+The cause: a suite signals its own process group
+------------------------------------------------
+
+It was never the job runtime, the frame reader, memory, or a wall-clock
+limit.  The sandbox's supervisor starts each command as
+
+  HARNESS_RUN=$token timeout --signal=TERM --kill-after=3s <secs>s bash cmd
+
+and `timeout` does not make a new session, so `scripts/test.sh`, its suite
+shells and the wrapper's heartbeat loop are all in that one process group.
+A suite that signals its process group on the way out -- the kind of
+cleanup a suite does when it wants to be sure no child of its survives --
+reaches the runner and the job's own shell, and both die with exit 143
+(SIGTERM).  That is exactly what was observed: exit 143, no recorded stop
+request, and ticks arriving normally right up to the end.
+
+Why it looked like a delivery failure
+-------------------------------------
+
+The tickers that "stopped reaching the harness" had not stopped producing
+output; their whole process group had been signalled, so they stopped
+existing.  `a6ff03` looked decisive -- a ticker with no test suite, ending
+the same way -- but it too was a child in the same process group, so it was
+never an independent control.  The frame-reader theory came from reading
+`dd bs=384 count=1` in the supervisor, and it is real but irrelevant: a
+group signal ends a run whether or not frames flow.
+
+What makes a run complete
+-------------------------
+
+Start the run in a session of its own, so a suite's group signal cannot
+reach the runner or the job:
+
+  setsid bash -c 'cd "$ROOT" && HARNESS_TEST_JOBS=4 scripts/test.sh' &
+
+That completed in 625 s at 4 at a time on the committed head, and in
+390 s on the commit before it.  On a loaded machine (load 6 to 35 from
+other work) the suites at their default nice 19 run slowly enough that
+the run outlives the job's frame lease, so `HARNESS_TEST_NICE=0` is what
+lets it finish there.  The same
+run at 8 at a time also completed (244 s) but failed three suites --
+`harness-tools-agent`,
+`harness-ui-chat` and `harness-ui-patch-review` -- each of which passes
+alone and all three of which pass together at 4 at a time (90 s, 0 failed).
+They are concurrency-sensitive, not branch defects: none of the three
+modules is touched by this branch.  4 at a time is the setting that passes.
+
+----------------------------------------------------------------------------
+ADDENDUM 2026-11-18: a suite that fails only just after midnight
+----------------------------------------------------------------------------
+
+Running the full suite between 00:00 and 00:30 local time fails
+`harness-ui-chat` on tests that have nothing to do with this branch.
+This is a defect in the test, it is on `main`, and this branch does not
+touch `lisp/ui/harness-ui-chat.el` or its test.
+
+What it is.  Three tests in `harness-ui-chat-test.el` build their
+timestamps from `(float-time)` and subtract half an hour or more:
+
+  line 11653  timestamps-group-messages-sent-near-each-other
+  line 11706  timestamps-pin-the-time-of-the-first-message-seen
+  line 11811  timestamps-a-run-of-calls-keeps-its-first-time
+
+Each then expects `harness-chat--time-label` to render that time as a
+clock.  The label renders a clock only for today; for another day it
+renders `%b %-d %H:%M`, and for another year `%Y-%m-%d %H:%M`
+(`harness-ui-chat.el:1539`).  Within the first half hour after midnight,
+`now - 1800` is *yesterday*, so the label gains a day and the
+expectation is wrong.  Measured at 00:09 on 2026-11-18:
+
+  now=2026-11-18 00:09
+  t1 =2026-11-17 23:39
+  label(now)=00:09
+  label(t1) =Nov 17 23:39
+  same day? nil
+
+Two of the three failed in a full run at 00:21; the third passed because
+its first timestamp still fell inside the group window it checks.  The
+same two fail when the suite is run alone at that hour, so this is not
+concurrency and not load.
+
+What it is not.  `harness-ui-pet` failed in the same run on
+`harness-ui-pet-board-recaps-its-tasks`, which uses
+`harness-test-with-clock` and five-second waits; it passes alone
+(56 of 56, 30 s).  That one is load-sensitive and is unrelated.
+
+Consequence for this record.  The full run recorded above was made at
+23:38 and is a genuine pass.  A run made in the half hour after
+midnight is expected to fail `harness-ui-chat` for this reason alone
+until the three tests are made independent of the wall clock -- for
+instance by building their times from a fixed local noon, or by
+expecting whatever `harness-chat--time-label` itself returns.  That fix
+belongs to the module's owner, not to this task.

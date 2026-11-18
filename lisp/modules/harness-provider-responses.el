@@ -151,6 +151,7 @@
 (require 'harness-util)
 (require 'harness-http)
 (require 'harness-provider)
+(require 'harness-provider-diagnostics)
 (require 'harness-chatgpt-plan)
 (require 'harness-codex-quota)
 
@@ -1108,6 +1109,9 @@ when it does not.  See `harness-responses--error-kinds' for the kinds."
   on-event name http model session finished (status nil) (raw "") (error nil) (error-kind nil)
   retry-after usage stop-reason calls items cancelled
   quota-told ; the plan windows the turn was last told about
+  ;; Content-free diagnostics: the attempt, and what the response itself
+  ;; said answered it.  A missing id or model stays unknown.
+  diagnostics response-id served-model request-id
   (progress (make-hash-table :test 'equal)))
 
 (defun harness-responses--emit (stream event)
@@ -1261,6 +1265,18 @@ read and dropped."
                           nil)))
            (type (harness-responses--string (or (plist-get json :type) event))))
       (when (listp json)
+        ;; The response object in created/completed/failed carries the
+        ;; id and the model; a chunk that does not leaves them unknown.
+        (let ((response (plist-get json :response)))
+          (when (listp response)
+            (when-let* ((id (plist-get response :id)))
+              (when (and (stringp id) (not (string-empty-p id)))
+                (unless (harness-responses--stream-response-id stream)
+                  (setf (harness-responses--stream-response-id stream) id))))
+            (when-let* ((model (plist-get response :model)))
+              (when (and (stringp model) (not (string-empty-p model)))
+                (unless (harness-responses--stream-served-model stream)
+                  (setf (harness-responses--stream-served-model stream) model))))))
         (pcase type
           ((or "response.created" "response.in_progress" "response.queued") nil)
           ("response.output_item.added"
@@ -1381,27 +1397,49 @@ The usage comes first, then the tool calls the response made, then the
 ran tools records them before it is over."
   (unless (harness-responses--stream-finished stream)
     (setf (harness-responses--stream-finished stream) t)
-    (when-let* ((usage (harness-responses--stream-usage stream)))
-      (unless (eq reason 'cancelled)
-        (harness-responses--emit stream (harness-responses--usage-event usage))))
-    (when (eq reason 'tool-use)
-      (dolist (slot (harness-responses--stream-calls stream))
-        (let ((call (cdr slot)))
-          (when (plist-get call :name)
-            (harness-responses--emit
-             stream (list :type 'tool-call
-                          :id (or (plist-get call :call-id) (concat "call_" (harness-short-id)))
-                          :name (plist-get call :name)
-                          :input (harness-responses--parse-arguments (plist-get call :arguments))
-                          :respond nil))))))
-    (harness-responses--emit
-     stream (if error
-                (append (list :type 'done :stop-reason reason :error error)
-                        (when-let* ((kind (or kind (harness-responses--stream-error-kind stream))))
-                          (list :error-kind kind))
-                        (when-let* ((after (harness-responses--stream-retry-after stream)))
-                          (list :retry-after after)))
-              (list :type 'done :stop-reason reason)))))
+    (let ((usage-event nil))
+      (when-let* ((usage (harness-responses--stream-usage stream)))
+        (unless (eq reason 'cancelled)
+          (setq usage-event (harness-responses--usage-event usage))
+          (harness-responses--emit stream usage-event)))
+      (when (eq reason 'tool-use)
+        (dolist (slot (harness-responses--stream-calls stream))
+          (let ((call (cdr slot)))
+            (when (plist-get call :name)
+              (harness-responses--emit
+               stream (list :type 'tool-call
+                            :id (or (plist-get call :call-id) (concat "call_" (harness-short-id)))
+                            :name (plist-get call :name)
+                            :input (harness-responses--parse-arguments (plist-get call :arguments))
+                            :respond nil))))))
+      (let ((done (if error
+                      (append (list :type 'done :stop-reason reason :error error)
+                              (when-let* ((kind (or kind (harness-responses--stream-error-kind stream))))
+                                (list :error-kind kind))
+                              (when-let* ((after (harness-responses--stream-retry-after stream)))
+                                (list :retry-after after)))
+                    (list :type 'done :stop-reason reason))))
+        ;; Diagnostics read the attempt's raw usage and the event emitted
+        ;; above; they add no usage, send no request, and finish once.
+        (when-let* ((attempt (harness-responses--stream-diagnostics stream)))
+          (harness-provider-diagnostics-response
+           attempt
+           :status (harness-responses--stream-status stream)
+           :generation (harness-responses--stream-response-id stream)
+           :request-id (harness-responses--stream-request-id stream)
+           :served-model (harness-responses--stream-served-model stream)
+           :usage (harness-responses--stream-usage stream)
+           :usage-event usage-event
+           :currency "USD"
+           :outcome (cond ((eq reason 'cancelled) 'cancelled)
+                          (error 'error)
+                          (t 'ok))
+           :stop reason
+           :error-kind (and error (or kind (harness-responses--stream-error-kind stream)))
+           :retry-after (harness-responses--stream-retry-after stream)
+           :http-retries (when-let* ((http (harness-responses--stream-http stream)))
+                           (harness-http-handle-retries http))))
+        (harness-responses--emit stream done)))))
 
 (defun harness-responses--parse-arguments (raw)
   "Parse tool call arguments RAW (a JSON string) into a plist."
@@ -1531,6 +1569,16 @@ the efforts the answer names."
                       (harness-responses--finish stream 'error (nth 1 err) 'permanent)
                       'refused))))
       (unless (eq frozen 'refused)
+        ;; The prefix is logged before the request goes out, from the same
+        ;; body that goes on the wire.
+        (setf (harness-responses--stream-diagnostics stream)
+              (harness-provider-diagnostics-request
+               (harness-responses--body name request) request
+               :configured (format "%s:%s"
+                                   (or harness-responses-provider-id "chatgpt")
+                                   (or name "unknown"))
+               :route 'responses
+               :host "chatgpt.com"))
         (condition-case err
             (setf (harness-responses--stream-http stream)
                   (harness-http-request
@@ -1557,6 +1605,9 @@ the efforts the answer names."
                                  ;; from it.
                                  (harness-responses--frozen-keep name request)
                                  (setf (harness-responses--stream-status stream) status)
+                                 (when-let* ((request-id (cdr (assoc-string "x-request-id" headers t))))
+                                   (when (and (stringp request-id) (not (string-empty-p request-id)))
+                                     (setf (harness-responses--stream-request-id stream) request-id)))
                                  ;; Both forms of Retry-After are read, a number
                                  ;; of seconds and an HTTP-date, so the wait a
                                  ;; rate limit names reaches the provider pool
@@ -1604,8 +1655,25 @@ the efforts the answer names."
                                                  stream)))
                                               :effort)))
                              (progn
+                               ;; The refused request is one
+                               ;; attempt; the retry with the
+                               ;; efforts the answer named is
+                               ;; another, and the first is closed
+                               ;; rather than left without a line.
+                               (when-let* ((attempt-object
+                                            (harness-responses--stream-diagnostics stream)))
+                                 (harness-provider-diagnostics-response
+                                  attempt-object
+                                  :status status
+                                  :outcome 'error
+                                  :stop 'error
+                                  :error-kind 'request))
                                (setf (harness-responses--stream-status stream) nil
-                                     (harness-responses--stream-raw stream) "")
+                                     (harness-responses--stream-raw stream) ""
+                                     (harness-responses--stream-diagnostics stream) nil
+                                     (harness-responses--stream-response-id stream) nil
+                                     (harness-responses--stream-request-id stream) nil
+                                     (harness-responses--stream-served-model stream) nil)
                                (harness-responses--start stream request info 1))
                            (harness-responses--pre-stream-error stream status refusal)))
                         ;; A stream that ended without any terminal event is

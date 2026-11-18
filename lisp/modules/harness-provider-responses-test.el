@@ -18,6 +18,7 @@
 (require 'harness-http)
 (require 'harness-provider)
 (require 'harness-provider-responses)
+(require 'harness-provider-diagnostics)
 
 ;;;; The fake HTTP layer
 
@@ -1592,6 +1593,86 @@ are named by how long they last rather than by the server's slot names."
     (let ((quota (harness-test-await (harness-responses--quota))))
       (should (= 0.4 (plist-get (car (plist-get quota :windows)) :used)))
       (should-not (plist-get quota :informational)))))
+
+;;;; Content-free diagnostics
+
+(ert-deftest harness-provider-responses-diagnostics-record-response-and-cache ()
+  "The diagnostics line keeps the response id, model and cache reading.
+It adds no usage event: the turn's own event is still the only one."
+  (let ((harness-state-directory (file-name-as-directory (make-temp-file "hrd-" t)))
+        (harness-provider-diagnostics-enabled t)
+        (harness-provider-diagnostics-key-file nil)
+        (harness-provider-diagnostics--key 'unset)
+        (harness-provider-diagnostics--subkeys (make-hash-table :test 'equal))
+        (harness-provider-diagnostics--last (make-hash-table :test 'equal))
+        (harness-provider-diagnostics--last-order nil)
+        (harness-provider-diagnostics--sequence 0)
+        (harness-provider-diagnostics--warned nil)
+        (harness-log-level 'info)
+        (harness-log-filter-function nil)
+        (logs nil))
+    (unwind-protect
+        (let ((harness-log-hook (list (lambda (_level msg) (push msg logs)))))
+          (harness-provider-diagnostics-reset)
+          (harness-responses-test-with-fake
+              `(("/responses" . (:chunks (,(harness-responses-test--sse
+                                            '(:type "response.created"
+                                              :response (:id "resp_1" :model "gpt-5-served"))
+                                            '(:type "response.completed"
+                                              :response (:id "resp_1" :model "gpt-5-served"
+                                                         :output (vector)
+                                                         :usage (:input_tokens 100 :output_tokens 5
+                                                                 :input_tokens_details (:cached_tokens 40)))))))))
+            (let* ((result (harness-responses-test--complete
+                            '(:model "chatgpt:gpt-5" :system "Be terse."
+                              :messages ((:role user :content ((:type "text" :text "hi")))))))
+                   (events (car result))
+                   (line (car (cl-remove-if-not
+                               (lambda (msg) (string-match-p "provider-diagnostics: response" msg))
+                               logs))))
+              (should (= 1 (cl-count 'usage events :key (lambda (e) (plist-get e :type)))))
+              (should line)
+              (should (string-match-p "response-id=resp_1" line))
+              (should (string-match-p "request-id=unknown" line))
+              (should (string-match-p "served-model=gpt-5-served" line))
+              (should (string-match-p "cache-read=40" line))
+              (should (string-match-p "cache-write=unknown" line))
+              (should (string-match-p "cost-source=plan" line))
+              (should (string-match-p "outcome=ok" line)))))
+      (delete-directory harness-state-directory t))))
+
+(ert-deftest harness-provider-responses-diagnostics-send-no-prompt ()
+  "A prompt, a tool description and the token never enter a diagnostic line."
+  (let ((harness-state-directory (file-name-as-directory (make-temp-file "hrd-" t)))
+        (harness-provider-diagnostics-enabled t)
+        (harness-provider-diagnostics-key-file nil)
+        (harness-provider-diagnostics--key 'unset)
+        (harness-provider-diagnostics--subkeys (make-hash-table :test 'equal))
+        (harness-provider-diagnostics--last (make-hash-table :test 'equal))
+        (harness-provider-diagnostics--last-order nil)
+        (harness-provider-diagnostics--sequence 0)
+        (harness-provider-diagnostics--warned nil)
+        (harness-log-level 'info)
+        (harness-log-filter-function nil)
+        (logs nil))
+    (unwind-protect
+        (let ((harness-log-hook (list (lambda (_level msg) (push msg logs)))))
+          (harness-provider-diagnostics-reset)
+          (harness-responses-test-with-fake
+              `(("/responses" . (:chunks (,(harness-responses-test--sse
+                                            '(:type "response.completed"
+                                              :response (:id "resp_1"
+                                                         :output (vector)
+                                                         :usage (:input_tokens 1 :output_tokens 1))))))))
+            (harness-responses-test--complete
+             '(:model "chatgpt:gpt-5" :system "PROMPT-MARKER"
+               :tools ((:name "tool_marker" :description "TOOL-MARKER" :schema (:type "object")))
+               :messages ((:role user :content ((:type "text" :text "USER-MARKER"))))))
+            (let ((all (mapconcat #'identity logs "\n")))
+              (dolist (secret (list "PROMPT-MARKER" "TOOL-MARKER" "tool_marker" "USER-MARKER"
+                                    harness-responses-test--token))
+                (should-not (string-search secret all))))))
+      (delete-directory harness-state-directory t))))
 
 (provide 'harness-provider-responses-test)
 ;;; harness-provider-responses-test.el ends here

@@ -76,6 +76,7 @@ them out, so that supervisor loads only when it is named.
  ;;copilot            ; GitHub Copilot CLI as a hosted-loop completion provider.
  ;;deepseek           ; DeepSeek provider (OpenAI-compatible) with peak and off-peak pricing.
  ;;demo               ; Scripted provider for demos and tests.
+ ;;diagnostics        ; Content-free request-prefix and observed serving-provider diagnostics.
  ;;gremlin            ; A provider that is slow, malformed, hungry or dishonest on purpose.
  ;;openai             ; OpenAI-compatible chat completions provider (OpenAI, local servers,…
  ;;openrouter         ; OpenRouter provider: request fields, price-aware endpoint pinning,…
@@ -167,6 +168,7 @@ them out, so that supervisor loads only when it is named.
 | [provider-copilot](provider-copilot.md) |  | [provider](provider.md) | GitHub Copilot CLI as a hosted-loop completion provider. |
 | [provider-deepseek](provider-deepseek.md) |  | [provider](provider.md), [provider-openai](provider-openai.md) | DeepSeek provider (OpenAI-compatible) with peak and off-peak pricing. |
 | [provider-demo](provider-demo.md) |  | [provider](provider.md) | Scripted provider for demos and tests. |
+| [provider-diagnostics](provider-diagnostics.md) |  |  | Content-free request-prefix and observed serving-provider diagnostics. |
 | [provider-gremlin](provider-gremlin.md) |  | [provider](provider.md), [gremlin](gremlin.md) | A provider that is slow, malformed, hungry or dishonest on purpose. |
 | [provider-openai](provider-openai.md) |  | [provider](provider.md) | OpenAI-compatible chat completions provider (OpenAI, local servers, custom endpoints). |
 | [provider-openrouter](provider-openrouter.md) |  | [provider](provider.md), [provider-openai](provider-openai.md), [retry](retry.md) | OpenRouter provider: request fields, price-aware endpoint pinning, error detail. |

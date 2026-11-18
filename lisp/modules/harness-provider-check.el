@@ -900,6 +900,16 @@ the model's prices estimate it, and nil when neither gives a number."
                  1000000.0)
               'catalogue))))))
 
+(defun harness-provider-check--diagnostics (session)
+  "Return the content-free diagnostics summary of SESSION, or nil.
+Nil is unknown: the module is off, or this process has no record of the
+session.  The summary names the attempt's prefix comparison and what the
+response said served it, never a prompt or a guess about the route."
+  (when (fboundp 'harness-provider-diagnostics-session-summary)
+    (condition-case nil
+        (harness-provider-diagnostics-session-summary session)
+      (error nil))))
+
 (defun harness-provider-check--cache-summary (job spec reply)
   "Return the safe summary of REPLY to cache spec SPEC of JOB."
   (let* ((events (plist-get reply :events))
@@ -929,7 +939,9 @@ the model's prices estimate it, and nil when neither gives a number."
           :input (and usage (plist-get usage :input))
           :output (and usage (plist-get usage :output))
           :cost (car cost)
-          :cost-source (cdr cost))))
+          :cost-source (cdr cost)
+          :diagnostics (harness-provider-check--diagnostics
+                        (plist-get reply :session)))))
 
 (defun harness-provider-check--cache-call-run (run spec)
   "Send cache spec SPEC for RUN; resolve its summary, even when it fails."
@@ -999,6 +1011,32 @@ how a measured persistence point is made."
   (let ((read (plist-get result :cache-read)))
     (and (numberp read) (> read 0))))
 
+(defun harness-provider-check--serving (results)
+  "Return what the probes' responses said served them, as data.
+Every value comes from the response, never from the configured
+route: `:providers' and `:models' are the distinct names supplied,
+`:reported' and `:unknown' count the probes that did and did not
+supply one, and `:observed' is non-nil only when every probe named
+a provider.  A provider name is a name, not a geography, a training
+policy or a cache shard."
+  (let (providers models (reported 0) (unknown 0))
+    (dolist (result results)
+      (let* ((summary (plist-get result :diagnostics))
+             (response (plist-get summary :response))
+             (provider (plist-get response :provider))
+             (model (plist-get response :served-model)))
+        (if (and (stringp provider) (not (string-empty-p provider)))
+            (progn (cl-incf reported)
+                   (cl-pushnew provider providers :test #'equal))
+          (cl-incf unknown))
+        (when (and (stringp model) (not (string-empty-p model)))
+          (cl-pushnew model models :test #'equal))))
+    (list :providers (nreverse providers)
+          :models (nreverse models)
+          :reported reported
+          :unknown unknown
+          :observed (and (> reported 0) (zerop unknown)))))
+
 (defun harness-provider-check--cache-evidence (_job specs results)
   "Return the conservative evidence of JOB's cache EXPERIMENT.
 SPECS is what was planned and RESULTS what came back.  Missing telemetry
@@ -1040,6 +1078,7 @@ request measures a provider's cache lifetime."
          (sessions (delq nil (mapcar (lambda (r) (plist-get r :session-id))
                                      results))))
     (list :kind 'prompt-cache
+          :serving (harness-provider-check--serving usable)
           :requested (length specs)
           :actual (length results)
           :telemetry (cond ((cl-some (lambda (r) (eq (plist-get r :telemetry) 'present))
@@ -1054,9 +1093,14 @@ request measures a provider's cache lifetime."
                                          usable))
           :output (apply #'+ (mapcar (lambda (r) (or (plist-get r :output) 0)) usable))
           :repeats (mapcar (lambda (r) (plist-get r :cache-read)) repeats)
-          :repeat-samples (length repeats-with-telemetry)
-          :repeat-hits (cl-count-if #'harness-provider-check--cache-hit-p
-                                    repeats-with-telemetry)
+          ;; A probe that reported no cache field is unknown, not a
+          ;; miss: with nothing measured, the counts are nil rather
+          ;; than a zero a reader would take for `asked and missed'.
+          :repeat-samples (and repeats-with-telemetry
+                              (length repeats-with-telemetry))
+          :repeat-hits (and repeats-with-telemetry
+                           (cl-count-if #'harness-provider-check--cache-hit-p
+                                        repeats-with-telemetry))
           :repeat-seconds (mapcar (lambda (r) (plist-get r :seconds)) repeats)
           :control (list :prime (and control-prime
                                      (plist-get control-prime :cache-read))
@@ -1065,8 +1109,10 @@ request measures a provider's cache lifetime."
                          :mismatch (and mismatch (plist-get mismatch :cache-read)))
           :controls-clean (and controls-clean t)
           :keep-warm (list :refresh (mapcar (lambda (r) (plist-get r :cache-read)) warm)
-                           :refresh-samples (length warm)
-                           :refresh-hits (cl-count-if #'harness-provider-check--cache-hit-p warm)
+                           :refresh-samples (and warm (length warm))
+                           :refresh-hits (and warm
+                                              (cl-count-if #'harness-provider-check--cache-hit-p
+                                                           warm))
                            :resume (and resume (plist-get resume :cache-read)))
           :persistence (list :wait wait
                              :sample (and persistence-result
@@ -1081,6 +1127,35 @@ request measures a provider's cache lifetime."
                                   (= (length sessions) (length (delete-dups
                                                                 (copy-sequence sessions))))))))
 
+(defun harness-provider-check--count-label (value &optional suffix)
+  "Return VALUE as a count for a detail line, or `unknown'.
+VALUE nil is unknown, never zero: a probe that reported no cache read is
+not a probe that reported none used.  SUFFIX is appended to a number."
+  (if (numberp value)
+      (format "%s%s" value (or suffix ""))
+    "unknown"))
+
+(defun harness-provider-check--serving-label (serving)
+  "Return SERVING, a `--serving' plist, as a short noun phrase.
+A probe that did not name a provider says `unknown', never the
+configured route, and a provider name is not a geography."
+  (let ((providers (plist-get serving :providers))
+        (unknown (or (plist-get serving :unknown) 0)))
+    (cond ((and (null providers) (> unknown 0)) "unknown")
+          ((null providers) "not probed")
+          (t (concat (mapconcat #'identity providers ", ")
+                     (if (> unknown 0)
+                         (format " · %d unknown" unknown)
+                       ""))))))
+
+(defun harness-provider-check--cache-read-label (value)
+  "Return VALUE, a cache read, as a noun phrase for a detail line.
+Nil is unknown, not a miss: a probe that reported no cache field says
+nothing about the cache."
+  (if (numberp value)
+      (if (> value 0) "cached" "not cached")
+    "unknown"))
+
 (defun harness-provider-check--cost-label (cost)
   "Return COST, a plist, as the observed or estimated amount and its source."
   (let ((observed (plist-get cost :observed))
@@ -1094,7 +1169,11 @@ request measures a provider's cache lifetime."
      (t "unknown"))))
 
 (defun harness-provider-check--cache-detail (evidence)
-  "Return a compact noun-phrase summary of cache EVIDENCE."
+  "Return a compact noun-phrase summary of cache EVIDENCE.
+A reading the probes did not report is `unknown', never zero: a run with
+no cache telemetry says `repeats unknown/unknown cached', not `0/0'.
+`controls ambiguous' says the controls did not establish isolation --
+they read cached tokens, or no control reported telemetry at all."
   (let* ((repeats (plist-get evidence :repeats))
          (hits (plist-get evidence :repeat-hits))
          (samples (plist-get evidence :repeat-samples))
@@ -1104,18 +1183,34 @@ request measures a provider's cache lifetime."
          (cost (plist-get evidence :cost)))
     (format (concat "repeats %s/%s cached · keep-warm %s/%s cached · resume %s"
                     " · persistence %ss · controls %s · prompt %s · cached %s"
-                    " · output %s · telemetry %s · cost %s · n=%s · TTL unverified")
-            (or hits 0) (or samples 0)
-            (or (plist-get warm :refresh-hits) 0) (or (plist-get warm :refresh-samples) 0)
-            (if (plist-get warm :resume) "cached" "not cached")
-            (or (plist-get persistence :wait) 0)
+                    " · output %s · telemetry %s · cost %s · n=%s"
+                    " · served %s · TTL unverified")
+            (harness-provider-check--count-label hits)
+            (harness-provider-check--count-label samples)
+            (harness-provider-check--count-label (plist-get warm :refresh-hits))
+            (harness-provider-check--count-label (plist-get warm :refresh-samples))
+            (harness-provider-check--cache-read-label (plist-get warm :resume))
+            (harness-provider-check--count-label (plist-get persistence :wait))
             (if (plist-get evidence :controls-clean) "cold" "ambiguous")
-            (or (plist-get evidence :context) 0)
-            (or (plist-get evidence :cache-read) 0)
-            (or (plist-get evidence :output) 0)
+            (harness-provider-check--count-label (plist-get evidence :context))
+            (harness-provider-check--count-label (plist-get evidence :cache-read))
+            (harness-provider-check--count-label (plist-get evidence :output))
             telemetry
             (harness-provider-check--cost-label cost)
-            (length repeats))))
+            (length repeats)
+            (harness-provider-check--serving-label (plist-get evidence :serving)))))
+
+(defun harness-provider-check--controls-warm-p (evidence)
+  "Non-nil when a control probe of EVIDENCE read cached tokens.
+That is the ambiguity: a never-primed prefix that reports a hit means the
+probe cannot tell reuse from a provider counting every input as cached.
+A run whose controls reported no telemetry at all is a different case --
+nothing was measured -- and is not warm."
+  (let ((control (plist-get evidence :control)))
+    (cl-some (lambda (key)
+               (let ((read (plist-get control key)))
+                 (and (numberp read) (> read 0))))
+             '(:prime :resume :mismatch))))
 
 (defun harness-provider-check--prompt-cache-verdict (evidence)
   "Return (STATUS . DETAIL) for exact-prefix cache EVIDENCE.
@@ -1141,7 +1236,13 @@ not unsupported."
       (cons 'skip (format "%d/%d repeat samples"
                           samples harness-provider-check-cache-min-samples)))
      ((not (plist-get evidence :controls-clean))
-      '(skip . "control prefix warm; isolation ambiguous"))
+      ;; A control that read cached tokens proves the probe cannot tell a
+      ;; reuse from a provider counting every input as cached; a run with no
+      ;; control at all measured nothing about isolation.  They are different
+      ;; skips, and saying which is which keeps the alarm unambiguous.
+      (if (harness-provider-check--controls-warm-p evidence)
+          '(skip . "control prefix warm; isolation ambiguous")
+        '(skip . "no cold control · isolation unmeasured")))
      ((>= hits harness-provider-check-cache-min-samples)
       '(pass . "exact-prefix reuse observed; not a guarantee"))
      ((zerop hits)
@@ -1434,6 +1535,7 @@ classification can call it unverified rather than a hit or a miss."
          (control-hits (cl-count-if #'harness-provider-check--independent-hit-p
                                     control-results)))
     (list :kind 'independent-prefixes
+          :serving (harness-provider-check--serving usable)
           :requested-sessions (length prefixes)
           :requested (length specs)
           :actual (length results)
@@ -1486,34 +1588,53 @@ classification can call it unverified rather than a hit or a miss."
                       :estimated (plist-get totals :estimated-cost)
                       :source (plist-get totals :cost-source)))))
 
+(defun harness-provider-check--controls-unmeasured-p (evidence)
+  "Non-nil when no control probe of EVIDENCE reported cache telemetry.
+The independent-prefix experiment needs a cold control to show that a
+hit came from the primed prefix and not from telemetry that counts every
+input.  A control that was never asked, or answered without a cache
+field, leaves isolation unmeasured -- unknown, not clean."
+  (let ((controls (plist-get evidence :controls)))
+    (not (cl-some (lambda (control)
+                    (numberp (plist-get control :cache-read)))
+                  (append controls nil)))))
+
 (defun harness-provider-check--independent-detail (evidence)
-  "Return a compact noun-phrase summary of independent-prefix EVIDENCE."
+  "Return a compact noun-phrase summary of independent-prefix EVIDENCE.
+A reading the probes did not report is `unknown', never zero, and a count
+with no samples behind it says `unknown' rather than a share of none."
   (let ((cost (plist-get evidence :cost))
-        (count (or (plist-get evidence :prefix-count) 0)))
+        (count (plist-get evidence :prefix-count)))
     (format (concat "independent prefixes %s/%s cached · baseline %s/%s"
                     " · round 1 %s/%s · round 2 %s/%s"
                     " · controls %s/%s cached · sessions %s/%s (%s distinct)"
                     " · peak %s parallel · throttled %s · errors %s · median %ss"
-                    " · prompt %s · cached %s · output %s · cost %s · TTL unverified")
-            (or (plist-get evidence :cached-count) 0) count
-            (or (plist-get evidence :baseline-hits) 0) count
-            (or (plist-get evidence :round-1-hits) 0) count
-            (or (plist-get evidence :round-2-hits) 0) count
-            (or (plist-get evidence :control-hits) 0)
-            (or (plist-get evidence :control-samples) 0)
+                    " · prompt %s · cached %s · output %s · cost %s"
+                    " · served %s · TTL unverified")
+            (harness-provider-check--count-label (plist-get evidence :cached-count))
+            (harness-provider-check--count-label count)
+            (harness-provider-check--count-label (plist-get evidence :baseline-hits))
+            (harness-provider-check--count-label count)
+            (harness-provider-check--count-label (plist-get evidence :round-1-hits))
+            (harness-provider-check--count-label count)
+            (harness-provider-check--count-label (plist-get evidence :round-2-hits))
+            (harness-provider-check--count-label count)
+            (harness-provider-check--count-label (plist-get evidence :control-hits))
+            (harness-provider-check--count-label (plist-get evidence :control-samples))
             (length (plist-get evidence :sessions))
-            (or (plist-get evidence :requested-sessions) 0)
+            (harness-provider-check--count-label (plist-get evidence :requested-sessions))
             (if (plist-get evidence :distinct-sessions) "all" "not all")
-            (or (plist-get evidence :peak-concurrency) 0)
-            (or (plist-get evidence :throttled) 0)
-            (or (plist-get evidence :errors) 0)
+            (harness-provider-check--count-label (plist-get evidence :peak-concurrency))
+            (harness-provider-check--count-label (plist-get evidence :throttled))
+            (harness-provider-check--count-label (plist-get evidence :errors))
             (or (and (plist-get evidence :median-seconds)
                      (format "%.2f" (plist-get evidence :median-seconds)))
                 "?")
-            (or (plist-get evidence :context) 0)
-            (or (plist-get evidence :cache-read) 0)
-            (or (plist-get evidence :output) 0)
-            (harness-provider-check--cost-label cost))))
+            (harness-provider-check--count-label (plist-get evidence :context))
+            (harness-provider-check--count-label (plist-get evidence :cache-read))
+            (harness-provider-check--count-label (plist-get evidence :output))
+            (harness-provider-check--cost-label cost)
+            (harness-provider-check--serving-label (plist-get evidence :serving)))))
 
 (defun harness-provider-check--independent-cache-verdict (evidence)
   "Return (STATUS . DETAIL) for independent-prefix cache EVIDENCE.
@@ -1552,6 +1673,8 @@ not unsupported."
       '(skip . "no cache telemetry; unknown, not zero"))
      ((> (or (plist-get evidence :control-hits) 0) 0)
       '(skip . "fresh control prefix read cached tokens; isolation ambiguous"))
+     ((harness-provider-check--controls-unmeasured-p evidence)
+      '(skip . "no control telemetry · isolation unmeasured"))
      ((< peak 2)
       '(skip . "requests did not overlap; concurrency unverified"))
      ((and (>= baseline count) (>= round-1 count) (>= round-2 count))
@@ -1736,25 +1859,28 @@ record read from disk must mean the same as the one just made."
     (harness-provider-check--evidence-normalize record)))
 
 (defun harness-provider-check--evidence-store (record)
-  "Keep RECORD with the other capability evidence; return RECORD.
+  "Keep RECORD with the other capability evidence; return non-nil when kept.
 A model's earlier record is replaced: its scope fingerprint is kept in
 the new record, and a changed scope makes the record stale when read.
-A missing state directory or a failed write never fails the check."
+A missing state directory or a failed write never fails the check, but
+it is not called saved either: nil says the record was not kept, so the
+caller can report that instead of a pass."
   (let ((file (harness-provider-check--evidence-file)))
-    (when file
-      (condition-case err
-          (let* ((old (harness-provider-check--evidence-records))
-                 (kept (cl-remove (plist-get record :model) old
-                                  :key (lambda (one) (plist-get one :model))
-                                  :test #'equal))
-                 (data (list :schema harness-provider-check--evidence-schema
-                             :records (harness-json-array
-                                       (cons record (cl-subseq kept 0 (min (length kept) 63)))))))
-            (harness-write-file-atomically file (harness-json-encode data)))
-        (error
-         (harness-log 'warn "provider-check: writing capability evidence failed: %s"
-                      (harness-error-short-message err)))))
-    record))
+    (and file
+         (condition-case err
+             (let* ((old (harness-provider-check--evidence-records))
+                    (kept (cl-remove (plist-get record :model) old
+                                     :key (lambda (one) (plist-get one :model))
+                                     :test #'equal))
+                    (data (list :schema harness-provider-check--evidence-schema
+                                :records (harness-json-array
+                                          (cons record (cl-subseq kept 0 (min (length kept) 63)))))))
+               (harness-write-file-atomically file (harness-json-encode data))
+               t)
+           (error
+            (harness-log 'warn "provider-check: writing capability evidence failed: %s"
+                         (harness-error-short-message err))
+            nil)))))
 
 (defun harness-provider-check--scope (model metadata provider)
   "Return the scope that gives evidence about MODEL its meaning.
@@ -1816,12 +1942,16 @@ says, not what this run measured."
   (append (list :capability capability) keys))
 
 (defun harness-provider-check--cache-miss-run-p (cache)
-  "Non-nil when CACHE is a complete run of repeated misses with cold controls."
+  "Non-nil when CACHE is a complete run of repeated misses with cold controls.
+Every repeat reported a cache reading: a probe with no cache field is
+unknown, and an unknown run is not evidence of a miss."
   (and cache
        (eq (plist-get cache :telemetry) 'present)
-       (>= (or (plist-get cache :repeat-samples) 0)
+       (numberp (plist-get cache :repeat-samples))
+       (numberp (plist-get cache :repeat-hits))
+       (>= (plist-get cache :repeat-samples)
            harness-provider-check-cache-min-samples)
-       (zerop (or (plist-get cache :repeat-hits) 0))
+       (zerop (plist-get cache :repeat-hits))
        (plist-get cache :controls-clean)
        (null (plist-get cache :environment))))
 
@@ -2094,6 +2224,25 @@ lifetime extension."
                        (plist-get finding :capability)))
                     items ", "))))
 
+(defun harness-provider-check--record-serving (cache cross)
+  "Return what CACHE and CROSS say served their probes, as one plist.
+The record keeps the observed provider names, the served models and how
+many probes named neither: unknown stays unknown, and the configured
+route is not put in their place.  A provider name is not a geography,
+a training policy or a cache-shard identity."
+  (let ((from-cache (plist-get cache :serving))
+        (from-cross (plist-get cross :serving)))
+    (list :providers (delete-dups
+                      (append (copy-sequence (plist-get from-cache :providers))
+                              (copy-sequence (plist-get from-cross :providers))))
+          :models (delete-dups
+                   (append (copy-sequence (plist-get from-cache :models))
+                           (copy-sequence (plist-get from-cross :models))))
+          :unknown (+ (or (plist-get from-cache :unknown) 0)
+                      (or (plist-get from-cross :unknown) 0))
+          :reported (+ (or (plist-get from-cache :reported) 0)
+                       (or (plist-get from-cross :reported) 0)))))
+
 (defun harness-provider-check--evidence-record (job cache cross)
   "Return a conservative capability record from JOB's CACHE and CROSS evidence.
 CROSS is the independent-prefix experiment: every session primes and
@@ -2120,6 +2269,7 @@ kept."
           :findings findings
           :cache cache
           :cross-session cross
+          :serving (harness-provider-check--record-serving cache cross)
           :cache-miss-runs (plist-get findings :cache-miss-runs)
           :cross-miss-runs (plist-get findings :cross-miss-runs)
           :settings (list :concurrency (harness-provider-check-job-request-concurrency job)
@@ -2138,11 +2288,12 @@ kept."
          (unsupported (harness-provider-check--findings-label findings :unsupported))
          (unverified (harness-provider-check--findings-label findings :unverified))
          (advertised (plist-get record :advertised)))
-    (format "observed %s · unsupported %s · unverified %s · advertised TTL %s"
+    (format "observed %s · unsupported %s · unverified %s · advertised TTL %s · served %s"
             (or observed "none")
             (or unsupported "none")
             (or unverified "none")
-            (or (plist-get advertised :cache-ttl) "none"))))
+            (or (plist-get advertised :cache-ttl) "none")
+            (harness-provider-check--serving-label (plist-get record :serving)))))
 
 (defun harness-provider-check--check-cache-evidence (job _run)
   "Record what the cache checks of JOB observed, conservatively.
@@ -2160,14 +2311,20 @@ and starts no request."
          (findings (plist-get record :findings))
          (observed (plist-get findings :observed))
          (unsupported (plist-get findings :unsupported))
-         (status (if (or observed unsupported) 'pass 'skip)))
-    (harness-provider-check--evidence-store record)
+         (saved (harness-provider-check--evidence-store record))
+         ;; A finding is only as good as the record that keeps it: a record
+         ;; that was not written cannot be read back, so the check says SKIP
+         ;; rather than a pass about evidence nothing will find.
+         (status (cond ((not (or observed unsupported)) 'skip)
+                       (saved 'pass)
+                       (t 'skip))))
     (list :status status
           :detail (format "%s · record %s"
                           (harness-provider-check--evidence-detail record)
-                          (if (harness-provider-check--evidence-file)
-                              "saved"
-                            "not saved (no state directory)"))
+                          (cond (saved "saved")
+                                ((harness-provider-check--evidence-file)
+                                 "not saved (write failed)")
+                                (t "not saved (no state directory)")))
           :evidence record)))
 
 (harness-defmethod provider/cache-evidence (model)
@@ -2977,11 +3134,19 @@ so a time-of-day price is honoured."
 
 (defun harness-provider-check--estimate (model plan)
   "Return the request, output and cost bounds of PLAN on MODEL.
-Cost is nil when the catalogue gives no input and output prices: an
-unknown cost is said to be unknown rather than shown as zero."
-  (let* ((requests (apply #'+ (mapcar (lambda (entry)
-                                       (or (plist-get entry :requests) 0))
-                                     plan)))
+`:requests' is what this run can actually spend: the plan's request count
+cut to the job's enforced budget (`harness-provider-check-max-requests').
+`:planned-requests' is what the plan would ask for and `:over-budget' is
+non-nil when the budget cuts it, so the announced bound is the enforced
+one and a plan too big to finish says so before it starts.  Cost is nil
+when the catalogue gives no input and output prices: an unknown cost is
+said to be unknown rather than shown as zero."
+  (let* ((planned (apply #'+ (mapcar (lambda (entry)
+                                        (or (plist-get entry :requests) 0))
+                                      plan)))
+         (budget (max 1 harness-provider-check-max-requests))
+         (requests (min planned budget))
+         (over (and (> planned budget) t))
          (rates (harness-provider-check--pricing model))
          (input (and rates (plist-get rates :input)))
          (output (and rates (plist-get rates :output)))
@@ -2995,13 +3160,17 @@ unknown cost is said to be unknown rather than shown as zero."
     (list :model model
           :checks (length plan)
           :requests requests
+          :planned-requests planned
+          :budget budget
+          :over-budget over
           :input-per-request harness-provider-check--estimate-input-tokens
           :max-output harness-provider-check-max-output-tokens
           :cost cost
           :currency (and cost "USD")
-          :basis (if cost
-                     "catalogue prices · all input uncached · full output cap"
-                   "cost unknown: no catalogue input and output prices"))))
+          :basis (concat (if cost
+                             "catalogue prices · all input uncached · full output cap"
+                           "cost unknown: no catalogue input and output prices")
+                         (if over " · request budget applied" "")))))
 
 ;;;; Running the plan
 ;;

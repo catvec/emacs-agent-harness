@@ -8,6 +8,7 @@ OpenAI Responses API paid for by a ChatGPT plan (Sign in with ChatGPT).
 - **Source:** [lisp/modules/harness-provider-responses.el](../../lisp/modules/harness-provider-responses.el)
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [provider](provider.md), [chatgpt-plan](chatgpt-plan.md)
+- **Brings along:** [provider-diagnostics](provider-diagnostics.md) (its file requires it)
 
 ## About
 
