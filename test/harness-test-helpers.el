@@ -349,44 +349,50 @@ at load 21 with 16 CPUs gives two, and a wait's bound doubles again."
          (load (/ (or (ignore-errors (car (load-average))) 0) 100.0)))
     (max 1 (ceiling (/ load (max 1 cpus))))))
 
-(defvar harness-test-wait-scale
+(defvar harness-test-wait-jobs
   (let ((jobs (getenv "HARNESS_TEST_JOBS")))
-    (* (max 1 (if (and jobs (string-match-p "\\`[0-9]+\\'" jobs))
-                  (string-to-number jobs)
-                1))
-       (harness-test--load-scale)))
-  "How much longer than `harness-test-wait-seconds' a wait may take.
-A run puts several suites in one machine's CPU at once (`HARNESS_TEST_JOBS',
-four by default), so a suite that would wait ten seconds alone must wait
-proportionally longer in a full run.  A fixed bound turns a slow machine
-into a failing test -- and worse, one whose helper returns nil, so a check
-that never ran reads as a check that ran and said nothing.
+    (max 1 (if (and jobs (string-match-p "\\`[0-9]+\\'" jobs))
+               (string-to-number jobs)
+             1)))
+  "How many suites a run puts in this machine's CPU at once.
+A suite that shares the machine with others must wait proportionally
+longer than one that has it to itself, so a bound for an idle machine is
+multiplied by this and by the machine's load per CPU
+\(`harness-test--load-scale').")
 
-The suites are not the only load: a machine can be busy with something
-else while a run goes, and then four suites' worth is not enough.  The
-job count is multiplied by the machine's load per CPU
-(`harness-test--load-scale'), so a wait competes with both what the run
-puts on the machine and what is there already.  It is read once, when
-the suite starts.")
+(defun harness-test--scale ()
+  "Return how much longer than an idle machine's bound a wait may take.
+That is the run's own suites (`harness-test-wait-jobs') times how busy
+the machine is now (`harness-test--load-scale').
+
+Asked at each check rather than once when the suite starts: a full run
+starts its suites as slots free, so the load a suite must compete with
+grows after it has begun -- a suite that started at load 8 and waited at
+load 26 was scaled for the machine it left, not the one it was on, and
+timed out with the work it waited for still coming.  A bound that tracks
+the machine as it is can only be met, not missed by the machine getting
+busier."
+  (* harness-test-wait-jobs (harness-test--load-scale)))
 
 (defun harness-test-wait (pred &optional timeout message)
   "Spin the event loop until PRED returns non-nil or TIMEOUT seconds pass.
 TIMEOUT is a bound for an idle machine, and every bound is scaled by
-`harness-test-wait-scale': a suite that shares the machine with others
-gets proportionally longer, because a bound met on an idle machine is
-not a claim about the code.  Without TIMEOUT it is
-`harness-test-wait-seconds'.  Signal an error mentioning MESSAGE on
-timeout.  Return PRED's value."
-  (let* ((seconds (* (or timeout harness-test-wait-seconds)
-                      harness-test-wait-scale))
-         (deadline (+ (float-time) seconds))
+`harness-test--scale': a suite that shares the machine with others gets
+proportionally longer, because a bound met on an idle machine is not a
+claim about the code.  Without TIMEOUT it is `harness-test-wait-seconds'.
+The scale is asked again at each check, so a machine that gets busier
+while the wait runs lengthens the bound rather than using it up.  Signal
+an error mentioning MESSAGE on timeout.  Return PRED's value."
+  (let* ((base (or timeout harness-test-wait-seconds))
+         (start (float-time))
          result)
     (while (and (not (setq result (funcall pred)))
-                (< (float-time) deadline))
+                (< (- (float-time) start) (* base (harness-test--scale))))
       (accept-process-output nil 0.02)
       (sit-for 0.005))
     (or result (error "Timed out after %ss waiting for %s"
-                      seconds (or message "condition")))))
+                      (format "%.0f" (* base (harness-test--scale)))
+                      (or message "condition")))))
 
 ;;;; A web server
 
@@ -484,12 +490,30 @@ on its way and read.")
   (format "http://127.0.0.1:%d%s" (process-contact server :service) path))
 
 (defun harness-test-await (promise &optional timeout)
-  "Block until PROMISE settles; return its value or signal.
+  "Block until PROMISE settles; return its value or signal its error.
 TIMEOUT is a bound for an idle machine, and it is scaled by
-`harness-test-wait-scale' as `harness-test-wait's is: a promise that
-would settle within ten seconds alone is not a failure when four
-suites share the machine's CPU."
-  (harness-await promise (* (or timeout 10) harness-test-wait-scale)))
+`harness-test--scale' as `harness-test-wait's is: a promise that would
+settle within ten seconds alone is not a failure when four suites share
+the machine's CPU.  The scale is asked again at each check, so a machine
+that gets busier while the promise is awaited lengthens the bound
+instead of using it up."
+  (let* ((base (or timeout 10))
+         (start (float-time))
+         (promise (harness-as-promise promise)))
+    (while (and (not (harness-promise-settled-p promise))
+                (< (- (float-time) start) (* base (harness-test--scale))))
+      (accept-process-output nil 0.02)
+      (unless (harness-promise-settled-p promise)
+        (sit-for 0.01)))
+    (pcase (harness-promise-state promise)
+      ('resolved (harness-promise-value promise))
+      ('rejected (let ((e (harness-promise-value promise)))
+                   (if (and (consp e) (symbolp (car e)) (get (car e) 'error-conditions))
+                       (signal (car e) (cdr e))
+                     (signal 'harness-error (list e)))))
+      (_ (signal 'harness-error
+                 (list (format "timed out after %ss waiting for the promise"
+                               (format "%.0f" (* base (harness-test--scale))))))))))
 
 (defun harness-test--without-connections (fn)
   "Call FN with TRAMP unable to open a connection; fail afterwards if it tried.

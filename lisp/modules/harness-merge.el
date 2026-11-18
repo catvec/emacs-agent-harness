@@ -72,8 +72,8 @@
 ;; A conflict never reaches the target's checkout.  The lock goes at
 ;; once and the target's HEAD has to be merged into the child's branch,
 ;; in the child's worktree, the conflicts resolved there and committed;
-;; the `merge_done' tool then queues the branch again.  A safety timer
-;; gives up on a conflict nobody resolves.
+;; the `merge_done' tool then queues the branch again.  Conflict resolution
+;; has no elapsed-time limit; it ends on completion, failure or cancellation.
 ;;
 ;; Who resolves them is `harness-merge-conflict-resolver'.  By default
 ;; the harness starts a fresh session for it (a `subagent' child of the
@@ -146,11 +146,6 @@ cost, and a PROVIDER:NAME is that model, at the child's level."
                  (string :tag "Model" :names model))
   :group 'harness)
 
-;;;; Constants
-
-(defconst harness-merge--hold-timeout 1800
-  "Seconds a child may take to resolve merge conflicts before it is aborted.")
-
 ;;;; State
 
 (defvar harness-merge--queues (make-hash-table :test 'equal)
@@ -179,7 +174,8 @@ Each is as `harness-merge--public' returns them, with `:reason' and
 `harness-merge--history-limit' of them.")
 
 (defvar harness-merge--timers (make-hash-table :test 'equal)
-  "Child session id -> safety timer of its unresolved conflict.")
+  "Legacy conflict timers, retained only for cleanup when reloading.
+New conflicts have no elapsed-time limit.")
 
 (defvar harness-merge--calls (make-hash-table :test 'equal)
   "Resolver session id -> its open spawn_agent call in the child's transcript.
@@ -911,9 +907,6 @@ and merge_done is called."
     (when (equal (gethash key harness-merge--locks) child-id)
       (remhash key harness-merge--locks))
     (harness-emit 'merge/conflict child-id (or parent-id key) files)
-    (puthash child-id
-             (run-at-time harness-merge--hold-timeout nil #'harness-merge--timeout entry)
-             harness-merge--timers)
     (let ((resolver (and (eq harness-merge-conflict-resolver 'fresh)
                          (harness-merge--start-resolver
                           entry child
@@ -1140,11 +1133,11 @@ stopped it."
           (error (harness-log 'warn "merge: could not record the result of the resolver %s: %s"
                               resolver-id (error-message-string err))))))))
 
-(defun harness-merge--timeout (entry)
-  "Give up on the unresolved conflict of ENTRY after `harness-merge--hold-timeout'."
-  (when (eq (plist-get entry :status) 'conflict)
-    (harness-merge--finish entry 'aborted
-                           (format "not resolved within %s" (harness-format-duration harness-merge--hold-timeout)))))
+(defun harness-merge--timeout (_entry)
+  "Ignore a legacy conflict timer scheduled before this module was reloaded.
+Conflict resolution ends on completion, failure or explicit cancellation,
+never solely because time elapsed."
+  nil)
 
 (defun harness-merge--unlock-worktree (entry)
   "Lift the harness's lock on the worktree of ENTRY's child, now merged.
@@ -1299,6 +1292,10 @@ session resolving a merge's conflicts works in the child's worktree."
 
 (defun harness-merge--init ()
   "Register the module's filters and subscribers (idempotent)."
+  ;; `defvar' preserves these timers across a reload.  Cancel only the old
+  ;; conflict deadlines, leaving entries, sessions and other timers intact.
+  (maphash (lambda (_child timer) (cancel-timer timer)) harness-merge--timers)
+  (clrhash harness-merge--timers)
   (harness-add-filter 'session/before-move #'harness-merge--before-move)
   (harness-add-filter 'agent/step #'harness-merge--hold 30)
   (harness-add-filter 'agent/before-turn #'harness-merge--hold 30)

@@ -10,7 +10,6 @@
 (defvar harness-merge--calls)
 (defvar harness-merge--timers)
 (defvar harness-agent--cancel-grace)
-(defvar harness-merge--hold-timeout)
 (defvar harness-session-interrupted-output)
 (defvar harness-merge-conflict-resolver)
 (defvar harness-provider-demo-script-override)
@@ -344,6 +343,21 @@ nothing left to conflict over."
         (should (string-match-p "merge_done" (plist-get user :content)))
         (should (equal (harness-sender-system "merge queue") (harness-node-sender user))))
       (harness-test-wait (lambda () (eq 'idle (plist-get (harness-call 'session/get child) :status))) 10 "child idle")
+      (should-not (gethash child harness-merge--timers))
+      ;; Simulate a deadline left by the old module.  Even after more than
+      ;; 30 minutes, its callback cannot abort the merge.  Reload cleanup
+      ;; removes only the legacy timer and keeps this same entry alive.
+      (let* ((entry (harness-merge--entry child))
+             (timer (run-at-time 3600 nil #'harness-merge--timeout entry)))
+        (harness-merge--set entry :requested (- (float-time) 7200))
+        (puthash child timer harness-merge--timers)
+        (timer-event-handler timer)
+        (should (eq 'conflict (harness-call 'merge/status child)))
+        (should-not finished)
+        (harness-merge--init)
+        (should-not (memq timer timer-list))
+        (should-not (gethash child harness-merge--timers))
+        (should (eq entry (harness-merge--entry child))))
       ;; The parent is not held while the child resolves.
       (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt parent "hello")) :stop-reason)))
       ;; merge_done fails before the parent's commit is merged in.
@@ -521,37 +535,41 @@ the same as without them, with no call left unpaired."
       ;; Answered once.
       (should (= 1 (length (harness-merge-test--outside child 'tool-result)))))))
 
-(ert-deftest harness-merge-fresh-resolver-timeout-answers-its-call ()
-  "A resolver still at work when its conflict times out is stopped, and
+(ert-deftest harness-merge-fresh-resolver-cancellation-answers-its-call ()
+  "An explicitly cancelled resolver is stopped, and
 its call in the child gets its result then: once, before the news that
-the merge was aborted, which happens once."
+the merge was cancelled, which happens once."
   (harness-merge-test-with
     (harness-merge-test--conflict-setup wt root)
     (harness-define-tool "stall" :label "Stall" :description "never returns" :kind 'read
                          :handler (lambda (_input _ctx) (harness-with-promise (resolve reject) (ignore resolve reject))))
-    (let ((harness-merge--hold-timeout 60) (finished nil) (resolvers nil)
+    (let ((finished nil) (resolvers nil)
           (harness-provider-demo-script-override '((:type tool-call :id "w-1" :name "stall" :input nil))))
       (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
       (harness-on 'merge/resolver (lambda (_c _p r) (push r resolvers)))
       (harness-call 'merge/enqueue child parent)
-      ;; Wait for the resolver to be running its stalled tool, then fire the
-      ;; actual conflict timer without relying on wall-clock delays.
-      (harness-test-wait (lambda () (and resolvers (gethash child harness-merge--timers)
+      ;; A blocked tool (including a wait for input) has no deadline.
+      (harness-test-wait (lambda () (and resolvers
                                         (eq 'tool (plist-get (harness-call 'agent/activity (car resolvers)) :phase))))
                          10 "the resolver to run its tool")
+      (should-not (gethash child harness-merge--timers))
+      (harness-merge--timeout (harness-merge--entry child))
+      (should (eq 'conflict (harness-call 'merge/status child)))
+      (should (harness-call 'agent/running (car resolvers)))
+      (should-not finished)
       (let ((cancel-timer
              (harness-test-capture-timer
               harness-agent--cancel-grace
-              (lambda () (timer-event-handler (gethash child harness-merge--timers))))))
+              (lambda () (harness-call 'merge/cancel child)))))
         (timer-event-handler cancel-timer))
-      (harness-test-wait (lambda () finished) 10 "aborted")
-      (should (equal (list (list child parent 'aborted)) finished))
+      (harness-test-wait (lambda () finished) 10 "cancelled")
+      (should (equal (list (list child parent 'cancelled)) finished))
       (let ((result (car (harness-merge-test--outside child 'tool-result))))
         (should (plist-get result :is-error))
-        (should (string-match-p "the merge was aborted (not resolved within " (plist-get result :output)))
+        (should (string-match-p "the merge was cancelled" (plist-get result :output)))
         (should (string-match-p "so the sub-agent was stopped" (plist-get result :output)))
         (should (< (harness-merge-test--position child (lambda (n) (equal (plist-get n :id) (plist-get result :id))))
-                   (harness-merge-test--position child (harness-merge-test--hint-p "finished: aborted")))))
+                   (harness-merge-test--position child (harness-merge-test--hint-p "finished: cancelled")))))
       ;; The resolver stops; that answers nothing again and finishes nothing again.
       (harness-test-wait (lambda () (not (harness-call 'agent/running (car resolvers)))) 10 "the resolver stopped")
       (accept-process-output nil 0.1)
@@ -634,6 +652,12 @@ as it settles the resolver, though the child itself was not running."
       ;; Not started, not running: no call yet.
       (should-not (harness-merge-test--outside child 'tool-call))
       (should-not (eq 'running (plist-get (harness-call 'session/get (car resolvers)) :status)))
+      ;; Waiting at a gate (permission or user input) remains blocked until
+      ;; its continuation is explicitly released, even for an old deadline.
+      (should-not (gethash child harness-merge--timers))
+      (harness-merge--timeout (harness-merge--entry child))
+      (should (eq 'conflict (harness-call 'merge/status child)))
+      (should-not (harness-merge-test--outside child 'tool-result))
       (funcall gate)
       (harness-test-wait (lambda () (harness-merge-test--outside child 'tool-call)) 10 "the call")
       (should (eq 'running (plist-get (harness-call 'session/get (car resolvers)) :status)))
@@ -882,22 +906,6 @@ medium rather than at the child's max; the child keeps its own."
       (should (file-exists-p (expand-file-name "three.txt" root)))
       (should (null (harness-call 'merge/queue parent))))))
 
-(ert-deftest harness-merge-hold-timeout-aborts ()
-  (harness-merge-test-with
-    (harness-merge-test--write wt "README" "child version\n")
-    (harness-merge-test--commit wt "child edit" "README")
-    (harness-merge-test--write root "README" "parent version\n")
-    (harness-merge-test--commit root "parent edit" "README")
-    (let ((harness-merge--hold-timeout 0.2) (harness-merge-conflict-resolver 'child) (finished nil))
-      (harness-on 'merge/finished (lambda (c p s) (push (list c p s) finished)))
-      (harness-call 'merge/enqueue child parent)
-      (harness-test-wait (lambda () finished) 10 "aborted")
-      (should (equal (list child parent 'aborted) (car finished)))
-      (should (null (harness-call 'merge/status child)))
-      (should (string-empty-p (harness-merge-test--git root "status" "--porcelain")))
-      (should (equal "parent version\n"
-                     (with-temp-buffer (insert-file-contents (expand-file-name "README" root)) (buffer-string))))
-      (should (null (gethash parent harness-merge--locks))))))
 
 (defun harness-merge-test--lock-line (root path)
   "Return the `locked' line `git worktree list --porcelain' gives PATH of ROOT, or nil."

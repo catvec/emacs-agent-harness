@@ -22,6 +22,7 @@
   '("test/harness-dev-frame-test.el"
     "test/harness-docs-test.el"
     "test/harness-promo-rec-test.el"
+    "test/harness-test-helpers-test.el"
     "test/harness-test-layout-test.el"
     "test/harness-test-runner-test.el"
     "test/harness-update-test.el"
@@ -30,10 +31,10 @@
   "Suites that test the repository, not one of its modules.
 Each is in test/ because it belongs to no module file: the dev loop's
 frames, the README's pictures, the promo film's recorder in
-promo/capture, this layout, the test runner itself, `harness-update' in
-harness.el, the voice gate's Python suite, and the lip-reading suite
-that runs its own Python tests beside the modules they cover.  A suite
-of a module does not belong here.")
+promo/capture, the helpers every suite loads, this layout, the test
+runner itself, `harness-update' in harness.el, the voice gate's Python
+suite, and the lip-reading suite that runs its own Python tests beside
+the modules they cover.  A suite of a module does not belong here.")
 
 (defun harness-test-layout--suites-in (dir)
   "Return the suite files directly in DIR, absolute and sorted.

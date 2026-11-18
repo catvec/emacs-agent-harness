@@ -271,4 +271,51 @@ a tree it did not test. The regression test,
 commits after it, and holds `--status` to refusing the tree without naming a
 failure; it fails on the old output.
 
+## An eleventh defect the rule found
 
+That scale was read once, when a suite started. A full run starts its
+suites as slots free, so the load a suite competes with grows after it
+has begun: `harness-ui-chat-test` and `harness-ui-patch-review-test`
+started early in a run at load 8 and timed out waiting at load 26 with
+the work they waited for still coming, and passed alone. The scale is
+asked for at each check now (`harness-test--scale`), so a machine that
+fills up lengthens a bound already being spent rather than using it up.
+`harness-test-helpers-a-wait-lengthens-as-the-machine-gets-busier` holds
+it: the same wait's scale is two at load 16 and six at load 48.
+
+## A twelfth defect the rule found
+
+`harness-update-check-finds-the-vendored-libraries` failed in that same
+run with *"has no remote to update from"*, on a clone that has one, and
+passed alone. `harness-revision-remote` answered nil for every rejection,
+so a `git` the machine could not start -- `make-process` signalling
+`file-error` when a loaded machine has no processes to spare -- read as a
+checkout without a remote. The person would look for a remote they
+already have. A rejection is passed on now unless git itself ran and
+failed, which is the case that really means the checkout has none:
+`harness-update-a-git-that-cannot-start-is-not-a-missing-remote` fails
+on the old code and passes on the new.
+
+## A thirteenth defect the rule found
+
+`harness-ui-secrets-round-trip-the-question-names-the-cache-a-reset-drops`
+failed in the same full run with a report that still read
+*"Redacting…"*, and passed alone. Its wait was
+`(string-match-p "Done" report)`, and `case-fold-search` is on by
+default: the pending status line is *"Redacting…  The harness answers
+when it is done; …"*, which holds "done". So the wait was satisfied the
+moment the buffer showed the pending status, and the assertions that
+follow read a report the redaction had not written yet. The waits now
+match the finished status as `harness-ui-secrets--redacted` writes it
+(`harness-ui-secrets-test--finished-p`), which the pending line cannot.
+
+## A fourteenth defect the rule found
+
+`harness-http-download-saves-the-body-and-reports-progress` failed in
+that run with a progress report of `(0)`: no bytes and no expected
+total, before the response's headers had arrived. `harness-http-download`
+documents the total as nil then, and the test asserted every report
+stated the body's length. The reports before the headers are skipped now
+(`seq-drop-while`), and the reports that do know the length must all
+state it. Reproduced outside ERT: one bad report in eighty downloads of
+a 60 kB body in six delayed pieces.

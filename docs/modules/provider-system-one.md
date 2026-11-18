@@ -73,6 +73,7 @@ anything, or decides anything on a caller's behalf.
 ### Methods it calls
 
 - `provider/model` ([provider](provider.md))
+- `provider/system-one` ([provider](provider.md))
 - `provider/system-one-p` ([provider](provider.md))
 
 ### Events it emits

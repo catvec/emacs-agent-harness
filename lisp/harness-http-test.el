@@ -101,7 +101,12 @@ oldest first."
           (should (equal (harness-test-http-url server "/pic.png") (harness-download-url-effective dl)))
           ;; The body came in pieces, and progress saw it grow.
           (should (>= (length progress) 2))
-          (should (cl-every (lambda (p) (equal (cdr p) (length body))) progress))
+          ;; A report may come before the response's headers, when the
+          ;; expected total is not known yet (`harness-http-download' says
+          ;; it is nil then); once it is, every report states the length.
+          (let ((known (seq-drop-while (lambda (p) (null (cdr p))) progress)))
+            (should known)
+            (should (cl-every (lambda (p) (equal (cdr p) (length body))) known)))
           (should (< (car (car progress)) (length body))))
       (delete-process server))))
 
