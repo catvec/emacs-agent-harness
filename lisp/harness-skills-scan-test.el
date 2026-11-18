@@ -376,5 +376,88 @@ is, not what this machine's disk is called."
       (should-not (plist-member properties :content))
       (should-not (string-search root (format "%S" properties))))))
 
+
+(defun harness-skills-scan-test--with-readdir-order (order fn)
+  "Call FN with `directory-files' returning each directory in ORDER.
+ORDER is a function of one list of names, such as `reverse': a filesystem
+whose readdir order is not name order does that to every listing, so a
+test that stubs it holds whatever filesystem it runs on."
+  (let ((real (symbol-function 'directory-files)))
+    (cl-letf (((symbol-function 'directory-files)
+               (lambda (directory &optional full match _nosort _count)
+                 (funcall order (funcall real directory full match t)))))
+      (funcall fn))))
+
+(ert-deftest harness-skills-scan-bounds-in-name-order-whatever-readdir-says ()
+  "The bounds cut the list in name order, so the fingerprint is the skill's.
+The files are made in an order that is not their name order, and the
+listing is read again with `directory-files' returning each directory in
+reverse, as a filesystem whose readdir order is not name order would.
+The bounded list, the byte bound, the depth cut and the fingerprint must
+not move, and a copy of the skill made in another order must agree with
+it: two machines holding one skill compare equal."
+  (harness-skills-scan-test-with-root
+    (let* ((dir (expand-file-name "bare" root))
+           (entry (harness-skills-scan-test--entry root)))
+      (dolist (name '("file-4.txt" "file-1.txt" "b-notes/inner/three.txt" "file-5.txt"
+                      "b-notes/two.txt" "file-0.txt" "file-3.txt"
+                      "b-notes/one.txt" "file-2.txt"))
+        (make-directory (file-name-directory (expand-file-name name dir)) t)
+        (with-temp-file (expand-file-name name dir) (insert (make-string 8 ?x))))
+      (let ((harness-skills-scan-max-files 8))
+        (let* ((by-name (harness-skills-scan-read dir entry))
+               (reversed (harness-skills-scan-test--with-readdir-order
+                          #'reverse (lambda () (harness-skills-scan-read dir entry))))
+               (wanted '("b-notes/inner/three.txt" "b-notes/one.txt" "b-notes/two.txt"
+                         "file-0.txt" "file-1.txt" "file-2.txt" "file-3.txt"
+                         "file-4.txt")))
+          ;; Name order, a subdirectory taken where its own name falls, and
+          ;; the eighth name left out: not the order the files were made in,
+          ;; and not the order they came back in.
+          (should (equal wanted (plist-get by-name :files)))
+          (should (equal wanted (plist-get reversed :files)))
+          (should (plist-get reversed :files-truncated))
+          (should (equal (plist-get by-name :fingerprint)
+                         (plist-get reversed :fingerprint)))))
+      ;; The byte bound is taken in the same order.
+      (let ((harness-skills-scan-max-files-bytes 16))
+        (let ((by-name (harness-skills-scan-read dir entry))
+              (reversed (harness-skills-scan-test--with-readdir-order
+                         #'reverse (lambda () (harness-skills-scan-read dir entry)))))
+          (should (equal '("b-notes/inner/three.txt" "b-notes/one.txt")
+                         (plist-get by-name :files)))
+          (should (equal (plist-get by-name :files) (plist-get reversed :files)))
+          (should (equal (plist-get by-name :fingerprint)
+                         (plist-get reversed :fingerprint)))))
+      ;; The depth cut is taken in the same order.
+      (let ((harness-skills-scan-max-depth 1))
+        (let ((by-name (harness-skills-scan-read dir entry))
+              (reversed (harness-skills-scan-test--with-readdir-order
+                         #'reverse (lambda () (harness-skills-scan-read dir entry)))))
+          (should (equal '("b-notes/one.txt" "b-notes/two.txt" "file-0.txt" "file-1.txt"
+                         "file-2.txt" "file-3.txt" "file-4.txt" "file-5.txt")
+                         (plist-get by-name :files)))
+          (should (plist-get by-name :files-truncated))
+          (should (equal (plist-get by-name :files) (plist-get reversed :files)))
+          (should (equal (plist-get by-name :fingerprint)
+                         (plist-get reversed :fingerprint)))))
+      ;; The same skill on another machine, its files made in another order:
+      ;; one fingerprint, one list.
+      (let ((other (harness-test-temp-dir)))
+        (unwind-protect
+            (progn
+              (dolist (name '("file-2.txt" "b-notes/two.txt" "file-0.txt" "file-5.txt"
+                              "b-notes/inner/three.txt" "b-notes/one.txt" "file-1.txt"
+                              "file-4.txt" "file-3.txt"))
+                (make-directory (file-name-directory (expand-file-name name other)) t)
+                (with-temp-file (expand-file-name name other) (insert (make-string 8 ?x))))
+              (copy-file (expand-file-name "SKILL.md" dir) (expand-file-name "SKILL.md" other))
+              (let ((here (harness-skills-scan-read dir entry))
+                    (there (harness-skills-scan-read
+                            other (harness-skills-scan-test--entry other))))
+                (should (equal (plist-get here :files) (plist-get there :files)))
+                (should (equal (plist-get here :fingerprint) (plist-get there :fingerprint)))))
+          (ignore-errors (delete-directory other t)))))))
+
 (provide 'harness-skills-scan-test)
 ;;; harness-skills-scan-test.el ends here

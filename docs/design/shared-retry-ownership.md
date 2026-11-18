@@ -371,6 +371,21 @@ assumed away:
   regression from this change.  A later run of the same suite on the
   same tree failed and a third passed, so it is load- or
   environment-sensitive, not stable evidence either way.
+
+  **Corrected later; both explanations above are wrong.**  The test
+  builds its own temporary root and lists nothing of the home
+  directory, so what else is installed cannot move it.  It failed
+  because `harness-skills-scan-files` applied its file-count and byte
+  bounds in `directory-files` (readdir) order, which is creation order
+  on tmpfs and a hash order on ext4, so which files survived the bound
+  depended on the filesystem.  It is not load-sensitive and not
+  environment-sensitive in the sense of a flaky test: on an ext4
+  `TMPDIR` it failed 12 of 12 runs, and the same tree with `TMPDIR` on
+  `/dev/shm` passed.  Fixed by taking the bounds in name order; see
+  [skill-file-bounds-in-name-order.md](skill-file-bounds-in-name-order.md)
+  and `docs/evidence/skill-file-bounds/`.  The "216 suites with none
+  failed" run above is reproducible only where readdir happens to
+  return creation order.
 - `harness-ui-chat-test.el`
   (`header-counts-tokens-as-they-stream`) and
   `harness-ui-pet-test.el` (`board-recaps-its-tasks`) failed in the

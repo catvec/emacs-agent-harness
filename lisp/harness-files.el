@@ -36,13 +36,20 @@
 (defun harness-files-project-root (dir)
   "Return the project root directory of DIR, or DIR itself.
 The project is the one around DIR, whichever worktree the user has
-assumed for it (`worktree-assume'): the harness works with the project."
-  (let* ((dir (file-name-as-directory (expand-file-name dir)))
-         (pr (let ((worktree-assume-inhibit t))
-               (ignore-errors (project-current nil dir)))))
-    (if pr
-        (file-name-as-directory (expand-file-name (project-root pr)))
-      dir)))
+assumed for it (`worktree-assume'): the harness works with the project.
+A remote DIR is its own root: a project there is found by a vc probe on
+the host, a process this has not started, and it blocks when a
+connection another caller opened is still there -- so a session on a
+remote directory could not be made.  The functions around this one
+return a remote root untouched for the same reason."
+  (if (file-remote-p dir)
+      (file-name-as-directory (expand-file-name dir))
+    (let* ((dir (file-name-as-directory (expand-file-name dir)))
+           (pr (let ((worktree-assume-inhibit t))
+                 (ignore-errors (project-current nil dir)))))
+      (if pr
+          (file-name-as-directory (expand-file-name (project-root pr)))
+        dir))))
 
 (defun harness-files--linked-git-dir (dotgit)
   "Return the common git directory the .git file DOTGIT points to, or nil.

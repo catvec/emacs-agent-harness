@@ -22,6 +22,22 @@
                    (tramp-connection-timeout   10))))
   (setq tramp-verbose 1))
 
+(ert-deftest harness-tramp-project-root-is-the-remote-directory ()
+  "A remote directory is its own project root, and finding that runs no process.
+`harness-files-project-root' used to ask `project-current' about any
+directory.  On a remote one that starts a vc probe on the host, which
+blocks once a connection another caller opened is still there: the
+session could not be made at all after any earlier remote command, and
+this file's own second test hung until the suite was killed."
+  (harness-tramp-test--enable-mock)
+  (require 'harness-files)
+  (let* ((dir (concat "/mock::" (file-name-as-directory (harness-test-temp-dir))))
+         ;; A connection to the host, left open as an earlier test leaves it.
+         (earlier (harness-await (harness-run-command '("sh" "-c" "echo out") :cwd dir) 60)))
+    (should (eql 0 (plist-get earlier :exit)))
+    (should (equal (file-name-as-directory (expand-file-name dir))
+                   (harness-files-project-root dir)))))
+
 (ert-deftest harness-tramp-tools-run-on-remote-cwd ()
   (harness-tramp-test--enable-mock)
   (harness-test-with-temp-state

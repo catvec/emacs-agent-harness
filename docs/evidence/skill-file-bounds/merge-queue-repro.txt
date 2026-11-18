@@ -1,0 +1,34 @@
+Reproduction of the merge-queue failure in a throwaway clone of the repository, at the
+real topology: the repository root worktree has main out, and the review branch
+is checked out in its own worktree.
+
+  repository root HEAD    37f452bd047946cb55f20e08ba31a60b2724d0ff  (main)
+  review branch checkout  3cba0da22d18af69298a3fd5691a850acef15ffa  (task/implement-price-aware-openrouter-session-e2mdkyz2)
+  branch to merge         f979ff75e31ca84c17476d414f1ea4734750ae9a  (task/fix-a-pre-existing-reproducible-rgfl74nd)
+
+1. BUGGY READ: HEAD from the repository root (parent-cwd), tip from the checkout
+   merge-tree exit 1: da731b67f1fee8c1a030a10d63a57a0b71edab39 lisp/harness-skills-scan.el
+   -> the branch is merged against main's older copy; conflict in lisp/harness-skills-scan.el
+   commit parented on main (37f452bd0479); git merge --ff-only in the review branch's checkout:
+   exit 128: hint: Diverging branches can't be fast-forwarded, you need to either:
+   hint:
+   hint: 	git merge --no-ff
+   hint:
+   hint: or:
+   hint:
+   hint: 	git rebase
+   hint:
+   hint: Disable this message with "git config set advice.diverging false"
+   fatal: Not possible to fast-forward, aborting.
+
+   the review branch's checkout is left at cfd6c8e9c56110e13fa1fbc91cf08edf99036610
+
+2. FIXED READ: HEAD from the checkout the merge advances (cwd), as the tip already was
+   merge-tree exit 0 (clean)
+   commit parented on 3cba0da22d18; git merge --ff-only: exit 0, Updating 3cba0da..cfd6c8e
+
+3. THE REVIEW BRANCH AFTER THE FIXED INTEGRATION
+   HEAD cfd6c8e9c56110e13fa1fbc91cf08edf99036610
+   scanner fix present: yes
+   both scanner regressions present: yes
+   working tree: clean

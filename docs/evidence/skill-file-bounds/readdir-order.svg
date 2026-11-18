@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="760" viewBox="0 0 1180 760" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<rect x="0" y="0" width="100%" height="46" fill="#1f2937"/>
+<text x="26" y="30" font-size="18" font-weight="bold" fill="#ffffff">Readdir order: the same skill on ext4 and on tmpfs</text>
+<text x="26" y="76" font-size="14" fill="#374151" xml:space="preserve">Same names, same sizes, same SKILL.md, same creation order on both filesystems; count bound 3.</text>
+<text x="26" y="100" font-size="14" fill="#374151" xml:space="preserve">&#8220;before&#8221; is the walk at 3cba0da; &#8220;after&#8221; is the walk in this branch.</text>
+<text x="26" y="132" font-size="14.5" fill="#111827" font-weight="normal" xml:space="preserve">creation order:  file-3.txt file-5.txt file-1.txt file-4.txt file-0.txt file-2.txt</text>
+<text x="26" y="153" font-size="14.5" fill="#111827" font-weight="normal" xml:space="preserve">count bound:     3</text>
+<text x="26" y="174" font-size="14.5" fill="#111827" font-weight="normal" xml:space="preserve"></text>
+<text x="26" y="195" font-size="14.5" fill="#1d4ed8" font-weight="bold" xml:space="preserve">== ext4  (/tmp/harness-readdir-evidence-24/flat)</text>
+<text x="26" y="216" font-size="14.5" fill="#111827" font-weight="normal" xml:space="preserve">   filesystem:     ext4</text>
+<text x="26" y="237" font-size="14.5" fill="#111827" font-weight="normal" xml:space="preserve">   readdir order:  file-0.txt file-2.txt file-3.txt SKILL.md file-1.txt file-4.txt file-5.txt</text>
+<text x="26" y="258" font-size="14.5" fill="#b91c1c" font-weight="normal" xml:space="preserve">   before the fix: (&quot;file-0.txt&quot; &quot;file-2.txt&quot; &quot;file-3.txt&quot;)</text>
+<text x="26" y="279" font-size="14.5" fill="#15803d" font-weight="normal" xml:space="preserve">   after  the fix: (&quot;file-0.txt&quot; &quot;file-1.txt&quot; &quot;file-2.txt&quot;)</text>
+<text x="26" y="300" font-size="14.5" fill="#111827" font-weight="normal" xml:space="preserve">   fingerprint before: fp-e6d9a91fcdce47cc3340995fb7fc574b</text>
+<text x="26" y="321" font-size="14.5" fill="#111827" font-weight="normal" xml:space="preserve">   fingerprint after : fp-c06a0a0307c448864dc3f7b66ba9272d</text>
+<text x="26" y="342" font-size="14.5" fill="#111827" font-weight="normal" xml:space="preserve"></text>
+<text x="26" y="363" font-size="14.5" fill="#7c3aed" font-weight="bold" xml:space="preserve">== tmpfs  (/dev/shm/harness-readdir-evidence-24/flat)</text>
+<text x="26" y="384" font-size="14.5" fill="#111827" font-weight="normal" xml:space="preserve">   filesystem:     tmpfs</text>
+<text x="26" y="405" font-size="14.5" fill="#111827" font-weight="normal" xml:space="preserve">   readdir order:  file-3.txt file-5.txt file-1.txt file-4.txt file-0.txt file-2.txt SKILL.md</text>
+<text x="26" y="426" font-size="14.5" fill="#b91c1c" font-weight="normal" xml:space="preserve">   before the fix: (&quot;file-1.txt&quot; &quot;file-3.txt&quot; &quot;file-5.txt&quot;)</text>
+<text x="26" y="447" font-size="14.5" fill="#15803d" font-weight="normal" xml:space="preserve">   after  the fix: (&quot;file-0.txt&quot; &quot;file-1.txt&quot; &quot;file-2.txt&quot;)</text>
+<text x="26" y="468" font-size="14.5" fill="#111827" font-weight="normal" xml:space="preserve">   fingerprint before: fp-6d11db593da67590dc3bb3fe982cbb6f</text>
+<text x="26" y="489" font-size="14.5" fill="#111827" font-weight="normal" xml:space="preserve">   fingerprint after : fp-c06a0a0307c448864dc3f7b66ba9272d</text>
+<text x="26" y="510" font-size="14.5" fill="#111827" font-weight="normal" xml:space="preserve"></text>
+<text x="26" y="531" font-size="14.5" fill="#111827" font-weight="bold" xml:space="preserve">== the two machines compared</text>
+<text x="26" y="552" font-size="14.5" fill="#b91c1c" font-weight="normal" xml:space="preserve">   before the fix: the same skill on ext4 and on tmpfs</text>
+<text x="26" y="573" font-size="14.5" fill="#b91c1c" font-weight="bold" xml:space="preserve">     files:        different -- (&quot;file-0.txt&quot; &quot;file-2.txt&quot; &quot;file-3.txt&quot;) vs</text>
+<text x="26" y="594" font-size="14.5" fill="#111827" font-weight="normal" xml:space="preserve">                            (&quot;file-1.txt&quot; &quot;file-3.txt&quot; &quot;file-5.txt&quot;)</text>
+<text x="26" y="615" font-size="14.5" fill="#b91c1c" font-weight="bold" xml:space="preserve">     fingerprint:  different -- fp-e6d9a91fcdce47cc3340995fb7fc574b vs fp-6d11db593da67590dc3bb3fe982cbb6f</text>
+<text x="26" y="636" font-size="14.5" fill="#15803d" font-weight="normal" xml:space="preserve">   after the fix:</text>
+<text x="26" y="657" font-size="14.5" fill="#15803d" font-weight="bold" xml:space="preserve">     files:        the same -- (&quot;file-0.txt&quot; &quot;file-1.txt&quot; &quot;file-2.txt&quot;)</text>
+<text x="26" y="678" font-size="14.5" fill="#15803d" font-weight="bold" xml:space="preserve">     fingerprint:  the same -- fp-c06a0a0307c448864dc3f7b66ba9272d</text>
+<text x="26" y="699" font-size="14.5" fill="#111827" font-weight="normal" xml:space="preserve"></text>
+</svg>

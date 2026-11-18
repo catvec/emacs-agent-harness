@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1010" height="839" viewBox="0 0 1010 839" font-family="DejaVu Sans Mono, Menlo, Consolas, monospace">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<rect x="0" y="0" width="100%" height="46" fill="#1f2937"/>
+<text x="26" y="30" font-size="18" font-weight="bold" fill="#ffffff">Merge-queue failure: reproduction at the real topology</text>
+<text x="26" y="93" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">Reproduction of the merge-queue failure in a throwaway clone of the repository, at the</text>
+<text x="26" y="114" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">real topology: the repository root worktree has main out, and the review branch</text>
+<text x="26" y="135" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">is checked out in its own worktree.</text>
+<text x="26" y="156" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve"></text>
+<text x="26" y="177" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">  repository root HEAD    37f452bd047946cb55f20e08ba31a60b2724d0ff  (main)</text>
+<text x="26" y="198" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">  review branch checkout  3cba0da22d18af69298a3fd5691a850acef15ffa  (task/implement-price-aware-openrouter-session-e2mdkyz2)</text>
+<text x="26" y="219" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">  branch to merge         f979ff75e31ca84c17476d414f1ea4734750ae9a  (task/fix-a-pre-existing-reproducible-rgfl74nd)</text>
+<text x="26" y="240" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve"></text>
+<text x="26" y="261" font-size="15" fill="#b91c1c" font-weight="bold" xml:space="preserve">1. BUGGY READ: HEAD from the repository root (parent-cwd), tip from the checkout</text>
+<text x="26" y="282" font-size="15" fill="#b91c1c" font-weight="normal" xml:space="preserve">   merge-tree exit 1: da731b67f1fee8c1a030a10d63a57a0b71edab39 lisp/harness-skills-scan.el</text>
+<text x="26" y="303" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">   -&gt; the branch is merged against main's older copy; conflict in lisp/harness-skills-scan.el</text>
+<text x="26" y="324" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">   commit parented on main (37f452bd0479); git merge --ff-only in the review branch's checkout:</text>
+<text x="26" y="345" font-size="15" fill="#b91c1c" font-weight="normal" xml:space="preserve">   exit 128: hint: Diverging branches can't be fast-forwarded, you need to either:</text>
+<text x="26" y="366" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">   hint:</text>
+<text x="26" y="387" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">   hint: 	git merge --no-ff</text>
+<text x="26" y="408" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">   hint:</text>
+<text x="26" y="429" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">   hint: or:</text>
+<text x="26" y="450" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">   hint:</text>
+<text x="26" y="471" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">   hint: 	git rebase</text>
+<text x="26" y="492" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">   hint:</text>
+<text x="26" y="513" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">   hint: Disable this message with "git config set advice.diverging false"</text>
+<text x="26" y="534" font-size="15" fill="#b91c1c" font-weight="normal" xml:space="preserve">   fatal: Not possible to fast-forward, aborting.</text>
+<text x="26" y="555" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve"></text>
+<text x="26" y="576" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">   the review branch's checkout is left at cfd6c8e9c56110e13fa1fbc91cf08edf99036610</text>
+<text x="26" y="597" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve"></text>
+<text x="26" y="618" font-size="15" fill="#15803d" font-weight="bold" xml:space="preserve">2. FIXED READ: HEAD from the checkout the merge advances (cwd), as the tip already was</text>
+<text x="26" y="639" font-size="15" fill="#15803d" font-weight="normal" xml:space="preserve">   merge-tree exit 0 (clean)</text>
+<text x="26" y="660" font-size="15" fill="#15803d" font-weight="normal" xml:space="preserve">   commit parented on 3cba0da22d18; git merge --ff-only: exit 0, Updating 3cba0da..cfd6c8e</text>
+<text x="26" y="681" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve"></text>
+<text x="26" y="702" font-size="15" fill="#15803d" font-weight="bold" xml:space="preserve">3. THE REVIEW BRANCH AFTER THE FIXED INTEGRATION</text>
+<text x="26" y="723" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve">   HEAD cfd6c8e9c56110e13fa1fbc91cf08edf99036610</text>
+<text x="26" y="744" font-size="15" fill="#15803d" font-weight="normal" xml:space="preserve">   scanner fix present: yes</text>
+<text x="26" y="765" font-size="15" fill="#15803d" font-weight="normal" xml:space="preserve">   both scanner regressions present: yes</text>
+<text x="26" y="786" font-size="15" fill="#15803d" font-weight="normal" xml:space="preserve">   working tree: clean</text>
+<text x="26" y="807" font-size="15" fill="#111827" font-weight="normal" xml:space="preserve"></text>
+</svg>
