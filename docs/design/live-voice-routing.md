@@ -66,7 +66,7 @@ been the wrong fix.
 `harness-voice-live--route` returns a plist:
 
 ```text
-(:kind session|workspace :buffer B :session S :workspace W :thread T
+(:kind session|workspace|draft :buffer B :session S :workspace W :thread T
  :name "what the UI calls it" :generation N)
 ```
 
@@ -132,7 +132,10 @@ clients may be using it.
 - a session target: `session/prompt` with one text block;
 - a workspace target: `_harness/workspace/prompt` with `:id` and
   `:opts (:thread ...)`, so the workspace's own agent routes it to that
-  thread's live episode.
+  thread's live episode;
+- a draft target: nothing.  The box composes a task or an answer, not a
+  message, so the words become its own text and its own submit sends
+  them ([voice-compose-context.md](voice-compose-context.md)).
 
 No distillation, no context envelope, no meta-instruction, no
 interpretation model.  The session's agent has the conversation it is in;
@@ -191,7 +194,8 @@ no sample is changed and the gate's threshold is untouched.
   `harness-voice-live-use-here`, `--adopt-other-box`, `--here-p`.
 - The pipeline: `--begin`, `--pipeline-need`, `--pipeline-starting-p`,
   `--pipeline-start`, `--watch-pipeline`, `--pipeline-tick`, `--spawn`.
-- Dispatch: `--dispatch` (session or workspace), `--transcript-route`.
+- Dispatch: `--dispatch` (session, workspace or draft), `--delegate-draft`,
+  `--draft-box`, `--draft-lost`, `--transcript-route`.
 - Removed: `--pending-items`, `--pending-context`, `--prompt`, and the
   distillation call in `--delegate`.
 
@@ -234,7 +238,10 @@ no sample is changed and the gate's threshold is untouched.
 - `lisp/ui/harness-ui-voice-live-test.el`: routing (retarget without
   restart, switch during capture, switch during a turn, repeated
   switches, non-target box copy, follow-selection, workspace thread,
-  many utterances), end to end through the real sidecar process
+  many utterances), the draft route (a board's box and a popout's are
+  targets, a dictation becomes the box's text, a draft that closed or
+  was switched away from keeps the words), end to end through the real
+  sidecar process
   (`routing` mode of `test/harness-voice-live-sidecar-test.py`), the
   shared pipeline (ready, initializing, failure, joining a start,
   stopping keeps it), and the transcript sent unchanged.
@@ -257,3 +264,6 @@ no sample is changed and the gate's threshold is untouched.
 - A workspace target needs the workspace's own live episode to exist;
   the prompt is routed to the thread, and the workspace decides what that
   thread does with it.
+- A draft target inserts the words in its box and asks no turn, so
+  nothing speaks back: the box's own submit is what sends them, and its
+  result is not narrated by the call.

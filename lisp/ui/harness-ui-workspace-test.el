@@ -81,12 +81,25 @@ COMPUTERS, when given, is what the registered computers are."
   (buffer-string))
 
 (defmacro harness-ui-workspace-test-with-live-voice (&rest body)
-  "Run BODY with real voice controls and a mocked live startup boundary."
+  "Run BODY in a rendered workspace with real live voice controls.
+The live startup boundary is mocked, so no sidecar process is spawned."
   (declare (indent 0))
   `(harness-ui-workspace-test-with
-     (let ((harness-voice-provider 'custom)
-           (harness-voice-live-command '("mock-live-sidecar" "--fixture-only"))
+     (let ((harness-voice--enabled t)
            (harness-voice--owner nil)
+           (harness-voice-provider 'custom)
+           (harness-voice-live-command '("mock-live-sidecar" "--fixture-only"))
+           (harness-voice-live--process nil)
+           (harness-voice-live--buffer nil)
+           (harness-voice-live--state nil)
+           (harness-voice-live--route-kind 'session)
+           (harness-voice-live--route-workspace nil)
+           (harness-voice-live--route-thread nil)
+           (harness-voice-live--route-draft nil)
+           (harness-voice-live--route-resolved-thread nil)
+           (harness-voice-live--route-name nil)
+           (harness-voice-live--route-generation 0)
+           (harness-voice-live--session nil)
            (global-mode-string nil))
        (harness-voice--reset)
        (harness-voice--init)
@@ -98,7 +111,10 @@ COMPUTERS, when given, is what the registered computers are."
          (harness-voice--shutdown)))))
 
 (ert-deftest harness-ui-workspace-live-voice-mode-without-a-session ()
-  "Real workspace boxes enable live controls with or without a live episode."
+  "A workspace box enables the live controls with no session id local.
+Its target is the thread it composes into, and the rendered copy is
+exactly the one a chat's box shows.  Real workspace boxes enable live
+controls with or without a live episode."
   (dolist (thread '("th-1" "th-2"))
     (harness-ui-workspace-test-with-live-voice
       (with-temp-buffer
@@ -115,6 +131,13 @@ COMPUTERS, when given, is what the registered computers are."
         (should-not harness-voice-live--process)
         (should-not harness-voice-live--state)
         (should (equal "An editable workspace draft" (harness-compose-text)))
+        ;; The box's own context is the selected thread.
+        (let ((context (harness-compose-context)))
+          (should (eq 'workspace (plist-get context :kind)))
+          (should (equal "w-1" (plist-get context :workspace)))
+          (should (equal thread (plist-get context :thread)))
+          (should (equal (and (equal thread "th-1") "s-1")
+                         (plist-get context :session))))
         ;; No new copy: the existing controls, rendered by the workspace,
         ;; retain their exact words and one-line tooltips.
         (cl-letf (((symbol-function 'harness-compose--room)
@@ -134,7 +157,8 @@ COMPUTERS, when given, is what the registered computers are."
           (search-forward "[Setup]")
           (should (equal "Voice settings" (get-text-property (1- (point)) 'help-echo))))
         (should (eq 'custom harness-voice-provider))
-        (should (equal '("mock-live-sidecar" "--fixture-only") harness-voice-live-command))))))
+        (should (equal '("mock-live-sidecar" "--fixture-only")
+                       harness-voice-live-command))))))
 
 (ert-deftest harness-ui-workspace-live-voice-entry-points-keep-the-workspace-route ()
   "Voice, Toggle and Start use real workspace routing, including a first message."
@@ -1382,6 +1406,71 @@ workspace has to be the one it shows."
       (should (equal "_harness/workspace/prompt" (caar sent)))
       (should (string-match-p "Ship it" (plist-get (cadar sent) :text))))))
 
+;;;; Live voice on a workspace box
+
+;; The reported regression's other half: a workspace box has a route --
+;; its selected thread -- but the entry points tested a chat's session id,
+;; so `C-c h V v' only refreshed and voice mode refused.  The box now says
+;; what it composes into, and the transport asks it.
+
+(ert-deftest harness-ui-workspace-live-voice-entry-points-start-here ()
+  "Voice and Start begin the call in the workspace's own box.
+No chat is opened, and the route names the selected thread; a new
+workspace with no thread is a target too, because its own prompt path
+makes the first one."
+  (dolist (entry '(harness-voice harness-voice-live--start-here))
+    (dolist (thread '("th-1" "th-2" nil))
+      (harness-ui-workspace-test-with-live-voice
+        (with-temp-buffer
+          (harness-ui-workspace-test-render)
+          (unless thread
+            (setq harness-ui-workspace--data
+                  (list :id "w-1" :name "Home" :root "/tmp/workspace/"
+                        :threads nil)))
+          (harness-ui-workspace--select-thread thread)
+          (let ((starts 0) (opened nil))
+            (cl-letf (((symbol-function 'harness-voice-live--begin)
+                       (lambda ()
+                         (cl-incf starts)
+                         (setq harness-voice-live--state 'starting)
+                         (harness-voice--refresh)))
+                      ((symbol-function 'harness-new-session)
+                       (lambda (dir position _callback)
+                         (push (list dir position) opened))))
+              (funcall entry)
+              (should (= 1 starts))
+              (should-not opened)
+              (should harness-voice-mode)
+              (should-not harness-voice-live--error)
+              (should-not harness-ui-session-id)
+              (let ((route (harness-voice-live--route)))
+                (should (eq 'workspace (plist-get route :kind)))
+                (should (eq (current-buffer) (plist-get route :buffer)))
+                (should (equal "w-1" (plist-get route :workspace)))
+                (should (equal thread (plist-get route :thread)))
+                (should (equal (and (equal thread "th-1") "s-1")
+                               (plist-get route :session)))))))))))
+
+(ert-deftest harness-ui-workspace-live-voice-sends-through-the-workspace ()
+  "A workspace delegation goes to its thread, never to a session prompt.
+The workspace's own agent does the work: the voice adds no second model."
+  (harness-ui-workspace-test-with-live-voice
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (harness-ui-workspace--select-thread "th-2")
+      (let ((calls nil)
+            (text "um, no wait, keep the matte tile")
+            (route (harness-voice-live--route-of-buffer (current-buffer))))
+        (cl-letf (((symbol-function 'harness-ui-call)
+                   (lambda (method params _callback &optional _on-error)
+                     (push (list method params) calls)))
+                  ((symbol-function 'harness-ui-call-turn)
+                   (lambda (&rest _) (ert-fail "Workspace voice sent as a session prompt"))))
+          (harness-voice-live--dispatch route text #'ert-fail))
+        (should (equal (list "_harness/workspace/prompt"
+                             (list :id "w-1" :text text
+                                   :opts (list :thread "th-2")))
+                       (car calls)))))))
 ;;;; Choosing a workspace
 
 ;; `harness-workspace' reads the list asynchronously.  These hold the

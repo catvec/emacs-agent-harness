@@ -502,6 +502,16 @@ write-up) or reject (feedback that sends a task back from review).
 \(search), with no ID, is the board's search: the box takes a line to
 find tasks, sessions and commands with, or to act on tasks
 \(`harness-tasks-search').")
+(defvar-local harness-ui-tasks--compose-nonce 0
+  "Raised each time the compose box is set to a draft, by `--set-compose'.
+The target alone cannot tell one draft from the next when the box is
+reused for the same purpose: submitting a new task empties the box and
+leaves the target nil, exactly as it was before.  This is what makes
+the replacement a replacement, so live voice drops what was spoken into
+the draft that is gone instead of inserting it into the next one.  Only
+`--set-compose' raises it -- typing, a redraw and the Submit / Refine /
+Plan toggle leave it alone -- so dictation into the box that is still
+there is never mistaken for a move.")
 (defvar-local harness-ui-tasks--mode 'submit
   "What the compose box does with a new task: `submit', `refine' or `plan'.
 Submit starts it.  Refine has an agent write it up, and Plan has a
@@ -3319,6 +3329,50 @@ edited."
   "Non-nil when the compose box takes the board's search (`harness-tasks-search')."
   (eq (car harness-ui-tasks--target) 'search))
 
+(defun harness-ui-tasks--compose-identity ()
+  "Return which draft this board's compose box is now, for live voice.
+Two things make a draft: what the box composes into -- its
+`harness-ui-tasks--target', a new task, a search, an edit, an answer,
+feedback -- and which draft of that purpose it is, its
+`harness-ui-tasks--compose-nonce'.  Both are needed, because the board
+reuses one buffer for all of them and returns to the same target when a
+task is submitted, so the target alone would call the empty box after a
+submit the same draft the spoken words went into.
+
+Only `--set-compose' changes either, so a redraw, a keystroke, a change
+of the Submit / Refine / Plan toggle and anything else that leaves the
+box's purpose alone leave this alone too, and a dictation into the box
+that is still there is never dropped."
+  (cons 'draft (cons harness-ui-tasks--compose-nonce
+                     (copy-tree harness-ui-tasks--target))))
+
+(defun harness-ui-tasks--compose-context ()
+  "Return what the board's compose box composes into.
+A message to a task's session (`harness-ui-tasks--messaging-p') goes to
+that session, as typing it and sending does; a search is a search; and
+the box that composes a task is a draft, because its words are a task
+until C-c C-c submits them, never a message to any chat.  A task with
+no session yet is a draft too: its words stay in the box, where its own
+submit says what is missing.
+
+Every draft names its `:identity' (`harness-ui-tasks--compose-identity'):
+the board reuses this one buffer for a new task, a search, an edit, an
+answer, feedback and a message, so the buffer alone cannot tell a draft
+spoken into from the one that replaced it."
+  (cond
+   ((harness-ui-tasks--searching-p)
+    (list :kind 'draft :name "Search"
+          :identity (harness-ui-tasks--compose-identity)))
+   ((harness-ui-tasks--messaging-p)
+    (let ((session (plist-get (harness-ui-tasks--find (cdr harness-ui-tasks--target))
+                              :session)))
+      (if (and (stringp session) (not (string-empty-p session)))
+          (list :kind 'session :session session :name "Task message")
+        (list :kind 'draft :name "Task message"
+              :identity (harness-ui-tasks--compose-identity)))))
+   (t (list :kind 'draft :name "Task board"
+            :identity (harness-ui-tasks--compose-identity)))))
+
 (defun harness-ui-tasks--compose-label ()
   "Return the compose box's label, which says what the box does.
 That depends on `harness-ui-tasks--target': a new task by default."
@@ -4301,11 +4355,18 @@ types in the box otherwise (`harness-ui-tasks--box-key-hint')."
 (defun harness-ui-tasks--set-compose (text target)
   "Put TEXT in the compose box for TARGET and move there.
 Another TARGET ends the search the box took, keys and all
-\(`harness-ui-tasks-search-end')."
+\(`harness-ui-tasks-search-end').
+
+The box is a new draft now, whatever TARGET is: this is the one place
+the board replaces what its box composes into, so it raises
+`harness-ui-tasks--compose-nonce'.  A submit empties the box back to a
+new task, which has the same target it had before -- the nonce is what
+says the draft those words were spoken into is gone."
   (when (and (harness-ui-tasks--searching-p) (not (eq (car target) 'search))
              (fboundp 'harness-ui-tasks-search-end))
     (harness-ui-tasks-search-end))
   (setq harness-ui-tasks--target target)
+  (cl-incf harness-ui-tasks--compose-nonce)
   (harness-ui-tasks--render-tail text)
   (goto-char harness-compose-end)
   (dolist (w (get-buffer-window-list nil nil t)) (set-window-point w (point))))
@@ -4878,6 +4939,10 @@ act on from there.
   (harness-compose-setup :project #'harness-ui-tasks--scope-dir
                          :placeholder #'harness-ui-tasks--placeholder
                          :redraw #'harness-ui-tasks--render-tail
+                         ;; The box composes a task, not a message to any
+                         ;; session: its words are a draft until C-c C-c
+                         ;; submits them.
+                         :context #'harness-ui-tasks--compose-context
                          ;; The board stays at the top; the gap opens between it and the box.
                          :bottom (lambda () (marker-position harness-ui-tasks--list-end))))
 

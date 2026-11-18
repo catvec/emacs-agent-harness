@@ -91,11 +91,19 @@ person selects another session or workspace.")
 For a workspace target this is the thread's live episode, once it has
 one; the prompt itself goes through the workspace.")
 (defvar harness-voice-live--route-kind 'session
-  "What the route names: `session' or `workspace'.")
+  "What the route names: `session', `workspace' or `draft'.")
 (defvar harness-voice-live--route-workspace nil
   "The workspace id the route names, or nil.")
 (defvar harness-voice-live--route-thread nil
   "The workspace thread the route names, or nil.")
+(defvar harness-voice-live--route-draft nil
+  "Which draft the route names, or nil.
+A draft's kind, session, workspace and thread are all the same for
+every draft, and a host may reuse one buffer for drafts of different
+purposes: the task board's box describes a new task, then a search, an
+edit or an answer, all in the board's buffer.  This is the context's
+`:identity' (`harness-compose-context'), so a box that was replaced is
+another target and a box that was merely typed into is the same one.")
 (defvar harness-voice-live--route-resolved-thread nil
   "First thread learned from an episode event before the workspace cache.")
 (defvar harness-voice-live--route-name nil
@@ -333,15 +341,19 @@ wait look alive, and it costs one character.")
 
 (defun harness-voice-live--route ()
   "Return the current route as a plist.
-`:kind' is `session' or `workspace'; `:buffer' is the compose buffer
-the controls are drawn in; `:session' the session a prompt goes to;
-`:workspace' and `:thread' the workspace target; `:name' what the UI
-calls it; `:generation' the route's generation."
+`:kind' is `session', `workspace' or `draft'; `:buffer' is the compose
+buffer the controls are drawn in; `:session' the session a prompt goes
+to; `:workspace' and `:thread' the workspace target; `:draft' which
+draft of that buffer it is (`harness-voice-live--route-draft'); `:name'
+what the UI calls it; `:generation' the route's generation.  A draft
+names no session and sends nothing: its words go into that box's own
+text."
   (list :kind harness-voice-live--route-kind
         :buffer harness-voice-live--buffer
         :session harness-voice-live--session
         :workspace harness-voice-live--route-workspace
         :thread harness-voice-live--route-thread
+        :draft harness-voice-live--route-draft
         :resolved-thread harness-voice-live--route-resolved-thread
         :name harness-voice-live--route-name
         :generation harness-voice-live--route-generation))
@@ -356,6 +368,7 @@ indicator and the target cannot disagree."
     (or (and (stringp name) (not (string-empty-p name)) name)
         (pcase (plist-get route :kind)
           ('workspace (or (plist-get route :workspace) "Workspace"))
+          ('draft "Draft")
           (_ (let ((session (plist-get route :session)))
                (and (stringp session)
                     (if (fboundp 'harness-ui-session-name)
@@ -402,36 +415,78 @@ are merely reading."
 
 (defun harness-voice-live--route-of-buffer (buffer)
   "Return the route BUFFER's compose box would be, or nil.
-A chat names its session; a workspace names its selected thread and the
-episode that thread runs in.  A buffer that names neither is no target.
-The workspace's own buffer-locals are read, so the transport needs no
-call into that module to know where a workspace's words go."
+The box itself says what it composes into (`harness-compose-context');
+a host that sets none is read from its buffer's own locals, as a chat
+and a workspace have always said it.  A box that composes a draft --
+the task board's, a popout's -- names itself and, when its host reuses
+one buffer for drafts of different purposes, which draft it is, and its
+words stay in it."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (cond
-       ((bound-and-true-p harness-ui-workspace--id)
-        (let* ((workspace harness-ui-workspace--id)
-               (thread (or (and (boundp 'harness-ui-workspace--thread)
-                                harness-ui-workspace--thread)
-                           (and (fboundp 'harness-ui-workspace--selected-thread)
-                                (harness-ui-workspace--selected-thread))))
-               (session (and (fboundp 'harness-ui-workspace--live-session)
-                             (harness-ui-workspace--live-session))))
-          (list :kind 'workspace
-                :buffer buffer
-                :workspace workspace
-                :thread thread
-                :session session
-                :name (harness-voice-live--workspace-label workspace thread))))
-       ((and (bound-and-true-p harness-ui-session-id)
-             (stringp harness-ui-session-id)
-             (not (string-empty-p harness-ui-session-id)))
-        (list :kind 'session
+      (when (harness-compose-live-p)
+        (let ((context (harness-compose-context)))
+          (pcase (plist-get context :kind)
+            ('session
+             (let ((session (plist-get context :session)))
+               (when (and (stringp session) (not (string-empty-p session)))
+                 (list :kind 'session
+                       :buffer buffer
+                       :session session
+                       :name (or (plist-get context :name)
+                                 (and (fboundp 'harness-ui-session-name)
+                                      (harness-ui-session-name session))
+                                 session)))))
+            ('workspace
+             (let ((workspace (plist-get context :workspace))
+                   (thread (plist-get context :thread)))
+               (when workspace
+                 (list :kind 'workspace
+                       :buffer buffer
+                       :workspace workspace
+                       :thread thread
+                       :session (plist-get context :session)
+                       :name (or (plist-get context :name)
+                                 (harness-voice-live--workspace-label workspace thread))))))
+            ('draft
+             (list :kind 'draft
+                   :buffer buffer
+                   :draft (plist-get context :identity)
+                   :name (or (plist-get context :name) "Draft")))
+            (_
+             ;; No context named: the buffer's own locals say it, as a
+             ;; chat's session id and a workspace's id always have.
+             (harness-voice-live--route-of-locals buffer))))))))
+
+(defun harness-voice-live--route-of-locals (buffer)
+  "Return the route BUFFER's own buffer locals name, or nil.
+This is the fallback for a box whose host names no context: a workspace
+names its selected thread, a chat its session, and a buffer that names
+neither is no target."
+  (with-current-buffer buffer
+    (cond
+     ((bound-and-true-p harness-ui-workspace--id)
+      (let* ((workspace harness-ui-workspace--id)
+             (thread (or (and (boundp 'harness-ui-workspace--thread)
+                              harness-ui-workspace--thread)
+                         (and (fboundp 'harness-ui-workspace--selected-thread)
+                              (harness-ui-workspace--selected-thread))))
+             (session (and (fboundp 'harness-ui-workspace--live-session)
+                           (harness-ui-workspace--live-session))))
+        (list :kind 'workspace
               :buffer buffer
-              :session harness-ui-session-id
-              :name (if (fboundp 'harness-ui-session-name)
-                        (harness-ui-session-name harness-ui-session-id)
-                      harness-ui-session-id)))))))
+              :workspace workspace
+              :thread thread
+              :session session
+              :name (harness-voice-live--workspace-label workspace thread))))
+     ((and (bound-and-true-p harness-ui-session-id)
+           (stringp harness-ui-session-id)
+           (not (string-empty-p harness-ui-session-id)))
+      (list :kind 'session
+            :buffer buffer
+            :session harness-ui-session-id
+            :name (if (fboundp 'harness-ui-session-name)
+                      (harness-ui-session-name harness-ui-session-id)
+                    harness-ui-session-id))))))
 
 (defun harness-voice-live--workspace-label (workspace thread)
   "Return a one-line name for WORKSPACE's THREAD, or nil."
@@ -447,15 +502,29 @@ call into that module to know where a workspace's words go."
 
 (defun harness-voice-live--route-same-p (a b)
   "Return non-nil when routes A and B name the same target.
+Two drafts are the same only in the same box and the same draft of it:
+a draft names no session, workspace or thread, so the box is the
+target, and moving from the task board's box to a popout's is a move.
+A host that reuses one buffer for drafts of different purposes says
+which draft it is (`:draft'), so the board's new task becoming a search,
+an edit or an answer in that same buffer is a move too -- the box the
+person spoke into is gone, and its words must not land in its
+replacement.  Typing in one draft changes no identity, so it stays the
+same target.
+
 A workspace episode is derived metadata, not a target switch.  Its first
 thread can resolve while the workspace buffer still has the empty cache."
   (and (eq (plist-get a :kind) (plist-get b :kind))
-       (if (eq (plist-get a :kind) 'workspace)
-           (and (equal (plist-get a :workspace) (plist-get b :workspace))
-                (or (equal (plist-get a :thread) (plist-get b :thread))
-                    (equal (or (plist-get a :thread) (plist-get a :resolved-thread))
-                           (or (plist-get b :thread) (plist-get b :resolved-thread)))))
-         (equal (plist-get a :session) (plist-get b :session)))))
+       (pcase (plist-get a :kind)
+         ('draft
+          (and (eq (plist-get a :buffer) (plist-get b :buffer))
+               (equal (plist-get a :draft) (plist-get b :draft))))
+         ('workspace
+          (and (equal (plist-get a :workspace) (plist-get b :workspace))
+               (or (equal (plist-get a :thread) (plist-get b :thread))
+                   (equal (or (plist-get a :thread) (plist-get a :resolved-thread))
+                          (or (plist-get b :thread) (plist-get b :resolved-thread))))))
+         (_ (equal (plist-get a :session) (plist-get b :session))))))
 
 (defun harness-voice-live--route-set (route)
   "Make ROUTE the target, raising the generation when it moved.
@@ -469,6 +538,7 @@ thread."
     (setq harness-voice-live--route-kind (or (plist-get route :kind) 'session)
           harness-voice-live--route-workspace (plist-get route :workspace)
           harness-voice-live--route-thread (plist-get route :thread)
+          harness-voice-live--route-draft (plist-get route :draft)
           harness-voice-live--route-name (plist-get route :name)
           harness-voice-live--session (or (plist-get route :session)
                                          (and (not moved) harness-voice-live--session)))
@@ -769,14 +839,15 @@ the call has nowhere to go and ends."
        (eq harness-voice-live--buffer (current-buffer))))
 
 (defun harness-voice-live--target-p (&optional buffer)
-  "Non-nil when BUFFER, this buffer by default, names a live target.
-A compose box that names no session and no workspace thread has nowhere
-to send its words, so it is not a target and must not offer to start a
-call: the task board's box and a popout's box are such hosts.  This asks
-what the start asks (`harness-voice-live--route-of-buffer'), so a box
-that draws Start is exactly a box whose Start works.  A control line
-runs before the box's markers are placed, so it asks
-`harness-compose-host-p', never `harness-compose-live-p'."
+  "Non-nil when BUFFER, this buffer by default, can take a live call.
+That is a live compose box, whatever it composes into: a chat's words go
+to its session, a workspace's to its thread, and a box that composes a
+task or a popout's answer takes the words as a draft, which is what it
+holds until its own submit sends them.  This asks what the start asks
+\(`harness-voice-live--route-of-buffer'), so a box that draws Start is
+exactly a box whose Start works.  A control line runs before the box's
+markers are placed, so it asks `harness-compose-host-p', never
+`harness-compose-live-p'."
   (let ((buffer (or buffer (current-buffer))))
     (and (buffer-live-p buffer)
          (with-current-buffer buffer
@@ -823,84 +894,72 @@ A box that is not the call's target still shows the call, with the
 target's name and a control that moves the words here: the indicator
 never says `Listening' in a box the words do not go to.
 
-A box that names no session and no workspace thread has nowhere to send
-its words, so it offers no start and no target: it says `Voice · no
-session' instead.  The task board and a popout are such hosts, and a
-Start control there could only fail (`harness-voice-live--target-p')."
+Every live compose box is a target, because every box says what it
+composes into (`harness-compose-context'): a task board's box and a
+popout's take a dictation as a draft, so they start and end a call as a
+chat's box does."
   (when (and harness-voice--enabled (harness-voice-live-p))
     (let ((active (harness-voice-live--active-p))
           (here (harness-voice-live--here-p))
-          (target (harness-voice-live--target-p))
           (items nil))
       (if (not harness-voice--controls)
           (setq items (list (list (harness-voice--button
                                    "Voice" #'harness-voice "Voice controls · C-c h V v"))))
-        (if (not target)
-            (setq items
-                  (list
-                   (list (propertize "Voice · no session" 'face 'harness-dim-face
-                                     'help-echo "Live voice · no session target")
-                         100 nil)
-                   (and active
-                        (list (harness-voice--button "Transcript" #'harness-voice-live-transcript
-                                                     "Live transcript") 60 nil))
-                   (list (harness-voice--button "Setup" #'harness-voice-setup
-                                                "Voice settings") 50 nil)))
-          (setq items
-                (list
-                 (list (propertize (harness-voice-live--status)
-                                   'face (harness-voice-live--face)
-                                   'help-echo (or harness-voice-live--error "Live voice status"))
-                       100 nil)
-                 (list (cond
-                        ((and active here)
-                         (harness-voice--button "End" #'harness-voice-live-stop
-                                                "Live session · end"))
-                        (active
-                         (harness-voice--button "Use here" #'harness-voice-live-use-here
-                                                "Live voice · target"))
-                        (t
-                         (harness-voice--button "Start" #'harness-voice-live--start-here
-                                                "Live voice · sidecar session")))
-                       95 nil)
-                 (and active here harness-voice-live--pending
-                      (not (harness-voice-live--input-busy-p))
-                      (list (harness-voice--button "Submission" #'harness-voice-live-send-now
-                                                   "Pending speech submission") 94 nil))
-                 (and active here
-                      (list (harness-voice--button "Interrupt C-c V" #'harness-voice-live-interrupt
-                                                   "Playback · interruption") 90 nil))
-                 (and harness-voice-live--error
-                      (list (propertize harness-voice-live--error 'face 'harness-failure-face
-                                        'help-echo harness-voice-live--error) 85 nil))
-                 (and active harness-voice-live--camera
-                      (list (propertize (harness-voice-live--camera-label)
-                                        'face (harness-voice-live--camera-face)
-                                        'help-echo "Camera · live capture")
-                            84 nil))
-                 (and active harness-voice-live--notice
-                      (list (propertize harness-voice-live--notice 'face 'harness-caution-face
-                                        'help-echo harness-voice-live--notice) 83 nil))
-                 (and active here harness-voice-live--control-status
-                      (list (propertize harness-voice-live--control-status
+        (setq items
+              (list
+               (list (propertize (harness-voice-live--status)
+                                 'face (harness-voice-live--face)
+                                 'help-echo (or harness-voice-live--error "Live voice status"))
+                     100 nil)
+               (list (cond
+                      ((and active here)
+                       (harness-voice--button "End" #'harness-voice-live-stop
+                                              "Live session · end"))
+                      (active
+                       (harness-voice--button "Use here" #'harness-voice-live-use-here
+                                              "Live voice · target"))
+                      (t
+                       (harness-voice--button "Start" #'harness-voice-live--start-here
+                                              "Live voice · sidecar session")))
+                     95 nil)
+               (and active here harness-voice-live--pending
+                    (not (harness-voice-live--input-busy-p))
+                    (list (harness-voice--button "Submission" #'harness-voice-live-send-now
+                                                 "Pending speech submission") 94 nil))
+               (and active here
+                    (list (harness-voice--button "Interrupt C-c V" #'harness-voice-live-interrupt
+                                                 "Playback · interruption") 90 nil))
+               (and harness-voice-live--error
+                    (list (propertize harness-voice-live--error 'face 'harness-failure-face
+                                      'help-echo harness-voice-live--error) 85 nil))
+               (and active harness-voice-live--camera
+                    (list (propertize (harness-voice-live--camera-label)
+                                      'face (harness-voice-live--camera-face)
+                                      'help-echo "Camera · live capture")
+                          84 nil))
+               (and active harness-voice-live--notice
+                    (list (propertize harness-voice-live--notice 'face 'harness-caution-face
+                                      'help-echo harness-voice-live--notice) 83 nil))
+               (and active here harness-voice-live--control-status
+                    (list (propertize harness-voice-live--control-status
                                       'face 'harness-caution-face
                                       'help-echo harness-voice-live--control-status) 82 nil))
-                 (and active here harness-voice-live--working
-                      (list (harness-voice--button "Cancel work" #'harness-voice-live-cancel
-                                                   "Agent turn · cancellation") 80 nil))
-                 (and active here
-                      (list (harness-voice--button
-                             (if harness-voice-live--muted
-                                 (harness-voice-live--resume-button)
-                               (harness-voice-live--pause-button))
-                             #'harness-voice-live-mute
-                             (if (harness-voice-provider-camera-p)
-                                 "Camera · live capture"
-                               "Microphone · live session")) 70 nil))
-                 (list (harness-voice--button "Transcript" #'harness-voice-live-transcript
-                                              "Live transcript") 60 nil)
-                 (list (harness-voice--button "Setup" #'harness-voice-setup
-                                              "Voice settings") 50 nil)))))
+               (and active here harness-voice-live--working
+                    (list (harness-voice--button "Cancel work" #'harness-voice-live-cancel
+                                                 "Agent turn · cancellation") 80 nil))
+               (and active here
+                    (list (harness-voice--button
+                           (if harness-voice-live--muted
+                               (harness-voice-live--resume-button)
+                             (harness-voice-live--pause-button))
+                           #'harness-voice-live-mute
+                           (if (harness-voice-provider-camera-p)
+                               "Camera · live capture"
+                             "Microphone · live session")) 70 nil))
+               (list (harness-voice--button "Transcript" #'harness-voice-live-transcript
+                                            "Live transcript") 60 nil)
+               (list (harness-voice--button "Setup" #'harness-voice-setup
+                                            "Voice settings") 50 nil))))
       (let ((room (max 1 (- (/ (harness-compose--room) (frame-char-width)) 3))))
         (concat (harness-ui-settings-line (list items) room)
                 ;; The pipeline is a line of its own under the controls:
@@ -1583,6 +1642,7 @@ Return non-nil when a heading was written."
                                         ('user 'harness-user-label-face)
                                         ('work 'harness-label-face)
                                         ('sent 'harness-label-face)
+                                        ('draft 'harness-label-face)
                                         ('not-sent 'harness-caution-face)
                                         (_ 'harness-agent-label-face)))
                     (propertize (format " · %s" (format-time-string "%H:%M"))
@@ -2110,7 +2170,8 @@ Finals are classified in onset order, not transcription completion order."
         (let* ((items (plist-get pending :items))
                (text (harness-voice-live--pending-text))
                (ids (delq nil (mapcar (lambda (item) (plist-get item :id)) items)))
-               (job (list :id (car ids) :ids ids :text text :route (plist-get pending :route)
+               (route (plist-get pending :route))
+               (job (list :id (car ids) :ids ids :text text :route route
                           :caption (and (= (length items) 1) (plist-get (car items) :caption))
                           :items (mapcar (lambda (item)
                                            (list :segment (plist-get item :segment)
@@ -2159,18 +2220,26 @@ Finals are classified in onset order, not transcription completion order."
               ;; has nothing left to take back.
               (when (eq (harness-voice-recovery-state harness-voice-live--recovery) 'done)
                 (harness-voice-live--recovery-cancel))
-              (let ((text (plist-get job :text)))
-                (harness-voice-live--transcript-sent text (plist-get job :caption))
-                (harness-voice-conversation-hear harness-voice-live--conversation text text))
-              (setq harness-voice-live--delegations
-                    (nconc harness-voice-live--delegations (list job)))
-              ;; Armed where the words actually cross, so the window is
-              ;; measured from the submission an input owner let through.
-              (harness-voice-live--recovery-arm job)
-              (when harness-voice-live--delegation
-                (harness-voice-live--pipeline-turn-queued (plist-get job :id)
-                                                        (plist-get job :segments)))
-              (harness-voice-live--delegate-next))))
+              (if (eq (plist-get route :kind) 'draft)
+                  ;; A draft is not a turn: its words are its box's text, and
+                  ;; nothing is said back into a conversation it has none of.
+                  (progn
+                    (harness-voice-live--refresh)
+                    (setq harness-voice-live--delegations
+                          (nconc harness-voice-live--delegations (list job)))
+                    (harness-voice-live--delegate-next))
+                (let ((text (plist-get job :text)))
+                  (harness-voice-live--transcript-sent text (plist-get job :caption))
+                  (harness-voice-conversation-hear harness-voice-live--conversation text text))
+                (setq harness-voice-live--delegations
+                      (nconc harness-voice-live--delegations (list job)))
+                ;; Armed where the words actually cross, so the window is
+                ;; measured from the submission an input owner let through.
+                (harness-voice-live--recovery-arm job)
+                (when harness-voice-live--delegation
+                  (harness-voice-live--pipeline-turn-queued (plist-get job :id)
+                                                          (plist-get job :segments)))
+                (harness-voice-live--delegate-next)))))
          (complete
           (lambda ()
             (when (funcall claim)
@@ -2583,7 +2652,8 @@ continuations are added."
 The job carries the route it was spoken under.  A job whose route has
 moved is answered with `retargeted' instead of being sent: the words
 belong to the thread they were said in, and a thread selected after
-them is not it."
+them is not it.  A job spoken into a draft is put in its box and
+answered at once, since it asks no turn."
   (when (and (null harness-voice-live--delegation)
              harness-voice-live--delegations
              (harness-voice-live--active-p)
@@ -2595,11 +2665,22 @@ them is not it."
            (id (plist-get job :id))
            (text (plist-get job :text))
            (route (plist-get job :route)))
-      (if (not (harness-voice-live--route-current-p (plist-get route :generation)))
-          (progn
-            (harness-voice-live--pipeline-turn id 'cancelled "retargeted")
-            (harness-voice-live--delegate-result job "" "retargeted")
-            (harness-voice-live--delegate-next))
+      (cond
+       ((not (harness-voice-live--route-current-p (plist-get route :generation)))
+        (harness-voice-live--pipeline-turn id 'cancelled "retargeted")
+        (harness-voice-live--delegate-result job "" "retargeted")
+        (harness-voice-live--delegate-next))
+       ((eq (plist-get route :kind) 'draft)
+        ;; Dictation asks no turn: the words are the box's draft now, and
+        ;; the sidecar is told the same breath so it keeps listening.
+        (let ((inserted (harness-voice-live--dispatch route text #'ignore)))
+          (harness-voice-live--pipeline-turn id 'done "draft")
+          (harness-voice-live--delegate-result
+           job "" (and (not inserted) (harness-voice-live--draft-lost-reason route))))
+        (harness-voice-live--settle-stage)
+        (harness-voice-live--refresh)
+        (harness-voice-live--delegate-next))
+       (t
         (cl-incf harness-voice-live--agent-watch)
         (cl-incf harness-voice-live--control-seq)
         (setq harness-voice-live--agent-turn nil
@@ -2628,7 +2709,7 @@ them is not it."
               ;; queueing it.
               (harness-voice-live--acknowledge id))
           (error
-           (harness-voice-live--delegate-error id err)))))))
+           (harness-voice-live--delegate-error id err))))))))
 
 (defun harness-voice-live--dispatch (route text on-error)
   "Send TEXT to ROUTE's target, calling ON-ERROR with a failure.
@@ -2637,8 +2718,11 @@ permissions and questions are the ones it always has.  A workspace
 thread gets `_harness/workspace/prompt' with the thread, which is how
 the workspace routes a message to that thread's live episode; the
 workspace's own agent does the work, and no second model is asked to
-interpret the words."
+interpret the words.  A draft takes the words into its own box
+\(`harness-voice-live--delegate-draft'): nothing is sent anywhere."
   (pcase (plist-get route :kind)
+    ('draft
+     (harness-voice-live--delegate-draft route text))
     ('workspace
      (let ((workspace (plist-get route :workspace))
            (thread (or (plist-get route :thread) (plist-get route :resolved-thread))))
@@ -2659,6 +2743,72 @@ interpret the words."
                                    :prompt (list (list :type "text" :text text)))
                              #'ignore
                              on-error)))))
+
+(defun harness-voice-live--draft-box (route)
+  "Return ROUTE's compose box, when it is still the draft ROUTE named.
+A box that was closed, or replaced by another draft, is not: the words
+must not land in a message the person did not speak into.  A host that
+reuses one buffer for drafts of different purposes says which draft it
+is (`:draft'), so the board's box becoming a search is a replacement
+even though the buffer is the same one."
+  (let ((buffer (plist-get route :buffer)))
+    (and (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (and (harness-compose-live-p)
+                (let ((context (harness-compose-context)))
+                  (and (eq (plist-get context :kind) 'draft)
+                       (equal (plist-get context :identity)
+                              (plist-get route :draft))))
+                buffer)))))
+
+(defun harness-voice-live--draft-lost-reason (route)
+  "Return why ROUTE's draft is gone, for the transcript and the notice.
+`no box' when the box closed or stopped composing a draft, `replaced'
+when the same box composes another draft now."
+  (let ((buffer (plist-get route :buffer)))
+    (if (and (buffer-live-p buffer)
+             (with-current-buffer buffer
+               (and (harness-compose-live-p)
+                    (eq (plist-get (harness-compose-context) :kind) 'draft))))
+        "replaced"
+      "no box")))
+
+(defun harness-voice-live--delegate-draft (route text)
+  "Put TEXT in ROUTE's draft box, as dictation, and report it inserted.
+The words are the box's text now, never a message: the box's own submit
+is what sends them, so a task board's box composes a task and a popout's
+answers its item, exactly as typed words would.  The sidecar is answered
+with no text, since no turn was asked for.  A box that closed or was
+replaced keeps the words in the transcript instead, and the call goes on."
+  (let ((buffer (harness-voice-live--draft-box route)))
+    (if (not buffer)
+        (harness-voice-live--draft-lost text (harness-voice-live--draft-lost-reason route))
+      (with-current-buffer buffer
+        (save-excursion
+          (goto-char harness-compose-end)
+          (let ((inhibit-read-only t))
+            (insert (if (and (> (point) harness-compose-start)
+                             (not (memq (char-before) '(?\s ?\t ?\n))))
+                        " " "")
+                    text)))
+        ;; The kept draft is what a redraw draws again, so the host's own
+        ;; tail -- a board's label, a popout's content -- keeps the words.
+        (harness-compose-capture)
+        (harness-compose-update-placeholder))
+      (harness-voice-live--transcript-section 'draft "Draft")
+      (harness-voice-live--transcript-insert (concat "  " text "\n")
+                                             'harness-dim-face)
+      t)))
+
+(defun harness-voice-live--draft-lost (text reason)
+  "Keep TEXT, spoken for a draft that is gone, in the transcript with REASON.
+Nothing is inserted and no turn is asked for: the words are not lost,
+and the call keeps listening for the next ones."
+  (harness-voice-live--transcript-section 'draft "Draft")
+  (harness-voice-live--transcript-insert (concat "  " text "\n") 'harness-dim-face)
+  (harness-voice-live--transcript-insert (concat "  " reason "\n") 'harness-caution-face)
+  (harness-voice-live--show-notice (concat "Draft · " reason))
+  nil)
 
 (defun harness-voice-live--acknowledge-possible-p (delegation)
   "Non-nil when DELEGATION's receipt could be heard now.
@@ -3349,6 +3499,7 @@ once, with a Retry control, rather than waiting out its own deadline."
               harness-voice-live--input-chunks nil
               harness-voice-live--input-seq 0
               harness-voice-live--held-seq 0
+              harness-voice-live--route-draft nil
               harness-voice-live--route-generation 0
               harness-voice-live--utterance-routes nil)
         (harness-voice-live--route-set route)
@@ -3677,6 +3828,7 @@ it was granted for."
         harness-voice-live--route-kind 'session
         harness-voice-live--route-workspace nil
         harness-voice-live--route-thread nil
+        harness-voice-live--route-draft nil
         harness-voice-live--route-resolved-thread nil
         harness-voice-live--route-name nil
         harness-voice-live--route-generation 0

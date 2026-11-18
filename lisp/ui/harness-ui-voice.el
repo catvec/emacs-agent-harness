@@ -492,10 +492,6 @@ With the live provider, a press starts the live session instead."
   (if (harness-voice-live-p)
       (cond
        ((harness-voice-live--active-p) nil)
-       ;; A box with no session or thread cannot start a call, and says so
-       ;; in one line instead of a failure it could never recover from.
-       ((not (harness-voice-live--target-p))
-        (user-error "Live voice · no session target"))
        (t
         (condition-case err
             (harness-voice-live-start)
@@ -586,8 +582,6 @@ unmutes the running one."
       (cond
        ((harness-voice-live--active-p)
         (harness-voice-live-mute))
-       ((not (harness-voice-live--target-p))
-        (user-error "Live voice · no session target"))
        (t
         (condition-case err
             (harness-voice-live-start)
@@ -1185,15 +1179,15 @@ output is played by."
 
 (defun harness-voice--mode-available-p ()
   "Non-nil when this buffer can host the selected voice capability.
-Live voice uses the transport's route, not a chat's session-id local:
-a workspace names its own selected thread and needs no live episode
-before its first prompt.  WAV spoken replies still require a chat
-with a session, and dictation into other compose hosts stays draft-only.
-A control line runs before the box's markers are placed, so this asks
-`harness-compose-host-p' rather than the markers alone."
+Live voice uses the box's own context, not a chat's session-id local:
+a workspace names its selected thread, and a box that composes a task or
+a popout's answer takes a dictation as a draft.  WAV spoken replies still
+require a chat with a session.  A control line runs before the box's
+markers are placed, so this asks `harness-compose-host-p' rather than
+the markers alone."
   (if (harness-voice-live-p)
       (and (harness-compose-host-p)
-           (harness-voice-live--route-of-buffer (current-buffer)))
+           (harness-voice-live--target-p))
     (and harness-ui-session-id (derived-mode-p 'harness-chat-mode))))
 
 ;;;###autoload
@@ -1230,9 +1224,7 @@ ownership; disabling stops audio, not work."
       (harness-voice--set-state 'ready))))
 
 (defun harness-voice-toggle ()
-  "Toggle voice in the current chat.
-A box that names no session or workspace thread has no live target, so
-it gets the voice chat instead (`harness-voice')."
+  "Toggle voice in the current chat, or the live call in this compose box."
   (interactive)
   (if (harness-voice-live-p)
       (cond
@@ -1278,10 +1270,10 @@ threads, questions and permissions in the existing harness workflow."
                          (not (harness-voice-live--active-p)))
                 (harness-voice-live--start-here)))
           (harness-voice--refresh)))
-    ;; An ordinary buffer, and a compose box that names no session or
-    ;; workspace thread -- the task board's, a popout's -- which has
-    ;; nowhere to send live words.  Both get a quick voice chat instead of
-    ;; controls that could only fail to start.
+    ;; An ordinary buffer, and a compose box that is not a live target --
+    ;; which no compose box is today, since every one says what it
+    ;; composes into -- gets a quick voice chat instead of controls that
+    ;; could only fail to start.
     (let ((context (harness-voice--context))
           (dir (harness-files-project-root default-directory)))
       (harness-new-session

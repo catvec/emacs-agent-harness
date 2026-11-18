@@ -54,7 +54,7 @@ on completion, interruption, failure, buffer death and shutdown.
 - `harness-voice-interrupt` — Stop speech, discard unfinished dictation, and cancel this voice turn.
 - `harness-voice-release` — Stop the microphone and transcribe, on mouse release or keyboard toggle.
 - `harness-voice-show` — Show the compose box that owns voice.
-- `harness-voice-toggle` — Toggle voice in the current chat.
+- `harness-voice-toggle` — Toggle voice in the current chat, or the live call in this compose box.
 
 ### Options
 

@@ -112,6 +112,22 @@ Letters type into the compose box; these chords act on the workspace.")
   "Return the live episode of THREAD, or of the selected thread."
   (plist-get (or thread (harness-ui-workspace--current-thread)) :live))
 
+(defun harness-ui-workspace--compose-context ()
+  "Return what this workspace's compose box composes into.
+The selected thread, asked each time, so a thread switch moves the
+words; a workspace with no thread yet still has a target, because its
+own prompt path makes the first one (`_harness/workspace/prompt')."
+  (let* ((thread (harness-ui-workspace--selected-thread))
+         (record (harness-ui-workspace--current-thread)))
+    (list :kind 'workspace
+          :workspace harness-ui-workspace--id
+          :thread thread
+          :session (and thread (harness-ui-workspace--live-session record))
+          :name (or (plist-get record :title)
+                    thread
+                    harness-ui-workspace--id
+                    "Workspace"))))
+
 (defun harness-ui-workspace--episode-of-p (session-id)
   "Non-nil when SESSION-ID is the live episode of a thread here."
   (and (stringp session-id)
@@ -1294,6 +1310,10 @@ opens the speech panel beside it."
                            default-directory))
    :placeholder (lambda () "Message…")
    :redraw #'harness-ui-workspace--render-tail
+   ;; The box composes into the selected thread, asked each time: a
+   ;; thread switch moves where the words go, and a new workspace's first
+   ;; message has a thread to create rather than one to name.
+   :context #'harness-ui-workspace--compose-context
    :bottom t)
   (add-hook 'kill-buffer-hook #'harness-ui-workspace--kill nil t)
   (harness-ui-view-install #'harness-ui-workspace-refresh))

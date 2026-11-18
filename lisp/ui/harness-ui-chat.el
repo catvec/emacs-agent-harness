@@ -5369,6 +5369,20 @@ nil keeps the usual \"Message\" hint.  A deleted session, a question
 waiting for its answer and an inactive session have hints of their
 own.  The BTW module says what a side conversation is for with it.")
 
+(defun harness-chat--compose-context ()
+  "Return what this chat's compose box composes into.
+Its session, named as the session list names it.  A chat whose session
+was deleted has no target: its words would go to no one, so it says so
+with a draft of its own rather than a session id that answers nothing."
+  (if (and (stringp harness-ui-session-id)
+           (not (string-empty-p harness-ui-session-id)))
+      (list :kind 'session
+            :session harness-ui-session-id
+            :name (if (fboundp 'harness-ui-session-name)
+                      (harness-ui-session-name harness-ui-session-id)
+                    harness-ui-session-id))
+    (list :kind 'draft :name "Chat")))
+
 (defun harness-chat--placeholder ()
   "Return the hint for the empty compose box."
   (cond (harness-chat--dead "session deleted")
@@ -8350,6 +8364,10 @@ the id of a session written in a message is a link to it.
                          :roots #'harness-chat--roots
                          :placeholder #'harness-chat--placeholder
                          :redraw #'harness-chat--render-tail
+                         ;; The box composes a message to this chat's
+                         ;; session, and a chat that has none is not a
+                         ;; target: its words would go to no one.
+                         :context #'harness-chat--compose-context
                          :bottom t)
   ;; The activity line is an overlay string: make the box leave room for
   ;; it as if it were text.  The settings line is text under the box,

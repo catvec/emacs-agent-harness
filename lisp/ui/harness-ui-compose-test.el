@@ -4047,5 +4047,80 @@ its title; an @task: reference names no file."
         ;; Sent, the references attach no file.
         (should (equal (list fix docs) (mapcar (lambda (a) (plist-get a :task)) (cdr (harness-compose-take)))))))))
 
+;;;; What the box composes into
+
+;; A host that names its box says where its words go, so a surface that
+;; names no session -- the task board, a popout -- is still a place to
+;; compose into: live voice asks the box, and a box that composes a draft
+;; takes the words as its own text rather than sending them anywhere.
+
+(ert-deftest harness-ui-compose-context-answers-nothing-for-a-host-that-names-none ()
+  "A box whose host sets no context says nothing, and its locals say it.
+The box never invents a target: a chat's session id is still read from
+the buffer, which is how every host named its box before this."
+  (harness-ui-compose-test-with
+    (should-not harness-compose-context-function)
+    (should-not (harness-compose-context))
+    ;; A box is a box only once it is drawn, and drawing names no target.
+    (harness-compose-hide)
+    (should-not (harness-compose-context))))
+
+(ert-deftest harness-ui-compose-context-asks-the-host-each-time ()
+  "The host's context is asked on every call, so a box can change target.
+A board's box that starts composing a message to a session names that
+session, and the same box composes a task again once it is reset."
+  (harness-ui-compose-test-with
+    (let ((target 'draft))
+      (harness-compose-setup :context
+                             (lambda ()
+                               (if (eq target 'draft)
+                                   (list :kind 'draft :name "Task board")
+                                 (list :kind 'session :session "s-1" :name "Message"))))
+      (should (equal '(:kind draft :name "Task board") (harness-compose-context)))
+      (setq target 'message)
+      (should (equal '(:kind session :session "s-1" :name "Message")
+                     (harness-compose-context)))
+      (should (equal "s-1" (plist-get (harness-compose-context) :session))))))
+
+(ert-deftest harness-ui-compose-context-keeps-the-draft-across-redraws ()
+  "A redraw does not change what the box composes into.
+The generation moves only when the draft is replaced, so a target that
+is still the same draft stays the same target."
+  (harness-ui-compose-test-with
+    (harness-compose-setup :context (lambda () (list :kind 'draft :name "Board")))
+    (let ((generation harness-compose-generation)
+          (context (harness-compose-context)))
+      (harness-ui-compose-test--draw)
+      (should (equal context (harness-compose-context)))
+      (should (= generation harness-compose-generation))
+      (harness-compose-set "Another draft")
+      (should (equal context (harness-compose-context)))
+      (should (> harness-compose-generation generation)))))
+
+(ert-deftest harness-ui-compose-context-names-which-draft-of-one-box ()
+  "A host that reuses its box says which draft of it is there.
+The board's box describes a new task, then a search, then an edit, all
+in one buffer, so its context carries `:identity' as well as its name:
+the name is what the UI shows, the identity is what live voice compares
+to tell the draft the person spoke into from the one that replaced it."
+  (harness-ui-compose-test-with
+    (let ((identity 'compose))
+      (harness-compose-setup
+       :context (lambda ()
+                  (list :kind 'draft
+                        :name (if (eq identity 'search) "Search" "Task board")
+                        :identity identity)))
+      (should (equal 'compose (plist-get (harness-compose-context) :identity)))
+      ;; Typing in the draft leaves the identity alone.
+      (harness-compose-set "Fix the tile")
+      (should (equal 'compose (plist-get (harness-compose-context) :identity)))
+      ;; The box taking another purpose names another draft.
+      (setq identity 'search)
+      (should (equal 'search (plist-get (harness-compose-context) :identity)))
+      ;; A host that names no identity is unchanged: nil, as before.
+      (harness-compose-setup :context (lambda () (list :kind 'draft :name "Board")))
+      (should (equal '(:kind draft :name "Board") (harness-compose-context)))
+      (should-not (plist-get (harness-compose-context) :identity)))))
+
 (provide 'harness-ui-compose-test)
 ;;; harness-ui-compose-test.el ends here
