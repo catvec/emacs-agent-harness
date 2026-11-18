@@ -75,9 +75,12 @@ chat draws the hint as one line, "Slots changed due to system load (3
 changes)", that opens to the changes with the time of each.  A change
 after a quiet spell, in a session that has moved on since the hint,
 starts a hint of its own, so the transcript still shows where in the
-session's work the load moved.  The hint is a folding one
-(`harness-node-fold`).  A session's model is never sent hints, so
-none of this changes what it reads.
+session's work the load moved.  A hint that has kept its fill of
+changes stays open all the same: it keeps the newest of them and
+counts the rest in its title, and opened it says how many it leaves
+out, so a stretch that runs for days is still one line.  The hint is
+a folding one (`harness-node-fold`).  A session's model is never
+sent hints, so none of this changes what it reads.
 
 That note is the history, and it stands where the first change of its
 stretch landed.  How the slots stand now is the machine's, not a

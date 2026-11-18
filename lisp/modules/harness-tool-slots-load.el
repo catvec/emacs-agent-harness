@@ -65,9 +65,12 @@
 ;; changes)", that opens to the changes with the time of each.  A change
 ;; after a quiet spell, in a session that has moved on since the hint,
 ;; starts a hint of its own, so the transcript still shows where in the
-;; session's work the load moved.  The hint is a folding one
-;; (`harness-node-fold').  A session's model is never sent hints, so
-;; none of this changes what it reads.
+;; session's work the load moved.  A hint that has kept its fill of
+;; changes stays open all the same: it keeps the newest of them and
+;; counts the rest in its title, and opened it says how many it leaves
+;; out, so a stretch that runs for days is still one line.  The hint is
+;; a folding one (`harness-node-fold').  A session's model is never
+;; sent hints, so none of this changes what it reads.
 ;;
 ;; That note is the history, and it stands where the first change of its
 ;; stretch landed.  How the slots stand now is the machine's, not a
@@ -421,7 +424,9 @@ watch was turned off."
 ;; them.  A change is added to the note the session has when that
 ;; note's last change is recent, wherever in the transcript the note
 ;; is -- tool calls and messages may have come since -- and a change
-;; that comes later than that starts a note of its own.
+;; that comes later than that starts a note of its own.  The note
+;; keeps the newest changes and counts them all, so a stretch that
+;; runs on and on is one line still.
 
 (defconst harness-tool-slots-load--note-key "tool-slots-load"
   "The `:key' of the fold of a session's note of slot changes.
@@ -441,56 +446,82 @@ stands still keeps its note however long the next change takes (see
 `harness-tool-slots-load--open-note').")
 
 (defvar harness-tool-slots-load--note-limit 20
-  "Most changes one note of slot changes holds.
-A note this full is closed, and the next change starts another: a load
-that moves for hours would otherwise write one ever longer note anew
-at every change.  With the default options the load of a build, from
-idle to full and back, changes the slots fewer times than that, each
-`harness-tool-slots-load-deadband' of load being one change at most,
-and the stepwise recovery of a short-term cut one change per step, so
-a build is one note.")
+  "Most changes one note of slot changes keeps lines to.
+A note stays open for the whole stretch of changes, and counts them
+all in its title; only the newest this many are kept as lines in it,
+and the ones left out are counted in a line above them (\"40 earlier
+changes\").  A load that moves for hours would otherwise write one
+ever longer note anew at every change.  With the default options the
+load of a build, from idle to full and back, changes the slots fewer
+times than that, each `harness-tool-slots-load-deadband' of load
+being one change at most, and the stepwise recovery of a short-term
+cut one change per step, so a build is one note of every change it
+made.")
 
-(defun harness-tool-slots-load--note-count-title (items)
-  "Return the title of a note holding ITEMS: the title, and how many changes.
+(defun harness-tool-slots-load--note-title-of (total)
+  "Return what a note of TOTAL changes says while it is folded.
 A note of one change is that change's own line in the chat, so its
 title is only the title."
-  (if (cdr items)
-      (format "%s (%d changes)" harness-tool-slots-load--note-title (length items))
+  (if (> total 1)
+      (format "%s (%d changes)" harness-tool-slots-load--note-title total)
     harness-tool-slots-load--note-title))
 
-(defun harness-tool-slots-load--note-text (items)
-  "Return the plain text of a note holding ITEMS, for what does not fold.
-One change reads as its own line, as the hint of a single change always
-did; several read as the title and a line to a change, with its time."
-  (if (null (cdr items))
-      (plist-get (car items) :text)
-    (concat (harness-tool-slots-load--note-count-title items) "\n"
-            (mapconcat (lambda (item)
-                         (let ((ts (plist-get item :ts)))
-                           (concat (if ts (format-time-string "%H:%M:%S  " ts) "")
-                                   (plist-get item :text))))
-                       items "\n"))))
+(defun harness-tool-slots-load--note-earlier (total shown)
+  "Return the line saying how many of a note's changes it leaves out.
+TOTAL is how many it stands for, SHOWN how many it keeps as lines.
+Empty when it keeps them all."
+  (let ((earlier (- total shown)))
+    (if (> earlier 0)
+        (format "%d earlier change%s" earlier (if (= earlier 1) "" "s"))
+      "")))
 
-(defun harness-tool-slots-load--note-meta (meta items)
-  "Return META, a node's `:meta', with the fold of a note holding ITEMS."
+(defun harness-tool-slots-load--note-text (items total)
+  "Return the plain text of a note holding ITEMS and standing for TOTAL.
+For what does not fold.  One change reads as its own line, as the hint
+of a single change always did; several read as the title and a line to
+a change, with its time, and the changes left out of the lines as a
+line of their own above them."
+  (if (and (= total 1) (= 1 (length items)))
+      (plist-get (car items) :text)
+    (let ((earlier (harness-tool-slots-load--note-earlier total (length items))))
+      (concat (harness-tool-slots-load--note-title-of total) "\n"
+              (if (string-empty-p earlier) "" (concat earlier "\n"))
+              (mapconcat (lambda (item)
+                           (let ((ts (plist-get item :ts)))
+                             (concat (if ts (format-time-string "%H:%M:%S  " ts) "")
+                                     (plist-get item :text))))
+                         items "\n")))))
+
+(defun harness-tool-slots-load--note-meta (meta items total)
+  "Return META, a node's `:meta', with the fold of a note holding ITEMS.
+TOTAL is how many changes it stands for, which is more than ITEMS hold
+when it keeps only the newest of them."
   (plist-put (copy-sequence meta) :fold
              (list :key harness-tool-slots-load--note-key
-                   :title (harness-tool-slots-load--note-count-title items)
+                   :title (harness-tool-slots-load--note-title-of total)
+                   :total total
                    :items items)))
+
+(defun harness-tool-slots-load--note-keep (items)
+  "Return the changes of ITEMS a note keeps as lines: the newest ones.
+That is the last `harness-tool-slots-load--note-limit' of them; the
+others are counted in the note's title and its line of earlier ones."
+  (let ((limit (max 1 harness-tool-slots-load--note-limit)))
+    (if (> (length items) limit) (last items limit) items)))
 
 (defun harness-tool-slots-load--open-note (id now)
   "Return session ID's note that a change at NOW is added to, or nil.
 That is the session's newest note of slot changes on the branch its
-transcript is on, when it holds fewer than
-`harness-tool-slots-load--note-limit' changes and either its last
-change is less than `harness-tool-slots-load--note-window' old or
-nothing has been written to the session since it.  A session that
-stands still -- waiting on the user, or running one long call --
-writes nothing between the changes, and its changes are one stretch
-however far apart they come: the window is for a session that has
-moved on, so the transcript still shows where in its work the load
-moved.  A newer note that is closed is the last word: an older one is
-older still."
+transcript is on, when either its last change is less than
+`harness-tool-slots-load--note-window' old or nothing has been written
+to the session since it.  A session that stands still -- waiting on
+the user, or running one long call -- writes nothing between the
+changes, and its changes are one stretch however far apart they come:
+the window is for a session that has moved on, so the transcript still
+shows where in its work the load moved.  A note that holds its fill of
+changes stays open too, keeping the newest and counting the rest, so a
+stretch is one line however long it runs.  A newer note is the last
+word: an older one is older still."
   (let* ((path (harness-call 'session/nodes id))
          (newest (plist-get (car (last path)) :id)))
     (cl-loop for node in (reverse path)
@@ -498,27 +529,28 @@ older still."
              when (and fold (equal (plist-get fold :key) harness-tool-slots-load--note-key))
              return (let* ((items (plist-get fold :items))
                            (last (plist-get (car (last items)) :ts)))
-                      (and (< (length items) harness-tool-slots-load--note-limit)
-                           (numberp last)
+                      (and (numberp last)
                            (or (equal (plist-get node :id) newest)
                                (< (- now last) harness-tool-slots-load--note-window))
                            node)))))
 
 (defun harness-tool-slots-load--note-add (id node text now)
   "Add the change TEXT, at NOW, to NODE, the note of session ID."
-  (let ((items (append (plist-get (harness-node-fold node) :items)
-                       (list (list :ts now :text text)))))
+  (let* ((fold (harness-node-fold node))
+         (items (append (plist-get fold :items) (list (list :ts now :text text))))
+         (total (1+ (or (plist-get fold :total) (length (plist-get fold :items)))))
+         (kept (harness-tool-slots-load--note-keep items)))
     (harness-call 'session/update-node id (plist-get node :id)
-                  :content (harness-tool-slots-load--note-text items)
-                  :meta (harness-tool-slots-load--note-meta (plist-get node :meta) items))))
+                  :content (harness-tool-slots-load--note-text kept total)
+                  :meta (harness-tool-slots-load--note-meta (plist-get node :meta) kept total))))
 
 (defun harness-tool-slots-load--note-start (id text now)
   "Start a note of slot changes in session ID, with the change TEXT at NOW."
   (let ((items (list (list :ts now :text text))))
     (harness-call 'session/append id
                   (list :kind 'hint
-                        :content (harness-tool-slots-load--note-text items)
-                        :meta (harness-tool-slots-load--note-meta nil items)))))
+                        :content (harness-tool-slots-load--note-text items 1)
+                        :meta (harness-tool-slots-load--note-meta nil items 1)))))
 
 (defun harness-tool-slots-load--note (id text now)
   "Tell session ID of the change TEXT, at NOW, in its note of slot changes.

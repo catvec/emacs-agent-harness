@@ -774,13 +774,19 @@ That is the `:meta' `:fold' of NODE:
   (:key KEY      ; the part of the harness that writes it, which finds
                  ; the hint again to add to it
    :title TITLE  ; what the hint says while it is folded
-   :items ITEMS) ; the lines under it, oldest first, each (:ts TIME :text TEXT)
+   :items ITEMS  ; the lines under it, oldest first, each (:ts TIME :text TEXT)
+   :total TOTAL) ; how many lines it stands for, when it keeps only some
 
 An item with no text is left out, and a hint with no title or no item
-is no fold.  Strings and numbers may have travelled over JSON."
+is no fold.  Strings and numbers may have travelled over JSON.  A fold
+that stands for more than its items keep -- a note of something that
+happens again and again, which keeps its newest lines -- says how many
+in `:total'; a `:total' that is no number, or no more than the items
+it kept, is none, and the fold is its items."
   (let ((fold (plist-get (plist-get node :meta) :fold)))
     (when (and (consp fold) (keywordp (car fold)))
       (let ((title (plist-get fold :title))
+            (total (plist-get fold :total))
             (items (delq nil
                          (mapcar (lambda (item)
                                    (let ((text (and (consp item) (plist-get item :text)))
@@ -790,7 +796,9 @@ is no fold.  Strings and numbers may have travelled over JSON."
                                  (let ((items (plist-get fold :items)))
                                    (and (sequencep items) (append items nil)))))))
         (when (and (stringp title) (not (string-empty-p title)) items)
-          (list :key (plist-get fold :key) :title title :items items))))))
+          (append (list :key (plist-get fold :key) :title title :items items)
+                  (and (numberp total) (> total (length items))
+                       (list :total total))))))))
 
 ;;;; Messages
 ;;

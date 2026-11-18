@@ -2971,12 +2971,29 @@ and in the message that attached it."
 A hint that keeps several lines under a title (`harness-node-fold') is
 drawn as that title, with the fold's button, and the lines in the fold
 \(`harness-chat--render-folded-hint'); any other as the note it is
-\(`harness-chat--render-plain-hint').  A fold of one line is that line,
-as the note it would have been."
+\(`harness-chat--render-plain-hint').  A fold of one line that stands
+for more is that line with the count of what it leaves out, so it is
+drawn folded too."
   (let ((fold (harness-node-fold (harness-chat-block-node block))))
-    (if (cdr (plist-get fold :items))
+    (if (or (cdr (plist-get fold :items))
+            (> (or (plist-get fold :total) 0) 1))
         (harness-chat--render-folded-hint block fold)
       (harness-chat--render-plain-hint block))))
+
+(defun harness-chat--fold-earlier-line (fold indent)
+  "Return the line saying how many of FOLD's lines it leaves out, or \"\".
+A note of something that happens again and again keeps its newest lines
+and counts the rest in its title and in `:total' (the tool slots
+changing, see harness-tool-slots-load.el); this is the line that says
+how many it leaves out, at INDENT, before the lines it keeps.  A fold
+that keeps them all has none."
+  (let* ((total (plist-get fold :total))
+         (shown (length (plist-get fold :items)))
+         (earlier (if (numberp total) (- total shown) 0)))
+    (if (> earlier 0)
+        (propertize (format "%d earlier change%s\n" earlier (if (= earlier 1) "" "s"))
+                    'face 'harness-summary-face 'line-prefix indent 'wrap-prefix indent)
+      "")))
 
 (defun harness-chat--render-folded-hint (block fold)
   "Return the body of hint BLOCK, whose several lines FOLD keeps under a title.
@@ -2985,7 +3002,8 @@ hanging in the indent before it.  The lines are in the fold, one to
 the line, each with the time it was said, under the title's first
 letter; the block starts folded (`harness-chat--collapsible-p'), and
 stays as the user left it when the hint is drawn again with another
-line."
+line.  A fold that keeps only the newest of the lines it stands for
+says how many it leaves out, above them."
   (let* ((id (harness-chat-block-id block))
          ;; Where the lines start, and so the title: after the margin and
          ;; four columns of indent, whatever width the button is drawn.
@@ -3004,16 +3022,18 @@ line."
                           "\n")
                   'wrap-prefix indent))
          (body (harness-chat--foldable
-                (mapconcat
-                 (lambda (item)
-                   (let* ((ts (plist-get item :ts))
-                          (time (if ts (format-time-string "%H:%M:%S  " ts) "")))
-                     (propertize (concat (propertize time 'face 'harness-summary-face)
-                                         (propertize (plist-get item :text) 'face 'harness-hint-face)
-                                         "\n")
-                                 'line-prefix indent
-                                 'wrap-prefix (concat indent (make-string (length time) ?\s)))))
-                 (plist-get fold :items) ""))))
+                (concat
+                 (harness-chat--fold-earlier-line fold indent)
+                 (mapconcat
+                  (lambda (item)
+                    (let* ((ts (plist-get item :ts))
+                           (time (if ts (format-time-string "%H:%M:%S  " ts) "")))
+                      (propertize (concat (propertize time 'face 'harness-summary-face)
+                                          (propertize (plist-get item :text) 'face 'harness-hint-face)
+                                          "\n")
+                                  'line-prefix indent
+                                  'wrap-prefix (concat indent (make-string (length time) ?\s)))))
+                  (plist-get fold :items) "")))))
     (harness-chat--margin (concat header body))))
 
 (defun harness-chat--render-plain-hint (block)
@@ -3528,10 +3548,13 @@ the number of changes and the newest one a hover away."
   (let ((hints (harness-chat--group-slot-hints group)))
     (if (null hints)
         ""
-      (let* ((items (cl-loop for b in hints
-                             append (plist-get (harness-node-fold (harness-chat-block-node b)) :items)))
+      (let* ((folds (mapcar (lambda (b) (harness-node-fold (harness-chat-block-node b))) hints))
+             (items (cl-loop for fold in folds append (plist-get fold :items)))
              (latest (plist-get (car (last items)) :text))
-             (count (length items)))
+             ;; A note keeps only its newest lines; it stands for the rest.
+             (count (cl-loop for fold in folds
+                             sum (let ((total (plist-get fold :total)))
+                                   (if (numberp total) total (length (plist-get fold :items)))))))
         (propertize (concat " · slots changed" (if (> count 1) (format " ×%d" count) ""))
                     'help-echo (if latest
                                    (format "Latest slot change: %s" latest)
@@ -3817,9 +3840,9 @@ changed calls it.  Return non-nil when a call changed."
 (defun harness-chat--collapsible-p (kind)
   "Non-nil when blocks of KIND start collapsed.
 A hint folds only when it keeps several lines under a title
-\(`harness-node-fold'); one that does not has no fold for this to
-matter to, and one that grows to have one, as the hint of the slots
-changing does, starts folded."
+\(`harness-node-fold'), or stands for more lines than it keeps; one that
+does not has no fold for this to matter to, and one that grows to have
+one, as the hint of the slots changing does, starts folded."
   (member kind '("thinking" "tool-call" "tool-result" "compaction" "hint")))
 
 (defun harness-chat--new-block (node)

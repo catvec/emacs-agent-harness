@@ -1135,11 +1135,14 @@ whose request and why.
 A hint that has the same kind of thing to say again and again keeps the
 lot in one hint rather than a hint each (tool-slots-load does, for the
 tool slots a busy machine takes away and gives back).  Its `:meta`
-`:fold` is `(:key KEY :title TITLE :items ((:ts TIME :text TEXT) …))`:
-KEY names the module that writes it, which finds the hint again to add
-to it, TITLE is what the hint says while it is folded, and ITEMS are
-the lines under it, oldest first.  Read it with `harness-node-fold`
-(harness-util), which tolerates what travelled over JSON.  `:content`
+`:fold` is `(:key KEY :title TITLE :items ((:ts TIME :text TEXT) …)
+:total N)`: KEY names the module that writes it, which finds the hint
+again to add to it, TITLE is what the hint says while it is folded,
+ITEMS are the lines under it, oldest first, and TOTAL, when it is more
+than the items, is how many lines the hint stands for: it keeps the
+newest and counts the rest.  Read it with `harness-node-fold`
+(harness-util), which tolerates what travelled over JSON, and leaves a
+TOTAL that is no number or no more than the items out.  `:content`
 says the same in plain text, the title and then a line to an item, for
 a client that does not fold; with one item it is that item's text, so a
 hint of one line is the note it would have been.  The module adds a line
@@ -12258,12 +12261,18 @@ the chat draws it as that one line, closed, with a line to a change
 under it, each with its time (see ui-chat).  A change after a quieter
 spell, in a session that has moved on since the note, starts a note of
 its own, so the transcript still shows where in the session's work the
-load moved; so does one that finds the note full
-(`harness-tool-slots-load--note-limit`, 20 changes, so a load that moves
-for hours does not write one ever longer note anew at each change), or
-off the branch the session's transcript is on now, or gone.  Only the
-module's own notes (by `:key`) are added to.  The window and the limit
-are internal variables, not options (see the configuration audit).
+load moved; so does one that finds the note off the branch the
+session's transcript is on now, or gone.  A note that has kept its fill
+of changes is not closed, though: a stretch that runs for hours, or for
+days in a session that stands still, stays one line, the note keeping
+the newest changes as its lines
+(`harness-tool-slots-load--note-limit`, 20 of them, so a load that moves
+for hours does not write one ever longer note anew at each change) and
+counting them all in its title and in its fold's `:total`.  Opened, it
+says how many it leaves out -- "40 earlier changes" -- above the newest
+ones.  Only the module's own notes (by `:key`) are added to.  The
+window and the limit are internal variables, not options (see the
+configuration audit).
 
 The note is the history, and it stands where the first change of its
 stretch landed, far up a session that went on since.  How the slots
@@ -13332,8 +13341,11 @@ is one line, its title, with the fold's button hanging in the indent
 before it, and the lines in the fold, each with the time it was said;
 the block starts folded, and a line added to the hint draws it again
 where it stands, as open or closed as the user left it
-(`harness-chat--render-folded-hint`).  With one line it is the plain
-note it would have been, which has nothing to fold.
+(`harness-chat--render-folded-hint`).  A fold that stands for more
+lines than it keeps says how many it leaves out, "40 earlier changes",
+above the lines it keeps.  With one line it is the plain note it would
+have been, which has nothing to fold -- unless it stands for more than
+that one, which is drawn folded too.
 Only the calls of tools on an allow list fold: the tools that say
 `:coalescable` (see tools), which the UI reads from `tools/list`.  It
 holds the quiet reads: `read_file`, `grep`, `glob`, `list_dir`,

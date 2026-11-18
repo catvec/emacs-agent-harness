@@ -942,8 +942,11 @@ line, not a line each.  The window is for a session that moved on."
           (should (equal (list harness-tool-slots-load-test--floor)
                          (harness-tool-slots-load-test--lines (cadr notes)))))))))
 
-(ert-deftest harness-tool-slots-load-a-full-note-is-closed ()
-  "A note that holds as many changes as it may is closed, and the next starts another."
+(ert-deftest harness-tool-slots-load-a-full-note-keeps-counting ()
+  "A note that holds its fill of changes stays open, keeping the newest.
+Its title counts every change of the stretch, and the ones it leaves
+out of its lines are said in a line of their own, so a stretch that
+runs on and on is one note still rather than a row of them."
   (harness-tool-slots-load-test-with-sessions
     (let ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)) :id))
           (harness-tool-slots-count 8)
@@ -952,18 +955,44 @@ line, not a line each.  The window is for a session that moved on."
       (harness-tool-slots-load-test--move 1.5)
       (harness-tool-slots-load-test--move 0.2)
       (should (= 1 (length (harness-tool-slots-load-test--notes id))))
+      (should (equal "Slots changed due to system load (2 changes)"
+                     (plist-get (harness-node-fold
+                                 (car (harness-tool-slots-load-test--notes id)))
+                                :title)))
+      ;; The third change would overfill the note: it stays, and keeps
+      ;; the newest two lines, counting the one it leaves out.
       (harness-tool-slots-load-test--move 2.0)
-      (let ((notes (harness-tool-slots-load-test--notes id)))
-        (should (= 2 (length notes)))
-        (should (= 2 (length (harness-tool-slots-load-test--lines (car notes)))))
-        (should (equal (list harness-tool-slots-load-test--floor)
-                       (harness-tool-slots-load-test--lines (cadr notes)))))
-      ;; The note that follows is where the session stopped, so the next
-      ;; change joins it, to fill it in its turn.
+      (let* ((notes (harness-tool-slots-load-test--notes id))
+             (fold (harness-node-fold (car notes))))
+        (should (= 1 (length notes)))
+        (should (equal "Slots changed due to system load (3 changes)" (plist-get fold :title)))
+        (should (= 3 (plist-get fold :total)))
+        (should (equal (list harness-tool-slots-load-test--restored
+                             harness-tool-slots-load-test--floor)
+                       (harness-tool-slots-load-test--lines (car notes))))
+        ;; What does not fold reads the title, then how many it leaves
+        ;; out, then the lines it keeps.
+        (let ((lines (split-string (plist-get (car notes) :content) "\n")))
+          (should (equal "Slots changed due to system load (3 changes)" (nth 0 lines)))
+          (should (equal "1 earlier change" (nth 1 lines)))
+          (should (= 4 (length lines)))
+          (should (string-match (concat "\\`[0-9][0-9]:[0-9][0-9]:[0-9][0-9]  "
+                                        (regexp-quote harness-tool-slots-load-test--floor)
+                                        "\\'")
+                                (nth 3 lines)))))
+      ;; The next change joins it too: still one note, still the newest
+      ;; two lines, and the count of what it leaves out grows.
       (harness-tool-slots-load-test--move 1.5)
-      (let ((notes (harness-tool-slots-load-test--notes id)))
-        (should (= 2 (length notes)))
-        (should (= 2 (length (harness-tool-slots-load-test--lines (cadr notes)))))))))
+      (let* ((notes (harness-tool-slots-load-test--notes id))
+             (fold (harness-node-fold (car notes))))
+        (should (= 1 (length notes)))
+        (should (equal "Slots changed due to system load (4 changes)" (plist-get fold :title)))
+        (should (= 4 (plist-get fold :total)))
+        (should (equal (list harness-tool-slots-load-test--floor
+                             "Tool slots raised from 1 to 4: system load 1.5x on this machine")
+                       (harness-tool-slots-load-test--lines (car notes))))
+        (should (equal "2 earlier changes"
+                       (nth 1 (split-string (plist-get (car notes) :content) "\n"))))))))
 
 (ert-deftest harness-tool-slots-load-a-note-off-the-branch-is-left-alone ()
   "A session that went back before its note does not add to the note.

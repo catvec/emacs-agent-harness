@@ -975,7 +975,25 @@ Items without text, and a fold with no title or no item, are no fold."
     ;; A client may send the items as a vector.
     (should (equal '((:ts nil :text "a"))
                    (plist-get (harness-node-fold '(:meta (:fold (:title "T" :items [(:text "a")]))))
-                              :items)))))
+                              :items)))
+    ;; A fold that keeps only some of the lines it stands for says how
+    ;; many it stands for; one that is no more than it keeps, or no
+    ;; number, is its items.
+    (should (equal '(:key "k" :title "T" :items ((:ts nil :text "newest")) :total 40)
+                   (harness-node-fold '(:meta (:fold (:key "k" :title "T" :total 40
+                                                      :items ((:text "newest"))))))))
+    (should (equal '(:key "k" :title "T" :items ((:ts nil :text "newest")) :total 40)
+                   (harness-node-fold
+                    (harness-json-parse
+                     (harness-json-encode
+                      '(:meta (:fold (:key "k" :title "T" :total 40
+                                      :items ((:text "newest"))))))))))
+    (should-not (plist-get (harness-node-fold
+                            '(:meta (:fold (:title "T" :total 1 :items ((:text "a"))))))
+                           :total))
+    (should-not (plist-get (harness-node-fold
+                            '(:meta (:fold (:title "T" :total "many" :items ((:text "a"))))))
+                           :total))))
 
 (ert-deftest harness-thinking-level-fit-fits-a-level-to-a-model ()
   "A thinking level is fitted to the levels a model offers, by their order.

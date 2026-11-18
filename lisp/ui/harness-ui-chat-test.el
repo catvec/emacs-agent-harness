@@ -1112,6 +1112,99 @@ count, closed, and the changes a click away."
           (dolist (text texts)
             (should-not (invisible-p (1- (harness-ui-chat-test-find buf text))))))))))
 
+(ert-deftest harness-ui-chat-a-slot-note-that-keeps-its-newest-says-what-it-leaves-out ()
+  "A note that stands for more changes than it keeps says so when it is opened.
+The tool-slots-load module keeps a note's newest changes as lines and
+counts them all in its title (see its tests); the chat draws the lines
+it keeps, with the count of the ones it leaves out above them, in the
+indent the lines are at, and says nothing of them when it keeps them
+all."
+  (harness-ui-chat-test-with
+    (dolist (m '(priority tool-slots tool-slots-load)) (harness-test-load-module m))
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (harness-tool-slots-load--note-limit 2)
+           (texts '("Tool slots reduced from 18 to 5: system load 1.8x on this machine"
+                    "Tool slots restored to 18: system load back to normal"
+                    "Tool slots reduced from 18 to 9: system load 1.4x on this machine"
+                    "Tool slots raised from 9 to 12: system load 1.2x on this machine")))
+      (harness-call 'session/append sid '(:kind user :content "build it"))
+      (dolist (text texts)
+        (harness-tool-slots-load--announce text))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "Slots changed due to system load (4 changes)"))
+                         5 "the note")
+      (with-current-buffer buf
+        ;; One line, closed, counting every change of the stretch.
+        (should (= 1 (length (harness-ui-chat-test-blocks buf "hint"))))
+        (let ((block (car (harness-ui-chat-test-blocks buf "hint"))))
+          (should (harness-chat-block-collapsed block))
+          (should (harness-ui-chat-test-find buf "Slots changed due to system load (4 changes)"))
+          ;; The two it leaves out are not drawn at all.
+          (should-not (harness-ui-chat-test-find buf (nth 0 texts)))
+          (should-not (harness-ui-chat-test-find buf (nth 1 texts)))
+          (goto-char (harness-ui-chat-test--fold-icon block))
+          (harness-chat-tab)
+          (should-not (harness-chat-block-collapsed block))
+          ;; Opened: the count of what it leaves out, at the lines' indent,
+          ;; then the newest two, each with its time.
+          (let ((pos (harness-ui-chat-test-find buf "2 earlier changes\n")))
+            (should pos)
+            (should-not (invisible-p (1- pos)))
+            ;; The margin's column, then the four the lines are indented by.
+            (should (equal "     " (get-text-property (1- pos) 'line-prefix))))
+          (dolist (text (cdr (cdr texts)))
+            (should-not (invisible-p (1- (harness-ui-chat-test-find buf text))))))))))
+
+(ert-deftest harness-ui-chat-a-fold-of-one-line-that-stands-for-more-is-folded ()
+  "A fold that keeps one line and stands for more is drawn folded, with its count.
+The tool-slots-load module can keep a note's one newest line while its
+title counts the stretch; the chat draws the fold rather than the note
+it would be, so the count is not lost."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (hint (harness-call 'session/append sid
+                               (list :kind 'hint
+                                     :content "Slots changed due to system load (3 changes)\n2 earlier changes\n12:15:05  newest"
+                                     :meta (list :fold (list :key "tool-slots-load"
+                                                             :title "Slots changed due to system load (3 changes)"
+                                                             :total 3
+                                                             :items (list (list :ts (float-time
+                                                                                     (encode-time
+                                                                                      (list 5 15 12 12 6 2026 nil -1 nil)))
+                                                                                :text "newest")))))))
+           (id (plist-get hint :id))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (let ((block (gethash id harness-chat--blocks)))
+          (should (harness-chat-block-fold block))
+          (should (harness-chat-block-collapsed block))
+          (should (harness-ui-chat-test-find buf "Slots changed due to system load (3 changes)"))
+          (should (invisible-p (1- (harness-ui-chat-test-find buf "2 earlier changes"))))
+          (goto-char (harness-ui-chat-test--fold-icon block))
+          (harness-chat-tab)
+          (should-not (invisible-p (1- (harness-ui-chat-test-find buf "2 earlier changes"))))
+          (should (harness-ui-chat-test-find buf "12:15:05  newest\n")))))))
+
+(ert-deftest harness-ui-chat-a-slot-notices-group-counts-the-changes-it-keeps ()
+  "A slot notice folded into a run says how many changes it stands for.
+A note keeps only its newest changes; the run's summary counts them all."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (cl-flet ((node (n) (harness-chat--on-node n)))
+          (harness-chat--on-node (list :id "c1" :kind "tool-call" :tool "read_file"
+                                       :call-id "c1" :title "Read a.el" :input '(:path "a.el")))
+          (harness-chat--on-node (list :id "c2" :kind "tool-call" :tool "read_file"
+                                       :call-id "c2" :title "Read b.el" :input '(:path "b.el")))
+          (node (list :id "slot" :kind "hint"
+                      :content "Slots changed due to system load (40 changes)\n39 earlier changes\n12:15:05  newest"
+                      :meta (list :fold (list :key "tool-slots-load"
+                                              :title "Slots changed due to system load (40 changes)"
+                                              :total 40
+                                              :items (list (list :ts 1760000105 :text "newest"))))))
+          (should (harness-ui-chat-test-find buf "· slots changed ×40")))))))
+
 ;;;; The settings line under the compose box
 
 (defun harness-ui-chat-test-settings (&optional room)
