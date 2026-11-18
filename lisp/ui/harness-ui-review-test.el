@@ -927,6 +927,48 @@ required -- renders as it always did."
       (should-not (string-search "Reproduction" text))
       (should (string-match-p "^Handed in" text)))))
 
+(ert-deftest harness-ui-review-report-reads-a-report-from-before-the-removal ()
+  "A report stored with a design, a walkthrough and a demo still reads.
+The report is a record, so the keys stay where they are: the design and
+the walkthrough are not drawn, the demo evidence is a line that says what
+it is, and no action of the removed review is offered."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (let ((harness-acp--server-enabled nil))
+      (dolist (m '(acp ui ui-compose ui-markdown ui-popout ui-tasks ui-report))
+        (harness-test-load-module m)))
+    (let* ((task (list :id "t-old" :session "s-old" :prompt "Fix it" :state "review"
+                       :report (list :summary "The parser is fixed." :at 1.0
+                                     :design (list :title "The parser design"
+                                                   :name "docs/design/parser.md"
+                                                   :path "/work/docs/design/parser.md"
+                                                   :summary "Quotes are read in pairs."
+                                                   :text "# The parser design\n\nIt reads nested quotes.\n")
+                                     :walkthrough "Present the finished work."
+                                     :evidence (list (list :kind "note" :text "a note")
+                                                     (list :kind "demo" :title "Nested quotes"
+                                                           :path "/work/demo/index.html"
+                                                           :url "http://localhost:8000"
+                                                           :command '("python3" "-m" "http.server" "8000")
+                                                           :cwd "/work/demo"
+                                                           :cwd-name "demo"
+                                                           :narration "Type a quote.")))))
+           (text (harness-ui-report-string task)))
+      ;; The parts of a report are all there, and the note with them.
+      (should (string-match-p "^Handed in" text))
+      (should (string-search "a note" text))
+      ;; What was removed is not drawn: no design, no brief, no demo action.
+      (dolist (gone '("The parser design" "Read design" "Open design" "DESIGN"
+                      "Present the finished work." "Walkthrough" "Open demo"
+                      "Run demo" "Stop demo" "NARRATION"))
+        (should-not (string-search gone text)))
+      ;; The demo evidence is still a line of the report, named by what it is.
+      (should (string-search "[demo]" text))
+      ;; The popout draws the same, without an error.
+      (should (with-temp-buffer
+                (harness-ui-report--insert task)
+                (string-match-p "\[demo\]" (buffer-string)))))))
+
 (defun harness-ui-review-test--report (board id)
   "Pop out the report of task ID as BOARD's [Review Changes] does; return its buffer.
 The board's record is the one the wire gives, as the UI sees it."

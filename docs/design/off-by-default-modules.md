@@ -1,16 +1,15 @@
-# Off-by-default modules: demo and supervisor
+# Off-by-default modules: supervisor and otel
 
 ## The problem
 
 `harness-enabled-modules` decides what loads besides the core.  A list
 names the modules to add, and `t` asks for every module.  Many users,
 and this repository's own development harness, run with `t`, so the
-whole harness loads: including the `demo` module, which starts a
-hand-in's demo on its workspace computer and opens the walkthrough
-presenter, and the `supervisor` module, which makes a session plan and
-delegate instead of doing the work itself.  Both are features a user
-should choose, not behavior a harness takes on because it was asked
-for every module.
+whole harness loads: including the `supervisor` module, which makes a
+session plan and delegate instead of doing the work itself, and the
+`otel` module, which exports what sessions do to a collector.  Both are
+features a user should choose, not behavior a harness takes on because
+it was asked for every module.
 
 Today the choice is all or nothing: `t` loads them, and a list has to
 name every module the user wants if it is to leave them out.  There is
@@ -22,7 +21,7 @@ that also fails the modules requiring the one it names.
 
 Add `harness-off-by-default-modules`, a list of module names that
 `harness-enabled-modules` `t` leaves out.  It ships as
-`(demo supervisor)`.  Such a module loads when:
+`(supervisor otel)`.  Such a module loads when:
 
 - `harness-enabled-modules` is a list naming it (an explicit list is
   the user saying what they want, so it overrides the default), or
@@ -40,7 +39,7 @@ selects; the core always loads, and a list is explicit.
 ## Why this shape
 
 **A default value of the disabled list.**  `(setq
-harness-disabled-modules '(demo supervisor))` would also keep the two
+harness-disabled-modules '(supervisor otel))` would also keep the two
 out of `t`, but it changes the meaning of the option from "never load
 this" to "off by default", and a user who customizes it to their own
 short list silently re-enables both.  The veto should stay a veto.
@@ -57,13 +56,6 @@ document, and it can list a module of the user's own as well.
 naming all the other modules works today, but it is long, goes stale as
 modules are added, and cannot express the user's actual request: "all
 of them except these".  `t` with an exception list does.
-
-**Gating the hand-in walkthrough brief.**  The `:walkthrough` of a
-hand-in report is written by `tools-handin` from a design or a demo; it
-is not part of the `demo` module, which runs the demo and opens the
-presenter.  It stays as it is: this change is about which modules
-load, and a user who also wants no walkthrough has a separate feature
-to ask about.
 
 ## Shape of the change
 
@@ -89,9 +81,8 @@ to ask about.
 ## What is seen
 
 - A harness started with `(setq harness-enabled-modules t)` no longer
-  loads `demo` or `supervisor` (nor `ui-supervisor`), so a session has
-  no `present_demo` tool, no demo or presenter methods, and no session
-  is judged into supervisor mode.
+  loads `supervisor` (nor `ui-supervisor`) or `otel`, so no session is
+  judged into supervisor mode and nothing is exported unasked.
 - `M-x harness-describe-modules` lists both as available; `M-x
   harness-enable-module` on one loads it at once, and `(setq
   harness-off-by-default-modules nil)` restores the old "t loads every
@@ -104,8 +95,8 @@ to ask about.
 `test/harness-core-test.el` covers the selection with a tree of small
 modules (t leaves an off-by-default module out, a name loads it, a
 requiring module brings it, the disabled list still wins), the real
-tree (demo and supervisor ship in the option, are not selected with t,
+tree (supervisor and otel ship in the option, are not selected with t,
 and are selected when named, with `ui-supervisor`), and the interactive
 path (`harness-enable-module` under t).  The module-docs, config,
-server, supervisor, demo and policy suites run as they did, and the
-full suite is run before hand-in.
+server, supervisor and policy suites run as they did, and the full
+suite is run before hand-in.

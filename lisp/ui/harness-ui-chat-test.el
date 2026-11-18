@@ -11448,11 +11448,6 @@ the report."
                  (harness-tool-ok "Handed in." :end-turn t
                                   :meta (list :report (list :summary "**Done** here."
                                                             :problem "The parser drops nested quotes."
-                                                            :design (list :title "The parser design"
-                                                                          :name "design/parser.md"
-                                                                          :path "/work/design/parser.md"
-                                                                          :summary "Quote handling."
-                                                                          :text "# The parser design\n\nIt reads nested quotes.\n")
                                                             :evidence (list (list :kind "note" :text "A note")))
                                               :task-id "t-chat"))))
     (let* ((sid (harness-ui-chat-test-session "hand-in report"))
@@ -11479,9 +11474,6 @@ the report."
                  (text (buffer-substring-no-properties (overlay-start fold) (overlay-end fold))))
             (should (string-search "Problem" text))
             (should (string-search "The parser drops nested quotes." text))
-            ;; The design is drawn first, as the review draws it.
-            (should (string-search "Design: The parser design" text))
-            (should (string-search "It reads nested quotes." text))
             ;; The summary is rendered markdown, not the raw input.
             (should-not (string-search "**Done**" text))
             (should (string-search "A note" text))

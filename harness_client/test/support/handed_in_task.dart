@@ -73,44 +73,6 @@ void seedHandedInTaskWithPictures(FakeHarness harness) {
   harness.seedShowcasePictures();
 }
 
-/// [seedHandedInTask], with the design the work was written against and a
-/// demo among the evidence: what a report draws before its problem, and what
-/// a demo says of itself.
-void seedDesignReport(FakeHarness harness) {
-  seedHandedInTask(harness);
-  final record = handedInRecord(harness);
-  record['design'] = {
-    'title': 'The parser design',
-    'path': '/Users/noah/Code/emacs-agent-harness/docs/design/parser.md',
-    'name': 'docs/design/parser.md',
-    'summary':
-        'Quotes are read in pairs, and an unclosed one is an error at the '
-        'line it starts.',
-    'text':
-        '# The parser design\n\nA quote opens a string, and the next one '
-        'closes it.\n\n## Errors\n\nAn unclosed quote is an error at the '
-        'line it starts.\n',
-  };
-  record['evidence'] = [
-    ...asList(record['evidence']),
-    {
-      'kind': 'demo',
-      'title': 'Nested quotes',
-      'path':
-          '/Users/noah/Code/emacs-agent-harness/.worktrees/task-handed-in/demo/'
-          'index.html',
-      'name': 'demo/index.html',
-      'url': 'http://localhost:8000',
-      'command': ['python3', '-m', 'http.server', '8000'],
-      'cwd':
-          '/Users/noah/Code/emacs-agent-harness/.worktrees/task-handed-in/demo',
-      'cwd-name': 'demo',
-      'narration': 'Type a quote and watch the error.',
-      'caption': 'The demo',
-    },
-  ];
-}
-
 /// [handedInTaskId], and beside it [unreportedTaskId], in review as well,
 /// whose round of work ended without a report: the harness recorded the last
 /// message the session wrote instead (`missing`), and that message is the
@@ -128,6 +90,52 @@ void seedUnreportedTask(FakeHarness harness) {
     report: report,
   );
   harness.seedHandIn(unreportedTaskId, report);
+}
+
+/// The name of the task whose report was written before the design document,
+/// the demo and the walkthrough went.
+const oldReportTaskId = 'task-old-report';
+const oldReportTaskName = 'Make the parser read nested quotes';
+
+/// A task in review whose report is the one the harness kept from before the
+/// removal: a design document, a walkthrough brief and a demo item, which
+/// nothing draws now.  The report is a record, so it keeps every key; the page
+/// draws what it always drew, and the demo item as the line its kind names.
+void seedOldReportTask(FakeHarness harness) {
+  seedHandedInTask(harness);
+  final report = <String, Object?>{
+    'summary': 'The parser reads nested quotes now.',
+    'problem': 'Nested quotes stopped the parser at the first inner quote.',
+    'reproduction': 'Parse `(a "b")` and watch it stop at the quote.',
+    'at': handedInAt.millisecondsSinceEpoch / 1000,
+    'design': {
+      'title': 'The parser design',
+      'name': 'docs/design/parser.md',
+      'path': '/work/docs/design/parser.md',
+      'summary': 'Quotes are read in pairs.',
+      'text': '# The parser design\n\nIt reads nested quotes.\n',
+    },
+    'walkthrough': 'Present the finished work.',
+    'evidence': [
+      {'kind': 'note', 'text': 'The tests pass.'},
+      {
+        'kind': 'demo',
+        'title': 'Nested quotes',
+        'path': '/work/demo/index.html',
+        'url': 'http://localhost:8000',
+        'command': ['python3', '-m', 'http.server', '8000'],
+        'cwd': '/work/demo',
+        'cwd-name': 'demo',
+        'narration': 'Type a quote and watch the error.',
+      },
+    ],
+  };
+  harness.tasks[oldReportTaskId] = _task(
+    oldReportTaskId,
+    oldReportTaskName,
+    report: report,
+  );
+  harness.seedHandIn(oldReportTaskId, report);
 }
 
 Map<String, Object?> _task(

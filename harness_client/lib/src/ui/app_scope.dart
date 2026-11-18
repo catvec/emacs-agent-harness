@@ -21,8 +21,6 @@ class HarnessScope extends InheritedWidget {
   }
 
   static AppController appOf(BuildContext context) => of(context).app;
-  static AppController? maybeAppOf(BuildContext context) =>
-      context.dependOnInheritedWidgetOfExactType<HarnessScope>()?.app;
   static SettingsController settingsOf(BuildContext context) =>
       of(context).settings;
 

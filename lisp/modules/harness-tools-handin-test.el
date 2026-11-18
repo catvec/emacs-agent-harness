@@ -329,6 +329,35 @@ given the bytes.  A file that is evidence but no picture is not given."
                        (base64-decode-string
                         (plist-get (harness-call 'session/image sid (plist-get shot :path)) :data))))))))
 
+(ert-deftest harness-tools-handin-asks-for-no-design-no-demo-and-no-walkthrough ()
+  "The tool, and the schema a model reads, ask for the ordinary report only.
+The design document, the demo and the walkthrough it narrated were
+removed: nothing of them may come back, in the description or in what a
+call may carry."
+  (harness-tools-handin-test-with
+    (let* ((spec (harness-call 'tools/get "hand_in"))
+           (description (plist-get spec :description))
+           (schema (plist-get spec :schema))
+           (properties (plist-get schema :properties))
+           (evidence (plist-get properties :evidence))
+           (item (plist-get evidence :items)))
+      ;; What a report is: problem, summary, reproduction, evidence, the
+      ;; three switches, and the branch it belongs on.
+      (should (equal '("cannot_continue" "evidence" "merge_base" "no_merge"
+                       "problem" "reproduction" "summary")
+                     (sort (mapcar (lambda (k) (substring (symbol-name k) 1))
+                                   (cl-loop for (k _v) on properties by #'cddr collect k))
+                           #'string<)))
+      ;; Evidence is the ordinary kinds, and no demo among them.
+      (should (equal '("caption" "code" "file" "image" "language" "note" "tool_call" "video")
+                     (sort (mapcar (lambda (k) (substring (symbol-name k) 1))
+                                   (cl-loop for (k _v) on (plist-get item :properties) by #'cddr collect k))
+                           #'string<)))
+      ;; Nor does the prose a model reads ask for them, or offer them.
+      (dolist (word '("design" "demo" "narration" "walkthrough" "presenter"))
+        (should-not (string-match-p word description))
+        (should-not (string-match-p word (format "%s" schema)))))))
+
 (ert-deftest harness-tools-handin-knows-no-project ()
   "Nothing of any project is in the tool: no app, no SDK, no licence."
   (harness-tools-handin-test-with

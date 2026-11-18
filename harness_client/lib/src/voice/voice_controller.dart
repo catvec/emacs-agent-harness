@@ -99,14 +99,11 @@ class SessionVoiceBridge implements VoiceSessionBridge {
   void removeSessionListener(void Function() listener) =>
       controller.removeListener(listener);
 
-  /// Replies that were already in the transcript, finished, when the voice
-  /// screen opened are history, not answers to what is said now.  One still
-  /// streaming is not: it is the answer being given as voice attaches (the
-  /// walkthrough of a report is sent before its conversation opens), and it
-  /// is spoken when it is whole.
+  /// Replies that were already in the transcript when the voice screen
+  /// opened are history, not answers to what is said now.
   void _prime() {
     for (final item in controller.transcript.items) {
-      if (item.isAssistant && !item.streaming) _spoken.add(item.key);
+      if (item.isAssistant) _spoken.add(item.key);
     }
   }
 
@@ -476,17 +473,6 @@ class VoiceController extends ChangeNotifier {
     return captions.last;
   }
 
-  /// Listen to the session's replies from now on, whether or not the
-  /// microphone is on: a demo's presenter narrates on its own when its run
-  /// starts, and what it says is what the page shows.  What the session has
-  /// already said is not repeated.
-  void follow() {
-    if (_disposed || _followSession) return;
-    _followSession = true;
-    bridge.addReplyListener(_onAgentReply);
-    bridge.addSessionListener(_sessionChanged);
-  }
-
   Future<void> start() async {
     if (_disposed || started) return;
     _lifecycle++;
@@ -523,7 +509,11 @@ class VoiceController extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    follow();
+    if (!_followSession) {
+      _followSession = true;
+      bridge.addReplyListener(_onAgentReply);
+      bridge.addSessionListener(_sessionChanged);
+    }
     unawaited(prepareMedia());
     _setPhase(VoicePhase.connecting);
     _syncPipeline();

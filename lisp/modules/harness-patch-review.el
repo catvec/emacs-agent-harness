@@ -669,10 +669,8 @@ messages they are of: the agent reads those in the reply itself."
 
 (defun harness-patch-review--thread-location (data)
   "Return the location in the diff the thread DATA is on, or nil.
-That is where its first reference to lines of a diff or to lines of a
-buffer -- a section of a design document, say -- is."
-  (when-let* ((ref (cl-find-if (lambda (ref)
-                                 (member (harness-thread-ref-kind ref) '("diff" "buffer")))
+That is where its first reference to lines of a diff is."
+  (when-let* ((ref (cl-find-if (lambda (ref) (equal (harness-thread-ref-kind ref) "diff"))
                                (harness-thread-refs data)))
               (file (plist-get ref :file)))
     (change-review-make-location

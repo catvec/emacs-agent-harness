@@ -12,8 +12,8 @@
 #   scripts/dev.sh reload           harness-reload
 #
 # The daemon loads every module (`harness-enabled-modules' t, and
-# `harness-off-by-default-modules' nil so that demo and supervisor load
-# too), so that every feature can be tried; HARNESS_DEV_MODULES=default
+# `harness-off-by-default-modules' nil so that supervisor loads too),
+# so that every feature can be tried; HARNESS_DEV_MODULES=default
 # starts it with the harness's defaults instead, the core only.
 #
 # Automation must never steal the user's focus.  `start' creates the

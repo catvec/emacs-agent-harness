@@ -781,8 +781,7 @@ the groups of `harness-enable-modules', each with what it is."
           "brings along what it requires and its UI (tasks loads the task board,\n"
           "ui-tasks). `(setq harness-enabled-modules t)` loads every module but\n"
           "the ones marked *when named*: `harness-off-by-default-modules` leaves\n"
-          "them out, so that demo, which runs a hand-in's demo and its walkthrough,\n"
-          "and supervisor load only when they are named.\n\n"
+          "them out, so that supervisor loads only when it is named.\n\n"
           "```elisp\n" (harness-module-docs-template all) "```\n\n")
        "")
      "## The harness process\n\n" (funcall modules nil)
