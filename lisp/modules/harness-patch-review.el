@@ -132,24 +132,36 @@
 ;; check.  Without the module there is no such check, and the hook is
 ;; empty.
 ;;
+;; THE HARNESS'S MESSAGES.  Two transitions of a task's review leave
+;; the agent something to hear that nothing the user typed would tell
+;; it.  In the working phase it may be waiting for the user, so the
+;; harness keeps a message of its own, from "review", as a draft of the
+;; task's session: one of the drafts the user sends
+;; (`patch-review/send-replies'), with the replies or by itself when
+;; nothing else waits.  The agent then takes a turn as it would for a
+;; message the user typed.  Nothing is sent by itself: the draft waits
+;; for the user, who may send it with the rest or drop it
+;; (`patch-review/discard-last-close',
+;; `patch-review/discard-last-reviewed').  The messages do not say to
+;; hand in -- the task's prompt does.  Only the user's operations offer
+;; them: the agent's own close is in a turn of its own, and a close in a
+;; task waiting for review needs no turn.
+;;
 ;; THE LAST CLOSE.  The user closing the last thread that has a sent
-;; comment and is open leaves the review with nothing to answer.  In the
-;; working phase the agent has to know: it may be waiting for the user,
-;; and nothing the user typed would tell it.  So the harness keeps a
-;; message of its own -- that no thread is left to answer
-;; (`harness-patch-review-last-close-message') -- as a draft of the
-;; task's session, from "review".  It is one of the drafts the user
-;; sends (`patch-review/send-replies'): with the replies, one send; by
-;; itself, when nothing else waits, the same.  The agent then takes a
-;; turn as it would for a message the user typed: it sees that no thread
-;; is left open, and hands the work in when nothing is outstanding.
-;; Nothing is sent by itself: the draft waits for the user, who may send
-;; it with the rest or drop it (`patch-review/discard-last-close').  The
-;; message does not say to hand in -- the task's prompt does.  Only the
-;; user's close offers it: the agent's own close is in a turn of its
-;; own, a close in a task waiting for review needs no turn, and a thread
-;; of drafts was never a question the work had to answer
+;; comment and is open leaves the review with nothing to answer
+;; (`harness-patch-review-last-close-message').  A thread of drafts was
+;; never a question the work had to answer, so its close offers nothing
 ;; (`harness-patch-review-draft-on-last-close').
+;;
+;; THE LAST REVIEWED.  The agent closes a thread, and the user says
+;; they looked at that close: it waits for them until they do
+;; (`change-review-thread-unreviewed-p').  Marking the last close that
+;; waited reviewed leaves the review with nothing of the agent's left to
+;; look at (`harness-patch-review-last-reviewed-message'): the mark is
+;; the user's own operation, the per-thread one and the bulk one alike,
+;; so both offer it (`harness-patch-review-draft-on-last-reviewed').  A
+;; close the agent makes afterwards waits again, and the draft that
+;; waited goes: it said no close was left, and one is.
 ;;
 ;; THE WORDS BY HAND.  Not every reply made it into a round.  One typed in
 ;; the session while the agent was at work -- steering, quoting what the
@@ -200,6 +212,10 @@
 (require 'change-review-mail)
 
 (defvar harness-tasks-feedback-additions-functions)
+;; The kinds of the harness's messages, and what each is
+;; (`harness-patch-review--kinds', defined with them below): the methods
+;; above that name them run after the file is read.
+(defvar harness-patch-review--kinds)
 
 ;;;; The set of a task
 
@@ -826,9 +842,9 @@ thread this review does not have.  The thread-reply module reads the
 block out of the words; this keeps it."
   (prog1 (harness-patch-review--user-tagged-comment
           (harness-patch-review--set-for task-id t) session-id block draft attachments)
-    ;; The review may have something to answer again: the message of its
-    ;; last close is read, and goes when a sent thread is open now.
-    (harness-patch-review--last-close-here task-id)))
+    ;; The review may have something to answer again: the harness's
+    ;; messages are read, and one that is no longer true goes.
+    (harness-patch-review--revalidate-drafts task-id)))
 
 (defun harness-patch-review--on-message (blocks session-id info)
   "Make the replies in threads of the user's message BLOCKS comments of a review.
@@ -854,7 +870,7 @@ leaves each as a thread block with its thread's id."
             (prog1 (harness-patch-review--register-blocks
                     (harness-patch-review--set-for (plist-get task :id) t)
                     session-id blocks)
-              (harness-patch-review--last-close-here (plist-get task :id)))))
+              (harness-patch-review--revalidate-drafts (plist-get task :id)))))
       (error (harness-log 'warn "patch-review: the threads of a message in %s were not made: %s"
                           session-id (harness-error-message err))
              blocks))))
@@ -1164,10 +1180,10 @@ when the task has no branch of its own or its repository is not here."
 
 (defun harness-patch-review--on-review (task)
   "Record the version of TASK, which comes to review: the work handed in.
-Its last-close message, if one still waited for the user to send, goes:
+The harness's messages, if any still waited for the user to send, go:
 the task has left the working phase."
   (when (plist-get task :id)
-    (harness-patch-review--drop-last-close (plist-get task :id)))
+    (harness-patch-review--drop-drafts (plist-get task :id)))
   (when (and (plist-get task :id) (harness-patch-review--repository task))
     (harness-patch-review--record-version task)))
 
@@ -1534,11 +1550,12 @@ The UI sends the operations the user makes: `add-comment', `set-status',
 `edit-comment', `delete-comment', `add-version', and `mark-reviewed' and
 `unmark-reviewed' for a close by the agent the user has looked at, or
 no longer has.  Return (:changed BOOL).  `patch-review/changed' announces
-what changed to every UI, so that each performs it on its own copy.  The
-user closing the last open thread of a task at work also leaves the
-harness's message that no thread is left, for the user to send with the
-drafts (`harness-patch-review-draft-on-last-close',
-`patch-review/send-replies')."
+what changed to every UI, so that each performs it on its own copy.  Two
+of the user's operations also leave a message of the harness's for the
+user to send with the drafts: closing the last open thread of a task at
+work, and marking the last close that waited for review reviewed
+(`harness-patch-review-draft-on-last-close',
+`harness-patch-review-draft-on-last-reviewed', `patch-review/send-replies')."
   (let ((kind (let ((value (plist-get op :op)))
                 (cond ((symbolp value) value)
                       ((stringp value) (intern value))))))
@@ -1550,24 +1567,32 @@ drafts (`harness-patch-review-draft-on-last-close',
       (setq op (harness-patch-review--ui-op task-id op))
       (setq changed (and (change-review-dispatch set op) t))
       (when changed
-        (if (harness-patch-review--last-close-p set op)
-            (harness-patch-review--offer-last-close task-id)
-          ;; Any other change may leave the message untrue -- a thread
-          ;; opened again, a sent comment added.  Reading it drops it
-          ;; then; one that still holds stays.
-          (harness-patch-review--last-close-here task-id)))
+        ;; The operation may be the transition that offers one of the
+        ;; harness's messages; any other change may leave one untrue -- a
+        ;; thread opened again, a sent comment added, a close the agent
+        ;; made that waits for the user's review.  Reading them drops the
+        ;; ones that no longer hold; those that still do stay.
+        (let ((offered (cl-find-if
+                        (lambda (kind)
+                          (funcall (plist-get (harness-patch-review--message-kind kind) :offered)
+                                   set op))
+                        (mapcar #'car harness-patch-review--kinds))))
+          (when offered
+            (harness-patch-review--offer-draft offered task-id))
+          (harness-patch-review--revalidate-drafts task-id offered)))
       (list :changed changed))))
 
 (harness-defmethod patch-review/send-replies (task-id)
   "Send the drafts waiting in task TASK-ID's review to its agent.
 It is for a task at work, which has no feedback to carry them.  The
 user's replies go as one message, a thread block each, and are marked
-sent.  The harness's message that the last thread is closed
-\(`patch-review/last-close') goes after them, as a message of its own,
-from \"review\".  Return (:sent N :last-close BOOL), N how many replies
-there were and BOOL whether the harness's message went with them.  A
-task waiting for review signals `harness-error': its drafts go with the
-feedback that sends it back."
+sent.  The harness's messages -- that the last thread is closed
+\(`patch-review/last-close') and that the last close is reviewed
+\(`patch-review/last-reviewed') -- go after them, each a message of its
+own, from \"review\".  Return (:sent N :last-close BOOL :last-reviewed
+BOOL), N how many replies there were and whether each of the harness's
+messages went with them.  A task waiting for review signals
+`harness-error': its drafts go with the feedback that sends it back."
   (harness-patch-review--send-working-replies task-id))
 
 (defun harness-patch-review--sent-open-threads (set)
@@ -1720,10 +1745,11 @@ and both are there.  Signal an error naming the threads there are when
         (change-review-update-status
          set (or reply-thread (change-review-comment-thread comment)) status
          :author author :time (+ time 0.001)))
-      ;; The review has something new: the message of its last close, if
-      ;; one waits for the user to send, is read: it goes when the
-      ;; review has a thread to answer again, and stays when it does not.
-      (harness-patch-review--last-close-here task-id)
+      ;; The review has something new: the harness's messages, if any
+      ;; wait for the user to send, are read: one goes when the review
+      ;; has a thread to answer again, or a close to review, and stays
+      ;; when it does not.
+      (harness-patch-review--revalidate-drafts task-id)
       (list :thread (and reply-thread (change-review-thread-id reply-thread))
             :status (and reply-thread
                          (symbol-name (change-review-thread-status reply-thread)))
@@ -1747,6 +1773,65 @@ added, the comments given their quote, the threads made."
     (list :added (length added)
           :edited (length (cl-remove-if-not (lambda (op) (eq (plist-get op :op) 'edit-comment)) done))
           :threads (mapcar (lambda (op) (plist-get op :thread)) added))))
+
+(defun harness-patch-review--board-meta (opts)
+  "Return the board place OPTS names as a thread's meta, or nil.
+The keys are the place's own: a nil one is left out, so a thread about a
+diagram as a whole has no object."
+  (let (meta)
+    (dolist (key '(:board :diagram :object :revision :name))
+      (let ((value (plist-get opts key)))
+        (when (and value (not (and (stringp value) (string-blank-p value))))
+          (setq meta (plist-put meta key value)))))
+    meta))
+
+(harness-defmethod patch-review/board-thread (task-id body &rest opts)
+  "Start or answer a thread of task TASK-ID's review about a place on a board.
+BODY is the comment.  OPTS `:board', `:diagram', `:object', `:revision'
+and `:name' are the place it is about, kept as the thread's meta so the
+anchor is the object's identity and the revision the one discussed; a
+`:thread' answers that thread instead of starting one.  `:session' and
+`:call-id' say which session and call wrote it.
+
+This is the review's own thread, with the review's own resolve, not a
+comment store beside it.  Return (:thread ID :status STATUS :comment
+DATA :meta META)."
+  (let* ((task (harness-patch-review--task task-id))
+         (set (harness-patch-review--set-for task-id t))
+         (named (plist-get opts :thread))
+         (thread (and named
+                      (or (change-review-find-thread set named)
+                          (signal 'harness-error
+                                  (list (format "No thread %s in this review" named))))))
+         (meta (harness-patch-review--board-meta opts))
+         (author (harness-patch-review--agent (plist-get opts :session)
+                                              (plist-get opts :call-id)))
+         (id (or (and thread (change-review-thread-id thread))
+                 (change-review-new-thread-id set)))
+         (comment (change-review-make-comment
+                   :id (change-review-new-id "c")
+                   :thread id
+                   :author author
+                   :body (string-trim body)
+                   :time (float-time)
+                   :sent (float-time)
+                   :revision (or (plist-get opts :revision)
+                                 (when-let* ((version (change-review-latest-version set)))
+                                   (change-review-version-id version)))
+                   :meta meta)))
+    (when (harness-string-blank-p body)
+      (signal 'harness-error (list "A board discussion needs words")))
+    (change-review-dispatch
+     set (list :op 'add-comment :thread id
+               :thread-meta (and (not thread) meta)
+               :comment (change-review-comment-to-data comment)))
+    (harness-patch-review--last-close-here task-id)
+    (let ((made (or thread (change-review-find-thread set id))))
+      (list :thread id
+            :status (and made (symbol-name (change-review-thread-status made)))
+            :comment (change-review-comment-to-data comment)
+            :meta (and made (change-review-thread-meta made))
+            :task (plist-get task :id)))))
 
 (harness-defmethod patch-review/viewed (task-id)
   "Return the files viewed, and approved, in task TASK-ID's review.
@@ -1948,21 +2033,26 @@ no <quote> tag, as it quotes nothing."
   "Send the drafts written in the threads of TASK-ID's review to its agent.
 The user's replies go as one message, each a thread block, so the agent
 answers them in their threads as one turn; each is marked sent.  The
-harness's message that the last thread is closed, when it waits
-\(`patch-review/last-close'), goes after them as a message of its own,
-from \"review\".  Return (:sent N :last-close BOOL), N how many replies
-there were.  Only a task in the working phase sends them so: a task
-waiting for review sends its drafts with the feedback that sends it
-back."
+harness's messages, when they wait -- that the last thread is closed
+\(`patch-review/last-close') and that the last close is reviewed
+\(`patch-review/last-reviewed') -- go after them, each a message of its
+own, from \"review\".  Return (:sent N :last-close BOOL
+:last-reviewed BOOL), N how many replies there were and whether each of
+the harness's messages went.  Only a task in the working phase sends
+them so: a task waiting for review sends its drafts with the feedback
+that sends it back."
   (let ((task (harness-patch-review--task task-id))
         (set (harness-patch-review--set-for task-id t)))
     (unless (harness-patch-review--working-task-p task)
       (signal 'harness-error
               (list "The task waits for review: its drafts go with the feedback that sends it back")))
     (let* ((replies (harness-patch-review--working-replies set))
-           (close (harness-patch-review--last-close-here task-id))
+           (kinds (mapcar #'car harness-patch-review--kinds))
+           (waiting (cl-loop for kind in kinds
+                             for draft = (harness-patch-review--draft-here kind task-id)
+                             when draft collect (cons kind draft)))
            (session (plist-get task :session)))
-      (unless (or replies close)
+      (unless (or replies waiting)
         (signal 'harness-error (list "No draft to send")))
       (when replies
         (unless (and (stringp session) (not (string-blank-p session)))
@@ -1988,18 +2078,23 @@ back."
                           task-id (harness-error-message e))))
           (change-review-mark-sent set replies :time time :meta (list :working t))))
       ;; Sending a draft in a new, open thread makes it a sent open
-      ;; thread: the last-close message is no longer true.  Revalidate
-      ;; after marking the replies, not against the earlier snapshot.
-      (setq close (harness-patch-review--last-close-here task-id))
-      ;; After the replies, so the agent reads them before it hears there
-      ;; is nothing left to answer: the message starts the turn when no
-      ;; reply does, and steers one already running.
-      (when close
-        (harness-patch-review--prompt-review task (plist-get close :text))
-        (harness-patch-review--drop-last-close task-id))
-      (list :sent (length replies) :last-close (and close t)))))
-
-;;;; The last close
+      ;; thread, and the message of the last close no longer true.
+      ;; Read the harness's messages again after marking the replies,
+      ;; not against the earlier snapshot.
+      (let ((sent (cl-loop for (kind . _draft) in waiting
+                           for draft = (harness-patch-review--draft-here kind task-id)
+                           when draft collect (cons kind draft))))
+        ;; After the replies, so the agent reads them before it hears what
+        ;; the review is left with: a message starts the turn when no
+        ;; reply does, and steers one already running.
+        (dolist (entry sent)
+          (harness-patch-review--prompt-review task (plist-get (cdr entry) :text) (car entry))
+          (harness-patch-review--drop-draft (car entry) task-id))
+        (append (list :sent (length replies))
+                (cl-loop for kind in kinds
+                         collect (intern (format ":%s" kind))
+                         collect (and (assq kind sent) t)))))))
+;;;; The harness's messages
 
 ;; Declared before `harness-patch-review-draft-on-last-close', so a value
 ;; set under the old name is kept.
@@ -2022,18 +2117,121 @@ closing a thread itself offers none.  Off, closing a thread leaves no
 message."
   :type 'boolean :group 'harness)
 
+(defcustom harness-patch-review-draft-on-last-reviewed t
+  "When non-nil, reviewing the last close of a task at work offers a message.
+The agent closes a thread, and the close waits for the user to say they
+looked at it (`change-review-thread-unreviewed-p').  Marking the last
+close that waited reviewed -- the per-thread operation, or the bulk one
+that marks every close at once -- leaves nothing of the agent's work
+left to look at.  The mark then keeps a message of the harness's own,
+from \"review\", as a draft of the task's session: the UI shows it with
+the other drafts, and the user sends it with them
+\(`patch-review/send-replies'), or by itself when nothing else waits.
+The message starts a turn then, as a message the user typed would: the
+agent sees that the user reviewed every close it made, and hands the
+work in when nothing is outstanding.  It does not say to hand in -- the
+task's prompt does.  Only the working phase offers it: a task waiting
+for review needs no turn when its closes are reviewed.  Off, marking a
+close reviewed leaves no message."
+  :type 'boolean :group 'harness)
+
 (defconst harness-patch-review-last-close-message
   "The user closed the last open thread of this task's review; no thread is left to answer."
   "What the agent reads when the user closes the last open thread of its review.
 It says what changed, not what to do: the task's prompt says to hand the
 work in when nothing is outstanding.")
 
-(defvar harness-patch-review--last-close-drafts (make-hash-table :test #'equal)
-  "Task id -> the message the user has yet to send that its last thread is closed.
+(defconst harness-patch-review-last-reviewed-message
+  "The user reviewed the last close of this task's review; no close is left to review."
+  "What the agent reads when the user reviews the last close of its review.
+It says what changed, not what to do: the task's prompt says to hand the
+work in when nothing is outstanding.")
+
+;; Two transitions of a review leave the agent something to hear that
+;; nothing the user typed would tell it, in the working phase: the user
+;; closing the last thread to answer, and the user reviewing the last
+;; close that waited.  Each is a draft of the task's session, from
+;; "review", that the user sends with the other drafts
+;; (`patch-review/send-replies') or drops.  The two are the same kind of
+;; thing throughout -- kept in the state directory, announced to the
+;; UIs, read again whenever the review changes -- so they are kept by
+;; kind, and a kind is a plist of what its message says, when it is
+;; true, and what offers it.
+
+(defconst harness-patch-review--kinds
+  '((last-close
+     :message harness-patch-review-last-close-message
+     :option harness-patch-review-draft-on-last-close
+     :store "patch-review-last-close"
+     :event patch-review/last-close
+     :name "last close"
+     :true (lambda (_task set) (null (harness-patch-review--sent-open-threads set)))
+     :offered (lambda (set op) (harness-patch-review--last-close-p set op)))
+    (last-reviewed
+     :message harness-patch-review-last-reviewed-message
+     :option harness-patch-review-draft-on-last-reviewed
+     :store "patch-review-last-reviewed"
+     :event patch-review/last-reviewed
+     :name "last reviewed"
+     :true (lambda (_task set) (null (harness-patch-review--unreviewed-threads set)))
+     :offered (lambda (set op) (harness-patch-review--last-reviewed-p set op))))
+  "The harness's messages, by kind, and what each is.
+A kind is a plist: `:message', the constant its text is;
+`:option', the option that turns it on; `:store', the directory of the
+state documents that keep it; `:event', the event that announces it;
+`:name', what logs call it; `:true', the function saying whether the
+review still leaves the message true; and `:offered', the function
+saying whether an operation is the transition that offers it.")
+
+(defun harness-patch-review--message-kind (kind)
+  "Return what KIND, a kind of harness message, is; signal when it is none."
+  (or (cdr (assq kind harness-patch-review--kinds))
+      (signal 'harness-error (list (format "No kind of harness message %S" kind)))))
+
+(defun harness-patch-review--kind-message (kind)
+  "Return the text of the message of KIND."
+  (symbol-value (plist-get (harness-patch-review--message-kind kind) :message)))
+
+(defun harness-patch-review--kind-on-p (kind)
+  "Non-nil when the option of KIND offers its message."
+  (symbol-value (plist-get (harness-patch-review--message-kind kind) :option)))
+
+(defvar harness-patch-review--harness-drafts (make-hash-table :test #'equal)
+  "\(KIND . TASK-ID) -> the harness's message the user has yet to send.
 A draft is a plist: `:task', `:session', `:text', `:from' and `:time'.
 The draft waits for the user, who sends it with their other drafts
 \(`patch-review/send-replies'); it never goes out by itself.
-`patch-review/last-close' gives it to a UI to show.")
+`patch-review/last-close' and `patch-review/last-reviewed' give it to a
+UI to show.")
+
+(defun harness-patch-review--draft-key (kind task-id)
+  "Return the key of KIND's draft of TASK-ID."
+  (cons kind task-id))
+
+(defun harness-patch-review--draft (kind task-id)
+  "Return KIND's draft of TASK-ID kept here, or nil."
+  (gethash (harness-patch-review--draft-key kind task-id)
+           harness-patch-review--harness-drafts))
+
+(defun harness-patch-review--draft-put (kind task-id draft)
+  "Keep DRAFT as KIND's draft of TASK-ID here, or forget it when nil."
+  (let ((key (harness-patch-review--draft-key kind task-id)))
+    (if draft
+        (puthash key draft harness-patch-review--harness-drafts)
+      (remhash key harness-patch-review--harness-drafts))))
+
+(defun harness-patch-review--drafts-here (task-id)
+  "Return the harness's messages that wait in task TASK-ID, as (KIND . DRAFT)."
+  (cl-loop for (kind) on harness-patch-review--kinds by #'cdr
+           for draft = (harness-patch-review--draft kind task-id)
+           when draft collect (cons kind draft)))
+
+(defun harness-patch-review--unreviewed-threads (set)
+  "Return the threads of SET whose close waits for the user to review it.
+That is what `change-review-thread-unreviewed-p' says of each: a thread
+closed by someone else, which the user has not marked reviewed."
+  (cl-remove-if-not (lambda (thread) (change-review-thread-unreviewed-p set thread))
+                    (change-review-set-threads set)))
 
 (defun harness-patch-review--last-close-p (set op)
   "Non-nil when OP is the user closing the last sent open thread of SET.
@@ -2049,57 +2247,86 @@ in a turn of its own, and it knows."
                        (change-review-thread-comments thread))
               (null (harness-patch-review--sent-open-threads set))))))
 
-(defun harness-patch-review--last-close-valid-p (task-id)
-  "Non-nil when a last-close draft of TASK-ID is still the review's.
-The task is at work, in the working phase, and no thread with a sent
-comment is open.  A task that left the phase, or one whose thread was
-opened again, has no such message to send."
+(defun harness-patch-review--closing-entry (thread status-id)
+  "Return the history entry of THREAD that STATUS-ID names, or the close now.
+An entry that is no change of status to closed, or none at all, is nil."
+  (let ((entry (if (and (stringp status-id) (not (string-empty-p status-id)))
+                   (cl-find status-id (change-review-thread-history thread)
+                            :key (lambda (e) (plist-get e :id)) :test #'equal)
+                 (change-review-thread-closing thread))))
+    (and entry (eq (plist-get entry :status) 'closed) entry)))
+
+(defun harness-patch-review--last-reviewed-p (set op)
+  "Non-nil when OP is the user reviewing the last close that waited in SET.
+OP is a `mark-reviewed' operation whose close was one the user had not
+looked at -- a close of someone else's, never the user's own, which never
+waits -- and no thread of SET waits for the user's review now: the close
+OP marks was the last.  A mark of a close already marked changes nothing,
+and is no transition.  An `unmark-reviewed' is not one either: it puts a
+close back to review."
+  (and (eq 'mark-reviewed (intern (format "%s" (plist-get op :op))))
+       (when-let* ((thread (change-review-find-thread set (plist-get op :thread)))
+                   (entry (harness-patch-review--closing-entry
+                           thread (plist-get op :status-id)))
+                   (author (plist-get entry :author)))
+         (and (plist-get entry :reviewed)
+              (not (change-review-own-author-p set author))
+              (null (harness-patch-review--unreviewed-threads set))))))
+
+(defun harness-patch-review--draft-true-p (kind task-id)
+  "Non-nil when KIND's message is still true of task TASK-ID.
+The task is at work, in the working phase, and what the message says of
+the review holds: no thread with a sent comment is open, or no close
+waits for the user's review.  A task that left the phase, or one whose
+review says otherwise, has no such message to send."
   (condition-case nil
       (let ((task (harness-call 'task/get task-id))
-            (set (harness-patch-review--set-for task-id)))
-        (and task set
+            (set (harness-patch-review--set-for task-id))
+            (true (plist-get (harness-patch-review--message-kind kind) :true)))
+        (and task set true
              (harness-patch-review--working-task-p task)
-             (null (harness-patch-review--sent-open-threads set))))
+             (funcall true task set)))
     (error nil)))
 
-(defun harness-patch-review--last-close-draft (task)
-  "Return the draft of the harness's message for TASK, or nil.
+(defun harness-patch-review--draft-for (kind task)
+  "Return the draft of KIND's message for TASK, or nil.
 TASK has to have a session: without one the message has nowhere to go."
   (let ((session (plist-get task :session)))
     (when (and (stringp session) (not (harness-string-blank-p session)))
       (list :task (plist-get task :id)
             :session session
-            :text harness-patch-review-last-close-message
+            :text (harness-patch-review--kind-message kind)
             :from (harness-sender-system "review")
             :time (float-time)))))
 
-(defun harness-patch-review--last-close-store-name (task-id)
-  "Return the store document of TASK-ID's last-close draft."
-  (format "patch-review-last-close/%s.json"
+(defun harness-patch-review--draft-store-name (kind task-id)
+  "Return the store document of KIND's draft of TASK-ID."
+  (format "%s/%s.json" (plist-get (harness-patch-review--message-kind kind) :store)
           (replace-regexp-in-string "[^A-Za-z0-9._-]" "_" task-id)))
 
-(defun harness-patch-review--last-close-save (task-id draft)
-  "Keep DRAFT, TASK-ID's last-close message, in the state directory.
+(defun harness-patch-review--draft-save (kind task-id draft)
+  "Keep DRAFT, KIND's message of TASK-ID, in the state directory.
 With DRAFT nil the document goes.  A failure is logged: the message is
-the user's, and must not make the close fail."
+the user's, and must not make the operation fail."
   (when (harness-method-exists-p 'store/save)
     (condition-case err
         (if draft
             (harness-call 'store/save
-                          (harness-patch-review--last-close-store-name task-id) draft)
+                          (harness-patch-review--draft-store-name kind task-id) draft)
           (harness-call 'store/delete
-                        (harness-patch-review--last-close-store-name task-id)))
-      (error (harness-log 'warn "patch-review: the last close of %s was not kept: %s"
+                        (harness-patch-review--draft-store-name kind task-id)))
+      (error (harness-log 'warn "patch-review: the %s of %s was not kept: %s"
+                          (plist-get (harness-patch-review--message-kind kind) :name)
                           task-id (harness-error-message err))))))
 
-(defun harness-patch-review--last-close-read (task-id)
-  "Return the last-close draft of TASK-ID kept in the state directory, or nil.
+(defun harness-patch-review--draft-read (kind task-id)
+  "Return KIND's draft of TASK-ID kept in the state directory, or nil.
 It is there when the harness reloaded, or started again, while the user
 had not yet sent it."
   (when (harness-method-exists-p 'store/load)
     (let ((data (ignore-errors
                   (harness-call 'store/load
-                                (harness-patch-review--last-close-store-name task-id)))))
+                                (harness-patch-review--draft-store-name kind task-id)))))
       (when (and (consp data)
                  (stringp (plist-get data :text))
                  (stringp (plist-get data :session)))
@@ -2110,66 +2337,93 @@ had not yet sent it."
                                   (plist-put from :kind (harness-sender-kind from))))))
         data))))
 
-(defun harness-patch-review--set-last-close (task-id draft)
-  "Keep DRAFT as TASK-ID's last-close draft, or forget it when nil.
-Announce what changed to every UI: `patch-review/last-close' with the
-draft, or with nil when it is gone.  The draft is kept in the state
-directory too, for a harness that reloads while the user has not sent
-it."
-  (if draft
-      (puthash task-id draft harness-patch-review--last-close-drafts)
-    (remhash task-id harness-patch-review--last-close-drafts))
-  (harness-patch-review--last-close-save task-id draft)
-  (harness-emit 'patch-review/last-close task-id draft))
+(defun harness-patch-review--emit-draft (kind task-id draft)
+  "Announce DRAFT, KIND's message of TASK-ID, or its going when DRAFT is nil.
+Each kind's event is named here, where the reader and the module pages
+see it; the kind picks which one."
+  (pcase kind
+    ('last-close (harness-emit 'patch-review/last-close task-id draft))
+    ('last-reviewed (harness-emit 'patch-review/last-reviewed task-id draft))
+    (_ (signal 'harness-error (list (format "No event for the harness message %S" kind))))))
 
-(defun harness-patch-review--offer-last-close (task-id)
-  "Keep the message TASK-ID's last close leaves for the user to send.
-Only in the working phase, and only with
-`harness-patch-review-draft-on-last-close' on.  Nothing is sent: the
-message waits as a draft until the user sends the drafts
+(defun harness-patch-review--set-draft (kind task-id draft)
+  "Keep DRAFT as KIND's draft of TASK-ID, or forget it when nil.
+Announce what changed to every UI: the kind's event with the draft, or
+with nil when it is gone.  The draft is kept in the state directory too,
+for a harness that reloads while the user has not sent it.  A draft that
+is already there, saying the same, is kept as it is and announced no
+again: marking a close twice, or reading the message once more, is no
+second message."
+  (let ((old (harness-patch-review--draft kind task-id)))
+    (harness-patch-review--draft-put kind task-id draft)
+    (harness-patch-review--draft-save kind task-id draft)
+    (unless (and old draft (equal (plist-get old :text) (plist-get draft :text)))
+      (harness-patch-review--emit-draft kind task-id draft))))
+
+(defun harness-patch-review--offer-draft (kind task-id)
+  "Keep the message KIND's transition leaves for TASK-ID's user to send.
+Only in the working phase, and only with the kind's option on.  Nothing
+is sent: the message waits as a draft until the user sends the drafts
 \(`patch-review/send-replies') or drops it
-\(`patch-review/discard-last-close')."
-  (when harness-patch-review-draft-on-last-close
+\(`patch-review/discard-last-close', `patch-review/discard-last-reviewed')."
+  (when (harness-patch-review--kind-on-p kind)
     (condition-case err
-        (when (harness-patch-review--last-close-valid-p task-id)
-          (when-let* ((draft (harness-patch-review--last-close-draft
-                              (harness-call 'task/get task-id))))
-            (harness-patch-review--set-last-close task-id draft)))
-      (error (harness-log 'warn "patch-review: the message of %s's last close was not offered: %s"
-                          task-id (harness-error-message err))))))
+        (when (harness-patch-review--draft-true-p kind task-id)
+          (when-let* ((draft (harness-patch-review--draft-for
+                              kind (harness-call 'task/get task-id))))
+            (harness-patch-review--set-draft kind task-id draft)))
+      (error (harness-log 'warn "patch-review: the message of %s's %s was not offered: %s"
+                          task-id (plist-get (harness-patch-review--message-kind kind) :name)
+                          (harness-error-message err))))))
 
-(defun harness-patch-review--drop-last-close (task-id)
-  "Forget TASK-ID's last-close draft, telling UIs when there was one."
-  (let ((had (or (gethash task-id harness-patch-review--last-close-drafts)
-                 (harness-patch-review--last-close-read task-id))))
-    (remhash task-id harness-patch-review--last-close-drafts)
-    (harness-patch-review--last-close-save task-id nil)
+(defun harness-patch-review--drop-draft (kind task-id)
+  "Forget KIND's draft of TASK-ID, telling UIs when there was one."
+  (let ((had (or (harness-patch-review--draft kind task-id)
+                 (harness-patch-review--draft-read kind task-id))))
+    (harness-patch-review--draft-put kind task-id nil)
+    (harness-patch-review--draft-save kind task-id nil)
     (when had
-      (harness-emit 'patch-review/last-close task-id nil))))
+      (harness-patch-review--emit-draft kind task-id nil))))
 
-(defun harness-patch-review--last-close-here (task-id)
-  "Return TASK-ID's last-close draft while it still is the review's.
-A draft that is no longer the review's -- a thread was opened again, or
-the task left the working phase -- is forgotten, and nil is returned.
-One the harness kept in the state directory is read when the table has
-none: a reload loses the table, not the message."
-  (let ((draft (or (gethash task-id harness-patch-review--last-close-drafts)
-                   (harness-patch-review--last-close-read task-id))))
+(defun harness-patch-review--draft-here (kind task-id)
+  "Return KIND's draft of TASK-ID while it still is the review's.
+A draft that is no longer the review's -- a thread was opened again, a
+close waits for the user's review, or the task left the working phase --
+is forgotten, and nil is returned.  One the harness kept in the state
+directory is read when the table has none: a reload loses the table, not
+the message."
+  (let ((draft (or (harness-patch-review--draft kind task-id)
+                   (harness-patch-review--draft-read kind task-id))))
     (cond ((null draft) nil)
-          ((harness-patch-review--last-close-valid-p task-id)
-           (puthash task-id draft harness-patch-review--last-close-drafts)
+          ((harness-patch-review--draft-true-p kind task-id)
+           (harness-patch-review--draft-put kind task-id draft)
            draft)
-          (t (harness-patch-review--drop-last-close task-id)
+          (t (harness-patch-review--drop-draft kind task-id)
              nil))))
 
-(defun harness-patch-review--prompt-review (task text)
+(defun harness-patch-review--drop-drafts (task-id)
+  "Forget every harness message that waits in task TASK-ID."
+  (dolist (kind (mapcar #'car harness-patch-review--kinds))
+    (harness-patch-review--drop-draft kind task-id)))
+
+(defun harness-patch-review--revalidate-drafts (task-id &optional offered)
+  "Read the harness's messages of TASK-ID again, after OFFERED was offered.
+A change may leave a message untrue -- a thread opened again, a close the
+agent made that waits for the user's review, the task handed in -- and
+then it goes; one that still holds stays."
+  (dolist (kind (mapcar #'car harness-patch-review--kinds))
+    (unless (eq kind offered)
+      (harness-patch-review--draft-here kind task-id))))
+
+(defun harness-patch-review--prompt-review (task text &optional kind)
   "Send TASK's agent TEXT as a message of the harness's own, from \"review\".
-It starts a turn as a message the user typed would, and steers one
-already running (`agent/prompt').  The message says only what changed:
-whether to hand the work in is the agent's and its task prompt's.  A task
-with no session, or a harness that cannot prompt one, signals; a failure
-to reach the agent is logged."
-  (let ((session (plist-get task :session)))
+KIND names the message, for the log.  It starts a turn as a message the
+user typed would, and steers one already running (`agent/prompt').  The
+message says only what changed: whether to hand the work in is the
+agent's and its task prompt's.  A task with no session, or a harness that
+cannot prompt one, signals; a failure to reach the agent is logged."
+  (let ((session (plist-get task :session))
+        (name (if kind (plist-get (harness-patch-review--message-kind kind) :name) "review")))
     (unless (and (stringp session) (not (harness-string-blank-p session)))
       (signal 'harness-error (list "The task has no session to send its message to")))
     (unless (harness-method-exists-p 'agent/prompt)
@@ -2180,13 +2434,21 @@ to reach the agent is logged."
                                        (list (list :type "text" :text text))
                                        (list :from (harness-sender-system "review")))))
       (when (eq (harness-promise-state promise) 'rejected)
-        (signal 'harness-error (list "The message of the last close did not reach the agent")))
+        (signal 'harness-error (list "The message of the review did not reach the agent")))
       (harness-catch
        promise
        (lambda (err)
-         (harness-log 'warn "patch-review: the message of %s's last close was not sent: %s"
-                      (plist-get task :id) (harness-error-message err)))))
+         (harness-log 'warn "patch-review: the message of %s's %s was not sent: %s"
+                      (plist-get task :id) name (harness-error-message err)))))
     t))
+
+(defun harness-patch-review--last-close-here (task-id)
+  "Return the message that TASK-ID's last close waits to send, or nil."
+  (harness-patch-review--draft-here 'last-close task-id))
+
+(defun harness-patch-review--last-reviewed-here (task-id)
+  "Return the message that TASK-ID's last reviewed close waits to send, or nil."
+  (harness-patch-review--draft-here 'last-reviewed task-id))
 
 (harness-defmethod patch-review/last-close (task-id)
   "Return the message TASK-ID's last close waits for the user to send, or nil.
@@ -2200,15 +2462,37 @@ draft the review has outgrown -- a thread opened again, or the task
 handed its work in -- is forgotten, and nil returned."
   (harness-patch-review--last-close-here task-id))
 
+(harness-defmethod patch-review/last-reviewed (task-id)
+  "Return the message TASK-ID's last reviewed close waits to send, or nil.
+The message is the harness's own, from \"review\": it says that the user
+reviewed the last close that waited, and no close is left to review.  It
+is a plist of `:task', `:session', `:text', `:from' and `:time'.  A UI
+shows it as a draft, which the user sends with the other drafts
+\(`patch-review/send-replies') or drops with
+`patch-review/discard-last-reviewed'.  Only a task at work has one.  A
+draft the review has outgrown -- a close the agent made since, or the
+task handed its work in -- is forgotten, and nil returned."
+  (harness-patch-review--last-reviewed-here task-id))
+
+(defun harness-patch-review--discard (kind task-id)
+  "Forget KIND's message of TASK-ID, unsent; say whether there was one."
+  (if (harness-patch-review--draft-here kind task-id)
+      (progn
+        (harness-patch-review--drop-draft kind task-id)
+        (list :discarded t))
+    (list :discarded nil)))
+
 (harness-defmethod patch-review/discard-last-close (task-id)
   "Forget the message that TASK-ID's last thread is closed, unsent.
 Return (:discarded t) when there was one, (:discarded nil) when none
 waited."
-  (if (harness-patch-review--last-close-here task-id)
-      (progn
-        (harness-patch-review--drop-last-close task-id)
-        (list :discarded t))
-    (list :discarded nil)))
+  (harness-patch-review--discard 'last-close task-id))
+
+(harness-defmethod patch-review/discard-last-reviewed (task-id)
+  "Forget the message that TASK-ID's last close is reviewed, unsent.
+Return (:discarded t) when there was one, (:discarded nil) when none
+waited."
+  (harness-patch-review--discard 'last-reviewed task-id))
 
 ;;;; What the agent reads
 
@@ -2263,6 +2547,9 @@ draft is not shown: the user has not sent it."
 (harness-declare-event 'patch-review/last-close
                        "(TASK-ID DRAFT) when the message that a task's last review thread is closed waits for the user to send it, or when it no longer does: DRAFT is (:task :session :text :from :time), or nil.")
 
+(harness-declare-event 'patch-review/last-reviewed
+                       "(TASK-ID DRAFT) when the message that a task's last reviewed close waits for the user to send it, or when it no longer does: DRAFT is (:task :session :text :from :time), or nil.")
+
 (defvar harness-tools-handin-require-closed-threads)
 
 (defun harness-patch-review--hand-in-blocker (task)
@@ -2293,14 +2580,14 @@ On `change-review-changed-functions'."
     (harness-emit 'patch-review/changed (change-review-set-id set) op)))
 
 (defun harness-patch-review--on-deleted (id)
-  "Forget the review of task ID, which was deleted, and its last-close message."
+  "Forget the review of task ID, which was deleted, and its harness messages."
   (remhash id harness-patch-review--sets)
-  (harness-patch-review--drop-last-close id))
+  (harness-patch-review--drop-drafts id))
 
 (defun harness-patch-review--on-done (task &optional _how)
-  "Forget the last-close message of TASK, which is done."
+  "Forget the harness's messages of TASK, which is done."
   (when-let* ((id (plist-get task :id)))
-    (harness-patch-review--drop-last-close id)))
+    (harness-patch-review--drop-drafts id)))
 
 (defun harness-patch-review--init ()
   "Follow the tasks, and put the drafts in the feedback that sends one back.
@@ -2331,11 +2618,11 @@ runs first."
   ;; The messages that waited go with the tasks' state, UIs hearing of it.
   ;; They stay in the state directory, for the harness that loads next:
   ;; the user may not have sent them.
-  (clrhash harness-patch-review--last-close-drafts)
+  (clrhash harness-patch-review--harness-drafts)
   (clrhash harness-patch-review--sets))
 
 (harness-define-module 'patch-review
-  :doc "The threads of a task's review: kept in the state directory, delivered with the feedback, answered by the agent."
+  :doc "The threads of a task's review: kept in the state directory, delivered with the feedback, answered by the agent, with the messages their transitions leave."
   :requires '(store tasks tools-review thread-reply)
   :init #'harness-patch-review--init
   :shutdown #'harness-patch-review--shutdown)

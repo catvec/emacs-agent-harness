@@ -505,6 +505,16 @@ write-up) or reject (feedback that sends a task back from review).
 \(search), with no ID, is the board's search: the box takes a line to
 find tasks, sessions and commands with, or to act on tasks
 \(`harness-tasks-search').")
+(defvar-local harness-ui-tasks--compose-nonce 0
+  "Raised each time the compose box is set to a draft, by `--set-compose'.
+The target alone cannot tell one draft from the next when the box is
+reused for the same purpose: submitting a new task empties the box and
+leaves the target nil, exactly as it was before.  This is what makes
+the replacement a replacement, so live voice drops what was spoken into
+the draft that is gone instead of inserting it into the next one.  Only
+`--set-compose' raises it -- typing, a redraw and the Submit / Refine /
+Plan toggle leave it alone -- so dictation into the box that is still
+there is never mistaken for a move.")
 (defvar-local harness-ui-tasks--mode 'submit
   "What the compose box does with a new task: `submit', `refine' or `plan'.
 Submit starts it.  Refine has an agent write it up, and Plan has a
@@ -1137,9 +1147,10 @@ back from review that took its slot (`:return-reason' preempted), named
 by its title when the board has it; \"slot taken back by\" the task
 waiting on you whose slot it worked in, once you answered (reclaimed);
 \"sent back from review\" for one the user sent back while no slot
-could take it; \"quota\" or \"budget\" for one whose turn stopped for
-lack of either, and \"stalled\" for one a transient failure stopped and
-the harness is trying again.  Each carries on where it stopped when it
+could take it; \"quota\", \"budget\" or \"catalogue\" for one whose turn
+stopped for lack of either, or for an endpoint catalogue that could not
+be read, and \"stalled\" for one a transient failure stopped and the
+harness is trying again.  Each carries on where it stopped when it
 starts again."
   (pcase (format "%s" (or (plist-get task :return-reason) "returned"))
     ("preempted"
@@ -1151,6 +1162,7 @@ starts again."
     ("sent-back" "sent back from review")
     ("quota" "quota")
     ("budget" "budget")
+    ("catalogue" "catalogue")
     ("stalled" "stalled")
     (_ "paused")))
 
@@ -1212,7 +1224,8 @@ line of a card.  See `harness-ui-tasks--clock'."
   "The fact on TASK's card in COLUMN that says what holds it back, or nil.
 Only a queued task in Pending has one: its hold, short
 \(`harness-ui-tasks--hold-text'), in the held face while it waits for
-quota or a budget, dim while it is only paused."
+quota, a budget or the endpoint catalogue, dim while it is only
+paused."
   (when-let* (((eq column 'pending))
               (hold (plist-get task :hold)))
     (propertize (harness-ui-tasks--hold-text hold t)
@@ -1331,7 +1344,8 @@ cost -- is in the tooltip of the title instead
 \(`harness-ui-tasks--figures').  Its priority is not among them: the
 arrow before the title says that (`harness-ui-tasks--priority-mark').
 A cell is dimmed (`harness-dim-face'), the hold's apart: it stands out
-while a task waits for quota, a budget or a stalled turn's next try."
+while a task waits for quota, a budget, the endpoint catalogue or a
+stalled turn's next try."
   (let* ((todos (harness-ui-tasks--todos session))
          (started (plist-get task :started))
          (cells
@@ -1791,7 +1805,7 @@ So it shows while the command it runs prompts or works."
   (puthash key (list :at (float-time) :requests 0) harness-ui-tasks--pressed)
   (when (harness-ui-tasks--board-p (current-buffer))
     (harness-ui-tasks--render t)
-    (redisplay)))
+    (harness-latency-redisplay)))
 
 (defun harness-ui-tasks--let-go (key)
   "Let the button KEY go: it is drawn up again."
@@ -3323,6 +3337,50 @@ edited."
   "Non-nil when the compose box takes the board's search (`harness-tasks-search')."
   (eq (car harness-ui-tasks--target) 'search))
 
+(defun harness-ui-tasks--compose-identity ()
+  "Return which draft this board's compose box is now, for live voice.
+Two things make a draft: what the box composes into -- its
+`harness-ui-tasks--target', a new task, a search, an edit, an answer,
+feedback -- and which draft of that purpose it is, its
+`harness-ui-tasks--compose-nonce'.  Both are needed, because the board
+reuses one buffer for all of them and returns to the same target when a
+task is submitted, so the target alone would call the empty box after a
+submit the same draft the spoken words went into.
+
+Only `--set-compose' changes either, so a redraw, a keystroke, a change
+of the Submit / Refine / Plan toggle and anything else that leaves the
+box's purpose alone leave this alone too, and a dictation into the box
+that is still there is never dropped."
+  (cons 'draft (cons harness-ui-tasks--compose-nonce
+                     (copy-tree harness-ui-tasks--target))))
+
+(defun harness-ui-tasks--compose-context ()
+  "Return what the board's compose box composes into.
+A message to a task's session (`harness-ui-tasks--messaging-p') goes to
+that session, as typing it and sending does; a search is a search; and
+the box that composes a task is a draft, because its words are a task
+until C-c C-c submits them, never a message to any chat.  A task with
+no session yet is a draft too: its words stay in the box, where its own
+submit says what is missing.
+
+Every draft names its `:identity' (`harness-ui-tasks--compose-identity'):
+the board reuses this one buffer for a new task, a search, an edit, an
+answer, feedback and a message, so the buffer alone cannot tell a draft
+spoken into from the one that replaced it."
+  (cond
+   ((harness-ui-tasks--searching-p)
+    (list :kind 'draft :name "Search"
+          :identity (harness-ui-tasks--compose-identity)))
+   ((harness-ui-tasks--messaging-p)
+    (let ((session (plist-get (harness-ui-tasks--find (cdr harness-ui-tasks--target))
+                              :session)))
+      (if (and (stringp session) (not (string-empty-p session)))
+          (list :kind 'session :session session :name "Task message")
+        (list :kind 'draft :name "Task message"
+              :identity (harness-ui-tasks--compose-identity)))))
+   (t (list :kind 'draft :name "Task board"
+            :identity (harness-ui-tasks--compose-identity)))))
+
 (defun harness-ui-tasks--compose-label ()
   "Return the compose box's label, which says what the box does.
 That depends on `harness-ui-tasks--target': a new task by default."
@@ -4305,11 +4363,18 @@ types in the box otherwise (`harness-ui-tasks--box-key-hint')."
 (defun harness-ui-tasks--set-compose (text target)
   "Put TEXT in the compose box for TARGET and move there.
 Another TARGET ends the search the box took, keys and all
-\(`harness-ui-tasks-search-end')."
+\(`harness-ui-tasks-search-end').
+
+The box is a new draft now, whatever TARGET is: this is the one place
+the board replaces what its box composes into, so it raises
+`harness-ui-tasks--compose-nonce'.  A submit empties the box back to a
+new task, which has the same target it had before -- the nonce is what
+says the draft those words were spoken into is gone."
   (when (and (harness-ui-tasks--searching-p) (not (eq (car target) 'search))
              (fboundp 'harness-ui-tasks-search-end))
     (harness-ui-tasks-search-end))
   (setq harness-ui-tasks--target target)
+  (cl-incf harness-ui-tasks--compose-nonce)
   (harness-ui-tasks--render-tail text)
   (goto-char harness-compose-end)
   (dolist (w (get-buffer-window-list nil nil t)) (set-window-point w (point))))
@@ -4882,6 +4947,10 @@ act on from there.
   (harness-compose-setup :project #'harness-ui-tasks--scope-dir
                          :placeholder #'harness-ui-tasks--placeholder
                          :redraw #'harness-ui-tasks--render-tail
+                         ;; The box composes a task, not a message to any
+                         ;; session: its words are a draft until C-c C-c
+                         ;; submits them.
+                         :context #'harness-ui-tasks--compose-context
                          ;; The board stays at the top; the gap opens between it and the box.
                          :bottom (lambda () (marker-position harness-ui-tasks--list-end))))
 
@@ -5478,8 +5547,9 @@ written up or planned for the backlog (`harness-ui-tasks--new-opts')."
                          "Kept for when the task starts (queue suspended)")
                         ((and returned (equal (format "%s" (plist-get task :return-reason)) "sent-back"))
                          "Kept for when the task starts")
-                        ;; Paused, or waiting for quota or a budget: the
-                        ;; harness keeps the message for the start too.
+                        ;; Paused, or waiting for quota, a budget or the
+                        ;; endpoint catalogue: the harness keeps the message
+                        ;; for the start too.
                         ((and returned (plist-get task :hold))
                          "Kept for when the task starts")
                         (t "Sent")))))

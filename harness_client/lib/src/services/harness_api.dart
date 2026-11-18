@@ -3,6 +3,7 @@ import 'dart:async';
 import '../acp/acp_client.dart';
 import '../acp/acp_message.dart';
 import '../acp/capabilities.dart';
+import '../models/board.dart';
 import '../models/computer.dart';
 import '../models/memory.dart';
 import '../models/workspace_graph.dart';
@@ -1095,6 +1096,58 @@ class HarnessApi {
     });
   }
 
+  /// The messages that wait to be sent in [id], read where they
+  /// stand: each session's own queue and the messages its running turn
+  /// has not taken.  [scope] is `workspace', `thread', `session' or
+  /// `all'; [thread] names the thread a `thread' scope reads.
+  Future<WorkspaceInbox> workspaceInbox(
+    String id, {
+    String scope = 'workspace',
+    String? thread,
+    String? session,
+  }) async {
+    return WorkspaceInbox.fromWire(
+      await extension('workspace/inbox', {
+        'id': id,
+        'opts': {
+          'scope': scope,
+          if (thread != null && thread.isNotEmpty) 'thread': thread,
+          if (session != null && session.isNotEmpty) 'session': session,
+        },
+      }),
+    );
+  }
+
+  /// Move the message [message] names to thread [to] in workspace [id].
+  /// [message] names the message by `node' or `queue', or is the string
+  /// `last'; words are the last resort, so a message is never guessed
+  /// from text when its node is known.
+  Future<WorkspaceReassignment> reassignWorkspaceMessage(
+    String id, {
+    String? node,
+    String? queue,
+    String? last,
+    required String to,
+    String? by,
+  }) async {
+    return WorkspaceReassignment.fromWire(
+      await extension('workspace/reassign', {
+        'id': id,
+        // `last' is the word the harness reads as "the last user
+        // message the workspace shows"; a node or a queue id names one
+        // message exactly, and words are the last resort.
+        'message': (last != null && last.isNotEmpty)
+            ? 'last'
+            : {
+                if (node != null && node.isNotEmpty) 'node': node,
+                if (queue != null && queue.isNotEmpty) 'queue': queue,
+              },
+        'to': to,
+        if (by != null && by.isNotEmpty) 'opts': {'by': by},
+      }),
+    );
+  }
+
   Future<WorkspaceThread> createWorkspaceThread(String id, String title) async {
     return WorkspaceThread.fromWire(
       await extension('workspace/thread/create', {'id': id, 'title': title}),
@@ -1316,6 +1369,7 @@ class HarnessApi {
       }),
     );
   }
+
   // The workspace's speech floor: one record the harness keeps, so
   // every client shows the same queue and the same solo.
 
@@ -1395,6 +1449,263 @@ class HarnessApi {
   Future<WorkspaceSpeech> workspaceSpeechClear(String id) async {
     return WorkspaceSpeech.fromWire(
       await extension('workspace/speech/clear', {'id': id}),
+    );
+  }
+
+  // ---- The freeform board ------------------------------------------------
+
+  /// Make a board called [name] in [project], and answer the board's id.
+  /// The id is a client's own name for it: a board's identity is the id, so
+  /// the app makes one that is readable and cannot collide with another.
+  Future<BoardDocument> boardCreate(
+    String board,
+    String name, {
+    String? project,
+  }) async {
+    return BoardDocument.fromWire(
+      await extension('board/create', {
+        'id': board,
+        'name': name,
+        if ((project ?? '').isNotEmpty) 'opts': {'project': project},
+      }),
+    );
+  }
+
+  /// The boards the harness keeps, newest first; [project] keeps one
+  /// project's.  The engine reads them through `board/list`, whose only
+  /// argument is its option object, so the project travels inside `opts`.
+  Future<List<BoardSummary>> boardList({String? project}) async {
+    if (!can('board/list')) return const [];
+    final answer = await extensionRaw('board/list', {
+      if (project != null && project.isNotEmpty)
+        'opts': {'project': project, 'all': false},
+    });
+    return [
+      for (final wire in asMapList(answer)) BoardSummary.fromWire(wire),
+    ];
+  }
+
+  /// One board as a client draws it, for [diagram] (the first by default)
+  /// and with the objects near [near].
+  Future<BoardDocument> boardGet(
+    String board, {
+    String? diagram,
+    String? near,
+    Duration? timeout,
+  }) async {
+    if (!can('board/get')) {
+      throw const AcpException(-32601, 'board/get is unavailable.');
+    }
+    return BoardDocument.fromWire(
+      await extension(
+        'board/get',
+        {
+          'id': board,
+          if ((diagram ?? '').isNotEmpty || (near ?? '').isNotEmpty)
+            'opts': {
+              if ((diagram ?? '').isNotEmpty) 'diagram': diagram,
+              if ((near ?? '').isNotEmpty) 'near': near,
+            },
+        },
+        timeout,
+      ),
+    );
+  }
+
+  /// The patch [ops] would make on [board]: validated, not committed.
+  Future<BoardPatchAnswer> boardPatch(
+    String board,
+    List<Map<String, Object?>> ops, {
+    String? diagram,
+    List<String>? scope,
+  }) async {
+    return BoardPatchAnswer.fromWire(
+      await extension('board/patch', {
+        'id': board,
+        'ops': ops,
+        if ((diagram ?? '').isNotEmpty || (scope ?? const []).isNotEmpty)
+          'opts': {
+            if ((diagram ?? '').isNotEmpty) 'diagram': diagram,
+            if ((scope ?? const []).isNotEmpty) 'scope': scope,
+          },
+      }),
+    );
+  }
+
+  /// The exact batch [ops], rendered and diagnosed; nothing changes.
+  Future<BoardPatchAnswer> boardPreview(
+    String board,
+    List<Map<String, Object?>> ops, {
+    String? diagram,
+    List<String>? scope,
+  }) async {
+    return BoardPatchAnswer.fromWire(
+      await extension('board/preview', {
+        'id': board,
+        'ops': ops,
+        if ((diagram ?? '').isNotEmpty || (scope ?? const []).isNotEmpty)
+          'opts': {
+            if ((diagram ?? '').isNotEmpty) 'diagram': diagram,
+            if ((scope ?? const []).isNotEmpty) 'scope': scope,
+          },
+      }),
+    );
+  }
+
+  /// Apply the batch [patch] names, at the revision [expected] the caller
+  /// read, under the idempotency [key].  A key seen before answers what it
+  /// answered then; a batch made against another revision is refused.
+  Future<BoardPatchAnswer> boardCommit(
+    String board, {
+    required String patch,
+    required String hash,
+    required int expected,
+    required String key,
+    String? diagram,
+    List<Map<String, Object?>>? ops,
+    List<String>? scope,
+  }) async {
+    final opts = <String, Object?>{
+      'key': key,
+      if (diagram != null && diagram.isNotEmpty) 'diagram': diagram,
+      if (ops != null && ops.isNotEmpty) 'ops': ops,
+      if (scope != null && scope.isNotEmpty) 'scope': scope,
+    };
+    return BoardPatchAnswer.fromWire(
+      await extension('board/commit', {
+        'id': board,
+        // The engine's argument is `patch-id`: a commit names the patch the
+        // preview returned, not the batch it was made from.
+        'patch-id': patch,
+        'hash': hash,
+        'expected': expected,
+        // The engine reads the batch's extra options from a single `opts`
+        // object, as it does for `board/patch`.
+        'opts': opts,
+      }),
+    );
+  }
+
+  /// Take back the newest commit of [board], or the one [revision] names;
+  /// [dryRun] answers the operations without committing them.
+  Future<BoardPatchAnswer> boardUndo(
+    String board, {
+    int? revision,
+    bool dryRun = false,
+  }) async {
+    return BoardPatchAnswer.fromWire(
+      await extension('board/undo', {
+        'id': board,
+        if (revision != null || dryRun)
+          'opts': {
+            if (revision != null) 'revision': revision,
+            if (dryRun) 'dry-run': true,
+          },
+      }),
+    );
+  }
+
+  /// Ask a connected client to show a place on [board].  The answer says
+  /// whether one was there to hear it, never that one was when none was.
+  Future<BoardPlace> boardFocus(
+    String board, {
+    String? diagram,
+    String? object,
+    int? revision,
+  }) async {
+    return BoardPlace.fromWire(
+      await extension('board/focus', {
+        'id': board,
+        if ((diagram ?? '').isNotEmpty ||
+            (object ?? '').isNotEmpty ||
+            revision != null)
+          'opts': {
+            if ((diagram ?? '').isNotEmpty) 'diagram': diagram,
+            if ((object ?? '').isNotEmpty) 'object': object,
+            if (revision != null) 'revision': revision,
+          },
+      }),
+    );
+  }
+
+  /// The client state the harness stored for [board]: viewports, selections
+  /// and the last focus request.  Navigation writes this, not a revision.
+  Future<Map<String, BoardClientView>> boardViews(String board) async {
+    final answer = await extensionRaw('board/views', {'id': board});
+    return {
+      for (final entry in asMap(answer).entries)
+        entry.key: BoardClientView.fromWire(asMap(entry.value)),
+    };
+  }
+
+  /// Pin [board]'s revision as a delivered artifact: a copy of the document
+  /// as it is now, which later edits cannot rewrite.  [task] is the task
+  /// that delivers it, [diagram] the landing diagram and [object] a place on
+  /// it.
+  Future<BoardPin> boardPin(
+    String board, {
+    String? task,
+    String? diagram,
+    String? object,
+    String? title,
+  }) async {
+    return BoardPin.fromWire(
+      await extension('board/pin', {
+        'id': board,
+        'opts': {
+          if ((task ?? '').isNotEmpty) 'task': task,
+          if ((diagram ?? '').isNotEmpty) 'diagram': diagram,
+          if ((object ?? '').isNotEmpty) 'object': object,
+          if ((title ?? '').isNotEmpty) 'title': title,
+        },
+      }),
+    );
+  }
+
+  /// The pinned revisions of [board], newest first: the artifacts tasks
+  /// delivered, which later edits cannot rewrite.
+  Future<List<BoardPin>> boardPins(String board) async {
+    final answer = await extensionRaw('board/pins', {'id': board});
+    return [for (final item in asList(answer)) BoardPin.fromWire(asMap(item))];
+  }
+
+  /// One pin of [board] as it was: the document it kept and the rendering of
+  /// that document, read from the snapshot rather than from the board.
+  Future<BoardPinnedRevision> boardPinned(String board, String pin) async {
+    final answer = asMap(
+      await extensionRaw('board/pins', {
+        'id': board,
+        'opts': {'pin': pin},
+      }),
+    );
+    return BoardPinnedRevision(
+      pin: BoardPin.fromWire(asMap(answer['pin'])),
+      document: BoardDocument.fromWire(asMap(answer['document'])),
+      image: asString(answer['image']),
+    );
+  }
+
+  /// Discuss one place of [board] in a task's review: a native thread of
+  /// that review, anchored to the object at the revision on screen.
+  Future<Map<String, Object?>> boardDiscuss(
+    String board,
+    String object, {
+    required String task,
+    String? diagram,
+    required String text,
+    String? thread,
+  }) async {
+    return asMap(
+      await extensionRaw('board/discuss', {
+        'id': board,
+        'object': object,
+        'opts': {
+          'task': task,
+          'text': text,
+          if ((diagram ?? '').isNotEmpty) 'diagram': diagram,
+          if ((thread ?? '').isNotEmpty) 'thread': thread,
+        },
+      }),
     );
   }
 }

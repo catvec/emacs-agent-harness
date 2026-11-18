@@ -1,0 +1,65 @@
+Readdir order vs name order: the same skill on ext4 and on tmpfs
+
+One skill directory, the same file names, the same sizes and the same
+SKILL.md, made in the same creation order on two filesystems: ext4 at
+/tmp and tmpfs at /dev/shm.  Both are scanned with the count bound at 3.
+"before" is `harness-skills-scan-files' as it was at 3cba0da; "after" is
+the fixed walk in this branch.
+
+Produced by `readdir-order.el` beside this file, at commit 3db152b:
+
+    emacs -Q --batch -L lisp -L lisp/modules -L lisp/ui -L test -L . \
+      -l docs/evidence/skill-file-bounds/readdir-order.el
+
+It builds the two directories itself and deletes them again, so the
+output is the same on any machine whose /tmp is ext4 and whose /dev/shm
+is tmpfs; the directory names carry the Emacs process id.
+
+creation order:  file-3.txt file-5.txt file-1.txt file-4.txt file-0.txt file-2.txt
+count bound:     3
+
+== ext4  (/tmp/harness-readdir-evidence-24/flat)
+   filesystem:     ext4
+   readdir order:  file-0.txt file-2.txt file-3.txt SKILL.md file-1.txt file-4.txt file-5.txt
+   before the fix: ("file-0.txt" "file-2.txt" "file-3.txt")
+   after  the fix: ("file-0.txt" "file-1.txt" "file-2.txt")
+   fingerprint before: fp-e6d9a91fcdce47cc3340995fb7fc574b
+   fingerprint after : fp-c06a0a0307c448864dc3f7b66ba9272d
+
+== tmpfs  (/dev/shm/harness-readdir-evidence-24/flat)
+   filesystem:     tmpfs
+   readdir order:  file-3.txt file-5.txt file-1.txt file-4.txt file-0.txt file-2.txt SKILL.md
+   before the fix: ("file-1.txt" "file-3.txt" "file-5.txt")
+   after  the fix: ("file-0.txt" "file-1.txt" "file-2.txt")
+   fingerprint before: fp-6d11db593da67590dc3bb3fe982cbb6f
+   fingerprint after : fp-c06a0a0307c448864dc3f7b66ba9272d
+
+== the two machines compared
+   before the fix: the same skill on ext4 and on tmpfs
+     files:        different -- ("file-0.txt" "file-2.txt" "file-3.txt") vs
+                            ("file-1.txt" "file-3.txt" "file-5.txt")
+     fingerprint:  different -- fp-e6d9a91fcdce47cc3340995fb7fc574b vs fp-6d11db593da67590dc3bb3fe982cbb6f
+   after the fix:
+     files:        the same -- ("file-0.txt" "file-1.txt" "file-2.txt")
+     fingerprint:  the same -- fp-c06a0a0307c448864dc3f7b66ba9272d
+
+The two readdir orders differ because the filesystems differ: ext4
+returns a hash order, tmpfs returns creation order.  Before the fix the
+bound cut whichever names came back first, so the listing and the
+fingerprint were a property of the filesystem and of the order the files
+were made in; the same skill on two machines disagreed.  After the fix
+both read the directory in name order, and the listing and the
+fingerprint are the same on both.
+
+The repository's own suite showed the same thing.  On the unpatched tree
+with TMPDIR on ext4, harness-skills-scan-bounds-what-it-lists failed in
+12 of 12 runs with exactly this shape -- expected ("file-0.txt"
+"file-1.txt" "file-2.txt"), got ("file-0.txt" "file-2.txt"
+"file-3.txt") -- and the same suite, same tree, with TMPDIR on tmpfs,
+passed.
+
+With the fix in place, the new regression
+harness-skills-scan-bounds-in-name-order-whatever-readdir-says fails
+against the pre-fix walk (it gets "b-notes/one.txt" first, without
+"b-notes/inner/three.txt") and passes against the fixed one; and
+harness-skills-scan-bounds-what-it-lists is untouched and passes.

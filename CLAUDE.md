@@ -85,26 +85,42 @@
   is kept under `scripts/.dev/test-logs/<suite>.log`, and the run's own
   lines and summary in `last-run.txt`, so read the log instead of
   re-running.
+- **A failure is work to do, not a baseline.**  Every suite that fails is a
+  defect in this tree, whether this branch made it or it was already on
+  `main`: investigate it, find the cause, and repair it with a regression
+  that fails before the fix and passes after it.  Leave the code better
+  than you found it.  Never dismiss one as pre-existing, somebody else's,
+  flaky or out of scope; never skip, delete, weaken or relabel a test to get
+  green; never take a narrower rerun, a passing wrapper or a stamp as a
+  failing run's result.  A repair another live task already owns is
+  coordinated by naming that task and its evidence, not by leaving the
+  failure in place.  The runner and the app's check print this rule with
+  the failures themselves (`scripts/test.sh`,
+  `harness_client/tool/check_build.sh`).
 - Before claiming that tests pass, use this checklist (a baseline failure
   is still a failure, not a passing run):
   1. Commit the final tree, then run `scripts/test.sh` with no arguments.
      Save its whole output to a log; capture its exit status immediately
      and return that status from the command. A trailing `echo` or a pipe
      can otherwise hide a failing exit status.
-  2. Read the final summary and each failing suite's saved log. Run
-     `scripts/test.sh --status` without rerunning tests: it checks the
-     structured result in `scripts/.dev/test-stamp.json`, requires a full
-     passing run for the current clean commit, and names failed suites.
-     A selected run, an unfinished run, or an older commit is not evidence
-     that the final tree passed.
+  2. Read the final summary and each failing suite's saved log, and
+     repair every failure it names.  Run `scripts/test.sh --status`
+     without rerunning tests: it checks the structured result in
+     `scripts/.dev/test-stamp.json`, requires a full passing run for the
+     current clean commit, and names failed suites.  A selected run, an
+     unfinished run, or an older commit is not evidence that the final
+     tree passed.
   3. Report full-suite status separately from focused checks and lint.
      Only say "all tests pass" when the full run has zero failed suites
      and exit 0; retain skipped counts where relevant. If it failed,
      state **full suite FAILED**, its exit status and the failing tests,
-     even if the same failure occurs at the base. Fix the failure when
-     appropriate, or explicitly report the blocker; never relabel it as
-     a pass. Quote the actual run's tool call, not a successful wrapper
-     command or a narrower rerun.
+     even if the same failure occurs at the base: a base failure is
+     still a failure, and repairing it is part of the work.  Only a
+     genuine environment or access blocker, reported with the failing
+     command, its exit status, the tests it affects, the evidence and
+     the smallest next action, leaves a failure in place.  Never relabel
+     it as a pass. Quote the actual run's tool call, not a successful
+     wrapper command or a narrower rerun.
 - Run `scripts/lint.sh` before you hand in.
 - A change to the Flutter app (`harness_client/`: `lib/`, `test/`,
   `android/`, `assets/`, `pubspec.yaml`, `pubspec.lock`) is checked by

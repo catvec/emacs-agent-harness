@@ -38,6 +38,19 @@
 ;; at once: the `agent/stop' filters may answer it with a message of the
 ;; harness's and a step more, a few times at most (`harness-agent--stopped').
 ;;
+;; Voice controls are not user prompts.  `agent/voice-control' records a
+;; hint and a control event: "interrupt" audits playback interruption
+;; without cancelling work; "cancel" requires the opaque `:turn-id'
+;; captured from `agent/activity'.  A completed or replaced turn cannot
+;; cancel the next one.  The result distinguishes an accepted request,
+;; an already ended turn, a stale token and unavailable control, with
+;; per-call outcomes for completed tools and unsupported cancellation.
+;; Only a foreground bash run in the shared runtime currently supplies
+;; an `agent/tool-canceller'; its closure captures that exact execution
+;; before the model is cancelled.  Other tools and unshared commands
+;; have no supported stop.  Neither an accepted request nor a completed
+;; call promises rollback, undone effects or background jobs stopped.
+;;
 ;; A tool result may carry pictures for the model (`:images', as read_file
 ;; on an image gives): a hosted loop is handed them with the result, a
 ;; native one reads them from the transcript with its next request, and
@@ -245,6 +258,38 @@ Each is (CALL-ID :tool NAME :title TITLE :since FLOAT :checking BOOL
 tool reported (`tools/progress'), `:note' the note it shows under its
 call (`tools/note').")
 
+(defvar harness-agent--control-turns (make-hash-table :test 'eq :weakness 'key)
+  "Turn -> its stable control identity and tool completion records.
+Each is (:turn-id TOKEN :tools ((CALL-ID :tool NAME :completed BOOL
+:interrupted BOOL) ...)).  Kept beside turn structs so a reload also
+works with turns created before this API existed.")
+
+(defvar harness-agent--latest-control-turns (make-hash-table :test 'equal)
+  "Session id -> its newest control record, running or ended.
+Only the newest turn is retained: an older token is stale, never a
+request to cancel whatever runs now.")
+
+(defun harness-agent--control-turn (turn)
+  "Return TURN's control record, creating its opaque identity once."
+  (let ((record (or (gethash turn harness-agent--control-turns)
+                    (puthash turn (list :turn-id (harness-uuid) :tools nil)
+                             harness-agent--control-turns))))
+    (when (eq turn (gethash (harness-agent-turn-session-id turn) harness-agent--turns))
+      (puthash (harness-agent-turn-session-id turn) record harness-agent--latest-control-turns))
+    record))
+
+(defun harness-agent--control-tool-ended (record call-id &optional interrupted)
+  "Mark RECORD's CALL-ID completed, or INTERRUPTED without a known result."
+  (when-let* ((call (assoc call-id (plist-get record :tools))))
+    (setcdr call (plist-put (cdr call) (if interrupted :interrupted :completed) t))))
+
+(defun harness-agent--on-tool-finished (sid call _result)
+  "Record CALL's completion before its asynchronous result reaches the agent."
+  (let ((record (gethash sid harness-agent--latest-control-turns)))
+    (when (and (plist-get call :turn-id)
+               (equal (plist-get call :turn-id) (plist-get record :turn-id)))
+      (harness-agent--control-tool-ended record (plist-get call :id)))))
+
 (defvar harness-agent--progress-timers (make-hash-table :test 'equal)
   "Session id -> the timer that announces held-back tool progress.")
 
@@ -356,11 +401,16 @@ ACTIVITY is a plist with `:phase', or nil once the turn is over.  It
 keeps the start time of the activity it continues (same phase and
 tool) unless it brings its own `:since'."
   (let* ((old (gethash sid harness-agent--activities))
+         (turn (gethash sid harness-agent--turns))
+         (turn-id (and turn (plist-get (harness-agent--control-turn turn) :turn-id)))
          (new (and activity
-                   (append (harness-plist-remove activity :since)
+                   (append (harness-plist-remove activity :since :turn-id :cancelling)
+                           (and turn-id (list :turn-id turn-id))
+                           (and turn (harness-agent-turn-cancelled turn) (list :cancelling t))
                            (list :since
                                  (or (plist-get activity :since)
-                                     (and old (eq (plist-get old :phase) (plist-get activity :phase))
+                                     (and old (equal (plist-get old :turn-id) turn-id)
+                                          (eq (plist-get old :phase) (plist-get activity :phase))
                                           (equal (plist-get old :tool) (plist-get activity :tool))
                                           (plist-get old :since))
                                      (float-time)))))))
@@ -430,12 +480,22 @@ provider waiting for it."
 It counts as having its permission checked until that is decided."
   (puthash sid (append (gethash sid harness-agent--calls)
                        (list (list call-id :tool name :title title :since (float-time) :checking t)))
-           harness-agent--calls))
+           harness-agent--calls)
+  (when-let* ((turn (gethash sid harness-agent--turns)))
+    (let ((record (harness-agent--control-turn turn)))
+      (setf (plist-get record :tools)
+            (append (plist-get record :tools) (list (list call-id :tool name)))))))
 
-(defun harness-agent--remove-call (sid call-id)
-  "Record that SID's tool call CALL-ID is over."
-  (let ((calls (cl-remove call-id (gethash sid harness-agent--calls) :key #'car :test #'equal)))
-    (if calls (puthash sid calls harness-agent--calls) (remhash sid harness-agent--calls))))
+(defun harness-agent--remove-call (sid call-id &optional turn)
+  "Record that SID's tool call CALL-ID of TURN is over.
+A late result of an old TURN must not remove a newer turn's call with
+the same provider id.  Without TURN, use SID's current turn."
+  (setq turn (or turn (gethash sid harness-agent--turns)))
+  (when turn
+    (harness-agent--control-tool-ended (harness-agent--control-turn turn) call-id))
+  (when (or (null turn) (harness-agent--current-p turn))
+    (let ((calls (cl-remove call-id (gethash sid harness-agent--calls) :key #'car :test #'equal)))
+      (if calls (puthash sid calls harness-agent--calls) (remhash sid harness-agent--calls)))))
 
 (defun harness-agent--set-call (sid call-id &rest props)
   "Set PROPS on SID's running tool call CALL-ID; return the call, or nil."
@@ -492,8 +552,14 @@ every line, and a multiline note travels whole."
 
 (harness-defmethod agent/activity (session-id)
   "Return what SESSION-ID's running turn is doing now, or nil.
-The value is a plist (:phase PHASE :since FLOAT ...), `:since' being
-when PHASE began.  PHASE is `waiting' (for the model), `thinking',
+The value is a plist (:phase PHASE :since FLOAT :turn-id TOKEN ...),
+`:since' being when PHASE began.  TOKEN is an opaque string stable for
+this turn, including its initial gate before any activity was reported;
+capture it for a later `agent/voice-control' cancellation.  Another turn
+always has another token, and an ended turn has no activity.  An existing
+unscoped activity record may have no token.  With `:cancelling' non-nil,
+cancellation of this turn was requested.  PHASE
+is `waiting' (for the model), `thinking',
 `writing', `tool-input' (the model writes the input of a call to
 `:tool', `:chars' characters so far), `compacting', or `tool': calls
 run, the oldest of them `:tool' with `:title', `:checking' while its
@@ -502,7 +568,15 @@ when several run.  A `tool' phase also carries `:calls', one plist per
 running call (:call-id, :tool, :title, :detail, :note and :since), the
 `:note' being what the call shows under its own block in a chat.
 Every change is announced as `agent/activity-changed'."
-  (gethash session-id harness-agent--activities))
+  (let ((turn (gethash session-id harness-agent--turns))
+        (activity (gethash session-id harness-agent--activities)))
+    (if turn
+        (append (harness-plist-remove activity :turn-id :cancelling)
+                (list :turn-id (plist-get (harness-agent--control-turn turn) :turn-id))
+                (and (harness-agent-turn-cancelled turn) (list :cancelling t)))
+      ;; Keep unscoped activity records readable without inventing a
+      ;; cancellation token when there is no tracked turn.
+      activity)))
 
 (defun harness-agent--show-running (session-id)
   "Show SESSION-ID, whose turn waits in a gate, as running.
@@ -900,6 +974,11 @@ for a model of SESSION that reads no images, which is sent none."
         (if (or (<= total limit) (not (harness-agent--vision-p session)))
             messages
           (let ((chunk (max 1 (/ limit 2))))
+            ;; A request that lost pictures is not the one the provider
+            ;; read: the results that held them are rewritten.  The session
+            ;; is told, so a body kept for it is dropped with its reason
+            ;; rather than refused at the transport.
+            (harness-emit 'agent/images-pruned (plist-get session :id) total limit)
             (harness-agent--drop-oldest-images
              messages (min total (* chunk (ceiling (- total limit) chunk))))))))))
 
@@ -1123,6 +1202,7 @@ turn running across a reload may still hold."
       (append (list :id (plist-get entry :node) :text (plist-get entry :text)
                     :ts (plist-get entry :ts))
               (and (plist-get entry :from) (list :from (plist-get entry :from)))
+              (and (plist-get entry :meta) (list :meta (plist-get entry :meta)))
               (and blocks (not (harness-agent--only-text-p blocks))
                    (list :blocks (mapcar #'harness-agent--display-block blocks)))))))
 
@@ -1157,7 +1237,7 @@ the messages that wait must not stop the turn from delivering them."
                               (delq nil (mapcar #'harness-agent--steering-item
                                                 (harness-agent-turn-steering turn)))))))))
 
-(defun harness-agent--message-entry (blocks from)
+(defun harness-agent--message-entry (blocks from &optional meta)
   "Return the entry of BLOCKS, a message from FROM that waits for the model.
 It is what the turn keeps of a message it has not recorded: `:node', the
 id the message will have as a node of the transcript, `:text', `:blocks'
@@ -1166,15 +1246,18 @@ and `:ts', when it was sent, with `:from' when FROM, who sent it (see
 which a hosted loop is handed with the tool result that delivers it
 \(`harness-agent--with-steering').  A message held for a gate
 \(`harness-agent--held') is kept as a message that steers is
-\(`harness-agent--record-steering'), so a UI draws both alike."
+\(`harness-agent--record-steering'), so a UI draws both alike.  META,
+when non-nil, is extra metadata for the node the message becomes, beside
+the sender FROM: a caller's own facts about where the message came from."
   (let ((images (harness-agent--message-images blocks)))
     (append (list :node (concat "n-" (harness-short-id 10))
                   :text (harness-agent--blocks-text blocks)
                   :blocks blocks :ts (float-time))
             (and from (list :from from))
+            (and meta (list :meta meta))
             (and images (list :images images)))))
 
-(defun harness-agent--record-steering (turn blocks from)
+(defun harness-agent--record-steering (turn blocks from &optional meta)
   "Hold BLOCKS, a message from FROM, for the next step of the running TURN.
 The message is no node yet: it waits as a pending entry, shown to the
 user with the messages that wait (`harness-agent--publish-steering'),
@@ -1183,8 +1266,8 @@ and the next step boundary delivers it once
 `:steering' (and `:from', when FROM is who sent it: see `agent/prompt').
 The entry (`harness-agent--message-entry') keeps the id that node will
 have, the message's text and blocks, who sent it, when, and its images.
-Return the entry."
-  (let ((entry (harness-agent--message-entry blocks from)))
+META is extra metadata for the node the message becomes.  Return the entry."
+  (let ((entry (harness-agent--message-entry blocks from meta)))
     (setf (harness-agent-turn-steering turn)
           (append (harness-agent-turn-steering turn) (list entry)))
     (harness-agent--publish-steering turn)
@@ -1197,13 +1280,15 @@ It is marked `:steering' beside its sender and the time it was sent
 got it after, when that is given: the mark is how a UI tells a message the
 model has from one it never got (`harness-agent--flush-steering')."
   (let* ((blocks (plist-get entry :blocks))
-         (from (plist-get entry :from)))
+         (from (plist-get entry :from))
+         (extra (plist-get entry :meta)))
     (list :id (plist-get entry :node) :kind 'user :content (plist-get entry :text)
           :blocks (unless (harness-agent--only-text-p blocks) blocks)
           :meta (append (list :steering t)
                         (and from (list :from from))
                         (and delivered-after (list :delivered-after delivered-after))
-                        (and (plist-get entry :ts) (list :sent-at (plist-get entry :ts)))))))
+                        (and (plist-get entry :ts) (list :sent-at (plist-get entry :ts)))
+                        extra))))
 
 ;;;; Messages held with a turn
 
@@ -1259,7 +1344,7 @@ the count comes first.  Nil when none waits."
           ((= n 1) (if quoted (format "1 message waits: “%s”" quoted) "1 message waits"))
           (t (format "%d messages wait" n)))))
 
-(defun harness-agent--hold-message (turn blocks from hold)
+(defun harness-agent--hold-message (turn blocks from hold &optional meta)
   "Keep BLOCKS, a message from FROM sent to TURN, until its gate lets it go on.
 HOLD is what holds the turn (`harness-agent--holding').  The message is
 recorded by `harness-agent--flush-held'.  Meanwhile the turn shows what
@@ -1268,10 +1353,10 @@ opened the turn too, while its gate holds it -- and its session reads
 running, as it does while a gate holds its first message.  The messages
 the gate holds are listed on the session, for a UI to draw as queued
 \(`harness-agent--publish-steering'), HOLD's words saying what they wait
-for."
+for.  META is extra metadata for the node the message becomes."
   (let* ((sid (harness-agent-turn-session-id turn))
          (held (append (gethash turn harness-agent--held)
-                       (list (harness-agent--message-entry blocks from))))
+                       (list (harness-agent--message-entry blocks from meta))))
          (opening (gethash turn harness-agent--opening)))
     (puthash turn held harness-agent--held)
     (puthash turn (plist-get hold :text) harness-agent--shown)
@@ -1295,13 +1380,18 @@ for."
 ENTRY is as `harness-agent--message-entry' makes it: the node has the id
 the message was listed under while it waited, so a UI that drew it
 waiting finds it in the transcript.  A message of text alone is its
-text; any other keeps its blocks."
+text; any other keeps its blocks.  The sender and the caller's own
+metadata (`:meta' of the entry) go in the node's `:meta', so a client
+reads where the message came from in the transcript itself."
   (let ((blocks (plist-get entry :blocks))
-        (from (plist-get entry :from)))
+        (from (plist-get entry :from))
+        (meta (plist-get entry :meta)))
     (append (list :id (plist-get entry :node)
                   :kind 'user :content (harness-agent--blocks-text blocks)
                   :blocks (unless (harness-agent--only-text-p blocks) blocks))
-            (and from (list :meta (list :from from))))))
+            (and (or from meta)
+                 (list :meta (append (and from (list :from from))
+                                     meta))))))
 
 (defun harness-agent--flush-held (turn)
   "Record the messages held for TURN, oldest first, as ordinary user messages.
@@ -1382,6 +1472,10 @@ model gets the message as a user message all the same.
 OPTS `:queued' says the message is the session's queue going out
 \(`agent/send-queue'), not one written now: the `agent/message' filters
 get it as `:queued', so a module can treat it as what the queue kept.
+OPTS `:meta' is extra metadata for the node the message becomes, beside
+the sender: a module's own facts about the message, such as the thread
+and profile a workspace message came from.  It is kept on the node's
+`:meta' and never shown to the model.
 An inactive session is resumed first: sending to it brings it back.
 Blank text blocks are dropped; a message left empty signals an error,
 so no turn, steering message or queued item is ever empty.
@@ -1401,6 +1495,8 @@ call the harness made and cannot be continued."
          (attachments (and queue (plist-get opts :attachments)))
          (from (let ((f (plist-get opts :from))) (and (harness-sender-kind f) f)))
          (queued (plist-get opts :queued))
+         (meta (let ((m (plist-get opts :meta)))
+                 (and (consp m) m)))
          (turn (gethash session-id harness-agent--turns))
          (hold (and turn (not queue) (gethash turn harness-agent--gated)
                     (harness-agent--holding session-id))))
@@ -1411,16 +1507,17 @@ call the harness made and cannot be continued."
       (setq blocks (harness-agent--message session-id blocks from (and turn t) queued)))
     (cond
      (queue
-      (harness-call 'session/queue session-id (harness-agent--blocks-text blocks) attachments from)
+      (harness-call 'session/queue session-id (harness-agent--blocks-text blocks)
+                    attachments from)
       (harness-resolved (list :queued t)))
      (hold
-      (harness-agent--hold-message turn blocks from hold)
+      (harness-agent--hold-message turn blocks from hold meta)
       (harness-agent-turn-promise turn))
      (turn
-      (harness-agent--record-steering turn blocks from)
+      (harness-agent--record-steering turn blocks from meta)
       (harness-emit 'agent/steered session-id)
       (harness-agent-turn-promise turn))
-     (t (harness-agent--start session-id blocks from)))))
+     (t (harness-agent--start session-id blocks from meta)))))
 
 (defun harness-agent--follow-head (session-id)
   "Make the provider conversation of SESSION-ID the transcript up to its head.
@@ -1460,16 +1557,18 @@ head.  See `session/provider-continuation'."
     (error (harness-log 'warn "agent: following the head of %s failed: %S" session-id err)
            (harness-resolved nil))))
 
-(defun harness-agent--start (session-id blocks &optional from)
+(defun harness-agent--start (session-id blocks &optional from meta)
   "Start a turn of SESSION-ID with the message BLOCKS; return its promise.
-FROM, when non-nil, is who sent the message (see `agent/prompt')."
+FROM, when non-nil, is who sent the message (see `agent/prompt'), and
+META extra metadata for the node the message becomes."
   (let* ((session (harness-call 'session/get session-id))
          (harness-error-report-session session-id)
          (promise (harness-make-promise))
          (turn (make-harness-agent-turn :session-id session-id :promise promise :started (float-time)))
-         (entry (harness-agent--message-entry blocks from))
+         (entry (harness-agent--message-entry blocks from meta))
          (node (harness-agent--opening-node entry)))
     (puthash session-id turn harness-agent--turns)
+    (harness-agent--control-turn turn)
     (puthash turn entry harness-agent--opening)
     (puthash turn t harness-agent--gated)
     (remhash session-id harness-agent--failures)
@@ -2279,15 +2378,18 @@ logged, short, and the ones after it still run."
       (when node (harness-emit 'agent/tool-call sid node))
       ;; Recorded before it starts, so its permission decision finds it.
       (harness-agent--add-call sid call-id name title)
-      (setq execution (harness-call-async 'tools/execute sid (list :id call-id :name name :input input)))
+      (setq execution (harness-call-async
+                       'tools/execute sid
+                       (list :id call-id :name name :input input
+                             :turn-id (plist-get (harness-agent--control-turn turn) :turn-id))))
       (harness-agent--update-activity sid)
       (harness-then
        execution
        (lambda (result)
          ;; Before `respond': sending the result can run the provider's
          ;; process filter, whose news must not hide behind this call.
-         (harness-agent--remove-call sid call-id)
-         (harness-agent--update-activity sid)
+         (harness-agent--remove-call sid call-id turn)
+         (when (harness-agent--current-p turn) (harness-agent--update-activity sid))
          ;; The pictures are kept as the tool saw them before anything
          ;; else comes to read them: a later request sends the copy, not
          ;; whatever the file holds by then (see harness-images.el).
@@ -2325,8 +2427,8 @@ logged, short, and the ones after it still run."
                (harness-agent--finish-turn turn)
              (harness-agent--maybe-continue turn))))
        (lambda (err)
-         (harness-agent--remove-call sid call-id)
-         (harness-agent--update-activity sid)
+         (harness-agent--remove-call sid call-id turn)
+         (when (harness-agent--current-p turn) (harness-agent--update-activity sid))
          (unwind-protect
              (let ((msg (harness-run-filter
                          'tools/output-text
@@ -2510,6 +2612,9 @@ REASON is why the provider stopped (`cancelled', say)."
     (when (harness-agent--current-p turn)
       (dolist (call (gethash sid harness-agent--calls))
         (when (plist-get (cdr call) :builtin)
+          ;; Closing the transcript pair is not proof that the provider's
+          ;; action stopped or completed; cancellation remains unsupported.
+          (harness-agent--control-tool-ended (harness-agent--control-turn turn) (car call) t)
           (condition-case err
               (harness-agent--record-builtin-result
                sid call
@@ -2529,11 +2634,13 @@ is cancelled first, so it drops whatever it kept for a next step -- a
 scripted provider's remaining script -- which this turn will not take;
 marking the turn ending keeps the provider's own news of that cancel
 from ending it as `cancelled' instead.  The transcript keeps
-everything recorded so far."
-  (setf (harness-agent-turn-ending turn) t)
-  (when-let* ((handle (harness-agent-turn-handle turn)))
-    (ignore-errors (funcall (plist-get handle :cancel))))
-  (harness-agent--end turn 'end-turn))
+everything recorded so far.  A late result of a turn already ended
+cannot cancel its old provider again after a replacement turn started."
+  (when (harness-agent--current-p turn)
+    (setf (harness-agent-turn-ending turn) t)
+    (when-let* ((handle (harness-agent-turn-handle turn)))
+      (ignore-errors (funcall (plist-get handle :cancel))))
+    (harness-agent--end turn 'end-turn)))
 
 (defun harness-agent--next-step (turn)
   "Run one more step of TURN, once the `agent/step' filters let it.
@@ -2556,7 +2663,8 @@ goes on or not, so the step that follows reads them."
 
 (defun harness-agent--maybe-continue (turn)
   "Decide what happens to TURN once its provider is done and no tool runs."
-  (when (and (harness-agent-turn-waiting-done turn)
+  (when (and (harness-agent--current-p turn)
+             (harness-agent-turn-waiting-done turn)
              (not (harness-agent-turn-ending turn))
              (zerop (harness-agent-turn-pending turn)))
     (setf (harness-agent-turn-waiting-done turn) nil)
@@ -2814,22 +2922,129 @@ a running turn, the queued messages would steer it."
 
 ;;;; Cancel and queue
 
-(harness-defmethod agent/cancel (session-id)
+(harness-defmethod agent/cancel (session-id &optional turn-id)
   "Cancel the running turn of SESSION-ID, if any.
+With TURN-ID, cancel only the turn with that `agent/activity' token;
+a completed or replaced turn is left alone.  Return non-nil only when
+the request targets the current turn.  This cancels the model loop,
+not arbitrary tools or background work; see `agent/voice-control'.
 `agent/cancelling' tells whatever holds a turn up before it starts, a
 gate asking the user say, to let it go: the turn then ends as soon as
 its gate settles, rather than after the grace period."
   (let ((turn (gethash session-id harness-agent--turns)))
-    (when turn
-      (setf (harness-agent-turn-cancelled turn) t)
-      (let ((cancel (plist-get (harness-agent-turn-handle turn) :cancel)))
-        (when cancel (ignore-errors (funcall cancel))))
-      (harness-emit 'agent/cancelling session-id)
-      (run-at-time harness-agent--cancel-grace nil
-                   (lambda () (when (eq (gethash session-id harness-agent--turns) turn)
-                                (harness-agent--finalize-live turn)
-                                (harness-agent--end turn 'cancelled))))
+    (when (and turn (or (null turn-id)
+                       (equal turn-id (plist-get (harness-agent--control-turn turn) :turn-id))))
+      (unless (harness-agent-turn-cancelled turn)
+        (setf (harness-agent-turn-cancelled turn) t)
+        ;; Before a provider's synchronous acknowledgement can end this
+        ;; turn and start another: a session-only event must not cancel
+        ;; the new turn's gate or mark that new turn cancelled.
+        (harness-emit 'agent/cancelling session-id)
+        (let ((cancel (plist-get (harness-agent-turn-handle turn) :cancel)))
+          (when cancel (ignore-errors (funcall cancel))))
+        (run-at-time harness-agent--cancel-grace nil
+                     (lambda () (when (eq (gethash session-id harness-agent--turns) turn)
+                                  (harness-agent--finalize-live turn)
+                                  (harness-agent--end turn 'cancelled)))))
       t)))
+
+(defun harness-agent--control-tools (record &optional cancellers)
+  "Return RECORD's per-call control outcomes, applying captured CANCELLERS.
+Each canceller is (CALL-ID . FUNCTION).  A function returns `requested',
+`completed' or `unavailable', and must target the captured execution,
+never look up whatever the session happens to run later."
+  (mapcar
+   (lambda (call)
+     (let* ((props (cdr call))
+            (cancel (cdr (assoc (car call) cancellers)))
+            (status (cond
+                     ((plist-get props :interrupted) 'unavailable)
+                     ((plist-get props :completed) 'completed)
+                     ((functionp cancel)
+                      (condition-case err
+                          (let ((status (funcall cancel)))
+                            (if (memq status '(requested completed unavailable)) status 'unavailable))
+                        (error (harness-log 'warn "agent: cancelling tool %s failed: %s"
+                                            (car call) (harness-error-short-message err))
+                               'unavailable)))
+                     (t 'unavailable))))
+       (list :id (car call) :tool (plist-get props :tool) :status status)))
+   (plist-get record :tools)))
+
+(defun harness-agent--record-voice-control (sid result)
+  "Audit voice control RESULT for SID as a hint and a control event.
+Never create a user prompt."
+  (when (harness-call 'session/exists-p sid)
+    (harness-call 'session/append sid
+                  (list :kind 'hint
+                        :content (format "Voice control · %s · %s"
+                                         (plist-get result :action) (plist-get result :status))
+                        :meta (list :voice-control (copy-tree result)))))
+  (harness-emit 'agent/voice-control sid result)
+  result)
+
+(harness-defmethod agent/voice-control (session-id action &optional opts)
+  "Audit voice ACTION for SESSION-ID, optionally requesting turn cancellation.
+ACTION is the string \"interrupt\" (playback-only audit; no work is
+cancelled) or \"cancel\" (explicit work cancellation).  OPTS is a plist;
+`:turn-id' must be the opaque token captured from `agent/activity' for
+\"cancel\".  A missing token never cancels whatever happens to run now.
+
+Return (:action ACTION :turn-id TOKEN :status STATUS :tools TOOLS
+:reason REASON).  STATUS is `requested' for a cancellation request
+accepted by the matching turn (or a playback-only interruption audit),
+`completed' when that newest turn already ended, `stale' for a replaced
+or mismatching turn, or `unavailable' without a token, session or known
+turn.  REASON further distinguishes these outcomes.  TOOLS lists that
+turn's calls as (:id ID :tool NAME :status requested|completed|unavailable).
+A completed call already returned; unavailable means no supported
+cancellation, not that its effects stopped.  No outcome promises rollback,
+effects undone, or background jobs stopped.
+
+The synchronous `agent/tool-canceller' filter starts with nil and takes
+SESSION-ID, TOKEN and CALL-ID.  A handler for a supported execution
+returns a no-argument function, without cancelling yet.  The function
+captures that exact execution and returns a tool status as above.
+Cancellers are captured before `agent/cancel', whose acknowledgement
+can synchronously end this turn and start another; the token is checked
+again by `agent/cancel'.  Unknown tools and unshared shells remain
+unavailable.  Control is recorded as a hint with `:meta :voice-control'
+and emitted as `agent/voice-control' (SESSION-ID RESULT); it never
+creates a user node or calls `agent/prompt'."
+  (let* ((token (plist-get opts :turn-id))
+         (turn (gethash session-id harness-agent--turns))
+         (record (if turn (harness-agent--control-turn turn)
+                   (gethash session-id harness-agent--latest-control-turns)))
+         (status 'unavailable) (reason nil) (tools nil))
+    (cond
+     ((not (member action '("interrupt" "cancel"))) (setq reason 'invalid-action))
+     ((not (harness-call 'session/exists-p session-id)) (setq reason 'unknown-session))
+     ((equal action "interrupt") (setq status 'requested reason 'playback-only))
+     ((not (and (stringp token) (not (string-empty-p token)))) (setq reason 'missing-turn-id))
+     ((null record) (setq reason 'no-turn))
+     ((not (equal token (plist-get record :turn-id))) (setq status 'stale reason 'turn-mismatch))
+     ((null turn)
+      (setq status 'completed reason 'turn-ended tools (harness-agent--control-tools record)))
+     (t
+      (let ((cancellers
+             (mapcar (lambda (call)
+                       (cons (car call)
+                             (and (not (plist-get (cdr call) :completed))
+                                  (harness-run-filter 'agent/tool-canceller nil
+                                                      session-id token (car call)))))
+                     (plist-get record :tools))))
+        (if (harness-call 'agent/cancel session-id token)
+            (setq status 'requested reason 'turn-cancellation
+                  tools (harness-agent--control-tools record cancellers))
+          ;; The turn finished during capability lookup.  No captured
+          ;; cancellation is invoked, and a new turn is never targeted.
+          (setq status (if (equal token (plist-get (gethash session-id harness-agent--latest-control-turns)
+                                                     :turn-id))
+                           'completed 'stale)
+                reason (if (eq status 'stale) 'turn-mismatch 'turn-ended)
+                tools (harness-agent--control-tools record))))))
+    (harness-agent--record-voice-control
+     session-id (list :action action :turn-id token :status status :tools tools :reason reason))))
 
 (defun harness-agent--queue-sender (items)
   "Return who sent ITEMS, queued messages that go out as one, or nil.
@@ -2973,6 +3188,8 @@ stopped work sends reach an idle session."
 (dolist (ev '((agent/turn-started . "(SESSION-ID)") (agent/turn-ended . "(SESSION-ID REASON)")
               (agent/cancelling
                . "(SESSION-ID) when the running turn is cancelled, before it ends: a gate holding the turn up lets it go")
+              (agent/voice-control
+               . "(SESSION-ID RESULT) after an audited playback interruption or turn-scoped cancellation request; RESULT is the structured outcome from `agent/voice-control', never a user prompt")
               (agent/step-started . "(SESSION-ID STEP)")
               (agent/step-ended
                . "(SESSION-ID INFO) when a logical step of a turn is over, once per step however many attempts it took: INFO has `:model', `:reason' (the provider's stop reason, `cancelled' or `error'), `:attempt', `:step', `:duration', `:cancelled', and, when the provider reported them, `:input' `:output' `:cache-read' `:cache-write' and `:cache-read-known', the step's own counts and no session total; `:error-kind' says what kind of failure it was, and its text is never included")
@@ -2982,7 +3199,9 @@ stopped work sends reach an idle session."
               (agent/call-usage
                . "(SESSION-ID USAGE) when a model call of a hosted loop's turn reports its usage, (:output N), with `:context' N, the size of the call's prompt, when the provider knows it; the turn's `usage' event counts it")
               (agent/activity-changed
-               . "(SESSION-ID ACTIVITY) when what a running turn does changes; ACTIVITY nil once it ends (see `agent/activity')")))
+               . "(SESSION-ID ACTIVITY) when what a running turn does changes; ACTIVITY nil once it ends (see `agent/activity')")
+              (agent/images-pruned
+               . "(SESSION-ID TOTAL LIMIT) when a request's history was cut back to LIMIT pictures, TOTAL being how many it held: what the provider was sent is no longer what the session sends")))
   (harness-declare-event (car ev) (cdr ev)))
 
 ;;;; Exit
@@ -3003,7 +3222,8 @@ was receiving."
   (add-hook 'kill-emacs-hook #'harness-agent--save-live)
   (harness-on 'permission/decided #'harness-agent--on-permission-decided)
   (harness-on 'tools/progress #'harness-agent--on-tool-progress)
-  (harness-on 'tools/note #'harness-agent--on-tool-note))
+  (harness-on 'tools/note #'harness-agent--on-tool-note)
+  (harness-on 'tools/finished #'harness-agent--on-tool-finished 10))
 
 (harness-define-module 'agent
   :doc "The turn loop: prompt, stream, run tools, steer, queue."

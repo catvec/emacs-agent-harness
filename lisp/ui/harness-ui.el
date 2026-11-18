@@ -46,6 +46,7 @@
 (require 'transient)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-latency)
 (require 'harness-acp)
 (require 'harness-server)
 (require 'harness-emacs-endpoint)
@@ -443,6 +444,163 @@ closed, so what the UI shows may need opening again.")
   "Requests made before the harness process listened, newest first.
 Each is (METHOD PARAMS PROMISE); PROMISE is nil for notifications.")
 
+;;; Pacing and coalescing the big listings
+;;
+;; A listing of every session, or of every task, is megabytes: on a
+;; harness with a few thousand sessions and a board that has run for
+;; months the two together are tens of megabytes of JSON.  The
+;; connection's writer holds at most `harness-process-send-max-bytes'
+;; (32 MiB) of writes before it closes the peer, and the UI asks for
+;; these listings from many places at once: connecting refreshes the
+;; sessions, opening the board refreshes them again and asks for the
+;; tasks, the review count asks for every project's tasks, and every
+;; board refresh does the same as events arrive.  Two boards and the
+;; review count were enough to put more than the cap in flight, and the
+;; harness then closed the connection -- "write backlog exceeded" --
+;; while it stayed healthy.
+;;
+;; So on a socket (`harness-ui--paced-p': the in-process connection
+;; has no writer and no backlog) the listings go out one at a time,
+;; each only once the one before it has been answered, which keeps the
+;; outstanding output to a single answer however large it is.  A
+;; listing asked for again while another of its kind waits its turn
+;; shares that one: it goes out after the second caller asked, so
+;; every caller gets an answer no older than its own request.  Nothing
+;; is dropped or truncated -- each request still gets a whole answer,
+;; and a caller still gets the error when one fails.
+
+(defconst harness-ui--bulk-methods
+  '("_harness/session/list" "_harness/task/list")
+  "Methods whose answers can be megabytes, sent one at a time on a socket.
+Their answers share the connection's bounded write backlog with every
+other message (`harness-process-send-max-bytes'), so a burst of them
+overflows it and the harness drops the connection.  One at a time keeps
+the outstanding output to a single answer, whatever its size.")
+
+(defvar harness-ui--bulk-queue nil
+  "Paced requests waiting their turn, oldest first: (METHOD PARAMS PROMISE).
+One entry per (METHOD PARAMS): a second caller shares it.")
+
+(defvar harness-ui--bulk-active nil
+  "The paced request out now, as (METHOD PARAMS PROMISE), or nil.
+No other paced request goes until it is answered, so one answer is on
+its way to the UI at a time.")
+
+(defvar harness-ui--bulk-stall-timer nil
+  "Timer that lets a paced queue go on when the answer out takes too long.
+An answer always comes -- the harness answers every request, and the
+connection rejects the pending ones when it closes -- but a harness
+busy for minutes must not keep a board from loading: after
+`harness-ui--bulk-stall-seconds' the next listing goes out too, and the
+one out is rejected, as a write deadline rejects it
+\(`harness-process-send-timeout').")
+
+(defconst harness-ui--bulk-stall-seconds 60
+  "How long one paced listing may be out before the queue goes on without it.
+Well past the time a listing of a few megabytes takes, and the same
+order as the writer's own write deadline.")
+
+(defun harness-ui--paced-p ()
+  "Non-nil when this connection's writes can back up, so listings are paced.
+The in-process connection answers on the spot and has no writer to
+overflow; a socket has one (`harness-process-send-async')."
+  (and harness-ui-connection
+       (eq (harness-acp-connection-kind harness-ui-connection) 'tcp)))
+
+(defun harness-ui--bulk-method-p (method)
+  "Non-nil when METHOD's answer can be megabytes (see `harness-ui--bulk-methods')."
+  (member method harness-ui--bulk-methods))
+
+(defun harness-ui--bulk-pump ()
+  "Send the oldest paced request waiting, unless one is out already.
+Its caller's promise is settled with what the connection answers, and
+the next one goes as soon as that answer is in.  Nothing goes until the
+connection can carry it; `harness-ui--flush-queue' pumps once it can."
+  (when (and (not harness-ui--bulk-active) harness-ui--bulk-queue
+             (harness-ui--paced-p)
+             (harness-acp-open-p harness-ui-connection))
+    (let* ((entry (pop harness-ui--bulk-queue))
+           (method (nth 0 entry))
+           (params (nth 1 entry))
+           (promise (nth 2 entry))
+           (settled (lambda (_)
+                      (when (eq harness-ui--bulk-active entry)
+                        (setq harness-ui--bulk-active nil)
+                        (when (timerp harness-ui--bulk-stall-timer)
+                          (cancel-timer harness-ui--bulk-stall-timer))
+                        (setq harness-ui--bulk-stall-timer nil)
+                        (harness-ui--bulk-pump))
+                      nil)))
+      (setq harness-ui--bulk-active entry
+            harness-ui--bulk-stall-timer
+            (run-at-time harness-ui--bulk-stall-seconds nil
+                         (lambda ()
+                           (when (eq harness-ui--bulk-active entry)
+                             (setq harness-ui--bulk-active nil
+                                   harness-ui--bulk-stall-timer nil)
+                             (harness-reject
+                              promise
+                              (list 'acp-error harness-acp-error-transport
+                                    "the answer took too long; asking again"
+                                    nil))
+                             (harness-ui--bulk-pump)))))
+      (condition-case err
+          (harness-then (harness-acp-request harness-ui-connection method params)
+                        (lambda (value) (harness-resolve promise value) (funcall settled nil))
+                        (lambda (e) (harness-reject promise e) (funcall settled nil)))
+        (error
+         ;; Nothing went out: the queue must not wait for it, nor its timer.
+         (setq harness-ui--bulk-active nil)
+         (when (timerp harness-ui--bulk-stall-timer)
+           (cancel-timer harness-ui--bulk-stall-timer))
+         (setq harness-ui--bulk-stall-timer nil)
+         (harness-reject promise (list 'acp-error harness-acp-error-transport
+                                       (harness-error-message err) nil))
+         (harness-ui--bulk-pump))))))
+
+(defun harness-ui--entry-for (method params)
+  "Return the paced request for METHOD and PARAMS waiting its turn, or nil.
+Only one that has not gone out is shared: it goes out after the caller
+asking now, so every caller gets an answer no older than its own
+request.  A listing already on its way is left to its own caller, and
+the next one is asked for."
+  (let ((key (list method params)))
+    (cl-find key harness-ui--bulk-queue
+             :key (lambda (entry) (list (nth 0 entry) (nth 1 entry)))
+             :test #'equal)))
+
+(defun harness-ui--send (method params)
+  "Send METHOD with PARAMS over the connection; return its promise.
+A bulk listing on a socket waits its turn, and shares the place of one
+waiting for the same params (`harness-ui--bulk-methods'); anything else
+goes straight out."
+  (if (and (harness-ui--bulk-method-p method) (harness-ui--paced-p))
+      (or (nth 2 (harness-ui--entry-for method params))
+          (let ((promise (harness-make-promise)))
+            (setq harness-ui--bulk-queue
+                  (append harness-ui--bulk-queue (list (list method params promise))))
+            (harness-ui--bulk-pump)
+            promise))
+    (harness-acp-request harness-ui-connection method params)))
+
+(defun harness-ui--abandon (reason)
+  "Reject the requests that never left the UI, and forget the rest.
+REASON says why, as `harness-acp-close' does: what the connection holds
+is rejected by it, and what waited for its turn here is rejected the
+same way, so no caller waits for an answer that will never come."
+  (let ((waiting (prog1 (append harness-ui--bulk-queue
+                                (and harness-ui--bulk-active (list harness-ui--bulk-active)))
+                    (setq harness-ui--bulk-queue nil
+                          harness-ui--bulk-active nil)
+                    (when (timerp harness-ui--bulk-stall-timer)
+                      (cancel-timer harness-ui--bulk-stall-timer))
+                    (setq harness-ui--bulk-stall-timer nil))))
+    (dolist (entry waiting)
+      (harness-reject (nth 2 entry)
+                      (list 'acp-error harness-acp-error-transport
+                            (format "connection %s" reason)
+                            (list :closed reason))))))
+
 (defun harness-ui-connected-p ()
   "Non-nil when the UI has a live connection."
   (and harness-ui-connection (harness-acp-connected-p harness-ui-connection)))
@@ -478,6 +636,8 @@ more; the session keeps it pending, and the chat answers it with
 `permission/answer' instead."
   (when harness-ui-connection
     (ignore-errors (harness-acp-close harness-ui-connection "replaced")))
+  ;; Whatever waited for its turn on the connection just let go goes too.
+  (harness-ui--abandon "replaced")
   (setq harness-ui-connection nil
         harness-ui-connected-since nil))
 
@@ -538,27 +698,35 @@ request it carries."
 (defun harness-ui--on-close ()
   "Say in the echo area that the UI's connection closed.
 A connection to the managed harness process is left to its supervisor
-to report."
+to report.  Whatever waited for its turn on it is rejected: nothing
+will answer it."
+  (harness-ui--abandon "closed")
   (unless (eq harness-ui-connection-address 'process) ; the supervisor reports that
     (message "Harness: connection closed%s"
              (if harness-ui-connection-address (format " (%s)" harness-ui-connection-address) ""))))
 
 (defun harness-ui--flush-queue ()
-  "Send every queued request over the open connection."
+  "Send every queued request over the open connection.
+A paced listing among them waits for its turn, which starts now."
   (let ((queue (nreverse harness-ui--queue)))
     (setq harness-ui--queue nil)
     (dolist (item queue)
       (pcase-let ((`(,method ,params ,promise) item))
         (if promise
-            (harness-then (harness-acp-request harness-ui-connection method params)
+            (harness-then (harness-ui--send method params)
                           (lambda (v) (harness-resolve promise v))
                           (lambda (e) (harness-reject promise e)))
-          (harness-acp-notify harness-ui-connection method params))))))
+          (harness-acp-notify harness-ui-connection method params))))
+    (harness-ui--bulk-pump)))
 
 (defun harness-ui-request (method &optional params)
-  "Send METHOD with PARAMS over the UI connection; return a promise."
+  "Send METHOD with PARAMS over the UI connection; return a promise.
+On a socket, a listing of every session or of every task waits its turn
+and shares the place of one already waiting for the same params
+\(`harness-ui--bulk-methods'): the UI can ask for them from many views
+at once without piling their answers past the connection's write bound."
   (if-let* ((conn (harness-ui-connection)))
-      (harness-acp-request conn method params)
+      (harness-ui--send method params)
     (let ((p (harness-make-promise)))
       (push (list method params p) harness-ui--queue)
       p)))
@@ -860,7 +1028,10 @@ UI's."
        (pcase (plist-get update :sessionUpdate)
          ("_harness/session" (harness-ui--cache-session (plist-get update :session)))
          ("_harness/session_deleted" (harness-ui--forget-session sid)))
-       (run-hook-with-args 'harness-ui-update-functions sid update)))
+       (run-hook-wrapped 'harness-ui-update-functions
+                         (lambda (fn)
+                           (harness-latency-call 'ui-update fn fn sid update)
+                           nil))))
     ("session/request_permission"
      (unless (run-hook-with-args-until-success 'harness-ui-permission-functions params respond)
        (harness-ui--default-permission params respond)))
@@ -924,7 +1095,7 @@ learning anything of it either."
   (run-hook-wrapped 'harness-ui-event-functions
                     (lambda (fn)
                       (condition-case err
-                          (funcall fn event args)
+                          (harness-latency-call 'ui-event fn fn event args)
                         (error (harness-log 'error "ui: %s failed on %s: %s"
                                             (if (symbolp fn) fn "a listener")
                                             event (harness-error-short-message err 600))))
@@ -4973,6 +5144,8 @@ from a callback (`harness-ui--call-with-display-override')."
 (declare-function harness-settings "harness-ui-config" (&optional directory scope))
 (declare-function harness-server "harness-ui-server" ())
 (declare-function harness-slots "harness-ui-slots" (&optional dir))
+(declare-function harness-ui-workspace-tool-open "harness-ui-workspace"
+                  (root &optional thread workspace))
 
 (defconst harness-ui-tool--views
   '((:view "sessions" :label "Sessions" :requires "project"
@@ -4998,7 +5171,10 @@ from a callback (`harness-ui--call-with-display-override')."
     (:view "usage" :label "Usage" :requires nil
      :modules (ui-usage) :function harness-usage :mode harness-ui-usage-mode)
     (:view "slots" :label "Task slots" :requires "project"
-     :modules (ui-slots) :function harness-slots :mode harness-ui-slots-mode))
+     :modules (ui-slots) :function harness-slots :mode harness-ui-slots-mode)
+    (:view "workspace" :label "Workspace" :requires "project"
+     :modules (ui-workspace) :function harness-ui-workspace-tool-open
+     :mode harness-ui-workspace-mode))
   "The fixed vocabulary of views a tool may open.
 No entry takes a command, code, a module to load or an interactive
 argument.  The modules must be running in this Emacs; a function left
@@ -5115,7 +5291,11 @@ The report returns a promise of that plist, after fetching its task."
                       ("settings" (harness-settings target))
                       ("server" (harness-server))
                       ("usage" (harness-usage))
-                      ("slots" (harness-slots target)))))
+                      ("slots" (harness-slots target))
+                      ("workspace"
+                       (harness-ui-workspace-tool-open target
+                                                       (plist-get params :thread)
+                                                       (plist-get params :workspace))))))
         (if (harness-promise-p value)
             (harness-then value (lambda (answer)
                                   (if (listp answer) answer

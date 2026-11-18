@@ -14,14 +14,18 @@
 (defvar harness-model)
 (defvar harness-acp-token)
 (defvar harness-acp--server-enabled)
+(defvar harness-acp-client-poll-interval)
 (declare-function harness-ui-request "harness-ui")
 (declare-function harness-ui-connected-p "harness-ui")
 (declare-function harness-acp-connect "harness-acp")
 (declare-function harness-acp-request "harness-acp")
 (declare-function harness-acp-close "harness-acp")
 (declare-function harness-acp-connection-pending "harness-acp")
+(declare-function harness-acp-connection-process "harness-acp")
 (declare-function harness-acp-set-handler "harness-acp")
 (declare-function harness-acp-initialize "harness-acp")
+(declare-function harness-acp-authenticate "harness-acp")
+(declare-function harness-acp--poll-sync "harness-acp")
 (declare-function harness-acp-respond-error "harness-acp")
 
 ;; A batch Emacs, as the tests run in, dies of a broken pipe: a request
@@ -161,6 +165,181 @@ not signal, and nothing more is written to the dead pipe."
       (should-not (harness-server--write-stderr "second"))
       (should (= calls 1)))
     (should-not harness-server--stderr-open)))
+
+(ert-deftest harness-server-stop-runs-kill-hooks-on-the-main-thread ()
+  "A private cooperative stop preserves kill hooks with live IO writers.
+Native SIGTERM can run those hooks using a writer's interpreter state
+while the main pthread is asleep.  The ordinary stop must instead run
+on the main Lisp thread and exit successfully, without fallback signals."
+  (harness-test-with-temp-state
+    (harness-test-share-compilation "elc" "elc-server")
+    (harness-test-reset-bus)
+    (setq harness-acp--server-enabled nil)
+    (harness-test-load-module 'acp)
+    (let* ((init (expand-file-name "server-init.el" harness-state-directory))
+           (marker (expand-file-name "shutdown.el" harness-state-directory))
+           (blocked (expand-file-name "writer-blocked" harness-state-directory))
+           (harness-server-init-file init)
+           (harness-enabled-modules '(acp))
+           (harness-acp-client-poll-interval harness-acp-client-poll-interval)
+           (address nil) (token nil) (proc nil) (conn nil))
+      (with-temp-file init
+        (insert ";;; -*- lexical-binding: t -*-\n"
+                (prin1-to-string
+                 `(with-eval-after-load 'harness-acp
+                    (puthash "_test/flood"
+                             (lambda (_client _params)
+                               (let (timer)
+                                 (setq timer
+                                       (run-at-time
+                                        0.01 0.01
+                                        (lambda ()
+                                          (when (cl-some
+                                                 (lambda (p)
+                                                   (when-let* ((state (process-get p 'harness--async-send)))
+                                                     (harness--async-send-active state)))
+                                                 (process-list))
+                                            (cancel-timer timer)
+                                            (with-temp-file ,blocked (insert "blocked"))))))
+                               (make-string (* 16 1024 1024) ?x)))
+                             harness-acp--standard-methods)))
+                "\n"
+                (prin1-to-string
+                 `(add-hook 'kill-emacs-hook
+                            (lambda ()
+                              (with-temp-file ,marker
+                                (prin1
+                                 (list :main (eq (current-thread) main-thread)
+                                       :writers
+                                       (cl-count-if
+                                        (lambda (thread)
+                                          (string-prefix-p "harness writer " (or (thread-name thread) "")))
+                                        (all-threads))
+                                       :active
+                                       (cl-count-if
+                                        (lambda (p)
+                                          (when-let* ((state (process-get p 'harness--async-send)))
+                                            (harness--async-send-active state)))
+                                        (process-list)))
+                                 (current-buffer))))))))
+      (unwind-protect
+          (progn
+            (setq proc (harness-server-spawn :on-address (lambda (a tk) (setq address a token tk))))
+            (harness-test-wait (lambda () address) 60 "the harness process's address")
+            ;; Even possession of the private stop secret does not bypass
+            ;; ACP authentication.  Ordinary authenticated clients still
+            ;; cannot stop the process without the parent's separate secret.
+            (setq conn (let ((harness-acp-token nil)) (harness-acp-connect address)))
+            (should-error
+             (harness-test-await
+              (harness-acp-request conn "_harness/server/stop"
+                                   (list :token (process-get proc 'harness-server--stop-token))) 10)
+             :type 'acp-error)
+            (harness-test-await (harness-acp-authenticate conn token) 10)
+            (should-error
+             (harness-test-await
+              (harness-acp-request conn "_harness/server/stop" '(:token "wrong")) 10)
+             :type 'acp-error)
+            (harness-test-await (harness-acp-initialize conn) 10)
+            ;; Stop reading before the large reply: its writer blocks in
+            ;; kernel IO, not just on its idle condition variable.  Shutdown
+            ;; must be independent of that client's socket and writer.
+            (setq harness-acp-client-poll-interval nil)
+            (harness-acp--poll-sync)
+            (harness-acp-request conn "_test/flood" nil)
+            (set-process-filter (harness-acp-connection-process conn) t)
+            (harness-test-wait (lambda () (file-exists-p blocked)) 10 "the blocked writer")
+            (harness-server-stop proc)
+            (harness-test-wait (lambda () (not (process-live-p proc))) 10 "harness process exit")
+            (should (eq (process-status proc) 'exit))
+            (should (= (process-exit-status proc) 0))
+            (should (file-exists-p marker))
+            (let ((saved (read (harness-read-file marker))))
+              (should (plist-get saved :main))
+              (should (> (plist-get saved :writers) 0))
+              (should (> (plist-get saved :active) 0)))
+            (should-not (process-get proc 'harness-server--stop-timer))
+            (should-not (process-get proc 'harness-server--stop-socket)))
+        (when conn (ignore-errors (harness-acp-close conn)))
+        (when (and proc (process-live-p proc))
+          (harness-server-stop proc)
+          (harness-test-wait (lambda () (not (process-live-p proc))) 10 "harness process exit"))))))
+
+(ert-deftest harness-server-stop-refuses-remote-and-unspawned-requests ()
+  (let ((harness-server--shutdown-requested nil)
+        (harness-server--stop-token nil)
+        (scheduled nil))
+    (cl-letf (((symbol-function 'harness-acp-client-remote-info) (lambda (_) nil))
+              ((symbol-function 'harness-run-soon) (lambda (&rest args) (push args scheduled))))
+      (should-error (harness-server--request-stop 'client '(:token "private")) :type 'harness-error)
+      (setq harness-server--stop-token "private")
+      (cl-letf (((symbol-function 'harness-acp-client-remote-info) (lambda (_) '(:address "remote"))))
+        (should-error (harness-server--request-stop 'client '(:token "private")) :type 'harness-error))
+      (should-not scheduled)
+      (should (eq (harness-server--request-stop 'client '(:token "private")) :empty))
+      (should (eq (harness-server--request-stop 'client '(:token "private")) :empty))
+      (should (equal scheduled '((kill-emacs 0)))))))
+
+(ert-deftest harness-server-standalone-has-no-private-stop-method ()
+  (pcase-let ((`(,status . ,out)
+               (harness-server-test--run-child
+                '((require 'harness)
+                  (require 'harness-server)
+                  (setenv "HARNESS_SERVER_CONFIG" nil)
+                  (setenv "HARNESS_SERVER_PARENT" nil)
+                  (setenv "HARNESS_SERVER_TOKEN" "standalone-token")
+                  (setenv "HARNESS_SERVER_STOP_TOKEN" "unused-inherited-secret")
+                  (setq harness-state-directory temporary-file-directory
+                        harness-acp--standard-methods (make-hash-table :test 'equal))
+                  (cl-letf (((symbol-function 'harness-start)
+                             (lambda ()
+                               (when (getenv "HARNESS_SERVER_STOP_TOKEN")
+                                 (error "Shutdown secret reached module startup"))))
+                            ((symbol-function 'harness-acp-server-address) (lambda () "127.0.0.1:1234"))
+                            ((symbol-function 'harness-server--event-loop)
+                             (lambda ()
+                               (when (gethash "_harness/server/stop" harness-acp--standard-methods)
+                                 (error "Standalone shutdown method"))
+                               (princ "no private stop method\n")
+                               (kill-emacs 0))))
+                    (harness-server-main)))
+                10)))
+    (should (equal status 0))
+    (should (string-search "no private stop method" out))))
+
+(ert-deftest harness-server-stop-bounds-a-server-that-ignores-term ()
+  "A stopped server cannot survive indefinitely; repeat stops cannot defer it."
+  (harness-test-with-temp-state
+    (let* ((ready (expand-file-name "ready" harness-state-directory))
+           (harness-server--stop-grace 0.05)
+           (harness-server--kill-grace 0.05)
+           (signal-process (symbol-function 'signal-process))
+           (signals nil) (proc nil))
+      (cl-letf (((symbol-function 'harness-server--command)
+                 (lambda () (list "sh" "-c" "trap '' TERM; : > \"$1\"; exec sleep 60" "sh" ready))))
+        (unwind-protect
+            (progn
+              (setq proc (harness-server-spawn))
+              (harness-test-wait (lambda () (file-exists-p ready)) 10 "the TERM-ignoring server")
+              (cl-letf (((symbol-function 'signal-process)
+                         (lambda (target signal)
+                           (when (eq target proc) (push signal signals))
+                           (funcall signal-process target signal))))
+                (harness-server-stop proc)
+                (let ((timer (process-get proc 'harness-server--stop-timer)))
+                  (harness-server-stop proc)
+                  (should (eq timer (process-get proc 'harness-server--stop-timer))))
+                (harness-test-wait (lambda () (not (process-live-p proc))) 10 "bounded server shutdown"))
+              (should (equal (reverse signals) '(term kill)))
+              (should (eq (process-status proc) 'signal))
+              (should (= (process-exit-status proc) 9))
+              (should-not (process-get proc 'harness-server--stop-timer))
+              ;; A late watchdog retains the dead process object, never a
+              ;; bare PID that could now identify an unrelated process.
+              (cl-letf (((symbol-function 'signal-process)
+                         (lambda (&rest _) (ert-fail "signal to an exited server"))))
+                (harness-server--stop-signal proc 'kill)))
+          (when (and proc (process-live-p proc)) (delete-process proc)))))))
 
 (ert-deftest harness-server-blocking-work-never-blocks-the-ui ()
   (harness-server-test-with-process

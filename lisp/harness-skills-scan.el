@@ -49,6 +49,9 @@
 ;; Bounds.  Every scan is bounded: a number of skills per root, a size
 ;; for SKILL.md, a number and total size of supporting files, a depth
 ;; and a count of diagnostics, and a wall-clock budget for one scan.
+;; The walk that applies them reads each directory in name order, so the
+;; list a bound cuts is a property of the skill and not of the order the
+;; filesystem happened to return its entries in.
 ;; Symbolic links are followed only to decide whether a skill stays
 ;; inside what may be read; nothing is ever read outside a skill
 ;; directory, and no file is read whole above the size bound.  Nothing
@@ -214,7 +217,7 @@ nil means $CLAUDE_CODE_PLUGIN_CACHE_DIR when that is set, else
 
 (defun harness-skills-scan--subdirs (dir)
   "Return the subdirectories of DIR whose names do not start with a dot, sorted."
-  (cl-remove-if-not #'file-directory-p (directory-files dir t "\\`[^.]")))
+  (cl-remove-if-not #'file-directory-p (harness-skills-scan--dir-entries dir)))
 
 (defun harness-skills-scan--mtime (path)
   "Return the modification time of PATH as a float, or nil."
@@ -380,6 +383,15 @@ SIZE is nil when PATH is not a regular file."
         (cons (harness-read-file path) size)
       (cons nil size))))
 
+(defun harness-skills-scan--dir-entries (dir)
+  "Return the non-dot entries of DIR as absolute names, in name order.
+`directory-files' returns them in readdir order, which is whatever order
+the filesystem holds them in -- creation order on tmpfs, hash order on
+ext4 -- so a bound applied to that order would cut a different list on
+every machine.  Every walk here takes its entries from this function, so
+the same skill lists the same files wherever its directory is copied."
+  (sort (ignore-errors (directory-files dir t "\\`[^.]" t)) #'string<))
+
 (defun harness-skills-scan-files (dir)
   "Return the supporting files of skill directory DIR, as relative names.
 They are sorted, no deeper than `harness-skills-scan-max-depth', dot
@@ -389,45 +401,56 @@ so a bound keeps the first names of a directory rather than an
 arbitrary subset of what the filesystem listed.  The skill's own
 `harness-skills-scan-file-name' is no supporting file and does not
 count against either bound.  Return (FILES . TRUNCATED) where TRUNCATED
-says the bounds cut the list."
+says the bounds cut the list.
+
+The walk reads every directory in name order -- a directory's entries
+sorted, and its subdirectories taken where their own names fall -- so
+which files a bound cuts is a property of the skill's own names, not of
+the order the filesystem returns them in.  The fingerprint hashes the
+files this returns, so two machines holding one skill keep one list
+and agree."
   (let* ((dir (harness-skills-scan--directory dir))
+         (self (expand-file-name harness-skills-scan-file-name dir))
          (seen nil)
          (out nil)
          (total 0)
          (truncated nil)
-         (stack (list (cons dir 0))))
-    (while (and stack (not truncated))
-      (let* ((pair (pop stack))
-             (current (car pair))
-             (depth (cdr pair)))
-        ;; Sorted before the bounds apply, so they cut the same files on
-        ;; every machine: sorting only OUT would keep a different subset
-        ;; for different filesystem enumeration orders, and two copies
-        ;; of a skill would then list and fingerprint different files.
-        (dolist (entry (sort (ignore-errors
-                              (directory-files current t "\\`[^.]" t))
-                             #'string<))
-          (unless truncated
-            (cond
-             ((member entry seen) nil)
-             ((and (file-directory-p entry) (not (file-symlink-p entry)))
-              (push entry seen)
-              (if (< depth harness-skills-scan-max-depth)
-                  (push (cons (harness-skills-scan--directory entry) (1+ depth)) stack)
-                (setq truncated t)))
-             ((file-regular-p entry)
-              (push entry seen)
-              (let* ((rel (file-relative-name entry dir))
-                     (size (or (harness-skills-scan--size entry) 0)))
-                ;; The skill's own file is listed by the skill, not among
-                ;; what it supports, so it takes no place of the bound.
-                (unless (or (equal entry (expand-file-name harness-skills-scan-file-name dir))
-                            (string= rel harness-skills-scan-file-name))
-                  (cond
-                   ((>= (length out) harness-skills-scan-max-files) (setq truncated t))
-                   ((> (+ total size) harness-skills-scan-max-files-bytes) (setq truncated t))
-                   (t (setq total (+ total size))
-                      (push rel out)))))))))))
+         (stop nil))
+    (cl-labels
+        ((walk (current depth)
+           ;; Sorted before the bounds apply, so they cut the same files on
+           ;; every machine: sorting only OUT would keep a different subset
+           ;; for different filesystem enumeration orders, and two copies
+           ;; of a skill would then list and fingerprint different files.
+           (dolist (entry (harness-skills-scan--dir-entries current))
+             (unless stop
+               (cond
+                ((member entry seen) nil)
+                ((and (file-directory-p entry) (not (file-symlink-p entry)))
+                 (push entry seen)
+                 (if (< depth harness-skills-scan-max-depth)
+                     (walk (harness-skills-scan--directory entry) (1+ depth))
+                   ;; A directory below the depth is left out and the
+                   ;; listing says it was cut; the files that are within
+                   ;; the depth stay listed, since the bound is on where a
+                   ;; file is and not on how far the walk has got.
+                   (setq truncated t)))
+                ((file-regular-p entry)
+                 (push entry seen)
+                 (let* ((rel (file-relative-name entry dir))
+                        (size (or (harness-skills-scan--size entry) 0)))
+                   ;; The skill's own file is listed by the skill, not among
+                   ;; what it supports, so it takes no place of the bound.
+                   (unless (or (equal entry self)
+                               (string= rel harness-skills-scan-file-name))
+                     (cond
+                      ((>= (length out) harness-skills-scan-max-files)
+                       (setq truncated t stop t))
+                      ((> (+ total size) harness-skills-scan-max-files-bytes)
+                       (setq truncated t stop t))
+                      (t (setq total (+ total size))
+                         (push rel out)))))))))))
+      (walk dir 0))
     (cons (sort out #'string<) truncated)))
 
 (defun harness-skills-scan--fingerprint (text files dir)
@@ -548,7 +571,7 @@ scan says what it skipped."
          (limit harness-skills-scan-max-skills)
          (truncated nil))
     (when (and dir (file-directory-p dir))
-      (dolist (sub (sort (ignore-errors (directory-files dir t "\\`[^.]" t)) #'string<))
+      (dolist (sub (harness-skills-scan--dir-entries dir))
         (when (and (not truncated)
                    (file-directory-p sub)
                    (file-readable-p (expand-file-name harness-skills-scan-file-name sub)))

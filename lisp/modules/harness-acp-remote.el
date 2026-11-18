@@ -1394,30 +1394,34 @@ For `harness-acp-initialize-extras-functions': it comes in the answer to
 ;;;; Connections
 
 (defvar harness-acp-remote--write-limit 120
-  "Seconds a device may leave what is sent to it unread before it is dropped.
-Internal, not an option.  A phone put away stops reading without
-closing its connection; everything sent to it meanwhile would pile up
-behind the write that waits for it (see `harness-process-send').  A
-device dropped reconnects when it wakes, and reads the sessions again.")
+  "Maximum age of a device's asynchronous write, in seconds.
+Internal, not an option.  The independent watchdog and byte backlog
+bound are enforced by `harness-process-send-async', even without another
+send.  A dropped device reconnects and reads the sessions again.")
 
 (defun harness-acp-remote--send (proc bytes)
-  "Write BYTES to the socket PROC, if it is still open.
-In line behind a write that waits for the device to read, never inside
-it: a device that stopped reading must not nest every write the harness
-makes meanwhile until Lisp nesting overflows."
+  "Queue BYTES to the socket PROC, if still open, without waiting for it.
+The per-socket writer preserves order and bounds pending time/bytes;
+a device that stopped reading holds no server dispatch open."
   (when (process-live-p proc)
     (condition-case err
-        (harness-process-send proc bytes harness-acp-remote--write-limit)
+        (harness-process-send-async proc bytes harness-acp-remote--write-limit)
       (error (harness-log 'debug "acp-remote: writing to %s failed: %s"
                           (process-name proc) (harness-error-message err))))))
 
 (defun harness-acp-remote--close (proc)
   "Close the socket PROC and drop its client, or its tunnel."
   (process-put proc 'harness-acp-remote-state 'closing)
+  (harness-process-send-cancel proc)
   (harness-acp-remote--close-tunnel proc)
   (when-let* ((client (process-get proc 'harness-acp-remote-client)))
     (harness-acp-drop-client client))
   (when (process-live-p proc) (delete-process proc)))
+
+(defun harness-acp-remote--finish (proc)
+  "Close PROC after its final frame or HTTP response and EOF, without waiting."
+  (process-put proc 'harness-acp-remote-state 'closing)
+  (harness-process-send-close proc))
 
 (defun harness-acp-remote--write-ws (client text)
   "Send TEXT, a JSON-RPC message, to CLIENT as a WebSocket text frame."
@@ -1554,8 +1558,7 @@ VALUE) header fields."
                    'utf-8 t)
                   bytes))
     (when (process-live-p proc)
-      (ignore-errors (harness-process-send-eof proc))
-      (run-at-time 5 nil (lambda () (when (process-live-p proc) (delete-process proc)))))))
+      (harness-acp-remote--finish proc))))
 
 (defun harness-acp-remote--respond-json (proc status object &optional headers)
   "Answer the request on PROC with STATUS and OBJECT as JSON, with HEADERS besides.
@@ -1663,15 +1666,18 @@ It ends the session whose secret REQUEST holds, as a WebSocket does."
   "End the WebSocket beside PROC when the tunnel's service ended."
   (unless (process-live-p proc)
     (let ((server (process-get proc 'harness-acp-remote-server)))
-      (when (process-live-p server)
+      (harness-process-send-cancel proc)
+      (when (and (process-live-p server)
+                 (not (eq (process-get server 'harness-acp-remote-state) 'closing)))
         (harness-acp-remote--send
          server (harness-acp-remote-ws-close-frame 1000 "The endpoint stopped"))
-        (harness-acp-remote--close server)))))
+        (harness-acp-remote--finish server)))))
 
 (defun harness-acp-remote--close-tunnel (proc)
   "Close the tunnel of the WebSocket on PROC, if it has one."
   (when-let* ((bridge (process-get proc 'harness-acp-remote-tunnel)))
     (process-put proc 'harness-acp-remote-tunnel nil)
+    (harness-process-send-cancel bridge)
     (when (process-live-p bridge)
       (delete-process bridge))))
 
@@ -1685,19 +1691,19 @@ a ping is answered, and a close ends both sides."
       (pcase event
         (`(binary . ,data)
          (when (and (process-live-p bridge) (> (length data) 0))
-           (process-send-string bridge data)))
+           (harness-process-send-async bridge data harness-acp-remote--write-limit)))
         (`(text . ,_) nil)
         (`(ping . ,payload)
          (harness-acp-remote--send proc (harness-acp-remote-ws-frame 'pong payload)))
         (`(pong . ,_) nil)
         (`(close . ,_)
          (harness-acp-remote--send proc (harness-acp-remote-ws-close-frame 1000))
-         (harness-acp-remote--close proc))
+         (harness-acp-remote--finish proc))
         (`(error ,code . ,message)
          (harness-log 'info "acp-remote: closing the tunnel of %s: %s"
                       (process-get proc 'harness-acp-remote-address) message)
          (harness-acp-remote--send proc (harness-acp-remote-ws-close-frame code message))
-         (harness-acp-remote--close proc))))))
+         (harness-acp-remote--finish proc))))))
 
 (defun harness-acp-remote--tunnel-protocol (request)
   "Return the subprotocol to answer a tunnel REQUEST with, or nil.
@@ -1870,12 +1876,12 @@ at once when too many connections have none."
           (`(pong . ,_) nil)
           (`(close . ,_)
            (harness-acp-remote--send proc (harness-acp-remote-ws-close-frame 1000))
-           (harness-acp-remote--close proc))
+           (harness-acp-remote--finish proc))
           (`(error ,code . ,message)
            (harness-log 'info "acp-remote: closing the WebSocket of %s: %s"
                         (process-get proc 'harness-acp-remote-address) message)
            (harness-acp-remote--send proc (harness-acp-remote-ws-close-frame code message))
-           (harness-acp-remote--close proc)))))))
+           (harness-acp-remote--finish proc)))))))
 
 ;;;; Routing
 
@@ -1975,6 +1981,7 @@ bytes."
 (defun harness-acp-remote--sentinel (proc _event)
   "Clean up after the socket PROC once it closed."
   (unless (process-live-p proc)
+    (harness-process-send-cancel proc)
     (if (eq proc harness-acp-remote--server)
         ;; The listener ended on its own: not by `harness-acp-remote--stop',
         ;; which forgets it first.  Serving is still wanted when the option is on.

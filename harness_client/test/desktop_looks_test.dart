@@ -91,6 +91,20 @@ Future<void> _showLookMenu(WidgetTester tester) async {
   await _settle(tester);
 }
 
+/// Bring a group's heading on the settings page back into view: the page
+/// builds its rows as they come into view, and reaching a control below a
+/// heading can scroll that heading out.
+Future<void> _showSection(WidgetTester tester, String label) async {
+  final scrollable = find
+      .descendant(
+        of: find.byType(SettingsScreen),
+        matching: find.byType(Scrollable),
+      )
+      .first;
+  await tester.scrollUntilVisible(find.text(label), -120, scrollable: scrollable);
+  await tester.pump();
+}
+
 String _activeLook(WidgetTester tester) {
   final text = tester.widget<Text>(find.byKey(const Key('look-active')));
   return text.data!;
@@ -242,8 +256,14 @@ Future<void> main() async {
       expect(rig.settings.previewPlatform, PreviewPlatform.linux);
       expect(_activeLook(tester), 'Adwaita');
       expect(_primary(tester), const Color(0xFF3584E4));
+      // Reaching the Look row scrolled the page past the group's heading,
+      // and the settings page builds its rows as they come into view, so
+      // the heading is brought back before it is read.  The words are the
+      // same ones a desktop names the group with, as above.
       expect(find.text('APPEARANCE'), findsNothing);
+      await _showSection(tester, 'Appearance');
       expect(find.text('Appearance'), findsOneWidget);
+      expect(find.text('APPEARANCE'), findsNothing);
 
       await _showLookMenu(tester);
       await tester.tap(_menuItem('Windows'));

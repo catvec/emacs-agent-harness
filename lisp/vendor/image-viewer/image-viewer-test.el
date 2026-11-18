@@ -142,6 +142,71 @@ PROPS are those of `image-viewer-image-string'."
         (should (equal (image-viewer-status-string)
                        "100% fit · 8×4"))))))
 
+(ert-deftest image-viewer-resolves-relative-files-before-display ()
+  "A relative file stays drawable after its string leaves the source buffer."
+  (image-viewer-test-with-dir
+    (let* ((default-directory (file-name-as-directory dir))
+           (relative "docs/media/voice-ribbon-review/voice-ribbon-versus-ordinary.png")
+           (file (expand-file-name relative)))
+      (make-directory (file-name-directory file) t)
+      (image-viewer-test--write dir relative image-viewer-test--png)
+      (let* ((text (image-viewer-image-string relative :max-width 8 :max-height 8))
+             (image (get-text-property 0 'display text)))
+        (should (equal (substring-no-properties text)
+                       "[image voice-ribbon-versus-ordinary.png]"))
+        (should (equal (get-text-property 0 'help-echo text)
+                       "+ and - zoom, 0 fits, 1 shows it at 100%"))
+        (should (equal (image-property image :file) file))
+        (with-temp-buffer
+          ;; A caller may keep the string, then show it elsewhere.  Emacs
+          ;; searches image-load-path, not this directory, for relative :file.
+          (setq default-directory (file-name-directory dir))
+          (insert text)
+          (goto-char (point-min))
+          (should (equal (image-viewer-status-string) "100% fit · 8×4"))
+          (when (display-images-p)
+            (image-flush image)
+            (should (equal (image-size image t) '(8 . 4)))))))))
+
+(ert-deftest image-viewer-resolves-relative-files-on-insertion ()
+  "Inserting an image resolves its file without changing caller copy."
+  (image-viewer-test-with-dir
+    (let* ((default-directory (file-name-as-directory dir))
+           (file (image-viewer-test--write dir "test.png" image-viewer-test--png)))
+      (with-temp-buffer
+        (let ((image (image-viewer-insert-image
+                      "test.png" :max-width 8 :max-height 8
+                      :label "Preview" :help-echo "Open preview")))
+          (should (equal (image-property image :file) file))
+          (should (equal (buffer-string) "Preview"))
+          (should (equal (get-text-property (point-min) 'help-echo)
+                         "Open preview")))))))
+
+(ert-deftest image-viewer-keeps-data-images-and-unreadable-fallbacks ()
+  "Resolving a local path neither rewrites data nor probes a remote file."
+  (image-viewer-test-with-dir
+    (let ((default-directory (file-name-as-directory dir)))
+      (let* ((source (list :data (base64-encode-string image-viewer-test--png t)
+                           :mime "image/png"))
+             (text (image-viewer-image-string source :max-width 8 :max-height 8))
+             (image (get-text-property 0 'display text)))
+        (should (equal (image-property image :data) image-viewer-test--png))
+        (should-not (image-property image :file))
+        (should (equal (substring-no-properties text) "[image image]")))
+      (let ((constructed 0) (probed 0))
+        (cl-letf (((symbol-function 'create-image)
+                   (lambda (&rest _) (cl-incf constructed) nil)))
+          (should-not (image-viewer-image-string "missing.png"))
+          (with-temp-buffer
+            (should-not (image-viewer-insert-image "missing.png"))
+            (should (equal (buffer-string) "")))
+          (cl-letf (((symbol-function 'file-readable-p)
+                     (lambda (&rest _) (cl-incf probed) nil)))
+            (should-not (image-viewer-image-string "/ssh:example:/image.png"))
+            (should-not (image-viewer-insert-image "/ssh:example:/image.png")))
+          (should (zerop constructed))
+          (should (zerop probed)))))))
+
 (ert-deftest image-viewer-zooms-at-point ()
   "Zooming changes the image in place, and 0 fits it again."
   (image-viewer-test-with-dir

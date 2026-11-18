@@ -2,7 +2,7 @@
 
 # replay
 
-Keeps what a session's model was sent: the responses it made and the payload of its last request, so that a restart and a change of the rendering code keep the prompt cache.
+Keeps what a session's model was sent: the responses it made, the payload of its last request, and the exact body of the final request field by field, so that a restart, a change of the rendering code and a change of the adapter's serialization keep the prompt cache; a body that changed with no recorded reset is refused before it is sent.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-replay.el](../../lisp/modules/harness-replay.el)
@@ -60,12 +60,42 @@ JSON maps an empty object and an empty array to nil both, and a
 request written again with null where it had {} or [] is not the
 request the provider cached.
 
+The neutral payload above is what the harness *means* to send.  What
+a provider's prompt cache sees is the adapter's own body, which the
+adapter builds afresh with every request (`harness-openai--body`,
+`harness-responses--body`): a change of that code -- a reordered
+field, a new setting, a different image representation -- changes the
+wire prefix while the neutral payload is identical, and nothing said
+so.  So the components of the *final* body are kept as well, exactly
+as they were encoded (`replay/frozen-splice`): the next request is
+assembled from those bytes for every component already sent, and only
+the components the new nodes add are encoded fresh.  The assembled
+body is compared component by component with what was kept before it
+is handed to the transport; a difference no recorded reset explains
+is refused there, naming the first divergent component, and nothing is
+sent.  The resets are explicit and recorded, each with its reason and
+a new generation: a compaction, a change of model, route, system
+prompt or tools, an adapter serialization version, a redaction,
+images dropped from the history, a payload too large to keep, and a
+store that could not be written.
+
+Identical components do not promise a provider cache hit: eviction,
+retention and routing are the provider's, and the diagnostics module
+(`harness-provider-diagnostics.el`) is what records them.  This
+module guarantees only what the harness sends.
+
 ## Provides
 
 ### Methods
 
 - `replay/forget` (id) — Delete what is kept for session ID: its responses and its last request.
+- `replay/frozen-check` (id body &optional generation) — Return why BODY may not be sent for session ID, or nil.
+- `replay/frozen-record` (id body &optional model route) — Keep BODY, the body of session ID's request, as what that request sent.
+- `replay/frozen-reset` (id reason &optional detail) — Record that session ID's frozen body no longer applies, and why.
+- `replay/frozen-splice` (id model route body) — Return the body of session ID's next request, frozen where it may be.
+- `replay/frozen-status` (id) — Return what is frozen for session ID, or nil.
 - `replay/keep-responses` (id call-ids) — Keep only the responses of session ID whose every call is in CALL-IDS.
+- `replay/miss-note` (id info) — Record that session ID's provider missed on INFO, a `cache/reuse`.
 - `replay/prefix` (request) — Return how REQUEST continues the payload of its session's last request.
 - `replay/redact` (id secrets &optional dry-run) — Take SECRETS out of the payload files of session ID, or count them (DRY-RUN).
 - `replay/remember-response` (id items) — Keep ITEMS, a response of session ID, on disk under the calls it made.
@@ -73,8 +103,14 @@ request the provider cached.
 - `replay/responses-p` (id) — Non-nil when the disk holds responses kept for session ID.
 - `replay/save-request` (request) — Keep REQUEST's payload for its session, to continue the next one from.
 
+### Events
+
+- `replay/prefix` — (SESSION-ID INFO) for every request whose body the replay module was asked to freeze, saying what it did with the prefix: INFO is (:generation N :decision SYMBOL :reason REASON :divergence PATH :prefix-bytes N :appended-bytes N :metadata N :model M :route R :at TIME).  DECISION is `spliced` when the prompt was re-sent from the kept bytes plus an appended suffix, `fresh` when no kept body applied, and `diverged` when the rebuilt prompt no longer continued it; REASON is why, one of `harness-replay-frozen-reset-reasons`, or `diverged`.  Nothing in INFO is a prompt's text or a digest of one, so a cache miss can be diagnosed from it without a prompt ever being kept for that purpose.
+
 ### Options
 
+- `harness-replay-frozen-max-bytes` — Largest frozen body kept for a session, in bytes.
+- `harness-replay-prompt-fields` — Fields of a request body that are the prompt the model is given.
 - `harness-replay-request-max-bytes` — Largest request payload kept for a session, in bytes.
 - `harness-replay-responses-limit` — Most responses kept for a session on disk.
 
@@ -91,6 +127,14 @@ request the provider cached.
 
 ### Events it handles
 
+- `agent/images-pruned` → `harness-replay--on-images-pruned`
+- `cache/reuse` → `harness-replay--on-reuse`
 - `compaction/done` → `harness-replay--on-compaction`
+- `replay/prefix` → `harness-replay--on-prefix`
 - `session/deleted` → `harness-replay--on-session-deleted`
+- `session/updated` → `harness-replay--on-session-updated`
+
+### Events it emits
+
+- `replay/prefix`
 

@@ -65,13 +65,13 @@ Markdown renderer only when it is finalised or at most every
 compaction summaries and runs of coalescable tools (with the thinking
 between their calls) collapse under overlays that isearch opens, so
 every word of the conversation stays searchable; a hand_in call that
-succeeds opens expanded once its result is in, its body the hand-in
-the review draws -- the report, and the changes and threads of the
-task's review (`harness-ui-report-hand-in-functions`) -- and a fold in
-it draws the call again (`harness-chat-refresh-hand-ins`).  It stays
-folded while something else shows that report already, the review
-banner of a task waiting for review
-(`harness-chat-hand-in-fold-functions`).  An agent answers a thread
+succeeds opens expanded when a module says its report waits for the
+user's review (`harness-chat-hand-in-open-functions`), its body the
+hand-in the review draws -- the report, the changes and threads of the
+task's review, and the buttons that decide it
+(`harness-ui-report-hand-in-functions`) -- and a fold in it draws the
+call again (`harness-chat-refresh-hand-ins`).  Once the work is
+decided the call folds, the review over.  An agent answers a thread
 in a <thread> block of its message, which draws as the card a reply
 in a thread is (`harness-chat--render-thread-tag`); a call of the
 reply tool that was removed, `review_comment`, with words is drawn as
@@ -119,7 +119,7 @@ this file never touches a session struct.
 
 ### Hooks
 
-- `harness-chat-hand-in-fold-functions` — Functions that say a hand_in call stays folded.
+- `harness-chat-hand-in-open-functions` — Functions that say a hand_in call opens expanded.
 - `harness-chat-header-end-functions` — Functions adding segments of their own to the chat header line.
 - `harness-chat-header-functions` — Functions putting segments in front of the chat header line.
 - `harness-chat-panel-functions` — Functions putting a panel of their own below the transcript.

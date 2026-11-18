@@ -30,6 +30,12 @@ patterns of model ids, the same ones `harness-allowed-models` takes.
   before.  An empty list is the same as absent: it is not a way to say
   "nothing", because a setting that silently offers nothing is a
   misconfiguration, not a policy.
+- A single string stands for a list of one, so a hand-written
+  `:allow-models "openrouter:qwen*"` reads as intended.
+- An entry that is not a non-blank string is dropped
+  (`harness-provider--allow-patterns`, applied by
+  `harness-define-provider`), so a stray nil in a hand-written list does
+  not narrow the provider to nothing.
 
 The two allowlists both apply and neither widens the other: a model must
 pass `harness-allowed-models` **and** its provider's `:allow-models`.
@@ -113,7 +119,8 @@ setting and its patterns, so the reader can find what to change.
 
 - `lisp/modules/harness-provider.el`: the `allow-models` slot of
   `harness-provider`, the `:allow-models` keyword of
-  `harness-define-provider`, `harness-provider--pattern-matches-p`,
+  `harness-define-provider`, `harness-provider--allow-patterns` (what
+  the value is normalised to), `harness-provider--pattern-matches-p`,
   `harness-provider--offered-p`, `harness-provider--offered`,
   `harness-provider--note-empty-allowlist`, the filtering in
   `harness-provider--rebuild-cache`, and the second arm of
@@ -130,6 +137,37 @@ setting and its patterns, so the reader can find what to change.
   `lisp/modules/harness-provider-openrouter-test.el` (the pass-through),
   `lisp/ui/harness-ui-model-picker-test.el` (the narrowed catalogue in
   the picker, and the empty one).
+- Demo: `demo/allow-models/` registers four made-up providers and prints
+  what a client sees -- the catalogue, a tier, a refusal, both allowlists
+  together -- so it shows the surfaces reading one narrowed set rather
+  than the filter function.  `demo/allow-models/render-evidence.py`
+  rewrites `docs/evidence/allow-models/allow-models-demo.png` from the
+  demo's own output.  It needs no network and no credential.
+
+## UI copy
+
+The only new user-visible text is in the settings page's endpoint
+editor, and each piece is a noun or a noun phrase:
+
+- `Allowed models` — the key's label;
+- `Provider, model or pattern` — a pattern's label, the same words
+  `harness-allowed-models` already shows, so the two entries read alike;
+- the key's `:doc` — a setting description, the one place the copy rule
+  allows prose.
+
+A test asserts both labels exactly
+(`harness-openai-allow-models-widget-is-copy-in-nouns`), including that
+the pattern label equals the global option's.  The refusal message is a
+server payload — data, not interface copy — and keeps the shape of the
+global option's.
+
+## The reader's own configuration
+
+The routing example in `~/.config/doom/config.el` constrains the models
+it will send to with `harness-allowed-models`, which applies to every
+provider.  It can now state them on the OpenRouter endpoint with
+`:allow-models` instead, leaving the global list free for what the whole
+harness may use.  That file was not edited.
 
 ## Limits
 

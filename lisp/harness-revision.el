@@ -110,6 +110,14 @@ of the harness, and a repository out of reach is none."
   "Return a promise rejected with a `harness-error' saying MESSAGE."
   (harness-rejected (list 'harness-error message)))
 
+(defun harness-revision-git-ran-p (err)
+  "Return non-nil when ERR is a git that ran and failed.
+`harness-revision-git' rejects with a `harness-error' for git's own
+failure and with the process error -- a `file-error' from a machine out
+of processes, say -- when git never ran at all, so the two are told
+apart by the error type."
+  (eq (car-safe err) 'harness-error))
+
 ;;;; The remote a checkout follows
 
 (defun harness-revision-remote-urls (output)
@@ -126,9 +134,11 @@ of the harness, and a repository out of reach is none."
   "Return a promise of the remote DIR's BRANCH follows, or of nil.
 
 DIR is a git checkout, BRANCH the branch of DIR to resolve, or nil for
-a detached HEAD, which follows none.  The promise is never rejected: a
-checkout git cannot read, or one without a remote, has none to follow.
-The plist is:
+a detached HEAD, which follows none.  A checkout git read and found no
+remote in has none to follow, which is nil, and so is one git could not
+read.  A git that could not run at all -- a machine out of processes,
+say -- said nothing about the checkout, and its error is passed on
+rather than read as a checkout with no remote.  The plist is:
 
   :remote   the name of the remote BRANCH tracks, else \"origin\",
             else the only remote DIR has
@@ -165,7 +175,8 @@ its origin.  This is what the version module names as an origin and what
            (list :remote (car pick) :url url
                  :branch (or tracked-branch branch)
                  :tracked (and tracked t))))))
-   (lambda (_err) nil)))
+   (lambda (err)
+     (if (harness-revision-git-ran-p err) nil (harness-rejected err)))))
 
 ;;;; Checkouts
 

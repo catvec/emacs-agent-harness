@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # What reading a transcript costs, measured in a batch Emacs.
 #   scripts/analysis/bench-transcript-load.sh
-# It compiles a copy of the checkout under scripts/.dev/bench-transcript,
+# It compiles a copy of the checkout in a temporary directory of its own,
 # never the checkout itself, and measures synthetic sessions: the full and
 # the lean session listing, the standard replay and the harness's nodes
 # alone, and finding session ids in a long message.  No real transcript is
@@ -10,9 +10,8 @@
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
-dir=scripts/.dev/bench-transcript
-rm -rf "$dir"
-mkdir -p "$dir"
+dir=$(mktemp -d "${TMPDIR:-/tmp}/harness-bench-transcript.XXXXXX")
+trap 'rm -rf "$dir"' EXIT
 cp -r lisp harness.el "$dir"/
 files=("$dir"/lisp/*.el "$dir"/lisp/modules/*.el "$dir"/lisp/ui/*.el)
 lp=(-L "$dir" -L "$dir/lisp" -L "$dir/lisp/modules" -L "$dir/lisp/ui" -L "$ROOT/test")

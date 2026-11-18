@@ -75,8 +75,19 @@ is a line the supervisor writes in one `write()` call:
   O TOKEN BASE64        bytes of its standard output
   E TOKEN BASE64        bytes of its standard error
   X TOKEN STATUS LIVE   it ended; LIVE processes of it are still there
-  P LIVE                processes of the instance no run owns
+  P LIVE SEQ            processes of the instance no run owns; SEQ is
+                        the number of the question it answers
   D                     the instance is going
+
+A count is a snapshot taken while the supervisor scans, and every
+process of a run still in flight is passed over -- that run owns them.
+So a `status` asked while a command runs is answered with a zero that
+says nothing about what the command leaves behind, and that zero
+arriving after the run ended would say the runtime holds nothing.  Each
+question is therefore numbered with the runtime's epoch, which every
+command that starts or ends bumps, and an answer whose number is no
+longer the runtime's own is dropped rather than believed: a runtime is
+not idle because nobody has counted what it holds.
 
 The harness decodes those frames in the process buffer Emacs fills from
 the pipe itself, so no pathname a command can change is ever followed on

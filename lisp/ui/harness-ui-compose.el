@@ -253,6 +253,23 @@ the box with its project alone (`harness-compose-project-function').")
   "Function returning the hint shown while the box is empty.")
 (defvar-local harness-compose-redraw-function #'ignore
   "Function the host redraws the box with, after the attachments change.")
+(defvar-local harness-compose-context-function nil
+  "Function returning what this box composes into, or nil.
+The context is a plist whose `:kind' is `session' (with `:session'), `workspace'
+\(with `:workspace' and `:thread') or `draft' (with `:name'), and whose
+`:name' is what the UI calls it.  A host that names its box sets this, so
+the box itself says where its words go: live voice routes a dictation to
+the box the person is looking at, and a draft takes the words into its
+own text rather than sending them to any session.  Nil leaves the box's
+buffer-locals to say it, as a chat's and a workspace's do.
+
+A draft also says `:identity', a value that names which draft it is,
+compared with `equal'.  A host that reuses one buffer for drafts of
+different purposes -- the task board's box, which describes a new task,
+then a search, an edit or an answer -- must set it, because the buffer
+alone cannot say whether the box the person spoke into is still there.
+A draft of one purpose keeps its identity while it is typed into, so
+dictation inside it is never mistaken for a move.")
 (defvar-local harness-compose--reveal-function nil
   "Function restoring a hidden box, set by `harness-compose-hide'.")
 (defvar harness-compose--focus-target nil
@@ -261,6 +278,18 @@ the box with its project alone (`harness-compose-project-function').")
 (defun harness-compose--project ()
   "Return the project root, as `harness-compose-project-function' says."
   (funcall harness-compose-project-function))
+
+(defun harness-compose-context ()
+  "Return what this box composes into, as a plist, or nil.
+The host's `harness-compose-context-function' answers when it has one:
+`:kind' is `session' (with `:session'), `workspace' (with `:workspace'
+and `:thread') or `draft' (with `:name' and, when the host reuses one
+buffer for drafts of different purposes, `:identity'), and `:name' is
+what the UI calls it.  A host that sets none returns nil, and a reader
+falls back to the buffer's own locals, which is how a chat and a
+workspace have always said where their words go."
+  (when (functionp harness-compose-context-function)
+    (funcall harness-compose-context-function)))
 
 ;;;; Setup and drawing
 
@@ -317,12 +346,15 @@ a string, already fitted to the window, or nil.")
   (define-key map (kbd "C-y") '(menu-item "" harness-compose-yank :filter harness-compose--yank-binding))
   (define-key map (kbd "M-y") '(menu-item "" harness-compose-yank-pop :filter harness-compose--yank-binding)))
 
-(cl-defun harness-compose-setup (&key project placeholder redraw bottom roots)
+(cl-defun harness-compose-setup (&key project placeholder redraw bottom roots context)
   "Make this buffer host a compose box.
 PROJECT returns the project root, PLACEHOLDER the hint for the empty
 box, REDRAW redraws the box (it must call `harness-compose-insert').
 ROOTS, when given, returns the directories the box finds project files
 in, when it has more than the project (`harness-compose-roots-function').
+CONTEXT, when given, returns what the box composes into
+\(`harness-compose-context-function'), so a host that names its box says
+where its words go even when its buffer names no session or thread.
 With BOTTOM the box sits at the bottom of every window showing the
 buffer, the way a chat app keeps its input there: t pads the top of a
 short buffer, a function returning a position pads there instead (a
@@ -338,6 +370,7 @@ window the ones that must stay on one line."
     (add-hook 'after-change-functions #'harness-compose--after-change nil t))
   (when project (setq harness-compose-project-function project))
   (when roots (setq harness-compose-roots-function roots))
+  (when context (setq harness-compose-context-function context))
   (when placeholder (setq harness-compose-placeholder-function placeholder))
   (when redraw (setq harness-compose-redraw-function redraw))
   ;; The last one keeps windows narrower than the frame (side windows)
@@ -367,6 +400,21 @@ window the ones that must stay on one line."
   (and harness-compose-start harness-compose-end
        (eq (marker-buffer harness-compose-start) (current-buffer))
        (<= harness-compose-start harness-compose-end)))
+
+(defvar harness-compose--drawing nil
+  "The buffer `harness-compose-insert' is inserting a box into, or nil.
+The markers of a box exist only once it is inserted, but the controls
+above the prompt are drawn first, so they see this instead.")
+
+(defun harness-compose-host-p ()
+  "Non-nil when this buffer is a compose host, drawn or being drawn.
+A control line above the prompt (`harness-compose-controls-functions')
+runs while the box is still being inserted, so it cannot ask
+`harness-compose-live-p', which reads the markers the insertion has not
+placed yet.  This is true then as well, and false in a buffer that only
+hides a box (`harness-compose-hide') or never had one."
+  (or (harness-compose-live-p)
+      (eq harness-compose--drawing (current-buffer))))
 
 (defun harness-compose-capture ()
   "Remember the box's text, before the host deletes it to redraw."
@@ -560,12 +608,16 @@ attachments show as chips (`harness-compose--show-tokens')."
           harness-compose--detached nil))
   (let ((start (point)))
     (setq harness-compose--controls-fit-room nil)
-    (dolist (fn harness-compose-controls-functions)
-      (when-let* ((line (funcall fn)))
-        (setq harness-compose--controls-fit-room (harness-compose--room))
-        (insert (propertize (concat line "\n") 'read-only t 'rear-nonsticky t))))
-    ;; Partial tail redraws stop here, preserving controls and the draft.
-    (setq harness-compose-controls-start (copy-marker start)))
+    ;; The controls are drawn above the prompt, before the markers of the
+    ;; box exist: they see this buffer as a compose host while they run
+    ;; (`harness-compose-host-p').
+    (let ((harness-compose--drawing (current-buffer)))
+      (dolist (fn harness-compose-controls-functions)
+        (when-let* ((line (funcall fn)))
+          (setq harness-compose--controls-fit-room (harness-compose--room))
+          (insert (propertize (concat line "\n") 'read-only t 'rear-nonsticky t))))
+      ;; Partial tail redraws stop here, preserving controls and the draft.
+      (setq harness-compose-controls-start (copy-marker start))))
   (let* ((background (or face 'harness-compose-face))
          (accent (and accent (list accent background)))
          (prompt (if accent (concat (harness-compose-bar (car accent) background) "❯ ") "❯ "))
@@ -954,7 +1006,7 @@ waits.  Return the timer; the caller cancels it when the target goes."
              (harness-compose--panel-target-delete (car cell))
              (when-let* ((panel (harness-compose--panel-named id)))
                (setcar cell (harness-compose--panel-target-overlays panel))
-               (redisplay t)))))))))
+               (harness-latency-redisplay t)))))))))
 
 (defun harness-compose--panel-up (n)
   "Return the Nth panel above the box, nearest first, as (START . END), or nil."
@@ -1034,7 +1086,7 @@ said, and nothing runs."
              (timer (harness-compose--panel-target-keep id cell)))
         (unwind-protect
             (progn
-              (redisplay t)
+              (harness-latency-redisplay t)
               (let ((read (read-key-sequence
                            (format "Key for the panel above (%s again for the next one up, C-g quits): "
                                    (harness-compose-panel-keys)))))

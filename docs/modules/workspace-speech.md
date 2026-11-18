@@ -82,7 +82,7 @@ mid-utterance leaves it to expire
 (`harness-workspace-speech-claim-seconds`), after which the entry is
 cancelled `:why "Speaker lost"` and the floor moves on.  The device
 and cross-client guarantees this can and cannot give are written in
-docs/workspace-speech.md; the honest summary is that the floor is one
+docs/design/workspace-speech-queue.md; the honest summary is that the floor is one
 record with one speaker, and that two clients which both claim in the
 same instant are serialized by the harness, so exactly one of them
 wins -- what no client can do is keep a claim it never reports back

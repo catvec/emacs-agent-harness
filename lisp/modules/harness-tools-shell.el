@@ -75,6 +75,16 @@
 ;;   has the backend table and what each path does and does not promise).
 ;;   `sandbox/session' says which of the two a session has, and why.
 ;;
+;;   Voice cancellation (`agent/voice-control') supports an in-flight bash
+;;   call only in that shared runtime.  The `agent/tool-canceller' filter
+;;   captures its actual run by the originating context's `:turn-id' and
+;;   `:call-id', never by the session's current work.  Invoking it requests
+;;   `harness-sandbox-session-kill-run' for that run only, not runtime
+;;   teardown or job cancellation (the sandbox's existing fail-safe may
+;;   still tear down a run that cannot stop).  A run already ended is
+;;   reported completed; unshared commands and other tools have no supported
+;;   canceller.  A cancellation request promises neither undo nor rollback.
+;;
 ;;   A shared runtime costs one thing, and the settings say it: its mounts
 ;;   are fixed when it starts, so a change to what the session may reach
 ;;   -- a granted or a revoked directory, a directory made read-only, a
@@ -161,6 +171,8 @@
                   (ctx cwd command &rest args))
 (declare-function harness-sandbox-session-wait "harness-sandbox-session" (run &optional deadline))
 (declare-function harness-sandbox-session-problem "harness-sandbox-session" (ctx cwd))
+(declare-function harness-sandbox-session-run-state "harness-sandbox-session" (run))
+(declare-function harness-sandbox-session-kill-run "harness-sandbox-session" (run &optional reason))
 (declare-function harness-tools-jobs--bash-job-shared "harness-tools-jobs" (input ctx))
 
 (defconst harness-tools-shell--program "bash"
@@ -189,6 +201,42 @@ run remote commands so."
   (list "sh" "-c" harness-tools-shell--remote-script "sh" command))
 
 ;;;; bash
+
+(defconst harness-tools-shell--voice-cancel-reason "explicit voice cancellation"
+  "The reason a voice control gives the shared-run cancellation contract.")
+
+(defvar harness-tools-shell--cancellable-runs (make-hash-table :test 'equal)
+  "(SESSION-ID TURN-ID CALL-ID) -> the exact shared bash run.
+Only originating turn identities from tool contexts are accepted.  No
+unshared command, detached job or session-wide runtime is registered.
+Entries last until `tools/finished', including the short interval after
+a run ended but before its asynchronous tool result reached the agent.")
+
+(defun harness-tools-shell--control-key (ctx)
+  "Return CTX's originating control scope, or nil without a turn identity."
+  (when (and (plist-get ctx :session-id) (plist-get ctx :call-id)
+             (stringp (plist-get ctx :turn-id)) (not (string-empty-p (plist-get ctx :turn-id))))
+    (list (plist-get ctx :session-id) (plist-get ctx :turn-id) (plist-get ctx :call-id))))
+
+(defun harness-tools-shell--tool-canceller (value sid turn-id call-id)
+  "Return VALUE or a canceller for SID's exact TURN-ID and CALL-ID run.
+Capture only; `agent/voice-control' invokes the function after requesting
+model cancellation.  Recheck the captured run's state at invocation,
+since it may finish, or a new turn may start, in between."
+  (or value
+      (when-let* ((run (gethash (list sid turn-id call-id) harness-tools-shell--cancellable-runs)))
+        (lambda ()
+          (cond
+           ((not (eq (harness-sandbox-session-run-state run) 'running)) 'completed)
+           ((plist-get run :cancelled) 'requested)
+           ((harness-sandbox-session-kill-run run harness-tools-shell--voice-cancel-reason) 'requested)
+           ((not (eq (harness-sandbox-session-run-state run) 'running)) 'completed)
+           (t 'unavailable))))))
+
+(defun harness-tools-shell--on-tool-finished (sid call _result)
+  "Forget the exact shared run after CALL of SID returned its result."
+  (remhash (list sid (plist-get call :turn-id) (plist-get call :id))
+           harness-tools-shell--cancellable-runs))
 
 (defun harness-tools-shell--number (v default)
   "Return V as a number, or DEFAULT."
@@ -403,9 +451,9 @@ list given, when it runs unwrapped."
       (push (string-trim-right stdout) parts))
     (unless (string-empty-p stderr)
       (push (concat "--- stderr ---\n" stderr) parts))
-    (push (if (eq exit 'timeout)
-              (format "exit: killed after %ss timeout" timeout)
-            (format "exit %s" exit))
+    (push (cond ((eq exit 'timeout) (format "exit: killed after %ss timeout" timeout))
+                ((eq exit 'cancelled) "exit: stopped after cancellation request")
+                (t (format "exit %s" exit)))
           parts)
     (string-join (nreverse parts) "\n")))
 
@@ -467,10 +515,18 @@ as before (see `harness-tools-shell--bash-unshared')."
         (cond
          ((and (consp run) (eq (car run) :error)) nil)
          (t
+          (when-let* ((key (harness-tools-shell--control-key ctx)))
+            (puthash key run harness-tools-shell--cancellable-runs))
           (harness-tools-note ctx (harness-tools-shell--bash-note 0 ""))
           (harness-then
            (harness-sandbox-session-wait run)
            (lambda (r)
+             ;; The sandbox's generic stopped result uses `timeout' as
+             ;; its exit sentinel.  An explicit cancellation is not proof
+             ;; that the command reached its configured timeout.
+             (when (and (eq (plist-get r :state) 'stopped)
+                        (equal (plist-get r :reason) harness-tools-shell--voice-cancel-reason))
+               (setq r (plist-put (copy-sequence r) :exit 'cancelled)))
              (let ((exit (plist-get r :exit))
                    (dropped (plist-get r :dropped)))
                (funcall
@@ -1015,9 +1071,23 @@ for the user's Emacs is refused with that explanation."
   :subject (lambda (input) (harness-first-line (plist-get input :code) 70))
   :handler #'harness-tools-shell--elisp)
 
+(defun harness-tools-shell--init ()
+  "Register the narrow shared-run cancellation hook.  Idempotent."
+  (harness-add-filter 'agent/tool-canceller #'harness-tools-shell--tool-canceller)
+  ;; Agent completion tracking runs at 10, before the run is forgotten.
+  (harness-on 'tools/finished #'harness-tools-shell--on-tool-finished 90))
+
+(defun harness-tools-shell--shutdown ()
+  "Forget cancellation handles without stopping commands, runtimes or jobs."
+  (harness-remove-filter 'agent/tool-canceller #'harness-tools-shell--tool-canceller)
+  (harness-off (cons 'tools/finished #'harness-tools-shell--on-tool-finished))
+  (clrhash harness-tools-shell--cancellable-runs))
+
 (harness-define-module 'tools-shell
   :doc "Bash (asynchronous, sandboxed when available) and Emacs Lisp evaluation."
-  :requires '(tools))
+  :requires '(tools)
+  :init #'harness-tools-shell--init
+  :shutdown #'harness-tools-shell--shutdown)
 
 (provide 'harness-tools-shell)
 ;;; harness-tools-shell.el ends here

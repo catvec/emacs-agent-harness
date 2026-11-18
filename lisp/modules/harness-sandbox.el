@@ -1376,18 +1376,46 @@ there."
 (defconst harness-sandbox--container-socket-paths
   '("/var/run/docker.sock" "/run/docker.sock" "/run/podman/podman.sock")
   "The sockets a container engine is found at, in the order to try.
-The first that exists is the one a container command is shown.")
+The first that exists is the one a container command is shown.  It is
+only consulted when no container runtime module says which engine the
+harness uses (see `harness-sandbox--container-engine').")
+
+(defun harness-sandbox--container-engine ()
+  "Return the container runtime's engine as a plist, or nil.
+That is `harness-container-runtime-engine', which names the CLI and the
+socket of the engine the harness's compose stacks use.  It is read here
+so a container command inside a sandbox reaches the same engine the
+stacks use -- a machine whose stacks run on Podman is not shown a Docker
+socket it never had.  The answer runs nothing, so reading it here does
+not ask the engine whether it answers, which would ask this probe.
+Nil when the container runtime module is not loaded, and the paths of
+`harness-sandbox--container-socket-paths' are looked at instead."
+  (when (fboundp 'harness-container-runtime-engine)
+    (condition-case err
+        (harness-container-runtime-engine)
+      (error
+       (harness-log 'debug "sandbox: the container runtime named no engine: %S" err)
+       nil))))
 
 (defun harness-sandbox--container-socket ()
   "Return the container socket path a command may be shown, or nil.
 `DOCKER_HOST' wins when it names a Unix socket, so a user who moved
-the engine's endpoint is followed rather than overruled."
-  (let ((host (getenv "DOCKER_HOST")))
+the engine's endpoint is followed rather than overruled.  Otherwise it
+is the socket of the engine the harness's stacks use, when it is there,
+and only when no container runtime module is loaded, the first socket
+at one of the known paths."
+  (let ((host (getenv "DOCKER_HOST"))
+        (engine (harness-sandbox--container-engine)))
     (cond
      ((and host (string-prefix-p "unix://" host))
       (let ((path (string-remove-prefix "unix://" host)))
         (and (file-exists-p path) path)))
-     ((cl-find-if #'file-exists-p harness-sandbox--container-socket-paths)))))
+     (engine
+      ;; Podman has no socket, and an engine that is not installed has
+      ;; none to show either: no other engine's is looked for then.
+      (let ((socket (plist-get engine :socket)))
+        (and socket (file-exists-p socket) socket)))
+     (t (cl-find-if #'file-exists-p harness-sandbox--container-socket-paths)))))
 
 (defun harness-sandbox--container-sysfs-mounts ()
   "Return bwrap arguments showing the system file systems a runtime reads, or nil.
@@ -2972,6 +3000,19 @@ sandbox that refuses one nests nothing, whatever its socket."
          (with-temp-buffer
            (eql 0 (call-process "unshare" nil t nil "--user" "--map-root-user" "--" "true"))))))
 
+(defun harness-sandbox--container-cli ()
+  "Return the container CLI a sandboxed command runs, or nil.
+That is the engine the harness's stacks use, by absolute path, when the
+container runtime module is loaded -- nil when that engine is not
+installed, and no other engine's CLI is offered in its place: a machine
+whose stacks run on Podman does not run a sandboxed command on a Docker
+that happens to be beside it.  With no container runtime module, the
+first of `docker' and `podman' that is installed."
+  (let ((engine (harness-sandbox--container-engine)))
+    (if engine
+        (plist-get engine :program)
+      (cl-find-if #'executable-find '("docker" "podman")))))
+
 (defun harness-sandbox--container-probe ()
   "Return what a container command would find in a sandbox here, as a plist.
 The plist holds `:ok', `:stage' and `:why' -- the first stage that
@@ -2981,7 +3022,7 @@ found of each stage: `:binary', `:socket', `:socket-state',
 starts no container."
   (let* ((policy (harness-sandbox--policy nil))
          (backend harness-sandbox--backend)
-         (binary (cl-find-if #'executable-find '("docker" "podman")))
+         (binary (harness-sandbox--container-cli))
          (socket (harness-sandbox--container-socket))
          (state (and socket (harness-sandbox--container-socket-state socket)))
          (sysfs (file-exists-p "/sys"))
@@ -3001,7 +3042,9 @@ starts no container."
           (pcase stage
             ('policy "Sandbox policy off · no confinement")
             ('backend (format "Sandbox backend unavailable · %s" (or backend 'none)))
-            ('binary "Container CLI missing · docker, podman")
+            ('binary (format "Container CLI missing · %s"
+                             (or (plist-get (harness-sandbox--container-engine) :label)
+                                 "docker, podman")))
             ('sysfs "Sysfs unavailable · /sys")
             ('cgroup "Cgroup filesystem absent · /sys/fs/cgroup")
             ('socket (format "Engine socket unavailable · %s"

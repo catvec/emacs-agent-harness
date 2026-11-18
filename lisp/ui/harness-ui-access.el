@@ -340,7 +340,13 @@ pages draw none, and ask for none."
                                (when (buffer-live-p buffer)
                                  (with-current-buffer buffer
                                    (setq harness-ui-access--timer nil)
-                                   (harness-ui-access-refresh buffer)))))))))))
+                                   ;; A window may have stopped showing it
+                                   ;; while the timer waited: it is hidden
+                                   ;; now, and waits for one again as any
+                                   ;; other page nothing shows does.
+                                   (if (harness-ui-view-follow-p buffer)
+                                       (harness-ui-access-refresh buffer)
+                                     (setq harness-ui-access--stale t))))))))))))
 
 (defun harness-ui-access--shown (&rest _)
   "Fetch the buffer again when it is shown after changes it missed.

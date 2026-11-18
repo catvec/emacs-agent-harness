@@ -1013,6 +1013,52 @@ why a request's `:max-tokens' does not reach the wire."
                    name max))
     body))
 
+;;;; The body, frozen where it may be
+
+;; The seam lives in harness-replay.el, which is loaded after this
+;; module and may not be loaded at all: it is reached by name, and never
+;; required from here.
+(declare-function harness-replay-seam "harness-replay")
+(declare-function harness-replay-seam-keep "harness-replay")
+(declare-function harness-replay-route "harness-replay")
+
+(defconst harness-responses--replay-mutation-error 'harness-replay-mutation
+  "The condition a body that may not be sent signals.")
+
+(defun harness-responses--frozen-body (name request)
+  "Return the body to send for REQUEST, frozen where it may be.
+The body is what `harness-responses--body' builds, with every field an
+earlier request of the same session sent put back as the bytes that
+request sent (see harness-replay.el).  A body that may not be sent at all
+-- a prompt component changed and no recorded reset explains it -- signals
+`harness-replay-mutation', and nothing goes on the wire."
+  (let* ((body (harness-responses--body name request))
+         (seam (if (fboundp 'harness-replay-seam)
+                   (harness-replay-seam request (format "chatgpt-plan:%s" name)
+                                        (harness-replay-route
+                                         request (list :id 'chatgpt-plan
+                                                       :base-url harness-responses-base-url))
+                                        body)
+                 ;; Nothing freezes it, and the bytes are what the
+                 ;; adapter's own body encodes to: the seam always answers
+                 ;; with text.
+                 (cons (harness-json-encode body) nil))))
+    (when (cdr seam)
+      (signal 'harness-replay-mutation (list (cdr seam) request body)))
+    (car seam)))
+
+(defun harness-responses--frozen-keep (name request)
+  "Keep BODY, the body just sent for REQUEST, as what that request sent.
+Nothing is kept when the body the transport sent is not the body the
+adapter built: a frozen body is what was compared, and keeping another
+would compare the next request with something it never sent."
+  (when (fboundp 'harness-replay-seam-keep)
+    (harness-replay-seam-keep request (format "chatgpt-plan:%s" name)
+                              (harness-replay-route
+                               request (list :id 'chatgpt-plan
+                                             :base-url harness-responses-base-url))
+                              (harness-responses--body name request))))
+
 ;;;; Error codes
 
 (defconst harness-responses--error-kinds
@@ -1470,84 +1516,107 @@ REQUEST is the harness request it was built from.  ATTEMPT counts the
 times this request has been sent: a request refused because the model
 does not take the reasoning effort asked for is sent once more with
 the efforts the answer names."
-  (if (harness-responses--stream-finished stream)
-      nil
+  (unless (harness-responses--stream-finished stream)
     (let* ((token (plist-get info :token))
+           (name (harness-responses--stream-name stream))
            (sse (harness-http-sse-parser
-                 (lambda (event data) (harness-responses--sse stream event data)))))
-      (condition-case err
-          (setf (harness-responses--stream-http stream)
-                (harness-http-request
-                 (concat (string-remove-suffix "/" harness-responses-base-url) "/responses")
-                 :method "POST"
-                 :headers (harness-responses--headers token)
-                 :json (harness-responses--body (harness-responses--stream-name stream) request)
-                 :timeout harness-responses--request-timeout
-                 ;; A streaming completion is worth repeating when the
-                 ;; connection failed before any of the answer arrived; the
-                 ;; HTTP layer never repeats one that delivered bytes.
-                 :retry t
-                 ;; A replay this layer decides on its own is a send
-                 ;; like any other: it asks the pool that admitted the
-                 ;; request before it goes (see `harness-admission').
-                 :gate (let ((gate (plist-get request :transport-gate)))
-                         (and (functionp gate) gate))
-                 :on-headers (lambda (status headers)
-                               (setf (harness-responses--stream-status stream) status)
-                               ;; Both forms of Retry-After are read, a number
-                               ;; of seconds and an HTTP-date, so the wait a
-                               ;; rate limit names reaches the provider pool
-                               ;; (`harness-admission') and the retry layer as
-                               ;; the wait it is.
-                               (when-let* ((after (harness-http-retry-after-seconds headers)))
-                                 (setf (harness-responses--stream-retry-after stream) after))
-                               ;; The plan's windows come with every answer, so
-                               ;; the quota is kept current without a request
-                               ;; of its own; a 429 carries them too, and they
-                               ;; are what says when the limit resets.
-                               (when (harness-responses--plan-headers headers)
-                                 (harness-responses--emit-quota stream)))
-                 :on-chunk (lambda (chunk)
-                             (if (and (harness-responses--stream-status stream)
-                                      (>= (harness-responses--stream-status stream) 300))
-                                 (setf (harness-responses--stream-raw stream)
-                                       (concat (harness-responses--stream-raw stream) chunk))
-                               (funcall sse chunk)))
-                 :callback (lambda (status _headers body err)
-                             (let* ((status (or status (harness-responses--stream-status stream)))
-                                    (raw (harness-responses--stream-raw stream))
-                                    (refusal (if (string-empty-p raw) (or body "") raw)))
-                               (cond
-                                ((harness-responses--stream-finished stream) nil)
-                                ((eq (car-safe err) 'cancelled)
-                                 (harness-responses--finish stream 'cancelled))
-                                (err (harness-responses--finish
-                                      stream 'error (harness-error-message (cadr err))
-                                      (and (harness-http-transient-error-p err) 'transport)))
-                                ((and status (>= status 300))
-                                 (if (and (null attempt)
-                                          (member status '(400 422))
-                                          (harness-responses--learn-rejected-effort
-                                           (harness-responses--stream-name stream)
-                                           refusal
-                                           (plist-get (harness-responses--reasoning
-                                                       request
-                                                       (harness-responses--model-efforts
-                                                        (harness-responses--stream-name stream)))
-                                                      :effort)))
-                                     (progn
-                                       (setf (harness-responses--stream-status stream) nil
-                                             (harness-responses--stream-raw stream) "")
-                                       (harness-responses--start stream request info 1))
-                                   (harness-responses--pre-stream-error stream status refusal)))
-                                ;; A stream that ended without any terminal
-                                ;; event is a cut connection, not an answer.
-                                ((not (harness-responses--terminal-p stream))
-                                 (harness-responses--finish
-                                  stream 'error "the stream ended without response.completed"
-                                  'transport))
-                                (t nil))))))
-        (error (harness-responses--finish stream 'error (harness-error-message err)))))))
+                 (lambda (event data) (harness-responses--sse stream event data))))
+           ;; The body is frozen where it may be, and checked at the
+           ;; boundary before anything is sent: a component that changed
+           ;; with no recorded reset stops the request here, and the wire
+           ;; sees nothing.
+           (frozen (condition-case err
+                       (harness-responses--frozen-body name request)
+                     (harness-replay-mutation
+                      (harness-responses--finish stream 'error (nth 1 err) 'permanent)
+                      'refused))))
+      (unless (eq frozen 'refused)
+        (condition-case err
+            (setf (harness-responses--stream-http stream)
+                  (harness-http-request
+                   (concat (string-remove-suffix "/" harness-responses-base-url) "/responses")
+                   :method "POST"
+                   :headers (append (harness-responses--headers token)
+                                    (list (cons "Content-Type" "application/json")))
+                   ;; The body goes out as the bytes it was frozen as, not
+                   ;; as a plist a transport encodes again.
+                   :body frozen
+                   :timeout harness-responses--request-timeout
+                   ;; A streaming completion is worth repeating when the
+                   ;; connection failed before any of the answer arrived; the
+                   ;; HTTP layer never repeats one that delivered bytes.
+                   :retry t
+                   ;; A replay this layer decides on its own is a send
+                   ;; like any other: it asks the pool that admitted the
+                   ;; request before it goes (see `harness-admission').
+                   :gate (let ((gate (plist-get request :transport-gate)))
+                           (and (functionp gate) gate))
+                   :on-headers (lambda (status headers)
+                                 ;; The body went out: it is what this session
+                                 ;; sent, and the next request is continued
+                                 ;; from it.
+                                 (harness-responses--frozen-keep name request)
+                                 (setf (harness-responses--stream-status stream) status)
+                                 ;; Both forms of Retry-After are read, a number
+                                 ;; of seconds and an HTTP-date, so the wait a
+                                 ;; rate limit names reaches the provider pool
+                                 ;; (`harness-admission') and the retry layer as
+                                 ;; the wait it is.
+                                 (when-let* ((after (harness-http-retry-after-seconds headers)))
+                                   (setf (harness-responses--stream-retry-after stream) after))
+                                 ;; The plan's windows come with every answer,
+                                 ;; so the quota is kept current without a
+                                 ;; request of its own; a 429 carries them too,
+                                 ;; and they are what says when the limit
+                                 ;; resets.
+                                 (when (harness-responses--plan-headers headers)
+                                   (harness-responses--emit-quota stream)))
+                   :on-chunk (lambda (chunk)
+                               (if (and (harness-responses--stream-status stream)
+                                        (>= (harness-responses--stream-status stream)
+                                            300))
+                                   (setf (harness-responses--stream-raw stream)
+                                         (concat (harness-responses--stream-raw stream)
+                                                 chunk))
+                                 (funcall sse chunk)))
+                   :callback
+                   (lambda (status _headers body err)
+                     (let* ((status (or status (harness-responses--stream-status stream)))
+                            (raw (harness-responses--stream-raw stream))
+                            (refusal (if (string-empty-p raw) (or body "") raw)))
+                       (cond
+                        ((harness-responses--stream-finished stream) nil)
+                        ((eq (car-safe err) 'cancelled)
+                         (harness-responses--finish stream 'cancelled))
+                        (err (harness-responses--finish
+                              stream 'error (harness-error-message (cadr err))
+                              (and (harness-http-transient-error-p err) 'transport)))
+                        ((and status (>= status 300))
+                         (if (and (null attempt)
+                                  (member status '(400 422))
+                                  (harness-responses--learn-rejected-effort
+                                   (harness-responses--stream-name stream)
+                                   refusal
+                                   (plist-get (harness-responses--reasoning
+                                               request
+                                               (harness-responses--model-efforts
+                                                (harness-responses--stream-name
+                                                 stream)))
+                                              :effort)))
+                             (progn
+                               (setf (harness-responses--stream-status stream) nil
+                                     (harness-responses--stream-raw stream) "")
+                               (harness-responses--start stream request info 1))
+                           (harness-responses--pre-stream-error stream status refusal)))
+                        ;; A stream that ended without any terminal event is
+                        ;; a cut connection, not an answer.
+                        ((not (harness-responses--terminal-p stream))
+                         (harness-responses--finish
+                          stream 'error "the stream ended without response.completed"
+                          'transport))
+                        (t nil))))))
+          (error (harness-responses--finish stream 'error
+                                            (harness-error-message err))))))))
 
 (defun harness-responses--terminal-p (stream)
   "Non-nil when STREAM saw a terminal event of its response.

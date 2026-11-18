@@ -27,6 +27,20 @@ import sys
 # Lines of an error to show in the report; the log keeps the whole stream.
 ERROR_LINES = 12
 
+# What a failing report says after the failures.  A baseline failure is
+# still a failure: it is not a pass, a waiver or somebody else's to leave
+# alone, and the run stays failed until it is mended.
+DIRECTIVE = [
+    "",
+    "TEST FAILURES: investigate and repair EVERY one of them.",
+    "  A test that fails here is a defect in this tree, whether this branch",
+    "  made it or it was already on main: leave the code better than you",
+    "  found it.  A test that also fails at the base is still a failure, and",
+    "  this run stays failed until it is mended.  Do not skip, delete, weaken",
+    "  or relabel a test to get green, and do not take a narrower rerun as",
+    "  its result.",
+]
+
 
 def relative_test_path(path: str) -> str:
     """test/NAME.dart for an absolute path (or a file: URL) into a test/ directory."""
@@ -128,6 +142,8 @@ def report(summary: dict) -> str:
         text = "\n".join(shown)
         for line in text.splitlines()[:ERROR_LINES]:
             lines.append("    " + line)
+    if summary["failed"] or not summary["finished"] or not summary["success"]:
+        lines.extend(DIRECTIVE)
     return "\n".join(lines)
 
 

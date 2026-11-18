@@ -243,6 +243,7 @@ The merges that change the effective value are:
 | If you set | Use instead |
 |---|---|
 | `harness-default-model` | `harness-model` (the old name still works as an alias) |
+| `harness-merge-hold-timeout` | nothing: conflict resolution has no elapsed-time limit, so the constant is gone |
 | `harness-merge-git-program`, `harness-tasks-git-program`, `harness-worktree-git-program` | nothing: put git on `exec-path` |
 | `harness-debug-backtraces t` | `(setopt harness-log-level 'debug)` |
 | `harness-ui-worktree-branch-prefix` | `harness-worktree-branch-prefix` |

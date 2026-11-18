@@ -624,13 +624,31 @@ void main() {
       buddy: rig,
       callBar: true,
     );
-    for (final switcher in tester.widgetList<AnimatedSwitcher>(
+    // The app's own transitions are still: every implicit animation the
+    // workspace draws itself is already where it is going, so nothing is on
+    // its way there.  (Material's own ink and text-style fades are not the
+    // app's, and are one-shot: they are settled below, not asserted here.)
+    final containers = tester.widgetList<AnimatedContainer>(
+      find.byType(AnimatedContainer),
+    );
+    final switchers = tester.widgetList<AnimatedSwitcher>(
       find.byType(AnimatedSwitcher),
-    )) {
+    );
+    expect(switchers, isNotEmpty, reason: 'the buddy swaps its words');
+    for (final switcher in switchers) {
       expect(switcher.duration, Duration.zero);
     }
-    expect(find.byType(AnimatedSwitcher), findsWidgets);
-    expect(tester.binding.transientCallbackCount, 0);
+    for (final container in containers) {
+      expect(container.duration, Duration.zero);
+    }
+    // And nothing keeps asking for frames: a repeating ticker would still be
+    // running after the framework's own short fades have finished.
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(
+      tester.binding.transientCallbackCount,
+      0,
+      reason: 'no animation is still running under reduced motion',
+    );
     expect(tester.takeException(), isNull);
     if (shots != null) {
       await _write(

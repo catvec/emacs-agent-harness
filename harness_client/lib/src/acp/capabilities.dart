@@ -105,6 +105,12 @@ class HarnessCapabilities {
       has('patch-review/viewed') &&
       has('patch-review/set-viewed');
 
+  /// The freeform agent board: its list and one board as a client draws it.
+  /// The patch, preview, commit, undo, focus and views calls are offered only
+  /// when the harness has them too, one at a time, so a board on an older
+  /// harness still reads and says what it cannot do.
+  bool get boards => has('board/list') && has('board/get');
+
   /// The persistent workspace chat: its list, one workspace, its timeline
   /// and prompts.  A harness with only some of the workspace modules still
   /// shows the tab when the core four are there.
@@ -204,6 +210,11 @@ class HarnessCapabilities {
       'Review',
       'Threads, diffs and feedback on a task\'s work',
       review,
+    ),
+    CapabilityFeature(
+      'Boards',
+      'Freeform notes, ink, diagrams and their links',
+      boards,
     ),
     CapabilityFeature(
       'Workspace',

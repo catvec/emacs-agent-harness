@@ -2,6 +2,7 @@
 ;;; Code:
 
 (require 'harness-test-helpers)
+(require 'harness-ui-voice)
 
 (defvar harness-acp--server-enabled)
 (defvar harness-acp-token)
@@ -29,8 +30,12 @@
        (harness-test-load-module 'ui-compose)
        (harness-test-load-module 'ui-workspace)
        (harness-ui-pending--forget-all)
+       ;; A selector left waiting by a case that failed is nobody's:
+       ;; the next case starts with none, and with no timer of one.
+       (setq harness-ui-workspace--choosing nil)
        (unwind-protect (progn ,@body)
          (harness-ui-pending--forget-all)
+         (setq harness-ui-workspace--choosing nil)
          (harness-ui-workspace--shutdown)))))
 
 (defun harness-ui-workspace-test-data ()
@@ -74,6 +79,163 @@ COMPUTERS, when given, is what the registered computers are."
   (cl-letf (((symbol-function 'harness-compose-fetch-completions) #'ignore))
     (harness-ui-workspace--render))
   (buffer-string))
+
+(defmacro harness-ui-workspace-test-with-live-voice (&rest body)
+  "Run BODY in a rendered workspace with real live voice controls.
+The live startup boundary is mocked, so no sidecar process is spawned."
+  (declare (indent 0))
+  `(harness-ui-workspace-test-with
+     (let ((harness-voice--enabled t)
+           (harness-voice--owner nil)
+           (harness-voice-provider 'custom)
+           (harness-voice-live-command '("mock-live-sidecar" "--fixture-only"))
+           (harness-voice-live--process nil)
+           (harness-voice-live--buffer nil)
+           (harness-voice-live--state nil)
+           (harness-voice-live--route-kind 'session)
+           (harness-voice-live--route-workspace nil)
+           (harness-voice-live--route-thread nil)
+           (harness-voice-live--route-draft nil)
+           (harness-voice-live--route-resolved-thread nil)
+           (harness-voice-live--route-name nil)
+           (harness-voice-live--route-generation 0)
+           (harness-voice-live--session nil)
+           (global-mode-string nil))
+       (harness-voice--reset)
+       (harness-voice--init)
+       (unwind-protect
+           (cl-letf (((symbol-function 'harness-compose-fetch-completions) #'ignore)
+                     ((symbol-function 'harness-voice-live--begin)
+                      (lambda () (ert-fail "Unmocked live voice startup"))))
+             ,@body)
+         (harness-voice--shutdown)))))
+
+(ert-deftest harness-ui-workspace-live-voice-mode-without-a-session ()
+  "A workspace box enables the live controls with no session id local.
+Its target is the thread it composes into, and the rendered copy is
+exactly the one a chat's box shows.  Real workspace boxes enable live
+controls with or without a live episode."
+  (dolist (thread '("th-1" "th-2"))
+    (harness-ui-workspace-test-with-live-voice
+      (with-temp-buffer
+        (harness-ui-workspace-test-render)
+        (harness-ui-workspace--select-thread thread)
+        (harness-compose-set "An editable workspace draft")
+        ;; Workspace mode owns a thread, not a chat's session-id local,
+        ;; even when that thread already has a live episode.
+        (should-not harness-ui-session-id)
+        (should (harness-compose-live-p))
+        (harness-voice-mode 1)
+        (should harness-voice-mode)
+        (should (eq harness-voice--owner (current-buffer)))
+        (should-not harness-voice-live--process)
+        (should-not harness-voice-live--state)
+        (should (equal "An editable workspace draft" (harness-compose-text)))
+        ;; The box's own context is the selected thread.
+        (let ((context (harness-compose-context)))
+          (should (eq 'workspace (plist-get context :kind)))
+          (should (equal "w-1" (plist-get context :workspace)))
+          (should (equal thread (plist-get context :thread)))
+          (should (equal (and (equal thread "th-1") "s-1")
+                         (plist-get context :session))))
+        ;; No new copy: the existing controls, rendered by the workspace,
+        ;; retain their exact words and one-line tooltips.
+        (cl-letf (((symbol-function 'harness-compose--room)
+                   (lambda () (* 500 (frame-char-width)))))
+          (harness-ui-workspace--render)
+          (goto-char harness-compose-controls-start)
+          (should (equal " Live · Off · [Start] · [Transcript] · [Setup]"
+                         (buffer-substring-no-properties
+                          (line-beginning-position) (line-end-position))))
+          (search-forward "Live · Off")
+          (should (equal "Live voice status" (get-text-property (1- (point)) 'help-echo)))
+          (search-forward "[Start]")
+          (should (equal "Live voice · sidecar session"
+                         (get-text-property (1- (point)) 'help-echo)))
+          (search-forward "[Transcript]")
+          (should (equal "Live transcript" (get-text-property (1- (point)) 'help-echo)))
+          (search-forward "[Setup]")
+          (should (equal "Voice settings" (get-text-property (1- (point)) 'help-echo))))
+        (should (eq 'custom harness-voice-provider))
+        (should (equal '("mock-live-sidecar" "--fixture-only")
+                       harness-voice-live-command))))))
+
+(ert-deftest harness-ui-workspace-live-voice-entry-points-keep-the-workspace-route ()
+  "Voice, Toggle and Start use real workspace routing, including a first message."
+  (dolist (entry '(harness-voice harness-voice-toggle harness-voice-live--start-here))
+    (dolist (thread '("th-1" "th-2" nil))
+      (harness-ui-workspace-test-with-live-voice
+        (with-temp-buffer
+          (harness-ui-workspace-test-render)
+          (unless thread
+            ;; A new workspace has no thread or live episode yet.  Its
+            ;; own prompt path, not voice, creates the first one.
+            (setq harness-ui-workspace--data
+                  (list :id "w-1" :name "Home" :root dir :threads nil)))
+          (harness-ui-workspace--select-thread thread)
+          (let ((starts 0) calls
+                (text "um, no wait, keep the matte tile"))
+            (cl-letf (((symbol-function 'harness-voice-live--begin)
+                       (lambda ()
+                         (cl-incf starts)
+                         (setq harness-voice-live--state 'starting)
+                         (harness-voice--refresh)))
+                      ((symbol-function 'harness-ui-call)
+                       (lambda (method params _callback &optional _on-error)
+                         (push (list method params) calls)))
+                      ((symbol-function 'harness-ui-call-turn)
+                       (lambda (&rest _) (ert-fail "Workspace voice sent as a session prompt")))
+                      ((symbol-function 'harness-ui-workspace--schedule-fetch) #'ignore))
+              (funcall entry)
+              (should (= 1 starts))
+              (should harness-voice-mode)
+              (should-not harness-voice-live--error)
+              (should-not harness-ui-session-id)
+              (cl-letf (((symbol-function 'harness-compose--room)
+                         (lambda () (* 500 (frame-char-width)))))
+                (harness-ui-workspace--render)
+                (goto-char harness-compose-controls-start)
+                (should (equal " Live · Starting · [Start] · [Transcript] · [Setup]"
+                               (buffer-substring-no-properties
+                                (line-beginning-position) (line-end-position)))))
+              (let ((route (harness-voice-live--route)))
+                (should (eq 'workspace (plist-get route :kind)))
+                (should (eq (current-buffer) (plist-get route :buffer)))
+                (should (equal "w-1" (plist-get route :workspace)))
+                (should (equal thread (plist-get route :thread)))
+                (should (equal (and (equal thread "th-1") "s-1")
+                               (plist-get route :session)))
+                ;; Compare the actual typed path with live dispatch, not
+                ;; a substitute availability predicate or fake workspace.
+                (harness-compose-set text)
+                (harness-ui-workspace-send)
+                (harness-voice-live--dispatch route text #'ert-fail)
+                (let ((expected
+                       (list "_harness/workspace/prompt"
+                             (append (list :id "w-1" :text text)
+                                     (and thread (list :opts (list :thread thread)))))))
+                  (should (equal (list expected expected) calls))))
+              (should (eq 'custom harness-voice-provider))
+              (should (equal '("mock-live-sidecar" "--fixture-only")
+                             harness-voice-live-command)))))))))
+
+(ert-deftest harness-ui-workspace-voice-still-requires-a-valid-route ()
+  "A compose box alone cannot enable live voice or WAV spoken replies."
+  (harness-ui-workspace-test-with-live-voice
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (let ((harness-ui-workspace--id nil))
+        (should (equal "Live voice compose unavailable"
+                       (error-message-string
+                        (should-error (harness-voice-mode 1) :type 'user-error))))
+        (should-not harness-voice-mode)
+        (should-not harness-voice--owner))
+      (let ((harness-voice-provider 'wav))
+        (should (equal "Spoken replies unavailable · Chat required"
+                       (error-message-string
+                        (should-error (harness-voice-mode 1) :type 'user-error))))
+        (should-not harness-voice-mode)
+        (should-not harness-voice--owner)))))
 
 (ert-deftest harness-ui-workspace-shows-the-one-chat ()
   "The header, thread list, divider and messages render as one chat."
@@ -179,9 +341,12 @@ COMPUTERS, when given, is what the registered computers are."
         (harness-ui-workspace--render))
       (goto-char (point-min))
       (should (equal (buffer-substring-no-properties (line-beginning-position) (line-end-position))
-                     "Workspace · Home   Thread · Kitchen renovation · Running   Knowledge · ready   Computer · off   Tasks New thread Episode Stop Refresh Graph Workspace computer Resources"))
+                     "Workspace · Home   Thread · Kitchen renovation · Running   Knowledge · ready   Computer · off   Tasks Inbox New thread Episode Stop Refresh Graph Workspace computer Resources"))
       (search-forward "Tasks")
       (should (equal "The task board of this workspace" (get-text-property (1- (point)) 'help-echo)))
+      (search-forward "Inbox")
+      (should (equal "The messages waiting in each thread's queue"
+                     (get-text-property (1- (point)) 'help-echo)))
       (search-forward "New thread")
       (should (equal "Start a new topic" (get-text-property (1- (point)) 'help-echo)))
       (search-forward "Refresh")
@@ -767,7 +932,7 @@ so before the first token arrives."
         (goto-char (point-min))
         (should (equal (concat "Workspace · Home   Thread · Kitchen renovation · Running · "
                                "Waiting for the model…   Knowledge · unavailable   Computer · off   "
-                               "Tasks New thread Episode Stop Refresh Graph Workspace computer Resources")
+                               "Tasks Inbox New thread Episode Stop Refresh Graph Workspace computer Resources")
                        (buffer-substring-no-properties
                         (line-beginning-position) (line-end-position)))))))
 
@@ -1243,3 +1408,673 @@ workspace has to be the one it shows."
         (harness-ui-workspace-test--type (kbd "C-c C-c")))
       (should (equal "_harness/workspace/prompt" (caar sent)))
       (should (string-match-p "Ship it" (plist-get (cadar sent) :text))))))
+(ert-deftest harness-ui-workspace-provenance-copy-is-exact ()
+  "A message's origin and a reassignment read as exact labels, or not at all.
+The plain case says nothing: a message from the thread that handles it,
+through the workspace's own profile, has no second line to read."
+  (harness-ui-workspace-test-with
+    (let ((data (harness-ui-workspace-test-data)))
+      (setq harness-ui-workspace--data data)
+      ;; Plain: nothing to say.
+      (should-not (harness-ui-workspace--origin-label
+                   '(:kind "message" :thread "th-1" :role "user"
+                     :origin "th-1" :handling "th-1" :profile "text")))
+      ;; Another thread began it: named by its title.
+      (should (equal "From Kitchen renovation"
+                     (harness-ui-workspace--origin-label
+                      '(:kind "message" :thread "th-2" :role "user"
+                        :origin "th-1" :handling "th-2"
+                        :profile "text"))))
+      ;; Another profile as well: both, in that order.
+      (should (equal "From Kitchen renovation · voice"
+                     (harness-ui-workspace--origin-label
+                      '(:kind "message" :thread "th-2" :role "user"
+                        :origin "th-1" :handling "th-2"
+                        :profile "voice"))))
+      ;; An entry written before provenance existed reads as plain.
+      (should-not (harness-ui-workspace--origin-label
+                   '(:kind "message" :thread "th-1" :role "user")))
+      ;; A reassignment names where it went and who moved it.
+      (should (equal "Reassigned to Harness memory · mediator"
+                     (harness-ui-workspace--reassigned-label
+                      '(:kind "message" :thread "th-1" :role "user"
+                        :reassigned (:from "th-1" :to "th-2"
+                                     :by "mediator")))))
+      ;; A message never moved says nothing about moving.
+      (should-not (harness-ui-workspace--reassigned-label
+                   '(:kind "message" :thread "th-1" :role "user"))))))
+
+(ert-deftest harness-ui-workspace-draws-origin-and-reassignment-lines ()
+  "The timeline draws the exact provenance lines a moved message needs.
+A message another thread began says so above its text; a reassignment
+names both threads and what became of the copy the person wrote."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-mode)
+      (setq harness-ui-workspace--id "w-1"
+            harness-ui-workspace--thread "th-1"
+            harness-ui-workspace--state 'ready
+            harness-ui-workspace--data (harness-ui-workspace-test-data)
+            harness-ui-workspace--entries
+            '((:kind "divider" :thread "th-2" :title "Harness memory"
+               :reason "new-thread")
+              (:kind "message" :thread "th-2" :role "user"
+               :text "Remember the grout."
+               :origin "th-1" :handling "th-2" :profile "text")
+              (:kind "reassignment" :thread "th-2" :origin "th-1"
+               :handling "th-2" :delivery "queued")))
+      (cl-letf (((symbol-function 'harness-compose-fetch-completions)
+                 #'ignore))
+        (harness-ui-workspace--render))
+      (let ((text (buffer-string)))
+        (should (string-match-p "^You From Kitchen renovation$" text))
+        (should (string-match-p
+                 "^Reassigned Kitchen renovation → Harness memory · queued$"
+                 text))
+        ;; Nothing else claims an origin it does not have.
+        (should (= 1 (how-many "^You From " (point-min) (point-max))))))))
+
+
+(ert-deftest harness-ui-inbox-lists-what-waits-in-each-state ()
+  "The inbox names each thread, its message and the state it is in.
+A queued message, one a running turn holds and one whose session cannot
+be read are three different facts, and the words say which is which."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-inbox-mode)
+      (setq harness-ui-inbox--id "w-1"
+            harness-ui-inbox--state 'ready
+            harness-ui-inbox--inbox
+            (list :workspace "w-1"
+                  :name "Home"
+                  :scope "workspace"
+                  :items (list (list :session "s-1" :thread "th-1"
+                                     :workspace "w-1" :workspace-name "Home"
+                                     :title "Kitchen renovation"
+                                     :text "Try the slate." :state "queued")
+                               (list :session "s-1" :thread "th-1"
+                                     :workspace "w-1" :workspace-name "Home"
+                                     :title "Kitchen renovation"
+                                     :text "And the grout." :state "waiting")
+                               (list :session "s-9" :thread "th-2"
+                                     :workspace "w-1" :workspace-name "Home"
+                                     :title "Harness memory"
+                                     :text "" :state "unavailable"
+                                     :why "Session unavailable"))
+                  :counts (list :queued 1 :waiting 1 :unavailable 1)))
+      (harness-ui-inbox--render)
+      (let ((text (buffer-string)))
+        (should (string-match-p "^Inbox · Home" text))
+        (should (string-match-p "Scope · Workspace" text))
+        (should (string-match-p "1 queued · 1 waiting · 1 unavailable" text))
+        (should (string-match-p "Kitchen renovation  Queued" text))
+        (should (string-match-p "Try the slate." text))
+        (should (string-match-p "Kitchen renovation  Waiting" text))
+        (should (string-match-p "Harness memory  Unavailable" text))
+        (should (string-match-p "Session unavailable" text))
+        ;; This workspace's own rows leave its name to the header.
+        (should-not (string-match-p "Home · Kitchen renovation" text))))))
+
+(ert-deftest harness-ui-inbox-names-the-workspace-a-row-waits-in ()
+  "The all scope says which workspace each message belongs to.
+A row of the workspace the buffer shows leaves the name to the header,
+so the header is said once and a row only when it is somewhere else."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-inbox-mode)
+      (setq harness-ui-inbox--id "w-1"
+            harness-ui-inbox--scope "all"
+            harness-ui-inbox--state 'ready
+            harness-ui-inbox--inbox
+            (list :workspace "w-1"
+                  :name "Home"
+                  :scope "all"
+                  :items (list (list :session "s-1" :thread "th-1"
+                                     :workspace "w-1" :workspace-name "Home"
+                                     :title "Kitchen renovation"
+                                     :text "Try the slate." :state "queued")
+                               (list :session "s-2" :thread "th-3"
+                                     :workspace "w-2" :workspace-name "Studio"
+                                     :title "Harness memory"
+                                     :text "Remember the grout." :state "waiting"))
+                  :counts (list :queued 1 :waiting 1 :unavailable 0)))
+      (harness-ui-inbox--render)
+      (let ((text (buffer-string)))
+        (should (string-match-p "^Inbox · Home" text))
+        (should (string-match-p "Kitchen renovation  Queued" text))
+        (should (string-match-p "Studio · Harness memory  Waiting" text))
+        ;; The header's name is said once, and a row never repeats it.
+        (should-not (string-match-p "Home · Kitchen renovation" text))))))
+
+(ert-deftest harness-ui-inbox-copy-and-tooltips ()
+  "The inbox's exact words and its buttons' tooltips are the inventory's."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-inbox-mode)
+      (setq harness-ui-inbox--id "w-1"
+            harness-ui-inbox--state 'ready
+            harness-ui-inbox--inbox
+            (list :workspace "w-1"
+                  :name "Home"
+                  :scope "workspace"
+                  :items (list (list :session "s-1" :thread "th-1"
+                                     :workspace "w-1" :workspace-name "Home"
+                                     :title "Kitchen renovation"
+                                     :text "Try the slate." :state "queued"))
+                  :counts (list :queued 1 :waiting 0 :unavailable 0)))
+      (harness-ui-inbox--render)
+      (goto-char (point-min))
+      (should (equal "Inbox · Home   Scope · Workspace   1 queued   Refresh Scope"
+                     (buffer-substring-no-properties
+                      (line-beginning-position) (line-end-position))))
+      (goto-char (point-min))
+      (search-forward "Refresh")
+      (should (equal "Read the inbox again" (get-text-property (1- (point)) 'help-echo)))
+      (search-forward "Scope")
+      (should (equal "Choose what the inbox covers"
+                     (get-text-property (1- (point)) 'help-echo)))
+      ;; Each scope button says what it covers, in a noun phrase.
+      ;; The header names the scope in the same word, so the button
+      ;; is the occurrence that carries the tooltip.
+      (dolist (case '(("Workspace" . "Every thread of this workspace")
+                      ("Thread" . "The thread in view")
+                      ("Session" . "The episode of the thread in view")
+                      ("All" . "Every workspace")))
+        (let ((label (car case)) (found nil))
+          (goto-char (point-min))
+          (while (search-forward label nil t)
+            (when (equal (cdr case) (get-text-property (1- (point)) 'help-echo))
+              (setq found t)))
+          (should found))))))
+
+(ert-deftest harness-ui-inbox-says-when-nothing-waits ()
+  "An empty inbox is a fact, not a blank page."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-inbox-mode)
+      (setq harness-ui-inbox--id "w-1"
+            harness-ui-inbox--state 'ready
+            harness-ui-inbox--inbox
+            (list :workspace "w-1" :scope "workspace" :items nil
+                  :counts (list :queued 0 :waiting 0 :unavailable 0)))
+      (harness-ui-inbox--render)
+      (let ((text (buffer-string)))
+        (should (string-match-p "No messages waiting" text))
+        (should-not (string-match-p "Unavailable" text))))))
+
+(ert-deftest harness-ui-inbox-shows-why-it-could-not-read ()
+  "A failed read says so and offers another try, not an empty inbox."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-inbox-mode)
+      (setq harness-ui-inbox--id "w-1"
+            harness-ui-inbox--state 'error
+            harness-ui-inbox--error "No workspace w-1")
+      (harness-ui-inbox--render)
+      (let ((text (buffer-string)))
+        (should (string-match-p "Inbox · unavailable" text))
+        (should (string-match-p "No workspace w-1" text))
+        (should (string-match-p "Retry" text))
+        (should-not (string-match-p "No messages waiting" text))))))
+
+(ert-deftest harness-ui-inbox-reads-the-scope-it-shows ()
+  "The fetch names the scope and the workspace, and the answer is drawn."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-inbox-mode)
+      (setq harness-ui-inbox--id "w-1"
+            harness-ui-inbox--scope "thread")
+      (let (requests)
+        (cl-letf (((symbol-function 'harness-ui-request)
+                   (lambda (method &optional params)
+                     (push (cons method params) requests)
+                     (harness-resolved
+                      (list :workspace "w-1" :scope "thread"
+                            :items (list (list :session "s-1" :thread "th-1"
+                                               :title "Kitchen renovation"
+                                               :text "Try the slate."
+                                               :state "queued"))
+                            :counts (list :queued 1 :waiting 0 :unavailable 0))))))
+          (harness-ui-inbox--fetch))
+        (should (equal (list :id "w-1" :opts (list :scope "thread"))
+                       (cdr (assoc "_harness/workspace/inbox" requests))))
+        (harness-test-wait (lambda () (string-match-p "Try the slate." (buffer-string))))
+        (should (string-match-p "Scope · Thread" (buffer-string)))))))
+
+(ert-deftest harness-ui-inbox-scope-buttons-switch-the-scope ()
+  "Each scope is a button, and pressing one reads that scope."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-inbox-mode)
+      (setq harness-ui-inbox--id "w-1"
+            harness-ui-inbox--state 'ready
+            harness-ui-inbox--inbox
+            (list :workspace "w-1" :scope "workspace" :items nil
+                  :counts (list :queued 0 :waiting 0 :unavailable 0)))
+      (harness-ui-inbox--render)
+      (let (scopes)
+        (cl-letf (((symbol-function 'harness-ui-inbox-refresh)
+                   (lambda () (push harness-ui-inbox--scope scopes))))
+          (dolist (scope '("thread" "session" "all"))
+            (harness-ui-inbox--set-scope scope)))
+        (should (equal '("all" "session" "thread") scopes))))))
+(ert-deftest harness-ui-workspace-reassign-summary-is-exact ()
+  "Each outcome of a reassignment reads as its own words.
+A message moved before anything read it, one the transcript already
+held, a repeated request and a stale one are different facts, and a
+reader is never told a delivered message was still waiting."
+  (harness-ui-workspace-test-with
+    (setq harness-ui-workspace--data (harness-ui-workspace-test-data))
+    (should (equal "Queued · Harness memory"
+                   (harness-ui-workspace--reassign-summary
+                    '(:status "queued" :thread "th-2" :delivery "queued"))))
+    (should (equal "Forwarded · Harness memory · delivered"
+                   (harness-ui-workspace--reassign-summary
+                    '(:status "forwarded" :thread "th-2" :delivery "delivered"))))
+    (should (equal "Repeated · Harness memory"
+                   (harness-ui-workspace--reassign-summary
+                    '(:status "repeated" :thread "th-2" :delivery "queued"))))
+    (should (equal "Stale · No longer waiting"
+                   (harness-ui-workspace--reassign-summary
+                    '(:status "stale" :thread "th-2"
+                      :delivery "uncertain" :why "No longer waiting"))))
+    (should (equal "Unreachable · Session ended"
+                   (harness-ui-workspace--reassign-summary
+                    '(:status "unreachable" :thread "th-2"
+                      :delivery "uncertain" :why "Session ended"))))))
+
+(ert-deftest harness-ui-workspace-reassign-moves-the-message-at-point ()
+  "The command sends the node of the message under point, not words.
+A message is named by its own node id, so a message with the same words
+as another is never the one moved by mistake."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-mode)
+      (setq harness-ui-workspace--id "w-1"
+            harness-ui-workspace--thread "th-1"
+            harness-ui-workspace--state 'ready
+            harness-ui-workspace--data (harness-ui-workspace-test-data)
+            harness-ui-workspace--entries
+            '((:kind "message" :thread "th-1" :role "user"
+               :node "n-1" :text "Remember the grout.")
+              (:kind "message" :thread "th-1" :role "assistant"
+               :node "n-2" :text "Noted.")))
+      (cl-letf (((symbol-function 'harness-compose-fetch-completions)
+                 #'ignore))
+        (harness-ui-workspace--render))
+      ;; Point on the first message's text.
+      (goto-char (point-min))
+      (should (search-forward "Remember the grout." nil t))
+      (let ((entry (harness-ui-workspace--message-at-point)))
+        (should entry)
+        (should (equal "n-1" (plist-get entry :node))))
+      (let (calls)
+        (cl-letf (((symbol-function 'harness-ui-workspace--reassign-target)
+                   (lambda () "th-2"))
+                  ((symbol-function 'harness-ui-call)
+                   (lambda (method params callback &optional _on-error)
+                     (push (cons method params) calls)
+                     (funcall callback '(:status "queued" :thread "th-2"
+                                         :delivery "queued"))))
+                  ((symbol-function 'harness-ui-workspace-refresh) #'ignore))
+          (harness-ui-workspace-reassign))
+        (should (equal "_harness/workspace/reassign" (caar calls)))
+        (should (equal (list :id "w-1" :message (list :node "n-1") :to "th-2")
+                       (cdar calls)))))))
+
+(ert-deftest harness-ui-workspace-reassign-refuses-the-same-thread ()
+  "A message already in the thread asked for is a user error, not a send."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-mode)
+      (setq harness-ui-workspace--id "w-1"
+            harness-ui-workspace--thread "th-1"
+            harness-ui-workspace--state 'ready
+            harness-ui-workspace--data (harness-ui-workspace-test-data)
+            harness-ui-workspace--entries
+            '((:kind "message" :thread "th-1" :role "user"
+               :node "n-1" :text "Remember the grout.")))
+      (cl-letf (((symbol-function 'harness-compose-fetch-completions)
+                 #'ignore))
+        (harness-ui-workspace--render))
+      (goto-char (point-min))
+      (should (search-forward "Remember the grout." nil t))
+      (cl-letf (((symbol-function 'harness-ui-workspace--reassign-target)
+                 (lambda () "th-1"))
+                ((symbol-function 'harness-ui-call)
+                 (lambda (&rest _) (error "should not send"))))
+        (should-error (harness-ui-workspace-reassign) :type 'user-error)))))
+
+(ert-deftest harness-ui-workspace-reassign-refuses-a-non-message ()
+  "Point on a divider or in empty space is not a message to move."
+  (harness-ui-workspace-test-with
+    (with-temp-buffer
+      (harness-ui-workspace-mode)
+      (setq harness-ui-workspace--id "w-1"
+            harness-ui-workspace--thread "th-1"
+            harness-ui-workspace--state 'ready
+            harness-ui-workspace--data (harness-ui-workspace-test-data)
+            harness-ui-workspace--entries
+            '((:kind "divider" :thread "th-1" :title "Kitchen renovation"
+               :reason "new-thread")))
+      (cl-letf (((symbol-function 'harness-compose-fetch-completions)
+                 #'ignore))
+        (harness-ui-workspace--render))
+      (goto-char (point-min))
+      (should-error (harness-ui-workspace-reassign) :type 'user-error))))
+
+;;;; Live voice on a workspace box
+
+;; The reported regression's other half: a workspace box has a route --
+;; its selected thread -- but the entry points tested a chat's session id,
+;; so `C-c h V v' only refreshed and voice mode refused.  The box now says
+;; what it composes into, and the transport asks it.
+
+(ert-deftest harness-ui-workspace-live-voice-entry-points-start-here ()
+  "Voice and Start begin the call in the workspace's own box.
+No chat is opened, and the route names the selected thread; a new
+workspace with no thread is a target too, because its own prompt path
+makes the first one."
+  (dolist (entry '(harness-voice harness-voice-live--start-here))
+    (dolist (thread '("th-1" "th-2" nil))
+      (harness-ui-workspace-test-with-live-voice
+        (with-temp-buffer
+          (harness-ui-workspace-test-render)
+          (unless thread
+            (setq harness-ui-workspace--data
+                  (list :id "w-1" :name "Home" :root "/tmp/workspace/"
+                        :threads nil)))
+          (harness-ui-workspace--select-thread thread)
+          (let ((starts 0) (opened nil))
+            (cl-letf (((symbol-function 'harness-voice-live--begin)
+                       (lambda ()
+                         (cl-incf starts)
+                         (setq harness-voice-live--state 'starting)
+                         (harness-voice--refresh)))
+                      ((symbol-function 'harness-new-session)
+                       (lambda (dir position _callback)
+                         (push (list dir position) opened))))
+              (funcall entry)
+              (should (= 1 starts))
+              (should-not opened)
+              (should harness-voice-mode)
+              (should-not harness-voice-live--error)
+              (should-not harness-ui-session-id)
+              (let ((route (harness-voice-live--route)))
+                (should (eq 'workspace (plist-get route :kind)))
+                (should (eq (current-buffer) (plist-get route :buffer)))
+                (should (equal "w-1" (plist-get route :workspace)))
+                (should (equal thread (plist-get route :thread)))
+                (should (equal (and (equal thread "th-1") "s-1")
+                               (plist-get route :session)))))))))))
+
+(ert-deftest harness-ui-workspace-live-voice-sends-through-the-workspace ()
+  "A workspace delegation goes to its thread, never to a session prompt.
+The workspace's own agent does the work: the voice adds no second model."
+  (harness-ui-workspace-test-with-live-voice
+    (with-temp-buffer
+      (harness-ui-workspace-test-render)
+      (harness-ui-workspace--select-thread "th-2")
+      (let ((calls nil)
+            (text "um, no wait, keep the matte tile")
+            (route (harness-voice-live--route-of-buffer (current-buffer))))
+        (cl-letf (((symbol-function 'harness-ui-call)
+                   (lambda (method params _callback &optional _on-error)
+                     (push (list method params) calls)))
+                  ((symbol-function 'harness-ui-call-turn)
+                   (lambda (&rest _) (ert-fail "Workspace voice sent as a session prompt"))))
+          (harness-voice-live--dispatch route text #'ert-fail))
+        (should (equal (list "_harness/workspace/prompt"
+                             (list :id "w-1" :text text
+                                   :opts (list :thread "th-2")))
+                       (car calls)))))))
+;;;; Choosing a workspace
+
+;; `harness-workspace' reads the list asynchronously.  These hold the
+;; words it says, what it does with an answer that arrives late, and the
+;; paths that create a workspace or open the only one unchanged.  The
+;; wait is a `recursive-edit', so an answer is delivered the way a timer
+;; delivers one: from the command loop.
+
+(defun harness-ui-workspace-test--said (fn)
+  "Run FN, returning the messages it showed, newest first."
+  (let (said)
+    (cl-letf (((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (push (apply #'format format-string args) said)
+                 nil)))
+      (funcall fn))
+    said))
+
+(defun harness-ui-workspace-test--answer-later (promise value)
+  "Answer PROMISE with VALUE from the command loop."
+  (run-at-time 0.05 nil (lambda () (harness-resolve promise value)))
+  promise)
+
+(defun harness-ui-workspace-test--two ()
+  "Return two workspaces, so the selector has something to offer."
+  '((:id "a" :name "Home") (:id "b" :name "Work")))
+
+(ert-deftest harness-ui-workspace-selector-says-it-is-loading-before-it-asks ()
+  "The selector says it is waiting before the request goes out.
+The words are the inventory's, and the acknowledgment comes first, so a
+harness that never answers is never a silent wait."
+  (harness-ui-workspace-test-with
+    (let ((said nil) (asked-when-said nil) (promise (harness-make-promise)))
+      (cl-letf (((symbol-function 'harness-ui-request)
+                 (lambda (&rest _) (setq asked-when-said (copy-sequence said)) promise))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) nil)))
+        (setq said (harness-ui-workspace-test--said
+                    (lambda ()
+                      (harness-ui-workspace-test--answer-later promise nil)
+                      (harness-ui-workspace--choose nil))))
+        ;; Before the request, the echo area already said so.
+        (should (equal "Workspace selector · loading" (car (last said))))))))
+
+(ert-deftest harness-ui-workspace-selector-says-it-is-still-waiting ()
+  "A harness that is slow to answer is told apart from one that hung.
+The words are the inventory's, and they follow the first message rather
+than replacing it before it could be read."
+  (harness-ui-workspace-test-with
+    (let ((promise (harness-make-promise)) (said nil)
+          (harness-ui-workspace--choice-delay 0.05))
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) promise))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) nil)))
+        (setq said (harness-ui-workspace-test--said
+                    (lambda ()
+                      ;; The answer comes after the delay, so both
+                      ;; messages are shown, in that order.
+                      (run-at-time 0.2 nil (lambda () (harness-resolve promise nil)))
+                      (harness-ui-workspace--choose nil))))
+        (should (equal '("Workspace selector · waiting"
+                         "Workspace selector · loading")
+                       said))))))
+
+(ert-deftest harness-ui-workspace-selector-waits-in-the-command-loop ()
+  "The wait is the command loop's, not a loop of the command's own.
+Nothing sleeps or accepts output in it, so a redisplay and C-g arrive
+as they do for any command."
+  (harness-ui-workspace-test-with
+    (let ((promise (harness-make-promise)) slept waited)
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) promise))
+                ((symbol-function 'sit-for) (lambda (&rest _) (setq slept t)))
+                ((symbol-function 'accept-process-output)
+                 (lambda (&rest _) (setq slept t)))
+                ((symbol-function 'recursive-edit) (lambda () (setq waited t)))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) nil)))
+        (harness-ui-workspace-test--said (lambda () (harness-ui-workspace--choose nil))))
+      (should waited)
+      (should-not slept))))
+
+(ert-deftest harness-ui-workspace-selector-cancel-drops-the-late-answer ()
+  "A cancelled wait opens no menu when its answer finally comes.
+The person gave the question up: no minibuffer appears behind them."
+  (harness-ui-workspace-test-with
+    (let ((promise (harness-make-promise)) (offered nil) (said nil))
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) promise))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) (setq offered t))))
+        (setq said (harness-ui-workspace-test--said
+                    (lambda ()
+                      ;; What C-g does to the wait: the recursive edit
+                      ;; ends with a quit, and the command goes on.
+                      (run-at-time 0.05 nil (lambda () (abort-recursive-edit)))
+                      (harness-ui-workspace--choose nil))))
+        ;; The answer comes after the wait was given up.
+        (harness-resolve promise (harness-ui-workspace-test--two))
+        (harness-test-wait (lambda () (null harness-ui-workspace--choosing)) 2))
+      (should-not offered)
+      (should-not (harness-ui-workspace--choosing-p)))))
+
+(ert-deftest harness-ui-workspace-selector-repeat-invocation-joins-the-first ()
+  "A second invocation while one waits asks the harness once.
+Two menus over one list would answer the same question twice, so the
+second command says it is loading and asks nothing."
+  (harness-ui-workspace-test-with
+    (let ((asked 0) (promise (harness-make-promise)) (said nil) (joined nil))
+      (cl-letf (((symbol-function 'harness-ui-request)
+                 (lambda (method &rest _)
+                   (when (equal method "_harness/workspace/list") (cl-incf asked))
+                   promise))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) nil)))
+        (setq said (harness-ui-workspace-test--said
+                    (lambda ()
+                      ;; The second invocation comes while the first
+                      ;; waits, as a second key press would.
+                      (run-at-time 0.05 nil
+                                   (lambda ()
+                                     (setq joined (harness-ui-workspace--choosing-p))
+                                     (harness-workspace)
+                                     (harness-resolve promise nil)))
+                      (harness-ui-workspace--choose nil)))))
+      (should joined)
+      ;; Asked once, and both invocations said they were loading.
+      (should (= 1 asked))
+      (should (equal '("Workspace selector · loading"
+                       "Workspace selector · loading")
+                     said))
+      (should-not (harness-ui-workspace--choosing-p)))))
+
+(ert-deftest harness-ui-workspace-selector-drops-an-answer-from-a-dead-frame ()
+  "An answer that comes back after its frame is gone opens nothing.
+The menu would appear in a frame the person is no longer looking at."
+  (harness-ui-workspace-test-with
+    (let ((promise (harness-make-promise)) (offered nil) (asked-frame nil))
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) promise))
+                ((symbol-function 'frame-live-p) (lambda (f) (not (eq f asked-frame))))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) (setq offered t))))
+        (harness-ui-workspace-test--said
+         (lambda ()
+           ;; The answer arrives, and by then the frame that asked is
+           ;; gone: the person closed it while the harness thought.
+           (run-at-time 0.05 nil
+                        (lambda ()
+                          (setq asked-frame (harness-ui-workspace--choice-frame
+                                             harness-ui-workspace--choosing))
+                          (harness-resolve promise (harness-ui-workspace-test--two))))
+           (harness-ui-workspace--choose nil))))
+      (should asked-frame)
+      (should-not offered)
+      (should-not (harness-ui-workspace--choosing-p)))))
+
+(ert-deftest harness-ui-workspace-selector-reports-a-failure-with-retry ()
+  "A harness that cannot answer says so, and says to try again.
+The selector is free to be asked again at once."
+  (harness-ui-workspace-test-with
+    (let ((said nil))
+      (cl-letf (((symbol-function 'harness-ui-request)
+                 (lambda (&rest _)
+                   (let ((p (harness-make-promise)))
+                     (run-at-time 0.05 nil
+                                  (lambda ()
+                                    (harness-reject p (list 'harness-error "the harness is out of reach"))))
+                     p))))
+        (setq said (harness-ui-workspace-test--said
+                    (lambda () (harness-ui-workspace--choose nil)))))
+      (should (member "Workspace selector · the harness is out of reach · try again" said))
+      (should-not (harness-ui-workspace--choosing-p))
+      ;; Asked again, it asks the harness again.
+      (cl-letf (((symbol-function 'harness-ui-request)
+                 (lambda (&rest _) (harness-resolved (harness-ui-workspace-test--two))))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) nil)))
+        (harness-ui-workspace-test--said (lambda () (harness-workspace)))
+        (should-not (harness-ui-workspace--choosing-p))))))
+
+(ert-deftest harness-ui-workspace-selector-times-out-with-retry ()
+  "A harness that never answers does not hold the command for ever.
+The wait ends with a line that says to try again, and nothing opens.
+The timer is the command's own, shortened for the test."
+  (harness-ui-workspace-test-with
+    (let ((promise (harness-make-promise)) (offered nil) (said nil)
+          (harness-ui-workspace--choice-timeout 0.2)
+          (started (float-time)))
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) promise))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) (setq offered t))))
+        (setq said (harness-ui-workspace-test--said
+                    (lambda () (harness-ui-workspace--choose nil))))
+        (should (< (- (float-time) started) 5))
+        (should-not offered)
+        (should (member "Workspace selector · timed out · try again" said))
+        (should-not (harness-ui-workspace--choosing-p))
+        ;; The answer that comes afterwards opens nothing.
+        (harness-resolve promise (harness-ui-workspace-test--two))
+        (should-not offered)))))
+
+(ert-deftest harness-ui-workspace-selector-opens-the-choice-it-read ()
+  "The menu opens with what the answer holds, and the choice opens it."
+  (harness-ui-workspace-test-with
+    (let ((promise (harness-make-promise)) (offered nil) (opened nil))
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) promise))
+                ((symbol-function 'completing-read)
+                 (lambda (prompt choices &rest _)
+                   (setq offered (cons prompt (mapcar #'car choices)))
+                   "Work"))
+                ((symbol-function 'harness-ui-workspace--open)
+                 (lambda (workspace &optional _position) (setq opened workspace))))
+        (harness-ui-workspace-test--said
+         (lambda ()
+           (harness-ui-workspace-test--answer-later promise (harness-ui-workspace-test--two))
+           (harness-ui-workspace--choose nil))))
+      (should (equal "Workspace: " (car offered)))
+      (should (equal '("Home" "Work") (cdr offered)))
+      (should (equal "b" (plist-get opened :id)))
+      (should-not (harness-ui-workspace--choosing-p)))))
+
+(ert-deftest harness-ui-workspace-selector-keeps-the-single-and-none-paths ()
+  "One workspace opens it; none creates the first, as before.
+Neither asks the person to choose, and neither says it is waiting."
+  (harness-ui-workspace-test-with
+    (let ((opened nil) (created nil))
+      (cl-letf (((symbol-function 'harness-ui-workspace--open)
+                 (lambda (workspace &optional _position) (setq opened workspace)))
+                ((symbol-function 'harness-ui-workspace--create)
+                 (lambda (name &optional root position)
+                   (setq created (list name root position)))))
+        (harness-ui-workspace--read-workspace (list (list :id "only" :name "Only")) nil)
+        (should (equal "only" (plist-get opened :id)))
+        (harness-ui-workspace--read-workspace nil nil)
+        (should (equal '("Home" nil nil) created))
+        (should-not (harness-ui-workspace--choosing-p))))))
+
+(ert-deftest harness-ui-workspace-selector-does-not-take-a-minibuffer-in-use ()
+  "An answer that arrives while a minibuffer of the person's own is in
+use opens no menu: it would take that minibuffer from them."
+  (harness-ui-workspace-test-with
+    (let ((promise (harness-make-promise)) (offered nil) (said nil))
+      (cl-letf (((symbol-function 'harness-ui-request) (lambda (&rest _) promise))
+                ((symbol-function 'active-minibuffer-window) (lambda () (selected-window)))
+                ((symbol-function 'harness-ui-workspace--read-workspace)
+                 (lambda (&rest _) (setq offered t))))
+        (setq said (harness-ui-workspace-test--said
+                    (lambda ()
+                      (harness-ui-workspace-test--answer-later promise (harness-ui-workspace-test--two))
+                      (harness-ui-workspace--choose nil))))
+      (should-not offered)
+      (should (member "Workspace selector · cancelled" said))))))

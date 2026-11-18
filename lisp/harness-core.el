@@ -96,6 +96,41 @@ cannot recurse.")
 (defvar harness--log-filtering nil
   "Non-nil while `harness-log-filter-function' runs.")
 
+(defvar-local harness--log-lines nil "Cached line count of the log buffer.")
+(defvar-local harness--log-tick nil
+  "Character modification tick at which `harness--log-lines' is valid.")
+
+(defun harness--log-trim (level msg)
+  "Append MSG at LEVEL to the log buffer, maintaining its size and line bounds.
+Count only the new text and text being removed, not the whole buffer
+on every entry.  An external edit invalidates the cached count."
+  (save-restriction
+    (widen)
+    (unless (and harness--log-lines
+                 (eql harness--log-tick (buffer-chars-modified-tick)))
+      (setq harness--log-lines (count-lines (point-min) (point-max))))
+    (goto-char (point-max))
+    (let ((partial (and (> (point) (point-min)) (not (eq (char-before) ?\n)))))
+      (insert (format-time-string "%H:%M:%S.%3N ")
+              (format "%-5s " (upcase (symbol-name level))) msg "\n")
+      (cl-incf harness--log-lines (+ (cl-count ?\n msg) (if partial 0 1))))
+    (let ((excess (- (buffer-size) harness--log-max-chars)))
+      (when (> excess 0)
+        ;; Prune in chunks: deleting one line at the front on every append
+        ;; shuttles the buffer's gap across megabytes on every entry too.
+        (goto-char (+ (point-min) (max excess (/ harness--log-max-chars 4))))
+        (forward-line 1)
+        (cl-decf harness--log-lines (count-lines (point-min) (point)))
+        (delete-region (point-min) (point))))
+    (when (> harness--log-lines harness--log-max-lines)
+      (goto-char (point-min))
+      (let ((remove (max (- harness--log-lines harness--log-max-lines)
+                         (/ harness--log-max-lines 4))))
+        (forward-line remove)
+        (delete-region (point-min) (point))
+        (cl-decf harness--log-lines remove)))
+    (setq harness--log-tick (buffer-chars-modified-tick))))
+
 (defun harness--log-short (text)
   "Return TEXT cut to `harness--log-entry-chars', saying so at its end.
 An error's text can be a whole tree of `rm' errors; keeping it whole
@@ -126,19 +161,7 @@ The message is cut to `harness--log-entry-chars' and goes through
                 (harness--log-short (apply #'format-message fmt args)))))
       (with-current-buffer (get-buffer-create harness-log-buffer-name)
         (let ((inhibit-read-only t))
-          (goto-char (point-max))
-          (insert (format-time-string "%H:%M:%S.%3N ")
-                  (format "%-5s " (upcase (symbol-name level)))
-                  msg "\n")
-          (let ((excess (- (buffer-size) harness--log-max-chars)))
-            (when (> excess 0)
-              (goto-char (+ (point-min) excess))
-              (forward-line 1)
-              (delete-region (point-min) (point))))
-          (when (> (count-lines (point-min) (point-max)) harness--log-max-lines)
-            (goto-char (point-min))
-            (forward-line (/ harness--log-max-lines 4))
-            (delete-region (point-min) (point)))))
+          (harness--log-trim level msg)))
       (run-hook-with-args 'harness-log-hook level msg)
       msg)))
 

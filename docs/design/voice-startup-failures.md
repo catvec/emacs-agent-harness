@@ -13,6 +13,15 @@ call, and each has a regression test that fails on the old code.
 
 ## 1. A compose box that is not a target
 
+> **Superseded.** The refusal below was right about *why* the start failed and
+> wrong about the remedy: a board's box and a popout's box do have somewhere
+> to put the words, and saying `Voice · no session` left the reported surface
+> unable to take voice at all. Every compose box now says what it composes into
+> (`harness-compose-context`), a box that composes a task or an answer is a
+> **draft** and a target, and a dictation is inserted as its text. See
+> [voice-compose-context.md](voice-compose-context.md). The section stays as
+> the record of what was found.
+
 ### What it is
 
 `harness-voice-live--controls` drew the live voice controls in every compose
@@ -124,19 +133,27 @@ compiled without its dependencies' structs evaluated.
 
 ## Verification
 
-- `harness-ui-voice-live-box-without-a-target-offers-no-start` pins the exact
-  rendered copy and the tooltip, and asserts no `[Start]`, no `[Use here]` and
+- `harness-ui-voice-live-box-without-a-target-offers-no-start` pinned the exact
+  rendered copy and the tooltip, and asserted no `[Start]`, no `[Use here]` and
   no `Live · Failed`.
-- `harness-ui-voice-live-box-without-a-target-refuses-the-start` asserts the
+- `harness-ui-voice-live-box-without-a-target-refuses-the-start` asserted the
   one-line refusal from `C-c v` and the mouse press, and that nothing started.
-- `harness-ui-voice-live-box-without-a-target-opens-a-voice-chat` asserts the
+- `harness-ui-voice-live-box-without-a-target-opens-a-voice-chat` asserted the
   fallback to a new voice chat.
 - `harness-ui-voice-pipeline-input-setter-survives-compile-order` compiles a
   file in a fresh Emacs that never evaluated the struct, in the order that
   broke: the setter answers `camera`, and the `setf` it replaces is shown to
   fail with the exact void-function error. All four fail on the old code.
 
+The three tests above were replaced when the refusal was superseded; their
+successors pin the opposite behaviour, and are listed in
+[voice-compose-context.md](voice-compose-context.md#verification).
+
 The live dev harness shows the two states side by side: the board's box reading
 `Live · Failed · [Start] · Live voice session unavailable` before, and
 `Voice · no session · [Setup]` after, while a real chat box still reads
 `Live · Off · [Start] · [Transcript] · [Setup]`.
+
+The `Voice · no session` state this section describes no longer exists: the
+board's box now reads `Live · Off · [Start] · [Transcript] · [Setup]` like any
+other, and a dictation becomes its draft.

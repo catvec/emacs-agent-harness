@@ -34,7 +34,7 @@ buffer.  No real page, module initialiser, model or server is started."
                             '(harness-sessions harness-ui-display-session harness-tasks
                               harness-ui-report-popout harness-ui-pending-popout harness-tree
                               harness-access harness-worktrees harness-settings harness-server
-                              harness-usage harness-slots))
+                              harness-usage harness-slots harness-ui-workspace-tool-open))
              ,@body))
        (kill-buffer buffer))))
 
@@ -60,7 +60,8 @@ buffer.  No real page, module initialiser, model or server is started."
         (:view "settings" :label "Settings" :available t :requires "project")
         (:view "server" :label "Server" :available t :requires nil)
         (:view "usage" :label "Usage" :available t :requires nil)
-        (:view "slots" :label "Task slots" :available t :requires "project"))
+        (:view "slots" :label "Task slots" :available t :requires "project")
+        (:view "workspace" :label "Workspace" :available t :requires "project"))
       (harness-ui-tool-views)))
     (should-not calls)))
 
@@ -130,7 +131,9 @@ buffer.  No real page, module initialiser, model or server is started."
                           ("settings" :project "/project" harness-settings ("/project") "/project/")
                           ("server" nil nil harness-server nil "/original/")
                           ("usage" nil nil harness-usage nil "/original/")
-                          ("slots" :project "/project" harness-slots ("/project") "/project/")))
+                          ("slots" :project "/project" harness-slots ("/project") "/project/")
+                          ("workspace" :project "/project" harness-ui-workspace-tool-open
+                           ("/project" nil nil) "/project/")))
             (let* ((view (nth 0 case))
                    (params (append (list :view view) (and (nth 1 case) (list (nth 1 case) (nth 2 case))))))
               (setq calls nil)

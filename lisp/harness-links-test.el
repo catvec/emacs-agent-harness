@@ -29,7 +29,20 @@
                    ("harness:task/t-4" (:kind task :task "t-4"))
                    ("harness:task/t-4/thread/t-3" (:kind thread :task "t-4" :thread "t-3"))
                    ("harness:computer/cmp-1" (:kind computer :computer "cmp-1"))
-                   ("harness:screen/my%20box" (:kind computer :computer "my box"))))
+                   ("harness:screen/my%20box" (:kind computer :computer "my box"))
+                   ("harness:board/b-1" (:kind board :board "b-1"))
+                   ("harness:board/b-1/diagram/d-1"
+                    (:kind board :board "b-1" :board-diagram "d-1"))
+                   ("harness:board/b-1/diagram/d-1/object/n-api"
+                    (:kind board :board "b-1" :board-diagram "d-1" :board-object "n-api"))
+                   ("harness:board/b-1/diagram/d-1/object/n-api/call/n-2"
+                    (:kind board :board "b-1" :board-diagram "d-1" :board-object "n-api"
+                     :board-call "n-2"))
+                   ("harness:board/b-1/revision/7"
+                    (:kind board :board "b-1" :board-revision "7"))
+                   ("harness:board/b-1/diagram/d-1/object/n-api/revision/7"
+                    (:kind board :board "b-1" :board-diagram "d-1"
+                     :board-object "n-api" :board-revision "7"))))
     (ert-info (url)
       (should (equal expected (harness-links-parse url))))))
 
@@ -57,6 +70,14 @@
                  "harness:session/a/b" "harness:foo/bar" "harness:session/a/message"
                  "harness:message/a/session/b" "harness:call/a/call/b" "harness:thread/a/task/b"
                  "harness:task/a/session/b" "harness:task/a/message/b"
+                 "harness:board" "harness:board/" "harness:board/b-1/diagram"
+                 "harness:board/b-1/object/n-api" "harness:board/b-1/diagram/d-1/object"
+                 "harness:board/b-1/revision" "harness:board/b-1/call/n-2"
+                 "harness:board/b-1/diagram/d-1/diagram/d-2"
+                 "harness:board/b-1/revision/7/revision/8"
+                 "harness:board/b-1/revision/7/call/n-2"
+                 "harness:board/b-1/diagram/d-1/object/n-api/call/n-2/revision/7"
+                 "harness:board/b-1/session/abc"
                  "https://example.org/session/abc" "session/abc" "" nil 12))
     (ert-info ((format "%S" url))
       (should-not (harness-links-parse url)))))
@@ -94,11 +115,31 @@
   (should (equal "harness:task/t-4/thread/t-3" (harness-links-thread-url "t-4" "t-3")))
   (should (equal "harness:thread/t-3" (harness-links-thread-url nil "t-3")))
   (should (equal "harness:computer/cmp-1" (harness-links-computer-url "cmp-1")))
+  (should (equal "harness:board/b-1" (harness-links-board-url "b-1")))
+  (should (equal "harness:board/b-1/diagram/d-1"
+                 (harness-links-board-url "b-1" "d-1")))
+  (should (equal "harness:board/b-1/diagram/d-1/object/n-api"
+                 (harness-links-board-url "b-1" "d-1" "n-api")))
+  (should (equal "harness:board/b-1/diagram/d-1/object/n-api/call/n-2"
+                 (harness-links-board-url "b-1" "d-1" "n-api" :call "n-2")))
+  (should (equal "harness:board/b-1/diagram/d-1/object/n-api/revision/7"
+                 (harness-links-board-url "b-1" "d-1" "n-api" :revision "7")))
+  (should (equal "harness:board/b-1/revision/7"
+                 (harness-links-board-url "b-1" nil nil :revision "7")))
   (should (equal "harness:session/abc/thread/t-3"
                  (harness-links-url '(:kind thread :session "abc" :thread "t-3"))))
   ;; A thread under a task is written under it, whatever else is given.
   (should (equal "harness:task/t-4/thread/t-3"
-                 (harness-links-url '(:kind thread :task "t-4" :session "abc" :thread "t-3")))))
+                 (harness-links-url '(:kind thread :task "t-4" :session "abc" :thread "t-3"))))
+  ;; A board link writes exactly the shape it read, and nothing deeper.
+  (dolist (url '("harness:board/b-1"
+                 "harness:board/b-1/diagram/d-1"
+                 "harness:board/b-1/diagram/d-1/object/n-api"
+                 "harness:board/b-1/diagram/d-1/object/n-api/call/n-2"
+                 "harness:board/b-1/revision/7"
+                 "harness:board/b-1/diagram/d-1/object/n-api/revision/7"))
+    (ert-info (url)
+      (should (equal url (harness-links-url (harness-links-parse url)))))))
 
 (ert-deftest harness-links-url-names-nothing-from-too-little ()
   (should-not (harness-links-url '(:kind session)))
@@ -133,6 +174,10 @@
   (should (equal "thread t-3" (harness-links-label '(:kind thread :thread "t-3"))))
   (should (equal "task t-4" (harness-links-label '(:kind task :task "t-4"))))
   (should (equal "computer cmp-1" (harness-links-label '(:kind computer :computer "cmp-1"))))
+  (should (equal "board b-1" (harness-links-label '(:kind board :board "b-1"))))
+  (should (equal "board b-1, n-api"
+                 (harness-links-label '(:kind board :board "b-1" :board-diagram "d-1"
+                                        :board-object "n-api"))))
   (should (equal "browser screen share"
                  (harness-links-label '(:kind computer :computer "cmp-1") "browser screen share")))
   (should (equal "Build" (harness-links-label '(:kind task :task "t-4") "Build")))

@@ -321,6 +321,22 @@ class SidecarTest(unittest.TestCase):
     def utterance(self, moving=30):
         return [0.0005] * 8 + [0.05] * moving + [0.0005] * 14
 
+    def test_interrupt_preserves_in_progress_mouth_gesture(self):
+        sidecar, events, camera = self.build(self.utterance())
+        try:
+            sidecar.start_session({"event": "start", "protocol": 1})
+            sidecar.speech_active = True
+            before = len(events.sent)
+            sidecar.handle({"event": "interrupt", "id": 7})
+            self.assertTrue(sidecar.speech_active)
+            self.assertEqual(events.sent[before:], [
+                {"event": "interrupted", "interrupt_id": 7},
+                {"event": "listening", "interrupt_id": 7},
+            ])
+            self.assertTrue(camera.opened())
+        finally:
+            sidecar.handle({"event": "stop"})
+
     def test_no_consent_means_no_device(self):
         sidecar, events, camera = self.build(self.utterance())
         sidecar.args.camera_consent = False

@@ -13,22 +13,39 @@ Write the recaps task cards and running chats show, with a short model call.
 ## About
 
 A task's card shows a recap under its title: a short sentence, from a
-model call, saying what the task is doing or has done so far (the
-card's subtitle; see `harness-ui-tasks`).  The board keeps it folded
-away except where it matters most, on a task that needs your input.
+model call, saying what the work is doing (the card's subtitle; see
+`harness-ui-tasks`).  The board keeps it folded away except where it
+matters most, on a task that needs your input.
+
+A recap reports the work since the previous one, not the assignment:
+a line that restates the task is what you can already read in its
+title.  The request labels the assignment for context, carries the
+recap in hand and the counts since it was made, and carries the
+transcript from the node that recap was made at (`:recap-node`), so
+the model reads what changed -- what the agent did, found, decided,
+what a check showed, what blocks the work now -- and nothing it has
+already told of.  Its system prompt says so, and asks for UNCHANGED
+when nothing has happened; a line that only repeats the task or the
+recap in hand is read the same way.  Either way the recap in hand
+stays, with the counters and the anchor moved on: no accomplishment
+is made up, and no duplicate goes into the history.
 
 The recap is refreshed when the task has moved on enough: after
 `harness-tasks-recap-turns` turns, `harness-tasks-recap-seconds`
 seconds or `harness-tasks-recap-tool-calls` tool calls since the last
-one, whichever comes first, like a warranty's months or miles.  The
-counters and the time it was made are kept on the task record
-(`:recap`, `:recap-at`, `:recap-turns`, `:recap-tools`), so a reload
-needs no history and the board shows the recap after a restart.
+one, whichever comes first, like a warranty's months or miles.  A
+task whose transcript has not grown since its recap is not asked
+again, whatever the thresholds say; a turn that stopped for the user
+still is, since the blocker is news.  The counters, the time it was
+made and the node it was made at are kept on the task record
+(`:recap`, `:recap-at`, `:recap-turns`, `:recap-tools`, `:recap-node`),
+so a reload needs no history and the board shows the recap after a
+restart.
 
 Unlike naming (`harness-naming`), the request is self-contained: the
-task, its plan and todos, and the tail of its transcript, not the
-whole conversation.  That keeps it short, and it lets the request go
-to the provider's simple tier (`harness-tasks-recap-model` `auto`),
+assignment, the todos, the recap in hand and the work since it, not
+the whole conversation.  That keeps it short, and it lets the request
+go to the provider's simple tier (`harness-tasks-recap-model` `auto`),
 which a fork of the session's own provider state could not.
 
 Checks run when a turn ends, after a tool result, and every
@@ -72,7 +89,6 @@ one's.
 - `session/get` ([session](session.md))
 - `session/nodes` ([session](session.md))
 - `session/set-ext` ([session](session.md))
-- `session/transcript-text` ([session](session.md))
 - `task/for-session` ([tasks](tasks.md))
 - `task/set-recap` ([tasks](tasks.md))
 

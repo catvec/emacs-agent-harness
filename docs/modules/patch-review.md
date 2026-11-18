@@ -2,7 +2,7 @@
 
 # patch-review
 
-The threads of a task's review: kept in the state directory, delivered with the feedback, answered by the agent.
+The threads of a task's review: kept in the state directory, delivered with the feedback, answered by the agent, with the messages their transitions leave.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-patch-review.el](../../lisp/modules/harness-patch-review.el)
@@ -142,24 +142,36 @@ thread is a statement that its point is done, never a way around the
 check.  Without the module there is no such check, and the hook is
 empty.
 
+THE HARNESS'S MESSAGES.  Two transitions of a task's review leave
+the agent something to hear that nothing the user typed would tell
+it.  In the working phase it may be waiting for the user, so the
+harness keeps a message of its own, from "review", as a draft of the
+task's session: one of the drafts the user sends
+(`patch-review/send-replies`), with the replies or by itself when
+nothing else waits.  The agent then takes a turn as it would for a
+message the user typed.  Nothing is sent by itself: the draft waits
+for the user, who may send it with the rest or drop it
+(`patch-review/discard-last-close`,
+`patch-review/discard-last-reviewed`).  The messages do not say to
+hand in -- the task's prompt does.  Only the user's operations offer
+them: the agent's own close is in a turn of its own, and a close in a
+task waiting for review needs no turn.
+
 THE LAST CLOSE.  The user closing the last thread that has a sent
-comment and is open leaves the review with nothing to answer.  In the
-working phase the agent has to know: it may be waiting for the user,
-and nothing the user typed would tell it.  So the harness keeps a
-message of its own -- that no thread is left to answer
-(`harness-patch-review-last-close-message`) -- as a draft of the
-task's session, from "review".  It is one of the drafts the user
-sends (`patch-review/send-replies`): with the replies, one send; by
-itself, when nothing else waits, the same.  The agent then takes a
-turn as it would for a message the user typed: it sees that no thread
-is left open, and hands the work in when nothing is outstanding.
-Nothing is sent by itself: the draft waits for the user, who may send
-it with the rest or drop it (`patch-review/discard-last-close`).  The
-message does not say to hand in -- the task's prompt does.  Only the
-user's close offers it: the agent's own close is in a turn of its
-own, a close in a task waiting for review needs no turn, and a thread
-of drafts was never a question the work had to answer
+comment and is open leaves the review with nothing to answer
+(`harness-patch-review-last-close-message`).  A thread of drafts was
+never a question the work had to answer, so its close offers nothing
 (`harness-patch-review-draft-on-last-close`).
+
+THE LAST REVIEWED.  The agent closes a thread, and the user says
+they looked at that close: it waits for them until they do
+(`change-review-thread-unreviewed-p`).  Marking the last close that
+waited reviewed leaves the review with nothing of the agent's left to
+look at (`harness-patch-review-last-reviewed-message`): the mark is
+the user's own operation, the per-thread one and the bulk one alike,
+so both offer it (`harness-patch-review-draft-on-last-reviewed`).  A
+close the agent makes afterwards waits again, and the draft that
+waited goes: it said no close was left, and one is.
 
 THE WORDS BY HAND.  Not every reply made it into a round.  One typed in
 the session while the agent was at work -- steering, quoting what the
@@ -184,14 +196,17 @@ to say.
 
 - `patch-review/apply` (task-id op) — Perform OP, an operation of change-review, on the review of task TASK-ID.
 - `patch-review/assume-viewed` (task-id &optional revision) — Take every file of task TASK-ID's review as viewed, but those changed lately.
+- `patch-review/board-thread` (task-id body &rest opts) — Start or answer a thread of task TASK-ID's review about a place on a board.
 - `patch-review/changes` (task-id &optional version) — Return the files task TASK-ID's review changes at VERSION, as plain data.
 - `patch-review/comment` (task-id body &rest opts) — Add the agent's comment BODY to the review of task TASK-ID.
 - `patch-review/diff` (task-id path &optional version) — Return the diff of PATH in task TASK-ID's review at VERSION.
 - `patch-review/discard-last-close` (task-id) — Forget the message that TASK-ID's last thread is closed, unsent.
+- `patch-review/discard-last-reviewed` (task-id) — Forget the message that TASK-ID's last close is reviewed, unsent.
 - `patch-review/drafts` (task-id) — Return the draft comments of task TASK-ID's review, those not sent yet, as data.
 - `patch-review/get` (task-id) — Return the review of task TASK-ID as plain data: its versions and threads.
 - `patch-review/import-manual` (task-id) — Make the user's words by hand in task TASK-ID's session threads of its review.
 - `patch-review/last-close` (task-id) — Return the message TASK-ID's last close waits for the user to send, or nil.
+- `patch-review/last-reviewed` (task-id) — Return the message TASK-ID's last reviewed close waits to send, or nil.
 - `patch-review/open-threads` (task-id) — Return the open threads of task TASK-ID's review, as a list of plists.
 - `patch-review/send-replies` (task-id) — Send the drafts waiting in task TASK-ID's review to its agent.
 - `patch-review/set-viewed` (task-id kind files on) — Mark FILES viewed in task TASK-ID's review, or approved, or take the mark off.
@@ -204,6 +219,7 @@ to say.
 
 - `patch-review/changed` — (TASK-ID OP) after an operation changed the threads of a task's review: OP, to perform on a copy.
 - `patch-review/last-close` — (TASK-ID DRAFT) when the message that a task's last review thread is closed waits for the user to send it, or when it no longer does: DRAFT is (:task :session :text :from :time), or nil.
+- `patch-review/last-reviewed` — (TASK-ID DRAFT) when the message that a task's last reviewed close waits for the user to send it, or when it no longer does: DRAFT is (:task :session :text :from :time), or nil.
 
 ### Hooks
 
@@ -212,6 +228,7 @@ to say.
 ### Options
 
 - `harness-patch-review-draft-on-last-close` — When non-nil, closing the last open thread of a task at work offers a message.
+- `harness-patch-review-draft-on-last-reviewed` — When non-nil, reviewing the last close of a task at work offers a message.
 
 ## Uses
 
@@ -238,6 +255,7 @@ to say.
 
 - `patch-review/changed`
 - `patch-review/last-close`
+- `patch-review/last-reviewed`
 
 ### Filter chains it joins
 

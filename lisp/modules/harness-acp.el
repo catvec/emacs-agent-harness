@@ -160,13 +160,14 @@ is never used for any other failure.")
   '("session/" "agent/" "provider/" "tools/list" "usage/" "fallback/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "handoff/" "naming/" "sandbox/status"
     "sandbox/detect" "sandbox/check" "sandbox/jobs" "sandbox/job-stop"
+    "sandbox/job-evidence"
     "harness/api" "harness/modules" "harness/version" "harness/reload"
     "question/" "project/" "task/" "plugins/" "search/"
     "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "priority/"
     "secrets/" "commit-msg/" "errors/"
     "decision/" "access/" "patch-review/" "tool-slots/" "cache/" "link/" "todo-sync/"
     "event-watch/" "chatgpt-plan/" "model-complexity/" "memory/"
-    "computer/" "speech/")
+    "computer/" "speech/" "board/")
   "Bus method name prefixes callable as `_harness/NAME'.
 Modules of the user's own add theirs to
 `harness-acp-extra-method-prefixes'.")
@@ -254,8 +255,9 @@ it can answer for another one.")
     permission/dir-allowed permission/dir-revoked
     config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said version/checked
     decision/changed access/changed access/judged patch-review/changed tool-slots/changed
-    patch-review/last-close
+    patch-review/last-close patch-review/last-reviewed
     cache/warm-changed event-watch/changed chatgpt-plan/accounts-changed memory/changed
+    board/created board/deleted board/changed board/focused
     admission/waiting admission/cooldown
     speech/changed)
   "Bus events forwarded verbatim as `_harness/event' notifications.")
@@ -618,7 +620,7 @@ many chunks bring it."
          (harness-acp--enqueue conn (harness-acp--normalise msg)))))
     ('tcp
      (let ((proc (harness-acp-client-process client)))
-       (when (process-live-p proc)
+       (when (and (memq client harness-acp--clients) (process-live-p proc))
          (harness-acp--client-write client proc (concat (harness-json-encode msg) "\n")))))
     (kind
      (let ((writer (harness-acp--client-get client 'writer)))
@@ -630,16 +632,11 @@ many chunks bring it."
             (harness-acp--drop-client client))))))))
 
 (defun harness-acp--client-write (client proc line)
-  "Write LINE to PROC, the socket of CLIENT, after what waits to go out.
-A client that reads more slowly than it is sent to, such as a UI busy
-for a while, fills its socket, and `process-send-string' then waits for
-room, running the timers due and process output meanwhile.  What those
-send to the same client waits in line for the write under way (see
-`harness-process-send'): writing it from each of them would make each
-wait inside the one before, until Lisp nesting exceeded
-`max-lisp-eval-depth' and every timer failed."
+  "Queue LINE to PROC, CLIENT's socket, without holding dispatch open.
+Each socket has its own FIFO writer, write-age watchdog and byte bound;
+a busy or vanished client cannot block delivery to the others."
   (condition-case err
-      (harness-process-send proc line)
+      (harness-process-send-async proc line)
     (error
      (harness-log 'warn "acp: send to %s failed: %s" (process-name proc) (harness-error-message err))
      (harness-acp--drop-client client))))
@@ -960,7 +957,9 @@ lisp/harness-emacs-endpoint.el for the tools.  Not callable over ACP."
         (ignore-errors (funcall cb nil (list :code harness-acp-error-transport :message "client disconnected")))))
     (let ((proc (harness-acp-client-process client))
           (conn (harness-acp-client-connection client)))
-      (when (and proc (process-live-p proc)) (delete-process proc))
+      (when proc
+        (harness-process-send-cancel proc)
+        (when (process-live-p proc) (delete-process proc)))
       (when conn (harness-acp--conn-shutdown conn "closed by server")))
     (harness-log 'debug "acp: client left (%d connected)" (length harness-acp--clients))))
 
@@ -2337,14 +2336,11 @@ Return what RESPOND does: non-nil when the answer went out."
     ('tcp
      (let ((proc (harness-acp-connection-process conn))
            (line (concat (harness-json-encode msg) "\n")))
-       (cond
-        ((not (process-live-p proc))
+       (unless (process-live-p proc)
          (signal 'acp-error (list harness-acp-error-transport "connection closed" nil)))
-        ((eq (process-status proc) 'connect)
-         (setf (harness-acp-connection-outbox conn)
-               (append (harness-acp-connection-outbox conn) (list line))))
-        ;; In line behind a write that waits for a busy server, not inside it.
-        (t (harness-process-send proc line)))))))
+       ;; Connection setup can wait too; the same bounded writer owns it,
+       ;; rather than an unbounded pre-connect outbox on the UI thread.
+       (harness-process-send-async proc line)))))
 
 (defun harness-acp--send-request (conn method params)
   "Send request METHOD with PARAMS over CONN; return (ID . PROMISE).
@@ -2420,7 +2416,10 @@ when it closed by itself, such as \"connection broken by remote peer\"."
 (defun harness-acp--conn-shutdown (conn reason)
   "Mark CONN closed for REASON, reject its pending requests and run on-close."
   (when (harness-acp-connection-open conn)
-    (setf (harness-acp-connection-open conn) nil)
+    (setf (harness-acp-connection-open conn) nil
+          (harness-acp-connection-outbox conn) nil)
+    (when-let* ((proc (harness-acp-connection-process conn)))
+      (harness-process-send-cancel proc))
     ;; Its socket may still live (see `harness-acp-close'), but is no
     ;; longer read: the poll timer stops with the last connection.
     (harness-acp--poll-sync)
@@ -2558,6 +2557,8 @@ event loop's (see \"Client: polling the sockets\"); no timer runs in it.
 The output goes to PROC's filter, which counts it as read by a poll."
   (and (processp proc)
        (eq (process-status proc) 'open)
+       ;; A paused reader can block in the select even with a zero timeout.
+       (not (eq (process-filter proc) t))
        (let ((harness-acp--polling t))
          (accept-process-output proc 0 nil 1))))
 
@@ -2749,7 +2750,7 @@ They are parsed as they are handled, a slice at a time."
         (let ((lines (harness-acp-connection-outbox conn)))
           (setf (harness-acp-connection-outbox conn) nil)
           (dolist (line lines)
-            (condition-case err (harness-process-send proc line)
+            (condition-case err (harness-process-send-async proc line)
               (error (harness-log 'warn "acp: flush failed: %s" (harness-error-message err)))))))
        ((not (process-live-p proc))
         (harness-acp--conn-shutdown conn (string-trim event)))))))

@@ -163,7 +163,10 @@ a permission's y and n.
   (setq-local header-line-format '(:eval (harness-ui-popout--header)))
   (harness-compose-setup :project (lambda () (or harness-ui-popout--dir default-directory))
                          :placeholder #'harness-ui-popout--placeholder-text
-                         :redraw #'harness-ui-popout--redraw-tail)
+                         :redraw #'harness-ui-popout--redraw-tail
+                         ;; A popout answers its own owner, never a chat:
+                         ;; its words are a draft until C-c C-c sends them.
+                         :context #'harness-ui-popout--compose-context)
   ;; The box stays in sight, however tall the content (see
   ;; `harness-ui-popout--scroll').
   (add-hook 'pre-redisplay-functions #'harness-ui-popout--follow nil t)
@@ -332,6 +335,18 @@ loading lines go, and the new draw puts one where each image goes."
           (set-window-start w (save-excursion (goto-char (point-min)) (forward-line (1- line)) (point)) t)
           (harness-ui-popout--fit w)))
       (force-mode-line-update))))
+
+(defun harness-ui-popout--compose-context ()
+  "Return what this popout's box composes into.
+A popout's words answer the item the popout shows, through its own
+submit; they never go to a chat, so the box is a draft.  Its title says
+which item, so the controls say where the words are waiting, and its
+key names the item itself: a popout buffer that is shown for another
+item is another draft, whatever it is titled."
+  (let ((title (harness-ui-popout--title-text)))
+    (list :kind 'draft
+          :name (if (string-empty-p title) "Popout" title)
+          :identity harness-ui-popout-key)))
 
 (defun harness-ui-popout--redraw-tail ()
   "Draw the attachments and the box again, leaving the content alone.

@@ -27,6 +27,8 @@ session behind the thread when the user wants the full transcript.
 
 ### Commands
 
+- `harness-ui-inbox-refresh` — Read the inbox again.
+- `harness-ui-inbox-scope` — Choose what the inbox covers.
 - `harness-ui-workspace-clear` — Clear the compose box.
 - `harness-ui-workspace-computer` — Show the computer of WORKSPACE, or of the current workspace.
 - `harness-ui-workspace-computer-open-vnc` — Open the workspace computer's noVNC page.
@@ -45,12 +47,14 @@ session behind the thread when the user wants the full transcript.
 - `harness-ui-workspace-new-thread` — Create a new thread and compose into it.
 - `harness-ui-workspace-open-board` — Open the task board of this workspace.
 - `harness-ui-workspace-open-episode` — Open the ordinary session behind the selected thread.
+- `harness-ui-workspace-reassign` — Reassign the message at point to another thread.
 - `harness-ui-workspace-refresh` — Read the workspace again.
 - `harness-ui-workspace-resources` — Show the resources of WORKSPACE, or of the current workspace.
 - `harness-ui-workspace-resources-refresh` — Read the resources of the buffer's workspace again.
 - `harness-ui-workspace-send` — Send the compose box's text to the workspace.
 - `harness-ui-workspace-stop` — Stop the live turn of the selected thread.
 - `harness-workspace` — Open the persistent workspace chat at POSITION.
+- `harness-workspace-inbox` — Open the inbox of WORKSPACE, or of the workspace this buffer shows.
 
 ## Uses
 
@@ -64,8 +68,10 @@ session behind the thread when the user wants the full transcript.
 - `workspace/cancel` ([workspace](workspace.md))
 - `workspace/create` ([workspace](workspace.md))
 - `workspace/get` ([workspace](workspace.md))
+- `workspace/inbox` ([workspace](workspace.md))
 - `workspace/list` ([workspace](workspace.md))
 - `workspace/prompt` ([workspace](workspace.md))
+- `workspace/reassign` ([workspace](workspace.md))
 - `workspace/timeline` ([workspace](workspace.md))
 - `workspace/update` ([workspace](workspace.md))
 

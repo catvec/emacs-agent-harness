@@ -1124,13 +1124,15 @@ The longest wait so far and the average one, by priority, as of NOW."
 
 (defun harness-ui-slots--reason (reason)
   "Return why a queued task leads its line, from REASON as the harness says it.
-A task that waited for quota or a budget names which."
+A task that waited for quota, a budget or the endpoint catalogue names
+which."
   (pcase (and reason (format "%s" reason))
     ("sent-back" "sent back")
     ("preempted" "pre-empted")
     ("returned" "returned")
     ("quota" "quota")
     ("budget" "budget")
+    ("catalogue" "catalogue")
     (_ nil)))
 
 (defun harness-ui-slots--note (entry)

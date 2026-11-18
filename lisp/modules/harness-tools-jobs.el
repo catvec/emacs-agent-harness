@@ -163,6 +163,204 @@ restarts do not give it more time either."
 (defconst harness-tools-jobs--tick 5
   "Seconds between two looks at the deadlines of the jobs.")
 
+(defcustom harness-tools-jobs-evidence-limit 262144
+  "Most bytes of job lifecycle evidence kept, across every session.
+A job's lifecycle is recorded as one line per event in a file of the
+harness's state directory (see `harness-tools-jobs-evidence`), and the
+file is cut from the front when it grows past this, so a harness that
+runs for months keeps a bounded record of how its jobs ended rather
+than all of them.  A line is small -- ids, times, a state and a reason,
+never the command or its output -- so this holds thousands of ends."
+  :type 'integer :group 'harness)
+
+(defconst harness-tools-jobs--evidence-file-name "jobs-lifecycle.jsonl"
+  "The file the lifecycle of every job is appended to, under the state
+directory.  One JSON object per line; see `harness-tools-jobs-evidence'.")
+
+(defvar harness-tools-jobs--evidence-unavailable nil
+  "Non-nil when the lifecycle file could not be written, once said so.")
+
+;;;; The lifecycle evidence
+;;
+;; A job's record is in memory and goes with the session (`--forget'),
+;; so what ended a job was only ever in the harness's debug log -- which
+;; is not kept -- and a job whose process was killed by a signal nothing
+;; in the harness sent read as failed with no reason at all.  That is
+;; what the two jobs of 2026-11-16 looked like: exit 143, reason nil,
+;; and nothing anywhere saying who asked for the teardown.
+;;
+;; So every job writes a small durable record of its own lifecycle: when
+;; it started and in which sandbox run, every time the harness asked it
+;; to stop and by which path, and how it ended.  A record says whether a
+;; Harness stop request had been made when the job ended, so a job that
+;; ends without one -- an external signal, say -- reads as unexplained
+;; rather than being blamed on a path that never ran.  Nothing of the
+;; command, its output or its transcript is in it: ids, times, a state,
+;; a reason and the path of its log, and no more.
+
+(defun harness-tools-jobs--evidence-path ()
+  "Return the file the lifecycle of every job is recorded in, or nil.
+It is under `harness-state-directory', which a harness that has none --
+one built only for a test of something else -- does not get."
+  (let ((dir (and (boundp 'harness-state-directory) (symbol-value 'harness-state-directory))))
+    (and (stringp dir) (not (string-empty-p dir))
+         (expand-file-name harness-tools-jobs--evidence-file-name dir))))
+
+(defun harness-tools-jobs--evidence-signal-name (number)
+  "Return the name of signal NUMBER, or nil when it is none.
+Only the numbers a job can plausibly be killed by are named; anything
+else up to 31 is `SIG<N>', and a number that is no signal at all is nil."
+  (pcase number
+    (1 "HUP") (2 "INT") (3 "QUIT") (6 "ABRT") (9 "KILL")
+    (11 "SEGV") (13 "PIPE") (14 "ALRM") (15 "TERM")
+    ((and (pred integerp) (pred natnump))
+     (and (<= number 31) (format "SIG%d" number)))
+    (_ nil)))
+
+(defun harness-tools-jobs--evidence-signal (exit)
+  "Return the signal name EXIT, a wait status, was killed by, or nil.
+A command ended by a signal has the shell's 128+N as its status when a
+shell or `timeout' reported it.  Only a status above 128 is read that
+way here: 15 is an exit of 15 as often as it is SIGTERM, and guessing
+between them would put a signal in the record that nothing observed.
+A process the harness itself read the status of is asked instead
+\(`process-status'), so its signal is named from the number it saw."
+  (and (integerp exit) (> exit 128)
+       (harness-tools-jobs--evidence-signal-name (- exit 128))))
+
+(defun harness-tools-jobs--evidence-trim (file)
+  "Cut FILE from the front to `harness-tools-jobs-evidence-limit' bytes.
+The cut is made at a line boundary, so the file stays whole lines of
+JSON, and the oldest events are the ones that go."
+  (let ((size (and (file-readable-p file) (file-attribute-size (file-attributes file)))))
+    (when (and size (> size harness-tools-jobs-evidence-limit))
+      (let ((text (harness-read-file file)))
+        (when (and text (> (length text) harness-tools-jobs-evidence-limit))
+          (let* ((cut (- (length text) harness-tools-jobs-evidence-limit))
+                 (start (or (string-match "\n" text cut) cut)))
+            (harness-write-file-atomically file (substring text (1+ start)))))))))
+
+(defun harness-tools-jobs--evidence-write (job event &rest fields)
+  "Append EVENT, of JOB's lifecycle, with FIELDS, to the evidence file.
+The record names the job, its session and the sandbox run it was in,
+and the time; FIELDS add what this event says -- a state, an exit, the
+path a stop came by -- and never the job's command or its output.  A
+file that cannot be written is said once in the log, and never stops
+the job: evidence is what is read after the fact, not what running it
+depends on."
+  (when-let* ((file (harness-tools-jobs--evidence-path)))
+    (let ((record (append (list :at (float-time)
+                                :event event
+                                :job (plist-get job :id)
+                                :session (plist-get job :session)
+                                :run (plist-get job :run-id)
+                                :sandbox (plist-get job :sandbox)
+                                :generation (plist-get job :generation)
+                                :log (plist-get job :log))
+                          fields)))
+      (condition-case err
+          (progn
+            (harness-ensure-directory (file-name-directory file))
+            (let ((coding-system-for-write 'utf-8-unix)
+                  (inhibit-message t))
+              (write-region (concat (harness-json-encode-text record) "\n")
+                            nil file 'append 'silent))
+            (harness-tools-jobs--evidence-trim file)
+            (setq harness-tools-jobs--evidence-unavailable nil))
+        (error
+         (unless harness-tools-jobs--evidence-unavailable
+           (setq harness-tools-jobs--evidence-unavailable t)
+           (harness-log 'warn "jobs: cannot record the lifecycle in %s: %s"
+                        file (harness-error-message err))))))))
+
+(defun harness-tools-jobs--evidence-running (job)
+  "Record that JOB started running, naming the sandbox run it is in.
+The run is the shared sandbox's token, or the job's own process, and
+the sandbox is the instance of the runtime it was started in: the two
+ids a later reading needs to put a job, its session and its sandbox
+together."
+  (let* ((run (plist-get job :run))
+         (sandbox (and run (harness-sandbox-session-sandbox (plist-get job :session))))
+         (proc (plist-get job :process)))
+    (setf (plist-get job :run-id)
+          (or (and run (plist-get run :token))
+              (and proc (process-live-p proc) (format "pid-%s" (process-id proc))))
+          (plist-get job :sandbox) (plist-get sandbox :instance)
+          (plist-get job :generation) (plist-get sandbox :generation)
+          (plist-get job :stop-path) nil
+          (plist-get job :stop-reason) nil
+          (plist-get job :end-recorded) nil)
+    (harness-tools-jobs--evidence-write
+     job "start"
+     :state "running"
+     :timeout (plist-get job :seconds)
+     :deadline (plist-get job :deadline)
+     :shared (and (plist-get job :shared) t))))
+
+(defun harness-tools-jobs--evidence-stop (job path reason)
+  "Record that the harness asked JOB to stop, by PATH, for REASON.
+PATH names the handler that asked -- the tool's stop, the deadline, a
+session or task ending, the shutdown -- and is what tells a later
+reading whether the Harness ended a job itself.  The job keeps it, so
+its end says which stop it ended from."
+  (setf (plist-get job :stop-path) path
+        (plist-get job :stop-reason) reason)
+  (harness-tools-jobs--evidence-write job "stop" :path path :reason reason))
+
+(defun harness-tools-jobs--evidence-end (job state exit)
+  "Record how JOB ended: STATE, and EXIT as the harness saw it.
+The record says whether a Harness stop request had been made -- and by
+which path -- and names the signal when the status says one ended it.
+A job that ended with no stop request behind it is marked unexplained
+rather than attributed to a path that never ran: what killed it is not
+something the harness saw, and it does not invent a sender."
+  (unless (plist-get job :end-recorded)
+    (setf (plist-get job :end-recorded) t)
+    (let ((path (plist-get job :stop-path)))
+      (harness-tools-jobs--evidence-write
+       job "end"
+       :state (and state (symbol-name state))
+       :exit exit
+       :signal (harness-tools-jobs--evidence-signal exit)
+       :path path
+       :reason (or (plist-get job :stop-reason) (harness-tools-jobs--reason job))
+       :teardown (cond (path "harness-stop")
+                       ((eq state 'exited) "exit")
+                       (t "unexplained"))))))
+
+(defun harness-tools-jobs-evidence (session-id &optional id)
+  "Return the recorded lifecycle of SESSION-ID's jobs, oldest first.
+Each record is a plist of one event of a job's life: `:event' is
+\"start\", \"stop\" or \"end\", `:job' and `:session' name the job and
+its session, `:run' and `:sandbox' the run and the runtime it was in,
+and `:at' when it happened.  A \"stop\" names the `:path' the harness
+was asked to stop the job by, and why; an \"end\" gives its `:state',
+`:exit', `:signal' when a signal ended it, and `:teardown' -- whether
+the harness asked for it, the command exited, or nothing recorded
+explains it.  With ID, only that job's.  The file is bounded, so a very
+old job's records are gone: it keeps the most recent
+`harness-tools-jobs-evidence-limit' bytes of every job's life."
+  (let ((text (and (harness-tools-jobs--evidence-path)
+                   (harness-read-file (harness-tools-jobs--evidence-path))))
+        (out nil))
+    (when text
+      (dolist (line (split-string text "\n" t))
+        (unless (string-blank-p line)
+          (let ((record (condition-case nil (harness-json-parse line) (error nil))))
+            (when (and record
+                       (equal session-id (plist-get record :session))
+                       (or (null id) (equal id (plist-get record :job))))
+              (push record out))))))
+    (nreverse out)))
+
+(harness-defmethod sandbox/job-evidence (session-id &optional id)
+  "Return how the jobs of SESSION-ID started, were stopped and ended.
+It is what `harness-tools-jobs-evidence' reads, oldest first: the
+durable record of each job's lifecycle, which outlives the job's entry
+in memory and the session that ran it.  A client sees its own session's
+jobs and no other's."
+  (harness-tools-jobs-evidence session-id id))
+
 (defconst harness-tools-jobs--log-interval 1
   "Seconds between two writes of a running job's log.
 A job's output arrives in chunks, and its buffer is bounded; the file it
@@ -187,7 +385,8 @@ float time and a count of seconds.")
 (defconst harness-tools-jobs--job-keys
   '(:id :session :ctx :command :cwd :seconds :deadline :profile
     :process :buffer :log :state :exit :reason :restarts :started :ran
-    :history :dropped :log-written :run :shared :pid :was-running)
+    :history :dropped :log-written :run :shared :pid :was-running
+    :run-id :sandbox :generation :stop-path :stop-reason :end-recorded)
   "Every key a job's plist is given when it is made.
 It is not documentation only: `harness-tools-jobs--new-job' builds the
 record from it, and a test holds every key the module sets to it.  The
@@ -195,7 +394,10 @@ record from it, and a test holds every key the module sets to it.  The
 was given rather than the stored plist, so a key set later but missing
 here would quietly be set on a local, never reach the job, and leave a
 branch that looks taken and is never taken -- which is what `:was-running'
-did (see `harness-tools-jobs--rebuild-shared').")
+did (see `harness-tools-jobs--rebuild-shared').  The last six are what
+the lifecycle evidence is written from: the run of the job's current
+life, the sandbox it ran in, why the harness stopped it and whether its
+end was recorded.")
 
 (defun harness-tools-jobs--new-job (&rest fields)
   "Return a new job record with FIELDS, a plist, set in it.
@@ -730,6 +932,11 @@ much, so the tail is never mistaken for the whole."
                         (harness-format-duration (plist-get job :seconds)))))
          (t (setf (plist-get job :exit) status
                   (plist-get job :state) (if (eql status 0) 'exited 'failed))))
+        ;; How it ended is written down before the log, so a job that
+        ;; died with no stop request behind it -- a signal nothing in the
+        ;; harness sent -- is in the record as unexplained rather than
+        ;; remembered only as a debug line nothing keeps.
+        (harness-tools-jobs--evidence-end job (plist-get job :state) status)
         (harness-log 'debug "jobs: %s ended (%s)" (plist-get job :id) status)
         (ignore-errors (harness-tools-jobs--write-log job))))))
 
@@ -842,6 +1049,7 @@ never a way to a longer life than the one granted."
                 (plist-get job :deadline)
                 (or (plist-get job :deadline)
                     (+ (float-time) (plist-get job :seconds))))
+          (harness-tools-jobs--evidence-running job)
           (harness-tools-jobs--write-log job)
           job)
       (unless proc
@@ -860,8 +1068,14 @@ never a way to a longer life than the one granted."
 
 ;;;; Stopping one
 
-(defun harness-tools-jobs--stop (job &optional reason)
-  "Stop JOB for REASON and return it.
+(defun harness-tools-jobs--stop (job &optional reason path)
+  "Stop JOB for REASON, asked for by PATH, and return it.
+PATH names the handler that stopped it -- the tool's stop, the deadline,
+its session or task ending, the shutdown -- and is recorded with the
+reason in the job's lifecycle (see `harness-tools-jobs-evidence'), so a
+later reading can tell a teardown the Harness asked for from one nothing
+here explains.
+
 A job of the session's shared sandbox is one run in it, so stopping the
 job ends that run -- its own process group -- and leaves the sandbox,
 and whatever else the session runs, going.  A job that runs in a sandbox
@@ -875,6 +1089,8 @@ the reason recorded."
     ;; A job its session stopped is not one to carry into a sandbox a
     ;; later change builds.
     (setf (plist-get job :was-running) nil)
+    (when (or run (and proc (process-live-p proc)))
+      (harness-tools-jobs--evidence-stop job (or path "harness") reason))
     (when run
       (if (eq (harness-sandbox-session-run-state run) 'running)
           (progn
@@ -910,6 +1126,10 @@ the reason recorded."
         (ignore-errors (signal-process (process-id proc) 'kill)))
       (setf (plist-get job :state) 'stopped
             (plist-get job :ran) (max 0 (- (float-time) (plist-get job :started))))
+      ;; Its own process is the end of a job of its own: the sentinel
+      ;; recorded what it exited with, and this says how the harness read
+      ;; the end it asked for.
+      (harness-tools-jobs--evidence-end job 'stopped (plist-get job :exit))
       (ignore-errors (harness-tools-jobs--keep-output job))
       (ignore-errors (harness-tools-jobs--write-log job)))
     job))
@@ -917,22 +1137,22 @@ the reason recorded."
 (defun harness-tools-jobs-stop-job (id &optional reason)
   "Stop the job ID for REASON; return its entry, or nil when there is none."
   (when-let* ((job (harness-tools-jobs--job id)))
-    (harness-tools-jobs--stop job reason)
+    (harness-tools-jobs--stop job reason "stop-job")
     (harness-tools-jobs--entry job)))
 
-(defun harness-tools-jobs--stop-all (session-id reason)
-  "Stop every job of SESSION-ID for REASON."
+(defun harness-tools-jobs--stop-all (session-id reason &optional path)
+  "Stop every job of SESSION-ID for REASON, asked for by PATH."
   (dolist (id (copy-sequence (gethash session-id harness-tools-jobs--by-session)))
     (when-let* ((job (harness-tools-jobs--job id)))
-      (harness-tools-jobs--stop job reason))))
+      (harness-tools-jobs--stop job reason (or path "stop-all")))))
 
-(defun harness-tools-jobs--end-all (session-id reason)
-  "Stop every job of SESSION-ID for REASON, and forget it.
+(defun harness-tools-jobs--end-all (session-id reason &optional path)
+  "Stop every job of SESSION-ID for REASON, asked for by PATH, and forget it.
 For a session that is deleted or closed: nothing of it is left to list, so
 nothing of it is left in the tables either."
   (dolist (id (copy-sequence (gethash session-id harness-tools-jobs--by-session)))
     (when-let* ((job (harness-tools-jobs--job id)))
-      (harness-tools-jobs--stop job reason)
+      (harness-tools-jobs--stop job reason (or path "end-all"))
       (harness-tools-jobs--forget job))))
 
 ;;;; The ones that are over
@@ -949,7 +1169,8 @@ nothing of it is left in the tables either."
                         (harness-tools-jobs--expired-p job))
                (harness-tools-jobs--stop
                 job (format "it reached its timeout of %s"
-                            (harness-format-duration (plist-get job :seconds))))))
+                            (harness-format-duration (plist-get job :seconds)))
+                "timeout")))
            harness-tools-jobs--jobs)
   (harness-tools-jobs--flush-logs))
 
@@ -983,7 +1204,8 @@ again after the sandbox exists."
          (current (and (eq (car current) :profile) (cadr current))))
     (cond
      (why
-      (harness-tools-jobs--stop job (format "its session may no longer run it: %s" why))
+      (harness-tools-jobs--stop job (format "its session may no longer run it: %s" why)
+                                "rebuild")
       nil)
      ((plist-get job :shared)
       ;; Its sandbox is the session's one, which the change rebuilds: the
@@ -999,12 +1221,14 @@ again after the sandbox exists."
                            (plist-get job :ctx) (plist-get job :cwd)))))
         (if problem
             (progn (harness-tools-jobs--stop
-                    job (format "its session may no longer run it: %s" problem))
+                    job (format "its session may no longer run it: %s" problem)
+                    "rebuild")
                    nil)
           job)))
      ((equal current old) job)
      ((harness-tools-jobs--expired-p job)
-      (harness-tools-jobs--stop job "its time is up, and its sandbox changed, so it was not restarted")
+      (harness-tools-jobs--stop job "its time is up, and its sandbox changed, so it was not restarted"
+                                 "rebuild")
       nil)
      ((not (harness-tools-jobs--running-p job))
       ;; Nothing left to rebuild: a job that ended is not restarted.
@@ -1012,18 +1236,21 @@ again after the sandbox exists."
      ((>= (or (plist-get job :restarts) 0) harness-tools-jobs-max-restarts)
       (harness-tools-jobs--stop
        job (format "its sandbox changed again after %s, so it was not restarted again"
-                   (harness-tools-count-phrase harness-tools-jobs-max-restarts "restart")))
+                   (harness-tools-count-phrase harness-tools-jobs-max-restarts "restart"))
+       "rebuild")
       nil)
      (t
       (harness-log 'warn "jobs: %s restarted, what its session may reach changed" (plist-get job :id))
-      (harness-tools-jobs--stop job "its sandbox changed, so it is restarted in the new one")
+      (harness-tools-jobs--stop job "its sandbox changed, so it is restarted in the new one"
+                                 "restart")
       (setf (plist-get job :profile) current
             (plist-get job :restarts) (1+ (or (plist-get job :restarts) 0)))
       (condition-case err
           (harness-tools-jobs--spawn job)
         (error (harness-tools-jobs--stop
                 job (format "its sandbox could not be built again: %s"
-                            (harness-error-message err)))
+                            (harness-error-message err))
+                "restart")
                nil))))))
 
 (defun harness-tools-jobs--rebuild-shared (job current)
@@ -1045,19 +1272,22 @@ what it holds this moment."
    ((harness-tools-jobs--running-p job) job)
    ((not (harness-tools-jobs--shared-p (plist-get job :ctx) (plist-get job :cwd)))
     (harness-tools-jobs--stop
-     job (or (plist-get job :reason) "its session may no longer hold a runtime"))
+     job (or (plist-get job :reason) "its session may no longer hold a runtime")
+     "rebuild")
     nil)
    ((not (plist-get job :was-running))
     ;; Its run ended before the change -- it had finished, or its session
     ;; stopped it -- so there is nothing to carry into the next runtime.
     job)
    ((harness-tools-jobs--expired-p job)
-    (harness-tools-jobs--stop job "its time is up, and its sandbox changed, so it was not restarted")
+    (harness-tools-jobs--stop job "its time is up, and its sandbox changed, so it was not restarted"
+                              "rebuild")
     nil)
    ((>= (or (plist-get job :restarts) 0) harness-tools-jobs-max-restarts)
     (harness-tools-jobs--stop
      job (format "its sandbox changed again after %s, so it was not restarted again"
-                 (harness-tools-count-phrase harness-tools-jobs-max-restarts "restart")))
+                 (harness-tools-count-phrase harness-tools-jobs-max-restarts "restart"))
+     "rebuild")
     nil)
    (t
     (harness-log 'warn "jobs: %s restarted, its session's sandbox was rebuilt" (plist-get job :id))
@@ -1069,7 +1299,8 @@ what it holds this moment."
         (harness-tools-jobs--start-shared job)
       (error (harness-tools-jobs--stop
               job (format "its sandbox could not be built again: %s"
-                          (harness-error-message err)))
+                          (harness-error-message err))
+              "restart")
              nil)))))
 
 (defun harness-tools-jobs-rebuild-session (session-id &optional note-running)
@@ -1091,7 +1322,8 @@ rebuilt after this, and what it ran ended with it."
         (error (harness-log 'error "jobs: %s could not be rebuilt: %s"
                             id (harness-error-message err))
                (harness-tools-jobs--stop
-                job (format "its sandbox could not be rebuilt: %s" (harness-error-message err))))))))
+                job (format "its sandbox could not be rebuilt: %s" (harness-error-message err))
+                "rebuild"))))))
 
 (defun harness-tools-jobs--on-access-changed (session-id &rest _)
   "Rebuild the jobs of SESSION-ID after what it may reach changed.
@@ -1121,11 +1353,12 @@ again there."
                               id (harness-error-message err))
                  (harness-tools-jobs--stop
                   job (format "its sandbox could not be rebuilt: %s"
-                              (harness-error-message err)))))))))
+                              (harness-error-message err))
+                  "rebuild")))))))
 
 (defun harness-tools-jobs--on-session-ended (session-id &rest _)
   "Stop the jobs of SESSION-ID, which was deleted or closed, and forget them."
-  (harness-tools-jobs--end-all session-id "its session ended"))
+  (harness-tools-jobs--end-all session-id "its session ended" "session-ended"))
 
 (defun harness-tools-jobs--on-session-moved (session-id _old new)
   "Stop the jobs of SESSION-ID, which moved to NEW."
@@ -1135,7 +1368,7 @@ again there."
 (defun harness-tools-jobs--on-task-done (task &rest _)
   "Stop the jobs of TASK's session, whose work is done."
   (when-let* ((sid (plist-get task :session)))
-    (harness-tools-jobs--stop-all sid "its task is done")))
+    (harness-tools-jobs--stop-all sid "its task is done" "task-done")))
 
 (defun harness-tools-jobs--on-task-cancelled (task &rest _)
   "Stop the jobs of TASK's session, whose work the user cancelled.
@@ -1147,7 +1380,7 @@ as to the pause and return path (`agent/stop-outstanding'), and nothing
 of a cancelled task keeps running.  A cancel of a task that never
 started takes its session with it, which `session/deleted' covers."
   (when-let* ((sid (plist-get task :session)))
-    (harness-tools-jobs--stop-all sid "its task was cancelled")))
+    (harness-tools-jobs--stop-all sid "its task was cancelled" "task-cancelled")))
 
 (defun harness-tools-jobs--stop-outstanding (value session-id &optional reason)
   "Stop SESSION-ID's jobs and say what stopped, for `agent/stop-outstanding'.
@@ -1165,7 +1398,8 @@ nothing running."
     (if (null running)
         value
       (harness-tools-jobs--stop-all
-       session-id (or reason "its session stopped the work it left running, so the job stopped"))
+       session-id (or reason "its session stopped the work it left running, so the job stopped")
+       "stop-outstanding")
       (let ((note (format "Bash %s stopped"
                           (harness-tools-count-phrase (length running) "job"))))
         (if (and (stringp value) (not (string-blank-p value)))
@@ -1238,6 +1472,16 @@ caller reads both numbers and neither is guessed."
                (and (memq (plist-get entry :state) '(exited stopped failed))
                     (plist-get entry :reason)
                     (format "  %s" (plist-get entry :reason)))
+               (and (memq (plist-get entry :state) '(exited stopped failed))
+                    (let ((last (car (last (harness-tools-jobs-evidence
+                                            (plist-get entry :session) (plist-get entry :id))))))
+                      (and (equal "end" (plist-get last :event))
+                           (format "  ended: %s"
+                                   (pcase (plist-get last :teardown)
+                                     ("harness-stop" (format "stopped by the harness · %s"
+                                                             (or (plist-get last :path) "-")))
+                                     ("exit" "the command exited")
+                                     (_ "no recorded stop request: unexplained"))))))
                (and (> (or (plist-get entry :restarts) 0) 0)
                     (format "  restarted %s" (harness-tools-count-phrase
                                               (plist-get entry :restarts) "time")))
@@ -1331,6 +1575,7 @@ same whichever sandbox the job runs in."
           ;; span: the deadline it already has is the one it keeps.
           (plist-get job :deadline) (or (plist-get job :deadline)
                                         (plist-get run :deadline)))
+    (harness-tools-jobs--evidence-running job)
     (harness-tools-jobs--write-log job)
     job))
 
@@ -1339,7 +1584,14 @@ same whichever sandbox the job runs in."
 The reason the job was stopped for is the reason its session reads: a
 run ended because the sandbox was rebuilt says that, while the job was
 stopped because its directory went, so the job's own reason wins and the
-run's is kept only where the job had none."
+run's is kept only where the job had none.
+
+How it ended is written to the job's lifecycle record here, with the
+exit the supervisor reported and whether a Harness stop request was
+behind it (see `harness-tools-jobs--evidence-end').  A run whose status
+says a signal ended it, and which no stop request of the harness
+explains, is recorded as unexplained: what sent it is not something the
+harness saw."
   (lambda (run)
     (let ((entry (ignore-errors (harness-sandbox-session-run-entry run))))
       (setf (plist-get job :state) (if (eq (harness-sandbox-session-run-state run) 'stopped)
@@ -1349,6 +1601,7 @@ run's is kept only where the job had none."
             (plist-get job :reason) (or (plist-get job :reason) (plist-get run :reason))
             (plist-get job :ran) (and entry (- (or (plist-get entry :elapsed) 0) 0))
             (plist-get job :log) (plist-get entry :log))
+      (harness-tools-jobs--evidence-end job (plist-get job :state) (plist-get run :exit))
       (ignore-errors (harness-tools-jobs--write-log job)))))
 
 (defun harness-tools-jobs--start (input ctx)
@@ -1423,7 +1676,7 @@ refused and stops the job instead of reviving it unconfined."
          (id (plist-get job :id)))
     (if (not restart)
         (progn
-          (harness-tools-jobs--stop job "stopped by its session")
+          (harness-tools-jobs--stop job "stopped by its session" "stop")
           (harness-tool-ok
            (format "%s stopped%s; its files stay where it wrote them"
                    id
@@ -1441,7 +1694,7 @@ refused and stops the job instead of reviving it unconfined."
               (let ((confinement (harness-tools-jobs--spawn-confinement job)))
                 (when confinement
                   (signal 'harness-error (list confinement)))))
-            (harness-tools-jobs--stop job "restarted by its session")
+            (harness-tools-jobs--stop job "restarted by its session" "restart")
             (setf (plist-get job :restarts) (1+ (or (plist-get job :restarts) 0)))
             ;; A restart is the same command again, in the sandbox the
             ;; session has now: its own, or the one the session shares.
@@ -1453,7 +1706,8 @@ refused and stops the job instead of reviving it unconfined."
                                      id (harness-format-duration (plist-get job :seconds)))
                              :meta (list :job id)))
         ((error quit)
-         (harness-tools-jobs--stop job (format "its restart failed: %s" (harness-error-message err)))
+         (harness-tools-jobs--stop job (format "its restart failed: %s" (harness-error-message err))
+                                  "restart")
          (harness-tool-error (format "%s could not restart: %s" id (harness-error-message err))))))))
 
 (defun harness-tools-jobs--bash-job (input ctx)
@@ -1486,9 +1740,63 @@ refused and stops the job instead of reviving it unconfined."
          (t
           (harness-tool-ok (or (harness-tools-jobs-log-text (car entries) (harness-tools-jobs--lines input))
                                "No output"))))))
+     ((equal action "evidence")
+      (let* ((id (and (stringp (plist-get input :id)) (string-trim (plist-get input :id))))
+             (id (and id (not (string-empty-p id)) id))
+             ;; A job that has ended may be gone from the session's list
+             ;; and still have its lifecycle recorded, which is the point
+             ;; of the record: the id is read as it is, and the session it
+             ;; is read under is what decides whose it was.
+             (records (harness-tools-jobs-evidence sid id)))
+        (cond
+         (records
+          (harness-tool-ok
+           (string-join (mapcar #'harness-tools-jobs--evidence-line records) "\n")
+           :meta (list :job id :records (length records))))
+         (id
+          (let ((job (ignore-errors (harness-tools-jobs--resolve id sid))))
+            (harness-tool-ok (if job
+                                 (format "No lifecycle recorded for %s yet" (plist-get job :id))
+                               (format "No job %s in this session" id)))))
+         (t (harness-tool-ok "No job lifecycle recorded in this session")))))
      (t (harness-tool-error
-         (format "bash_job needs action: start, list, status, logs, stop or restart%s"
+         (format "bash_job needs action: start, list, status, logs, evidence, stop or restart%s"
                  (if value (format " (not %S)" value) "")))))))
+
+(defun harness-tools-jobs--evidence-line (record)
+  "Return one line saying what RECORD, an event of a job's life, was.
+The line is the tool's, so it reads as what happened: when, which job,
+and what the event says -- a start's run, a stop's path and reason, an
+end's state, exit, signal and whether the harness asked for it."
+  (let ((event (plist-get record :event))
+        (at (plist-get record :at)))
+    (format "%s  %s  %s%s"
+            (if (numberp at) (format-time-string "%Y-%m-%d %H:%M:%S" at) "-")
+            (or (plist-get record :job) "-")
+            (pcase event
+              ("start" (format "start · run %s · %s"
+                               (or (plist-get record :run) "-")
+                               (if (harness-json-true-p (plist-get record :shared))
+                                   "in the session's sandbox" "in a sandbox of its own")))
+              ("stop" (format "stop · %s · %s"
+                              (or (plist-get record :path) "-")
+                              (or (plist-get record :reason) "no reason")))
+              ("end" (format "end · %s · exit %s%s · %s"
+                             (or (plist-get record :state) "-")
+                             (let ((exit (plist-get record :exit)))
+                               (if (integerp exit) exit "?"))
+                             (if-let* ((signal (plist-get record :signal)))
+                                 (format " (%s)" signal) "")
+                             (pcase (plist-get record :teardown)
+                               ("harness-stop" (format "stopped by the harness · %s"
+                                                       (or (plist-get record :path) "-")))
+                               ("exit" "the command exited")
+                               (_ "no recorded stop request: unexplained"))))
+              (_ (format "%s" event)))
+            (let ((log (plist-get record :log)))
+              (if (and (equal event "end") (stringp log))
+                  (format " · log %s" (harness-abbreviate-file-name log))
+                "")))))
 
 (defun harness-tools-jobs--lines (input)
   "Return how many lines of output a `bash_job' call with INPUT asks for."
@@ -1511,7 +1819,7 @@ A client sees the jobs of the session its view shows, and no other's."
 Signals when ID is no job of SESSION-ID's, so another session's job
 cannot be stopped through it."
   (let ((job (harness-tools-jobs--resolve id session-id)))
-    (harness-tools-jobs--stop job "stopped from the access view")
+    (harness-tools-jobs--stop job "stopped from the access view" "access-view")
     (harness-tools-jobs--entry job)))
 
 (harness-define-tool "bash_job"
@@ -1520,14 +1828,14 @@ cannot be stopped through it."
   (concat
    "Run a shell command as a long-lived, confined job of this session: it starts in this call, keeps running after it, and later calls reach it -- a dev server, a display, an emulator, or a game a playtest drives -- while what it writes stays in the working directory. "
    "A job runs in a sandbox of this session's own, built as a bash command's is: the directories the session may use, its temporary directory as /tmp, the network, its Linux capabilities, and a read-only or offline session's job is read-only or offline. The harness holds the process, so it is the same sandbox for every call that reaches it, and it is still a namespace of its own: a script inside it may start several processes, and all of them end with the job. "
-   "Actions: start (command, and optionally cwd and timeout in seconds, at most 3600), list, status (id, or all of the session's), logs (id, lines), stop (id) and restart (id, after a permission change or a crash). "
-   "A job ends when its time is up, when stop names it, when its session is closed or deleted, when its task is done or cancelled or paused, and when the harness shuts down; the sandbox's own timeout ends it even when the harness does not, and nothing it left running survives it. A restart runs the rest of the job's own time, not a new span, and it is refused when the session may no longer run a job in its directory. Its output is kept in the session's temporary directory, bounded: a job that prints more than the limit loses its oldest output, and the log says so. "
+   "Actions: start (command, and optionally cwd and timeout in seconds, at most 3600), list, status (id, or all of the session's), logs (id, lines), evidence (id, or all of the session's: how each job started, every stop the harness asked it for, and how it ended), stop (id) and restart (id, after a permission change or a crash). "
+   "A job ends when its time is up, when stop names it, when its session is closed or deleted, when its task is done or cancelled or paused, and when the harness shuts down; the sandbox's own timeout ends it even when the harness does not, and nothing it left running survives it. A restart runs the rest of the job's own time, not a new span, and it is refused when the session may no longer run a job in its directory. Its output is kept in the session's temporary directory, bounded: a job that prints more than the limit loses its oldest output, and the log says so. Its lifecycle -- its run, the path each stop came by, its exit and signal -- is kept in the harness's state directory, bounded, so how a job ended outlives the job: an end with no stop request behind it reads as unexplained, since what sent a signal is not something the harness sees. "
    "A job belongs to the session that started it: no other session lists, reads or stops it. A job runs in this session's shared runtime, which the sandbox layer holds on demand, and it needs a backend that can promise a verifiable cancel and teardown; where none can -- no backend, the `off' policy, a project whose own settings say `off', a remote directory, or a backend that cannot -- a job is refused with that reason, because its processes there would not be confined or would not end with it. "
    "The network is the machine's, as it is for bash: a job that listens on a port is reachable from this machine and from any other session's commands, so two jobs cannot bind the same address and port, and an offline session's job is offline. Confinement is what a job's own processes may touch, not a private network. "
    "For one command that starts, uses and stops a second process, bash is enough: its sandbox ends with the call.")
   :schema '(:type "object"
-            :properties (:action (:type "string" :enum ["start" "list" "status" "logs" "stop" "restart"]
-                                  :description "What to do: start a job, list the session's jobs, show one, read its output, stop it, or restart it.")
+            :properties (:action (:type "string" :enum ["start" "list" "status" "logs" "evidence" "stop" "restart"]
+                                  :description "What to do: start a job, list the session's jobs, show one, read its output, read how one ended, stop it, or restart it.")
                          :command (:type "string" :description "For start: the shell command the job runs, as bash runs one.")
                          :id (:type "string" :description "The job to act on, as start and list name it.")
                          :cwd (:type "string" :description "For start: the directory to run in, relative to the working directory. Default: the working directory.")
@@ -1555,7 +1863,7 @@ cannot be stopped through it."
   (harness-remove-filter 'agent/stop-outstanding #'harness-tools-jobs--stop-outstanding)
   (maphash (lambda (_id job)
              (when (harness-tools-jobs--running-p job)
-               (harness-tools-jobs--stop job "the harness is shutting down")))
+               (harness-tools-jobs--stop job "the harness is shutting down" "shutdown")))
            harness-tools-jobs--jobs))
 
 (defun harness-tools-jobs--init ()

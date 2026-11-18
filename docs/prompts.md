@@ -235,7 +235,7 @@ that does not use it gains no hooks, options or timers from it.
 
 | Prompt | Purpose | Variables | Used by |
 |---|---|---|---|
-| `recap-system` | Tells the model how to write a task card's one-sentence recap. | none | harness-recap--request |
+| `recap-system` | Tells the model how to write the one-sentence recap a card or a chat shows. | none | harness-recap--request |
 | `recap-ask` | The last line of a recap request. | none | harness-recap--prompt |
 
 ### compaction

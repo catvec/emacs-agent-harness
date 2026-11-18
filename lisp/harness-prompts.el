@@ -125,18 +125,18 @@
      "This conversation is a task the engineer handed to the agent to do unattended, tracked on a task board.  Title it like a ticket on that board: an imperative summary of the work to be done, such as \"Fix login redirect loop\" or \"Add CSV export to reports\".")
     (:name recap-system
      :module recap
-     :purpose "Tells the model how to write a task card's one-sentence recap."
+     :purpose "Tells the model how to write the one-sentence recap a card or a chat shows."
      :used-by "harness-recap--request"
      :variables nil
      :template
-     "You write the progress recaps that coding agents' task cards show under their titles.  Write one short sentence, in plain words, saying what the task is doing or has done so far: concrete work and findings, not encouragement, not a question, not a plan.  No markdown, no quotes, no lists, no trailing period is needed.")
+     "You write the progress recaps that coding agents' task cards and chats show.  Each is one short sentence, in plain words, of what happened since the previous recap: what the agent did, what it found or decided and why, what a check or a command showed, and, when it matters, what blocks the work now or what comes next.  Name the concrete thing -- a file, a function, a test, a command, its result -- rather than the work in general.  When the work waits on the engineer, say what it waits for.  Do not restate the task, the plan or the previous recap, and do not claim any work the transcript does not show: no encouragement, no question, no plan of your own.  When nothing has changed since the previous recap, answer UNCHANGED and nothing else.  No markdown, no quotes, no lists, no trailing period is needed.")
     (:name recap-ask
      :module recap
      :purpose "The last line of a recap request."
      :used-by "harness-recap--prompt"
      :variables nil
      :template
-     "Recap this task now, in one short sentence.")
+     "Write the recap now: one short sentence about what happened since the previous recap, or UNCHANGED when nothing did.")
     (:name compaction-system
      :module compaction
      :purpose "Tells the model how to write the handoff summary a compaction keeps."

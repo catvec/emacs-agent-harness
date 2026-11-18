@@ -1,0 +1,40 @@
+{
+  "schema-version": 1,
+  "artifact": {"id": "thread-continuation-fixture", "version": "2.0.0"},
+  "model": {"id": "fixture-logreg", "version": "0.2.0"},
+  "questions": {
+    "same-thread": {
+      "type": "noul",
+      "instructions": "Is the new message a continuation of the same conversation as the thread it was sent to?"
+    },
+    "next-step": {
+      "type": "choice",
+      "instructions": "What should the harness do with this message?",
+      "criteria": {
+        "continue": "The message belongs to the thread it was sent to, and the thread carries on.",
+        "new": "The message starts something the thread does not cover."
+      }
+    },
+    "topic-cue": {
+      "type": "score",
+      "instructions": "How strongly does the message's topic match the thread's?",
+      "criteria": ["no topic in common", "one topic in common", "the same topic"]
+    }
+  },
+  "dataset": {
+    "name": "thread-continuation-cases",
+    "version": "2.0.0",
+    "provenance": "synthetic cases written for the decision-provider suite; no user transcript is in it",
+    "splits": [{"name": "train", "count": 4},
+                {"name": "eval", "count": 2}]
+  },
+  "evaluation": {
+    "split": "eval",
+    "metrics": [{"name": "accuracy", "value": 1.0}],
+    "calibration": {"method": "none", "note": "two cases are not a calibration"}
+  },
+  "runtime": {
+    "kind": "local",
+    "requires": ["the fixture directory: artifact.json and cases.jsonl"]
+  }
+}

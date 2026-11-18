@@ -903,6 +903,38 @@ class TurnHoldTest(unittest.TestCase):
             rig.stt_gate.set()
             rig.stop()
 
+    def test_repeated_interrupt_acks_keep_capture_open_and_never_fabricate_text(self):
+        rig = SidecarRig()
+        try:
+            recorder = rig.sidecar.recorder
+            workers = list(rig.sidecar.workers)
+            rig.sidecar.speech_active = True
+            rig.sidecar.awaiting.add(1)
+            for request_id in (1, 2, 3):
+                before = len(rig.events.sent)
+                rig.sidecar.handle({"event": "interrupt", "id": request_id})
+                self.assertEqual(rig.events.sent[before:], [
+                    {"event": "interrupted", "interrupt_id": request_id},
+                    {"event": "listening", "interrupt_id": request_id},
+                ])
+                self.assertIs(recorder, rig.sidecar.recorder)
+                self.assertEqual(workers, rig.sidecar.workers)
+                self.assertFalse(rig.sidecar.muted)
+                self.assertTrue(rig.sidecar.speech_active)
+                self.assertIn(1, rig.sidecar.awaiting)
+            rig.sidecar.speech_active = False
+            rig.sidecar.transcripts.put((1, "Only actual words.", False))
+            rig.sidecar.drain_transcripts()
+            self.assertEqual([e["text"] for e in rig.find("delegation")],
+                             ["Only actual words."])
+            rig.sidecar.handle({"event": "mute", "on": True})
+            rig.sidecar.handle({"event": "interrupt", "id": 4})
+            self.assertTrue(rig.sidecar.muted)
+            rig.sidecar.handle({"event": "mute", "on": False})
+            self.assertFalse(rig.sidecar.muted)
+        finally:
+            rig.stop()
+
     def test_mute_and_end_drop_stale_output_and_reset_cut_bookkeeping(self):
         rig = SidecarRig()
         try:

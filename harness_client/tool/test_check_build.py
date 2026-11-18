@@ -141,6 +141,39 @@ class ReportFlutterTestsTest(unittest.TestCase):
         self.assertEqual(names.stdout.splitlines(),
                          ["test/a_test.dart :: alpha", "test/b_test.dart :: beta"])
 
+    def test_a_failing_report_says_to_repair_every_failure(self):
+        # The failures themselves must carry the rule, not only the docs: a
+        # reader of this output is told to investigate and repair every one of
+        # them, including those already failing on main.
+        result = self.report(json_stream([("a_test.dart", "alpha", "fail"),
+                                           ("a_test.dart", "fine", "ok")]))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("TEST FAILURES: investigate and repair EVERY one of them.",
+                      result.stdout)
+        self.assertIn("already on main", result.stdout)
+        self.assertIn("also fails at the base is still a failure", result.stdout)
+        self.assertIn("Do not skip, delete, weaken", result.stdout)
+        # After the failures it names, and still a failing exit status.
+        self.assertLess(result.stdout.index("FAILED test/a_test.dart :: alpha"),
+                        result.stdout.index("TEST FAILURES"))
+        # A run that did not finish says the same, and stays nonzero.
+        unfinished = self.report(json_stream([("a_test.dart", "one", "ok")],
+                                              finished=False))
+        self.assertEqual(unfinished.returncode, 3)
+        self.assertIn("TEST FAILURES", unfinished.stdout)
+        # The machine-readable list stays exactly that: names only.
+        names = self.report(json_stream([("a_test.dart", "alpha", "fail")]),
+                            "--failures")
+        self.assertEqual(names.stdout.splitlines(),
+                         ["test/a_test.dart :: alpha"])
+
+    def test_a_passing_report_carries_no_directive(self):
+        # A green run says what passed, and nothing about repairing.
+        result = self.report(json_stream([("a_test.dart", "one", "ok")]))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "1 tests: 1 passed, 0 failed, 0 skipped")
+        self.assertNotIn("TEST FAILURES", result.stdout)
+
     def test_the_exception_a_widget_test_printed_is_in_the_report(self):
         result = self.report(json_stream([("w_test.dart", "lays out", "widget")]))
         self.assertEqual(result.returncode, 1)
@@ -361,7 +394,6 @@ class CheckBuildTest(CheckFixture):
         self.assertEqual(stamp["head"], head)
         self.assertEqual(stamp["base"], self.git("rev-parse", "main"))
         self.assertEqual(stamp["steps"], ["pub-get", "analyze", "test", "build"])
-        self.assertEqual(stamp["known_test_failures"], 0)
         self.assertEqual(len(stamp["apk_sha256"]), 64)
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertFalse(os.path.exists(os.path.join(self.client, "build")))
@@ -446,17 +478,24 @@ class CheckBuildTest(CheckFixture):
                      "build": "build apk --release"}[step]) + 1])
                 self.commit("mended " + step, {marker: None})
 
-    def test_a_failure_the_base_already_had_is_listed_not_held_against_the_branch(self):
-        # main is red: a test fails there and fails here.
+    def test_a_failure_the_base_already_had_still_fails_the_check(self):
+        # main is red: a test fails there and fails here.  That is a defect in
+        # the tree all the same, so the check fails and writes no stamp; the
+        # base's run only says which failures this branch brought.
         self.git("checkout", "-q", "main")
         self.commit("red main", {"FAILING_TESTS": "lays out\n"})
         self.git("checkout", "-q", "task")
         self.git("merge", "-q", "--no-edit", "main")
         self.commit("ui", {"lib/main.dart": "void main() { run(); }\n"})
         result = self.run_check()
-        self.assertEqual(result.returncode, 0, self.output(result))
-        self.assertIn("all 1 failing tests already fail at", result.stdout)
-        self.assertEqual(self.stamp()["known_test_failures"], 1)
+        self.assertEqual(result.returncode, 1, self.output(result))
+        self.assertIn("every one of them already failing at", result.stdout)
+        self.assertIn("does not excuse them", result.stdout)
+        self.assertIn("investigate and repair EVERY one of them",
+                      result.stdout)
+        self.assertNotIn("PASSED", result.stdout)
+        self.assertFalse(
+            os.path.exists(os.path.join(self.out, "stamp.json")))
         # The base's tests were run too, to tell.
         self.assertEqual(
             [args for where, args in self.calls() if where.startswith("base/")],
@@ -472,8 +511,9 @@ class CheckBuildTest(CheckFixture):
         self.commit("ui", {"FAILING_TESTS": "lays out\nwraps\n"})
         result = self.run_check()
         self.assertEqual(result.returncode, 1, self.output(result))
-        self.assertIn("1 test(s) fail here that passed at", result.stdout)
+        self.assertIn("of them new since", result.stdout)
         self.assertIn("test/main_test.dart :: wraps", result.stdout)
+        self.assertIn("investigate and repair EVERY one of them", result.stdout)
         self.assertNotIn("PASSED", result.stdout)
         self.assertFalse(os.path.exists(os.path.join(self.out, "stamp.json")))
         # build never ran

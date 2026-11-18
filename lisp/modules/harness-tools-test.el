@@ -52,6 +52,59 @@ handler is given the computer the chain resolved."
                      (plist-get request :computer)))
       (should (equal "cmp-box" (plist-get handler-ctx :computer))))))
 
+(ert-deftest harness-tools-execute-preserves-originating-turn-context ()
+  "Turn identity survives the permission wait and computer resolution."
+  (harness-tools-test-with
+    (let ((decision (harness-make-promise)) handler-ctx)
+      (harness-register-method 'agent/activity (lambda (_sid) '(:turn-id "origin")))
+      (harness-define-tool "t_scoped" :label "Scoped tool"
+        :handler (lambda (_input ctx) (setq handler-ctx ctx) "ok"))
+      (cl-letf (((symbol-function 'harness-tools--decide) (lambda (_request) decision)))
+        (let ((result (harness-call 'tools/execute nil
+                                    '(:id "scoped-1" :name "t_scoped" :turn-id "origin"))))
+          (should-not handler-ctx)
+          (harness-resolve decision '(:behavior allow :computer "resolved"))
+          (should (equal "ok" (plist-get (harness-test-await result) :content)))
+          (should (equal "origin" (plist-get handler-ctx :turn-id)))
+          (should (equal "scoped-1" (plist-get handler-ctx :call-id)))
+          (should (equal "resolved" (plist-get handler-ctx :computer))))))))
+
+(ert-deftest harness-tools-execute-rejects-late-originating-turn-permission ()
+  "A late allow after cancellation, completion or replacement starts no work."
+  (harness-tools-test-with
+    (let ((activity '(:turn-id "origin")) (started 0))
+      (harness-register-method 'agent/activity (lambda (_sid) activity))
+      (harness-define-tool "t_scoped" :label "Scoped tool"
+        :handler (lambda (_input _ctx) (cl-incf started) "unexpected"))
+      (dolist (after '(nil (:turn-id "origin" :cancelling t) (:turn-id "replacement")))
+        (setq activity '(:turn-id "origin"))
+        (let ((decision (harness-make-promise)))
+          (cl-letf (((symbol-function 'harness-tools--decide) (lambda (_request) decision)))
+            (let ((result (harness-call 'tools/execute nil
+                                        '(:id "scoped-1" :name "t_scoped" :turn-id "origin"))))
+              (setq activity after)
+              (harness-resolve decision '(:behavior allow))
+              (let ((value (harness-test-await result)))
+                (should (plist-get value :is-error))
+                (should (equal "Originating turn inactive" (plist-get value :content))))))))
+      (should (= 0 started)))))
+
+(ert-deftest harness-tools-execute-unscoped-or-without-agent-is-unchanged ()
+  "Direct tools and harnesses without agent activity keep their old behavior."
+  (harness-tools-test-with
+    (let ((started 0))
+      (harness-define-tool "t_scoped" :label "Scoped tool"
+        :handler (lambda (_input _ctx) (cl-incf started) "ok"))
+      (cl-letf (((symbol-function 'harness-tools--decide)
+                 (lambda (_request) (harness-resolved '(:behavior allow)))))
+        ;; A harness that never enabled agent accepts its caller's context.
+        (harness-test-await (harness-call 'tools/execute nil
+                                         '(:id "scoped-1" :name "t_scoped" :turn-id "origin")))
+        (harness-register-method 'agent/activity (lambda (_sid) nil))
+        ;; A direct unscoped call is not a request on an agent turn.
+        (harness-test-await (harness-call 'tools/execute nil '(:id "direct-1" :name "t_scoped"))))
+      (should (= 2 started)))))
+
 (ert-deftest harness-tools-specs-carry-the-label ()
   "UIs learn the labels from the specs `tools/list' and `tools/get' return."
   (harness-tools-test-with
@@ -327,6 +380,23 @@ that is neither folded nor named fails, so adding one is a decision."
       (harness-call 'session/append sid '(:kind tool-call :tool "bash" :call-id "c1" :title "Bash: make test"))
       (should (equal "last ran Bash: make test"
                      (harness-tools-session-doing (harness-call 'session/get sid)))))))
+
+(ert-deftest harness-tools-session-doing-an-activity-with-only-a-turn-id-says-nothing ()
+  "A turn identity alone is not what the turn does: the note says the last thing.
+`agent/activity' names its turn before the turn reported a phase, and a
+note must not read that as the turn working with no idea what at."
+  (harness-tools-test-with-sessions
+    (let ((sid (harness-tools-test-session)))
+      (harness-call 'session/append sid '(:kind user :content "do the thing"))
+      (harness-call 'session/append sid '(:kind assistant :content "Done: the widget works."))
+      (should (equal "last said: Done: the widget works."
+                     (harness-tools-session-doing (harness-call 'session/get sid)
+                                                  (list :turn-id "t-1"))))
+      ;; A phase is what it does, said as the phrase for it.
+      (should (equal "thinking"
+                     (harness-tools-session-doing
+                      (plist-put (harness-call 'session/get sid) :status 'running)
+                      (list :turn-id "t-1" :phase 'thinking)))))))
 
 (ert-deftest harness-tools-session-doing-says-a-checked-call-waits-for-the-user ()
   "A call whose permission is being checked is one the user is asked about once

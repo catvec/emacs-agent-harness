@@ -653,9 +653,13 @@ class InstallScriptTest(unittest.TestCase):
     def test_ignores_connect_service_of_another_host(self):
         # The regression: the phone paired at .119, but .117 still advertised
         # an old _adb-tls-connect service.  The old code connected to .117.
+        # The live port appears on the (connect_after + 1)th `adb mdns
+        # services` listing after pairing, and the wait lists them every 3 s,
+        # so 3 here is the 4th listing, about 9 s in.  The budget is a whole
+        # pass more than that, so a loaded machine does not decide the test.
         self.flag("stale_connect")
         self.set_number("connect_after", 3)
-        result = self.run_install("--qr", "--timeout", "15", FAKE_PHONE_IP="192.168.1.119")
+        result = self.run_install("--qr", "--timeout", "20", FAKE_PHONE_IP="192.168.1.119")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.calls()
         self.assertFalse(any(call.startswith("connect 192.168.1.117:")
@@ -666,9 +670,11 @@ class InstallScriptTest(unittest.TestCase):
     def test_retries_a_stale_port_on_the_same_host(self):
         # The first published port for the phone can be a stale one; a refused
         # connect must not end the run.
+        # The live port is the 5th listing after pairing, about 12 s in (see
+        # the test above), so the budget leaves a pass to spare.
         self.flag("stale_same_host")
         self.set_number("connect_after", 4)
-        result = self.run_install("--qr", "--timeout", "15", FAKE_PHONE_IP="192.168.1.119")
+        result = self.run_install("--qr", "--timeout", "20", FAKE_PHONE_IP="192.168.1.119")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.calls()
         self.assertIn("connect 192.168.1.119:46037", calls)

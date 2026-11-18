@@ -283,7 +283,7 @@ They define the macros modules expand, so a change to one recompiles
 every file (see `harness--compiled-fresh-p').")
 
 (defconst harness--library-files '("lisp/harness-policy.el" "lisp/harness-files.el"
-                                  "lisp/harness-instance.el"
+                                  "lisp/harness-instance.el" "lisp/harness-latency.el"
                                   "lisp/harness-links.el" "lisp/harness-carry.el"
                                   "lisp/harness-prompts.el"
                                   "lisp/harness-redaction.el"
@@ -691,6 +691,8 @@ its source: what loads is a compiled copy elsewhere."
 (defvar harness-ui-connection-address)
 (declare-function harness-ui-reload-server "harness-ui")
 (declare-function harness-policy-load "harness-policy")
+(declare-function harness-latency-install "harness-latency")
+(declare-function harness-latency-uninstall "harness-latency")
 (declare-function harness-policy-apply "harness-policy" (&optional final))
 (declare-function straight-pull-package "straight" (package &optional from-upstream))
 (declare-function straight--repos-dir "straight" (&rest segments))
@@ -752,6 +754,7 @@ Return non-nil when every module loaded and initialised."
       (error (harness-log 'error "%s" (error-message-string err))
              (signal (car err) (cdr err))))
     (harness-modules-init)
+    (when (fboundp 'harness-latency-install) (harness-latency-install))
     (setq harness-started t)
     (run-hooks 'harness-start-hook)
     (harness-emit 'harness/started)
@@ -774,6 +777,7 @@ Return non-nil when every module loaded and initialised."
   (when (featurep 'harness-core)
     (harness-emit 'harness/stopping)
     (harness-modules-shutdown))
+  (when (fboundp 'harness-latency-uninstall) (harness-latency-uninstall))
   (setq harness-started nil))
 
 ;;;; Enabling modules

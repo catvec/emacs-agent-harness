@@ -1521,6 +1521,326 @@ node that is none of the session's: nothing is removed."
       (should-not (harness-agent-running-p id))
       (should (eq 'idle (plist-get (harness-call 'session/get id) :status))))))
 
+;;;; Turn-scoped voice controls (no audio or devices)
+
+(defvar harness-tools-shell--cancellable-runs)
+
+(defmacro harness-agent-test-with-shared-bash (&rest body)
+  "Run BODY with a mocked shared bash runtime, collecting RUNS and KILLED.
+Only the actual per-run cancellation contract is mocked; the agent,
+permission chain and shell tool handler run normally."
+  (declare (indent 0))
+  `(harness-agent-test-with
+     (harness-test-load-module 'tools-shell)
+     (let ((runs nil) (killed nil)
+           (harness-agent--cancel-grace 0.1)
+           (harness-tools-shell--cancellable-runs (make-hash-table :test 'equal)))
+       (harness-register-method 'sandbox/session (lambda (&rest _) '(:state running)))
+       (cl-letf (((symbol-function 'harness-sandbox-session-problem) (lambda (&rest _) nil))
+                 ((symbol-function 'harness-sandbox-session-start-run)
+                  (lambda (ctx _cwd _command &rest _)
+                    (let ((run (list :state 'running :ctx ctx :promise (harness-make-promise)
+                                     :cancelled nil :cancelled-reason nil)))
+                      (setq runs (append runs (list run)))
+                      run)))
+                 ((symbol-function 'harness-sandbox-session-wait)
+                  (lambda (run &optional _) (plist-get run :promise)))
+                 ((symbol-function 'harness-sandbox-session-run-state)
+                  (lambda (run) (plist-get run :state)))
+                 ((symbol-function 'harness-sandbox-session-kill-run)
+                  (lambda (run &optional reason)
+                    (push run killed)
+                    (setf (plist-get run :cancelled) t
+                          (plist-get run :cancelled-reason) reason)
+                    run))
+                 ((symbol-function 'harness-sandbox-session--stop)
+                  (lambda (&rest _) (ert-fail "Unexpected runtime-wide cancellation"))))
+         ,@body))))
+
+(defun harness-agent-test-finish-run (run &optional cancelled)
+  "Finish mocked shared RUN normally, or after CANCELLED was requested."
+  (setf (plist-get run :state) (if cancelled 'stopped 'exited))
+  (harness-resolve (plist-get run :promise)
+                   (list :exit (if cancelled 'timeout 0) :state (plist-get run :state)
+                         :reason (and cancelled (plist-get run :cancelled-reason))
+                         :stdout "fixture output\n" :stderr "")))
+
+(ert-deftest harness-agent-voice-control-token-at-initial-gate ()
+  "A token exists before phase activity or turn-start, and survives the gate."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (gate (harness-make-promise))
+           (started nil)
+           (harness-provider-demo-script-override '((:type done :stop-reason end-turn))))
+      (harness-add-filter 'agent/before-turn (lambda (_value _next &rest _) gate) 10)
+      (harness-on 'agent/turn-started
+                  (lambda (sid) (when (equal sid id)
+                                  (setq started (plist-get (harness-call 'agent/activity sid) :turn-id)))))
+      (let* ((p (harness-call 'agent/prompt id "fixture"))
+             (token (plist-get (harness-call 'agent/activity id) :turn-id)))
+        (should (stringp token))
+        (should-not (gethash id harness-agent--activities))
+        (should-not started)
+        (harness-resolve gate '(:proceed t))
+        (harness-test-await p)
+        (should (equal token started))
+        (should-not (harness-call 'agent/activity id))
+        (should (equal '(:action "cancel" :turn-id nil :status unavailable :tools nil :reason missing-turn-id)
+                       (harness-call 'agent/voice-control id "cancel")))
+        (should (equal 'completed
+                       (plist-get (harness-call 'agent/voice-control id "cancel" (list :turn-id token)) :status)))))))
+
+(ert-deftest harness-agent-voice-control-interrupt-is-audit-not-prompt ()
+  "Playback interruption records a control hint and leaves work alone."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override '((:type wait :seconds 60)))
+           (p (harness-call 'agent/prompt id "fixture"))
+           (token (plist-get (harness-call 'agent/activity id) :turn-id))
+           (events nil) result)
+      (harness-test-wait (lambda () (memq 'user (harness-agent-test-kinds id))))
+      (harness-on 'agent/voice-control (lambda (sid outcome) (push (list sid outcome) events)))
+      (cl-letf (((symbol-function 'harness-method/agent/prompt)
+                 (lambda (&rest _) (ert-fail "Voice control fabricated a prompt"))))
+        (setq result (harness-call 'agent/voice-control id "interrupt" (list :turn-id token))))
+      (should (equal '(:action "interrupt" :turn-id nil :status requested :tools nil :reason playback-only)
+                     (plist-put (copy-sequence result) :turn-id nil)))
+      (should-not (harness-agent-turn-cancelled (harness-agent-turn-for id)))
+      (should (equal (list (list id result)) events))
+      (let ((control (car (last (harness-call 'session/nodes id)))))
+        (should (eq 'hint (plist-get control :kind)))
+        (should (equal "Voice control · interrupt · requested" (plist-get control :content)))
+        (should (equal result (plist-get (plist-get control :meta) :voice-control))))
+      (should (= 1 (cl-count 'user (harness-agent-test-kinds id))))
+      (harness-call 'agent/cancel id)
+      (harness-test-await p))))
+
+(ert-deftest harness-agent-voice-control-active-shared-run ()
+  "Cancellation requests only the captured bash run, never its whole runtime."
+  (harness-agent-test-with-shared-bash
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "bash-1" :name "bash" :input (:command "fixture"))
+              (:type done :stop-reason end-turn)))
+           (p (harness-call 'agent/prompt id "fixture")))
+      (harness-test-wait (lambda () runs))
+      (let* ((run (car runs))
+             (token (plist-get (harness-call 'agent/activity id) :turn-id))
+             (result (harness-call 'agent/voice-control id "cancel" (list :turn-id token))))
+        (should (eq 'requested (plist-get result :status)))
+        (should (equal '((:id "bash-1" :tool "bash" :status requested)) (plist-get result :tools)))
+        (should (equal token (plist-get (plist-get run :ctx) :turn-id)))
+        (should (eq run (car killed)))
+        (should (= 1 (length killed)))
+        (should (plist-get (harness-call 'agent/activity id) :cancelling))
+        (should (= 1 (cl-count 'user (harness-agent-test-kinds id))))
+        (harness-agent-test-finish-run run t)
+        (should (eq 'cancelled (plist-get (harness-test-await p) :stop-reason)))
+        (let ((node (cl-find 'tool-result (harness-call 'session/nodes id)
+                             :key (lambda (n) (plist-get n :kind)))))
+          (should (equal "fixture output\nexit: stopped after cancellation request" (plist-get node :output)))
+          (should (eq 'cancelled (plist-get (plist-get node :meta) :exit))))
+        (should (= 0 (hash-table-count harness-tools-shell--cancellable-runs)))))))
+
+(ert-deftest harness-agent-voice-control-completed-call ()
+  "A returned tool is already completed, not cancellable or rolled back."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "read-1" :name "list_dir" :input (:path "."))
+              (:type wait :seconds 60)))
+           (p (harness-call 'agent/prompt id "fixture"))
+           (token (plist-get (harness-call 'agent/activity id) :turn-id)))
+      (harness-test-wait (lambda () (memq 'tool-result (harness-agent-test-kinds id))))
+      (let ((result (harness-call 'agent/voice-control id "cancel" (list :turn-id token))))
+        (should (eq 'requested (plist-get result :status)))
+        (should (equal '((:id "read-1" :tool "list_dir" :status completed)) (plist-get result :tools))))
+      (harness-test-await p)
+      (let ((result (harness-call 'agent/voice-control id "cancel" (list :turn-id token))))
+        (should (eq 'completed (plist-get result :status)))
+        (should (equal '((:id "read-1" :tool "list_dir" :status completed)) (plist-get result :tools)))))))
+
+(ert-deftest harness-agent-voice-control-unsupported-call ()
+  "An arbitrary tool has no supported cancellation; its effects are not undone."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (work (harness-make-promise))
+           (started nil)
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "custom-1" :name "custom" :input nil)
+              (:type done :stop-reason end-turn))))
+      (harness-define-tool "custom" :label "Custom" :description "fixture" :kind 'exec
+                           :handler (lambda (_input _ctx) (setq started t) work))
+      (let* ((p (harness-call 'agent/prompt id "fixture"))
+             (token (plist-get (harness-call 'agent/activity id) :turn-id)))
+        (harness-test-wait (lambda () started))
+        (let ((result (harness-call 'agent/voice-control id "cancel" (list :turn-id token))))
+          (should (eq 'requested (plist-get result :status)))
+          (should (equal '((:id "custom-1" :tool "custom" :status unavailable)) (plist-get result :tools)))
+          (should-not (harness-promise-settled-p work)))
+        (harness-resolve work "effect retained")
+        (harness-test-await p)
+        (should (cl-find "effect retained" (harness-call 'session/nodes id)
+                         :key (lambda (n) (plist-get n :output)) :test #'equal))))))
+
+(ert-deftest harness-agent-voice-control-builtin-close-is-not-completion ()
+  "A synthetic result pairing a provider call does not prove completion."
+  (harness-agent-test-with
+    (harness-agent-test-define-hosted
+     (lambda (_prompt) '((:type tool-call :id "builtin-1" :builtin t :name "web_search" :input nil))))
+    (let* ((id (harness-agent-test-hosted-session))
+           (p (harness-call 'agent/prompt id "fixture"))
+           (token (plist-get (harness-call 'agent/activity id) :turn-id)))
+      (harness-test-wait (lambda () (memq 'tool-call (harness-agent-test-kinds id))))
+      (let ((result (harness-call 'agent/voice-control id "cancel" (list :turn-id token))))
+        (should (equal '((:id "builtin-1" :tool "web_search" :status unavailable)) (plist-get result :tools))))
+      (harness-test-await p))))
+
+(ert-deftest harness-agent-voice-control-tool-completion-race ()
+  "A run ending after capture but before cancellation is reported completed."
+  (harness-agent-test-with-shared-bash
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "race-1" :name "bash" :input (:command "fixture"))
+              (:type done :stop-reason end-turn)))
+           (p (harness-call 'agent/prompt id "fixture")))
+      (harness-test-wait (lambda () runs))
+      (harness-on 'agent/cancelling (lambda (_sid) (harness-agent-test-finish-run (car runs))))
+      (let* ((token (plist-get (harness-call 'agent/activity id) :turn-id))
+             (result (harness-call 'agent/voice-control id "cancel" (list :turn-id token))))
+        (should (eq 'requested (plist-get result :status)))
+        (should (equal '((:id "race-1" :tool "bash" :status completed)) (plist-get result :tools)))
+        (should-not killed))
+      (harness-test-await p))))
+
+(ert-deftest harness-agent-voice-control-turn-completion-during-lookup ()
+  "A completed turn between lookup and agent/cancel is never cancelled anew."
+  (harness-agent-test-with-shared-bash
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "lookup-1" :name "bash" :input (:command "fixture"))
+              (:type done :stop-reason end-turn)))
+           (p (harness-call 'agent/prompt id "fixture"))
+           (token (plist-get (harness-call 'agent/activity id) :turn-id)))
+      (harness-test-wait (lambda () runs))
+      (harness-add-filter 'agent/tool-canceller
+                          (lambda (value &rest _)
+                            (harness-agent-test-finish-run (car runs))
+                            (harness-test-await p)
+                            value) 5)
+      (let ((result (harness-call 'agent/voice-control id "cancel" (list :turn-id token))))
+        (should (eq 'completed (plist-get result :status)))
+        (should (equal '((:id "lookup-1" :tool "bash" :status completed)) (plist-get result :tools)))
+        (should-not killed)))))
+
+(ert-deftest harness-agent-voice-control-replaced-and-ended-during-lookup ()
+  "A replacement remains a stale token even if that next turn already ended."
+  (harness-agent-test-with-shared-bash
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "lookup-1" :name "bash" :input (:command "fixture"))
+              (:type done :stop-reason end-turn)))
+           (p (harness-call 'agent/prompt id "fixture"))
+           (token (plist-get (harness-call 'agent/activity id) :turn-id)))
+      (harness-test-wait (lambda () runs))
+      ;; After the shell filter captured its exact run, both turns finish
+      ;; before the voice request can enter agent/cancel.
+      (harness-add-filter 'agent/tool-canceller
+                          (lambda (value &rest _)
+                            (should (functionp value))
+                            (harness-agent-test-finish-run (car runs))
+                            (harness-test-await p)
+                            (let ((harness-provider-demo-script-override '((:type done :stop-reason end-turn))))
+                              (harness-test-await (harness-call 'agent/prompt id "replacement")))
+                            value) 90)
+      (let ((result (harness-call 'agent/voice-control id "cancel" (list :turn-id token))))
+        (should (eq 'stale (plist-get result :status)))
+        (should (eq 'turn-mismatch (plist-get result :reason)))
+        (should (equal '((:id "lookup-1" :tool "bash" :status completed)) (plist-get result :tools)))
+        (should-not killed)
+        (should-not (harness-call 'agent/activity id))))))
+
+(ert-deftest harness-agent-voice-control-new-turn-during-cancellation ()
+  "A captured old canceller and late result cannot touch a reused next-turn id."
+  (harness-agent-test-with-shared-bash
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "reused" :name "bash" :input (:command "fixture"))
+              (:type done :stop-reason end-turn)))
+           (p (harness-call 'agent/prompt id "old"))
+           (old-turn (harness-agent-turn-for id))
+           (token (plist-get (harness-call 'agent/activity id) :turn-id))
+           (next-p nil) (cancel-events nil))
+      (harness-test-wait (lambda () runs))
+      (harness-on 'agent/cancelling
+                  (lambda (sid) (push (plist-get (harness-call 'agent/activity sid) :turn-id) cancel-events)))
+      ;; Deterministic provider acknowledgement / forced-grace boundary:
+      ;; finish the turn, then allow its replacement to start before the
+      ;; provider's cancel callback returns to the voice control.
+      (let* ((handle (harness-agent-turn-handle old-turn))
+             (original-cancel (plist-get handle :cancel)))
+        (should (functionp original-cancel))
+        (setf (plist-get handle :cancel)
+              (lambda ()
+                ;; Let the demo provider discard its old continuation,
+                ;; as a real acknowledgement does, before the next turn.
+                (funcall original-cancel)
+                (harness-agent--end old-turn 'cancelled)
+                (setq next-p (harness-call 'agent/prompt id "new"))
+                (harness-test-wait (lambda () (= 2 (length runs)))))))
+      (let ((result (harness-call 'agent/voice-control id "cancel" (list :turn-id token))))
+        (should (eq 'requested (plist-get result :status)))
+        (should (equal '((:id "reused" :tool "bash" :status requested)) (plist-get result :tools)))
+        (should (equal (list token) cancel-events))
+        (should (eq (car runs) (car killed)))
+        (should (= 1 (length killed))))
+      (let ((next-token (plist-get (harness-call 'agent/activity id) :turn-id)))
+        (should-not (equal token next-token))
+        (should-not (harness-agent-turn-cancelled (harness-agent-turn-for id)))
+        (should (eq 'stale (plist-get (harness-call 'agent/voice-control id "cancel" (list :turn-id token)) :status)))
+        (should (eq 'unavailable (plist-get (harness-call 'agent/voice-control id "cancel") :status)))
+        (harness-agent-test-finish-run (car runs) t)
+        (harness-test-await p)
+        (harness-test-wait
+         (lambda () (cl-find 'tool-result (harness-call 'session/nodes id) :key (lambda (n) (plist-get n :kind)))))
+        (should-not (harness-agent-turn-cancelled (harness-agent-turn-for id)))
+        (should (equal "reused" (plist-get (car (plist-get (harness-call 'agent/activity id) :calls)) :call-id)))
+        (should (equal next-token (plist-get (harness-call 'agent/activity id) :turn-id)))
+        (should (= 1 (length killed)))
+        (harness-call 'agent/voice-control id "cancel" (list :turn-id next-token))
+        (should (eq (cadr runs) (car killed)))
+        (harness-agent-test-finish-run (cadr runs) t)
+        (harness-test-await next-p)))))
+
+(ert-deftest harness-agent-voice-control-late-end-turn-result-leaves-new-turn-alone ()
+  "An old tool's late hand-in result cannot cancel a replacement provider."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (work (harness-make-promise)) (started nil) (old-cancels 0)
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "old-call" :name "custom" :input nil)
+              (:type done :stop-reason end-turn))))
+      (harness-define-tool "custom" :label "Custom" :description "fixture" :kind 'exec
+                           :handler (lambda (_input _ctx) (setq started t) work))
+      (let* ((p (harness-call 'agent/prompt id "old"))
+             (old-turn (harness-agent-turn-for id)))
+        (harness-test-wait (lambda () started))
+        (let ((handle (harness-agent-turn-handle old-turn)))
+          (funcall (plist-get handle :cancel))
+          (harness-agent--end old-turn 'cancelled)
+          (setf (plist-get handle :cancel) (lambda () (cl-incf old-cancels))))
+        (harness-test-await p)
+        (let* ((harness-provider-demo-script-override '((:type wait :seconds 60)))
+               (next-p (harness-call 'agent/prompt id "new"))
+               (token (plist-get (harness-call 'agent/activity id) :turn-id)))
+          (harness-resolve work (harness-tool-ok "late result" :end-turn t))
+          (harness-test-wait (lambda () (memq 'tool-result (harness-agent-test-kinds id))))
+          (should (= 0 old-cancels))
+          (should (equal token (plist-get (harness-call 'agent/activity id) :turn-id)))
+          (should-not (harness-agent-turn-cancelled (harness-agent-turn-for id)))
+          (harness-call 'agent/voice-control id "cancel" (list :turn-id token))
+          (harness-test-await next-p))))))
+
 (defvar harness-provider-demo-script-override)
 
 (ert-deftest harness-agent-streamed-text-saved-on-exit ()
@@ -3000,8 +3320,9 @@ Only an idle session turns running; one with no turn is left alone."
       (should (eq 'idle (plist-get (harness-call 'session/get id) :status)))
       (harness-call 'agent/note-activity id '(:phase compacting :detail "a word") t)
       (should (eq 'running (plist-get (harness-call 'session/get id) :status)))
+      (should (stringp (plist-get (harness-call 'agent/activity id) :turn-id)))
       (should (equal '(:phase compacting :detail "a word")
-                     (harness-plist-remove (harness-call 'agent/activity id) :since)))
+                     (harness-plist-remove (harness-call 'agent/activity id) :since :turn-id)))
       (funcall (car hold))
       (harness-test-await turn 10))
     ;; No turn, no change.

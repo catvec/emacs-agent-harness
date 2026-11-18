@@ -909,6 +909,41 @@ and a client that still calls it is not let through."
       (should (equal (list sid ":supervisor" t)
                      (plist-get (cadr (funcall heard "session/ext-changed")) :args))))))
 
+(ert-deftest harness-acp-reaches-a-jobs-lifecycle-evidence ()
+  "A client reads how its own jobs ended as `_harness/sandbox/job-evidence'.
+The evidence is the record a job leaves behind (`sandbox/job-evidence'),
+so it is useless if only Lisp can ask for it: the method is reachable
+over ACP, and it answers the records of the session the client names."
+  (harness-acp-test-with
+    (should (harness-acp--extension-allowed-p "sandbox/job-evidence"))
+    ;; A neighbouring name is not let through by it: the prefixes are
+    ;; prefixes, so what is checked is that it names its method and not
+    ;; every name that starts like it.
+    (should-not (harness-acp--extension-allowed-p "sandbox/job-ev"))
+    (harness-register-method 'sandbox/job-evidence
+                             (lambda (session-id &optional id)
+                               (list (list :event "end" :job (or id "job-1")
+                                           :session session-id :exit 143
+                                           :signal "TERM" :teardown "unexplained"))))
+    (unwind-protect
+        (let* ((conn (harness-acp-test-connect))
+               (sid (harness-acp-test-new-session conn))
+               (listed (plist-get (plist-get (harness-test-await (harness-acp-initialize conn))
+                                             :_harness)
+                                  :methods)))
+          (should (member "sandbox/job-evidence" listed))
+          (let ((records (harness-acp-test-request conn "_harness/sandbox/job-evidence"
+                                                   (list :session-id sid))))
+            (should (= 1 (length records)))
+            (should (equal sid (plist-get (car records) :session)))
+            (should (equal "unexplained" (plist-get (car records) :teardown))))
+          (should (equal "job-2"
+                         (plist-get (car (harness-acp-test-request
+                                          conn "_harness/sandbox/job-evidence"
+                                          (list :session-id sid :id "job-2")))
+                                    :job))))
+      (harness-unregister-method 'sandbox/job-evidence))))
+
 (defun harness-acp-test-events (event)
   "Return the args of each `_harness/event' EVENT the primary connection got, oldest first."
   (let (out)
@@ -1693,6 +1728,39 @@ message of the burst first: a UI that fell behind froze for as long."
         (should (> (length gaps) 6))
         (should (< (apply #'max gaps) 0.3))))))
 
+(ert-deftest harness-acp-large-log-burst-yields-with-a-full-log ()
+  "A large output backlog keeps the log bounded and yields between receive slices."
+  (harness-acp-test-with-inbox
+    (let* ((harness-log-buffer-name " *harness-acp-log-burst*")
+           (harness-log-hook nil) (harness-log-filter-function nil)
+           (harness-log-level 'info) (harness-acp-receive-slice 0.025)
+           (payload (make-string 64000 ?x))
+           (seen nil) (ticks (list (float-time))) (slices 0) ticker
+           (harness-acp-test-on-message
+            (lambda (params)
+              (harness-log 'info "%s" payload)
+              (push (plist-get params :n) seen))))
+      (unwind-protect
+          (progn
+            (with-current-buffer (get-buffer-create harness-log-buffer-name)
+              (dotimes (_ 4000) (insert (make-string 1000 ?x) "\n")))
+            (add-hook 'harness-acp-received-hook (lambda () (cl-incf slices)))
+            (setq ticker (run-at-time 0 0.02 (lambda () (push (float-time) ticks))))
+            (dotimes (i 600)
+              (harness-acp--enqueue conn (list :jsonrpc "2.0" :method "x" :params (list :n i))))
+            (harness-test-wait (lambda () (= 600 (length seen))) 20 "large output burst")
+            (should (equal (number-sequence 0 599) (nreverse seen)))
+            (should (> slices 1))
+            (with-current-buffer harness-log-buffer-name
+              (should (<= (buffer-size) harness--log-max-chars))
+              (should (= harness--log-lines (count-lines (point-min) (point-max)))))
+            (let ((gap (apply #'max
+                              (cl-loop for (a b) on (nreverse ticks) while b collect (- b a)))))
+              (message "ACP log burst: 600 x 64000 chars, %d slices, max heartbeat gap %.3fs" slices gap)
+              (should (< gap 0.3))))
+        (when (timerp ticker) (cancel-timer ticker))
+        (when (get-buffer harness-log-buffer-name) (kill-buffer harness-log-buffer-name))))))
+
 (ert-deftest harness-acp-receiving-parses-lines-as-it-handles-them ()
   "A TCP connection's lines are parsed in the slice that handles them;
 one that is no JSON is logged and skipped; a closed connection's are
@@ -2145,6 +2213,63 @@ the next connection."
               (should-not (cl-find #'harness-acp--poll timer-list :key #'timer--function))
               (harness-acp-close conn)))
         (setopt harness-acp-client-poll-interval original)))))
+
+(ert-deftest harness-acp-read-now-skips-paused-filter ()
+  "A paused reader never enters `accept-process-output', even with a zero timeout."
+  (let ((proc (make-pipe-process :name "harness-acp-test-paused" :noquery t :filter t))
+        calls)
+    (unwind-protect
+        (cl-letf (((symbol-function 'accept-process-output)
+                   (lambda (&rest args)
+                     (push (list args harness-acp--polling) calls)
+                     t)))
+          (should (eq (process-status proc) 'open))
+          (should-not (harness-acp--read-now proc))
+          (should-not calls)
+          ;; Only t pauses reads; both a function and nil still enter the select.
+          (dolist (filter (list #'ignore nil))
+            (set-process-filter proc filter)
+            (setq calls nil)
+            (should (harness-acp--read-now proc))
+            (should (equal (list (list (list proc 0 nil 1) t)) calls))))
+      (delete-process proc))))
+
+(ert-deftest harness-acp-poll-skips-paused-reader-and-resumes ()
+  "Polling a paused TCP reader returns promptly, then reads once it is resumed."
+  (harness-acp-test-with-listener
+    (let* ((harness-acp-client-poll-interval 60)
+           (seen nil)
+           (canary nil)
+           (conn (harness-acp-test-connect-tcp))
+           (proc (harness-acp-connection-process conn))
+           (filter (process-filter proc))
+           (peer (car harness-acp-test-peers)))
+      (harness-acp-set-handler conn (lambda (_method params _respond)
+                                      (push (plist-get params :n) seen)))
+      (set-process-filter proc t)
+      (process-send-string peer (concat (harness-acp-test-line 1) "\n"))
+      (run-at-time 0 nil (lambda () (setq canary t)))
+      ;; A Lisp timeout cannot interrupt an indefinitely blocked C select.
+      ;; Run this regression in an isolated batch with an external timeout.
+      (let ((start (float-time)))
+        (harness-acp--poll)
+        (should (< (- (float-time) start) 1)))
+      (should (eq (process-filter proc) t))
+      (should (harness-acp-connected-p conn))
+      (should harness-acp--poll-timer)
+      (should-not harness-acp--poll-failure)
+      (harness-test-wait (lambda () canary) 1 "the paused reader's canary")
+      (should (= 0 harness-acp--poll-reads))
+      (should (= 0 harness-acp--loop-reads))
+      (should-not harness-acp--inbox)
+      (should-not seen)
+      (set-process-filter proc filter)
+      (harness-acp-test-poll-until (lambda () (= 1 harness-acp--poll-reads)))
+      (should (equal (list (cons conn (harness-acp-test-line 1))) harness-acp--inbox))
+      (harness-test-wait (lambda () seen) 5 "the resumed reader's message")
+      (should (equal '(1) seen))
+      (should (= 0 harness-acp--loop-reads))
+      (harness-acp-close conn))))
 
 (ert-deftest harness-acp-poll-reads-the-socket-without-the-event-loop ()
   "A poll reads what waits in the socket, and the message reaches the inbox.

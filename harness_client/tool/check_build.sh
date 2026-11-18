@@ -10,9 +10,10 @@
 #
 #   pub-get     flutter pub get --enforce-lockfile  pubspec.lock agrees with pubspec.yaml
 #   analyze     flutter analyze                     no issues
-#   test        flutter test                        no test fails that passes at BASE (a
-#                                                   test that fails at BASE too is listed,
-#                                                   and held against nobody)
+#   test        flutter test                        no test fails; one that fails
+#                                                   at BASE too is a failure all the same,
+#                                                   and the base's run only says which
+#                                                   failures this branch brought
 #   build       flutter build apk --release         the APK tool/qr_install.sh
 #                                                   installs, from an empty build/
 #   upgrade     when pubspec.yaml, pubspec.lock, .flutter-version or android/
@@ -307,12 +308,21 @@ flutter_of() { # TREE -> the flutter to run in TREE
   if [ -n "${FLUTTER:-}" ]; then printf '%s' "$FLUTTER"; else printf '%s/tool/flutter' "$1"; fi
 }
 
-# The app's tests, by name.  A test that fails here and failed at BASE too is
-# somebody else's breakage -- the suite has been red before, and a branch that
-# cannot go in until others' failures are mended is a branch nobody can finish --
-# so it is listed, and held against nobody; a test that fails here and not at
-# BASE, or a file that no longer loads, fails the check.
+# The app's tests, by name.  Every failing test fails the check.  A test that
+# fails here and failed at BASE too is a defect in the tree all the same: it is
+# still a failure, not a waiver and not somebody else's to leave alone.  The
+# base's run is only a diagnosis -- which failures this branch brought and which
+# it found -- and it is printed either way; it never turns a red run green.
 known_test_failures=0
+failing_advice() {
+  echo '    TEST FAILURES: investigate and repair EVERY one of them.'
+  echo '      A test that fails here is a defect in this tree, whether this branch'
+  echo '      made it or it was already on main: leave the code better than you'
+  echo '      found it.  A test that also fails at the base is still a failure, and'
+  echo '      this check stays failed until it is mended.  Do not skip, delete,'
+  echo '      weaken or relabel a test to get green, and do not take a narrower'
+  echo '      rerun as this check result.'
+}
 base_test_failures() { # prints the failing tests of BASE's tree, one a line
   local utree flutter_base json status=0
   export_tree "$base_sha" "$work/base"
@@ -344,30 +354,35 @@ test_step() { # TREE FLUTTER
     return
   fi
   # A run that did not finish, or died with no failing test to name, is a failure.
+  # A test that fails here fails the check, whether or not it fails at BASE
+  # too: the base's run says which failures this branch brought, and never
+  # turns one of them into a pass.
   if [ "$report" -eq 1 ] && [ -n "${base_sha:-}" ] && [ "$base_sha" != "$head_sha" ]; then
     local here="$logs/failing-tests-here.txt" there="$logs/failing-tests-at-base.txt" new
     python3 -I "$tool_dir/report_flutter_tests.py" --failures "$json" >"$here" 2>/dev/null || true
+    known_test_failures="$(wc -l <"$here" | tr -d ' ')"
     if base_test_failures >"$there"; then
       new="$(LC_ALL=C comm -13 <(LC_ALL=C sort -u "$there") <(LC_ALL=C sort -u "$here"))"
       if [ -z "$new" ]; then
-        known_test_failures="$(wc -l <"$here" | tr -d ' ')"
-        printf 'ok   %-18s %ds   %s\n' test "$((SECONDS - started_at))" "$(head -n 1 "$log")"
-        printf '     NOTE: all %s failing tests already fail at %s; this branch adds none.  They are\n' \
-          "$known_test_failures" "${base_sha:0:12}"
-        printf '     listed in %s -- somebody should mend them.\n' "$log"
-        steps_run+=(test)
-        return
+        printf 'FAIL %-18s %s failing test(s), every one of them already failing at %s:\n' \
+          test "$known_test_failures" "${base_sha:0:12}"
+      else
+        printf 'FAIL %-18s %s failing test(s), %s of them new since %s:\n' \
+          test "$known_test_failures" "$(echo "$new" | wc -l | tr -d ' ')" "${base_sha:0:12}"
+        echo "$new" | sed 's/^/    | new here: /'
       fi
-      printf 'FAIL %-18s %d test(s) fail here that passed at %s:\n' test "$(echo "$new" | wc -l)" "${base_sha:0:12}"
-      echo "$new" | sed 's/^/    | /'
-      printf '     (%s -- %s; the whole report is in %s)\n' "$(head -n 1 "$log")" \
-        "$(wc -l <"$there" | tr -d ' ') failed at the base already" "$log"
+      printf '     %s failed at the base already, and that does not excuse them;\n' \
+        "$(wc -l <"$there" | tr -d ' ')"
+      printf '     the whole report is %s\n' "$log"
+      sed -n '1,40p' "$log" | sed 's/^/    | /'
+      failing_advice
       finish 1
     fi
   fi
   printf 'FAIL %-18s flutter test exit %d, report %d after %ds; its report, which is %s:\n' \
     test "$status" "$report" "$((SECONDS - started_at))" "$log"
   head -n 60 "$log" | sed 's/^/    | /'
+  failing_advice
   finish 1
 }
 
@@ -460,7 +475,6 @@ cat >"$stamp.new" <<EOF
   "at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "seconds": $((SECONDS - started)),
   "steps": [$steps_json],
-  "known_test_failures": $known_test_failures,
   "apk_sha256": "$apk_sha",
   "apk_bytes": $apk_bytes
 }

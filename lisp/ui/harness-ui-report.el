@@ -12,33 +12,31 @@
 ;;              one; the board's item at point (`SPC', through the
 ;;              shared `harness-ui-popout-at-point-functions') on a
 ;;              card of any column;
-;;   the chat   the review banner's [Review Changes] button.
+;;   the chat   the hand_in call's [Review Changes] button.
 ;;
 ;; The button reads [Review Changes], to look the changes and the work
 ;; over, not [Report], which reads as reporting the agent for something
 ;; bad.
 ;;
-;; Inside the task's session the report is not behind a button: while
-;; the task waits for review, the review banner shows it in full,
-;; expanded, between its heading and its buttons
-;; (`harness-ui-report-string'), and the hand_in call above the banner
-;; stays folded then, so the report is read once.
+;; Inside the task's session the report is not behind a button: the
+;; hand_in call of the round that waits for review opens expanded, and
+;; shows the report in full, between the review's heading and its buttons
+;; (`harness-ui-report-string').  The call is the review: once the work is
+;; decided it folds, and its report is read when the reader opens it.
 ;;
 ;; The transcript's hand_in calls draw it too, each call its own round's
 ;; report, expanded with the call.  What the review draws with a report
 ;; -- the files and threads of its changes -- is added through
-;; `harness-ui-report-hand-in-functions', so a hand_in call reads as the
-;; review banner does; the review module adds the one drawing both use
-;; (`harness-ui-review--hand-in').  A fold in either draws where it is
-;; again: the call's buttons draw the call
-;; (`harness-ui-report--redraw-function'), the banner's draw the chat's
-;; tail, and a popout's draw the popout.
+;; `harness-ui-report-hand-in-functions'; the review module adds the one
+;; drawing both use (`harness-ui-review--hand-in-call').  A fold draws
+;; where it is again: a call's buttons draw the call
+;; (`harness-ui-report--redraw-function'), and a popout's draw the popout.
 ;;
 ;; The report is drawn from the task record the harness holds: the board
 ;; and the chat both pass the record they already have, and a popout
 ;; follows `task/changed' so what it shows is current.  Once the task
 ;; is verified or sent back its popout closes, wherever that was done --
-;; the board, the session's banner, turning review off, an agent: the
+;; the board, the hand_in call, turning review off, an agent: the
 ;; review the report was opened for is over.  The report of a task
 ;; decided before it opened, a done one, stays open.  A referenced tool
 ;; call is the link it is, drawn as the chat draws calls: its title and
@@ -75,16 +73,16 @@
 ;; a chat app or a browser, to pass the evidence on (harness-ui-drag.el).
 ;; The popout opens before its images are drawn -- a line says each is
 ;; loading -- because decoding a screenshot of a whole frame takes a
-;; moment (`harness-ui-image-load').  The report a session's banner
+;; moment (`harness-ui-image-load').  The report a session's hand_in call
 ;; shows is drawn into a string, where nothing can draw later: its
 ;; images are drawn with it.
 ;;
 ;; Other modules add to the popout as they add to a chat:
 ;; `harness-ui-report-panel-functions' draws a panel at the end of the
 ;; report and `harness-ui-report-compose-functions' gives it a compose
-;; box.  The review module puts the banner a task's session shows there,
-;; [Verify] and [Send back], with the box taking the feedback, so work
-;; can be accepted from its report.
+;; box.  The review module puts the review banner there, [Verify] and
+;; [Send back], with the box taking the feedback, so work can be accepted
+;; from its report.
 ;;
 ;; What cannot be drawn does not take the rest down.  A piece of evidence
 ;; that fails says so in a line and the others draw; a report that fails
@@ -136,7 +134,7 @@ Each is called with the TASK the popout shows, in the popout buffer, on
 every draw, and returns a string, or nil for nothing.  The strings go
 after the evidence, in order, read-only, above the compose box when
 there is one.  The review module shows a task's review banner this way:
-the one its session shows, with [Verify] and [Send back].")
+its [Verify] and [Send back], with the box taking the feedback.")
 
 (defvar harness-ui-report-compose-functions nil
   "Functions giving a report popout a compose box.
@@ -151,11 +149,10 @@ takes the feedback that sends a task back this way.")
 (defvar harness-ui-report--redraw-function nil
   "Function that draws a report again where it is, or nil.
 Bound while a report is drawn into a string for a view other than a
-popout -- the review banner in a chat's tail, a hand_in call in the
-transcript -- to what draws that view again when a fold changes.  The
-buttons the drawing makes keep it, so a fold still works after the
-drawing is done.  Nil draws the report's popout and the review banner
-of its task again, as the popout's own folds ask.")
+popout -- a hand_in call in a transcript -- to what draws that view again
+when a fold changes.  The buttons the drawing makes keep it, so a fold
+still works after the drawing is done.  Nil draws the report's popout and
+the hand_in call of its task again, as the popout's own folds ask.")
 
 (defvar harness-ui-report-hand-in-functions nil
   "Functions that draw what a hand_in call shows with its report.
@@ -164,9 +161,10 @@ plist the call handed in, the TASK, the WINDOW the drawing is sized
 for, and REDRAW, a function that draws the call again where it is; it
 returns the string to draw, or nil to draw the report alone.  A module
 that knows more of the hand-in adds one: the review module draws the
-changes and threads of the task's review with the report, the same
-drawing its banner has, so the current hand-in and a previous call
-read the same.")
+changes and threads of the task's review with the report, and the review
+itself -- its heading and the buttons that decide it -- in the call of
+the round the task waits for review on, so the current hand-in and a
+previous call read as they should.")
 
 (defvar harness-ui-report--reports (make-hash-table :test 'equal)
   "Popout key -> the task record its popout shows, kept current.")
@@ -223,7 +221,7 @@ one stays so for the next."
   "Draw TASK's report again where it shows: its popout or its chat.
 REDRAW draws it there when given; without it the drawing's own
 `harness-ui-report--redraw-function' says, and with neither the popout
-and the review banner of the task are drawn again, as a popout's folds
+and the hand_in call of the task are drawn again, as a popout's folds
 ask."
   (if-let* ((redraw (or redraw harness-ui-report--redraw-function)))
       (funcall redraw)
@@ -573,8 +571,8 @@ else."
 (defun harness-ui-report--call-position (item)
   "Return where ITEM's call is in this chat buffer's transcript, or nil.
 That is its block, when the transcript holds it, else the last line
-naming the call above the transcript's end: never the report a review
-banner shows under the transcript."
+naming the call above the transcript's end: never the report the review
+of a hand_in call shows."
   (let ((end (if (and (boundp 'harness-chat--transcript-end) (markerp harness-chat--transcript-end))
                  (marker-position harness-chat--transcript-end)
                (point-max)))
@@ -627,10 +625,10 @@ has no task."
 (defun harness-ui-report--insert-message (text)
   "Insert TEXT, a message the session wrote in Markdown, rendered.
 C-c > on it quotes TEXT whole, as written, with the header and link of
-the report; wherever it shows: the popout, or the banner of the task's
-session."
+the report; wherever it shows: the popout, or the hand_in call of the
+task's session."
   (let ((start (point))
-        ;; The text may be read in another buffer, the chat's banner say:
+        ;; The text may be read in another buffer, the chat's call say:
         ;; the reference keeps the task it is of.
         (task harness-ui-report--task))
     (harness-ui-report--insert-markdown text)
@@ -865,7 +863,7 @@ with the work -- [Verify] and [Send back]."
                            (error (harness-ui-report--insert-failed
                                    (format "Evidence %d" number) item-err)))))))))
       (error (harness-ui-report--insert-failed "The report" err)))
-    ;; A report drawn among a view's own text -- the review banner shows the
+    ;; A report drawn among a view's own text -- a hand_in call shows the
     ;; report in the session -- already has its panel there, so the panels
     ;; are the popout's only.
     (unless harness-ui-report--full
@@ -877,8 +875,8 @@ The popout's panels: the hooks are the popout's host, and a report drawn
 as a string among a view's own text (`harness-ui-report-string') leaves
 them out, the view drawing what it wants of them itself.  A panel that
 fails says so in a line, and the panels after it are drawn all the same:
-the review banner's [Verify] and [Send back] must not go because the
-changes above them could not be read."
+the review's [Verify] and [Send back] must not go because the changes
+above them could not be read."
   (run-hook-wrapped 'harness-ui-report-panel-functions
                     (lambda (fn)
                       (condition-case err
@@ -923,8 +921,8 @@ that draws its threads answers it before this does
   "Return TASK's report drawn in full, as a string; nil when it has none.
 The summary and the evidence as the popout draws them, but expanded:
 every referenced call shows its whole output, with no [show all].  It
-is for a view that shows the report among its own text, as the review
-banner of a task's session does.  Images fit WINDOW, by default the
+is for a view that shows the report among its own text, as the hand_in
+call of a task's session does.  Images fit WINDOW, by default the
 selected one.  The buttons work wherever the string is inserted."
   (harness-ui-report--string-for (harness-ui-report--report task) task window))
 
@@ -1045,8 +1043,8 @@ history of the session with it."
                                (when (buffer-live-p buffer)
                                  (with-current-buffer buffer
                                    (harness-chat--rerender block)
-                                   ;; The review banner below shows the
-                                   ;; same hand-in; a fold shows in both.
+                                   ;; The review is the call itself: its
+                                   ;; buttons draw it again where it is.
                                    (when (functionp
                                           harness-compose-redraw-function)
                                      (funcall

@@ -81,6 +81,38 @@ class HarnessSpace {
   static const double pageWidth = 840;
 }
 
+/// Motion, and how a person who asked for less of it gets none.
+///
+/// Every transition the app draws by itself goes through here, so that one
+/// answer -- `MediaQuery.disableAnimationsOf' -- turns them all into the
+/// still version of the same change.  A surface under reduced motion holds
+/// no transient animation: it shows the state it is in, not the way it got
+/// there.
+class HarnessMotion {
+  const HarnessMotion._();
+
+  /// [duration] as it is drawn: zero when the person asked for no motion.
+  static Duration of(BuildContext context, Duration duration) =>
+      allowed(context) ? duration : Duration.zero;
+
+  /// Whether motion is drawn at all here.
+  static bool allowed(BuildContext context) =>
+      !(MediaQuery.maybeDisableAnimationsOf(context) ?? false);
+
+  /// A repeating controller that runs only when motion is allowed, and is
+  /// stopped when it is not, so a still surface holds no live ticker.
+  static void repeatIfAllowed(
+    BuildContext context,
+    AnimationController controller,
+  ) {
+    if (!allowed(context)) {
+      if (controller.isAnimating) controller.stop();
+      return;
+    }
+    if (!controller.isAnimating) controller.repeat(reverse: true);
+  }
+}
+
 /// The type scale: every piece of text in the app is one of these roles,
 /// rather than a size picked on the spot.  Nothing is set below 11 px.
 ///

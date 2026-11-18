@@ -24,7 +24,12 @@
 ;; A child in a worktree of its own is a worktree its parent may read
 ;; without asking, from the moment it exists until the child's branch
 ;; merges (`harness-tools-agent--grant-worktree'; the access module keeps
-;; the grant, read-only: see there).
+;; the grant, read-only: see there).  That worktree starts from the
+;; commit the parent session's own directory has out, so the child
+;; builds on its parent's work and not on whatever the main checkout
+;; happens to have checked out (`harness-tools-agent--worktree-base');
+;; it lives in the project's `.worktrees', beside the parent's when the
+;; parent works in one (`harness-tools-agent--worktree-root').
 ;;
 ;; The module also adds a Planning section to the system prompt that
 ;; explains sub-agents, worktrees and the merge queue, so plans can use
@@ -40,6 +45,7 @@
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-files)
 (require 'harness-priority)
 (require 'harness-tools)
 
@@ -56,7 +62,7 @@ When a task is complex (several files, several steps, anything you cannot verify
 Split work with the mechanisms this harness provides:
 - spawn_agent starts a fresh sub-agent that reads the prompt alone, so write the context the child needs into that prompt: a child never inherits this conversation, and forking the session is the user's to do, not the agent's. The call never blocks: it returns as soon as the child starts, and the child's answer arrives later in a message of its own. Start independent sub-tasks that way, together, and carry on while they run instead of waiting for one after another.
 - Several spawn_agent calls made in the same step run at once, each child starting its own turn without blocking the others.
-- Each sub-agent can work in its own git worktree (worktree=true), so independent steps run in parallel worktrees without touching each other's files. You may read that worktree (read_file, grep, glob, list_dir) without asking until its branch merges; to change a file there, ask the sub-agent (session_send) or request the directory.
+- Each sub-agent can work in its own git worktree (worktree=true), so independent steps run in parallel worktrees without touching each other's files. That worktree starts at this session's HEAD, so the child has what you have committed; work you have not committed is not in it, so commit before spawning a child that needs it. You may read that worktree (read_file, grep, glob, list_dir) without asking until its branch merges; to change a file there, ask the sub-agent (session_send) or request the directory.
 - A merge queue brings a worktree's branch back into the parent session's working directory, one child at a time; conflicts are handed to the child to resolve. Plan independent steps as parallel worktrees that merge back, and dependent steps sequentially in this session.
 Keep the plan short and concrete; update the todo list (todo_write) as steps complete."
   "Text appended to the system prompt by the tools-agent module.")
@@ -662,6 +668,45 @@ getting a fresh child it did not ask for."
                           "in its prompt. Forking is the user's (`session/fork'), who pays for the whole "
                           "conversation to be sent again.")))))
 
+(defun harness-tools-agent--worktree-root (parent)
+  "Return the repository root a sub-agent's worktree of PARENT is made in.
+That is the main checkout PARENT's working directory belongs to, so a
+child of a session in a task's worktree gets its worktree in the
+project's `.worktrees', beside the task's own, rather than one nested in
+the parent's.  A working directory that is no checkout gives PARENT's
+`:project', the repository the session was filed under, and a remote
+directory gives itself: the worktree is made where the child would have
+worked."
+  (let ((cwd (plist-get parent :cwd))
+        (project (plist-get parent :project)))
+    (cond ((file-remote-p cwd) cwd)
+          ((not (file-directory-p cwd)) cwd)
+          (t (or (and (harness-files-git-common-dir cwd)
+                      (ignore-errors (harness-files-main-root cwd)))
+                 (and (stringp project) (file-directory-p project) project)
+                 cwd)))))
+
+(defun harness-tools-agent--worktree-base (cwd)
+  "Return a promise of the commit a sub-agent's worktree of CWD starts from.
+That is the commit HEAD names in CWD: the work its parent has
+committed, so a child builds on its parent rather than on the main
+checkout, whatever branch that has out.  What the parent has not
+committed is not in it -- a worktree is made from commits.  A CWD that
+names no commit (no repository, or one whose first commit is still to
+come) gives nil, and the worktree starts at its root's HEAD, as it
+would have."
+  (if (or (file-remote-p cwd)
+          (not (file-directory-p cwd))
+          (not (harness-method-exists-p 'worktree/head)))
+      (harness-resolved nil)
+    (harness-then
+     (harness-call-async 'worktree/head cwd)
+     #'identity
+     (lambda (err)
+       (harness-log 'debug "tools-agent: %s names no commit to start a worktree from: %s"
+                    cwd (harness-error-message err))
+       nil))))
+
 (defun harness-tools-agent--spawn (input ctx)
   "Handler of the spawn_agent tool.
 Run INPUT's prompt in a child of the session in CTX and return at once,
@@ -687,14 +732,22 @@ own once its turn ends and nothing of it is outstanding any more."
       (signal 'harness-error (list "spawn_agent needs a prompt")))
     (harness-then
      (if want-worktree
+         ;; From the parent's own HEAD, not the root's: a child of a
+         ;; session in a task's worktree starts with the task's work.
          (harness-then
-          (harness-call 'worktree/create (or (plist-get parent :project) (plist-get parent :cwd))
-                        :branch (concat "harness/" (harness-tools-agent--short-id child-id)))
-          (lambda (wt) (list :path (plist-get wt :path) :branch (plist-get wt :branch))))
+          (harness-tools-agent--worktree-base cwd)
+          (lambda (base)
+            (harness-then
+             (apply #'harness-call 'worktree/create (harness-tools-agent--worktree-root parent)
+                    (append (list :branch (concat "harness/" (harness-tools-agent--short-id child-id)))
+                            (and base (list :base base))))
+             (lambda (wt) (list :path (plist-get wt :path) :branch (plist-get wt :branch)
+                                :base base)))))
        (harness-resolved nil))
      (lambda (wt)
        (let ((worktree (plist-get wt :path))
-             (branch (plist-get wt :branch)))
+             (branch (plist-get wt :branch))
+             (base (plist-get wt :base)))
          (harness-then
           (harness-tools-agent--create-child parent input child-id (or worktree cwd)
                                              worktree priority)
@@ -726,18 +779,20 @@ own once its turn ends and nothing of it is outstanding any more."
                   cid (list :stop-reason 'error :error (harness-error-message err)))))
               (harness-tool-ok
                (harness-tools-with-note
-                (format (concat "Sub-agent %s started (session %s%s). It runs in the background; "
+                (format (concat "Sub-agent %s started (session %s%s%s). It runs in the background; "
                                 "its answer arrives later in a message of its own, so do not "
                                 "wait or poll. Start more sub-agents the same way, or carry on "
                                 "with other work.")
                         (harness-tools-agent--child-name cid entry) cid
-                        (if worktree (format ", worktree %s" (abbreviate-file-name worktree)) ""))
+                        (if worktree (format ", worktree %s" (abbreviate-file-name worktree)) "")
+                        (if (and worktree base) (format ", from %s" (substring base 0 8)) ""))
                 (cdr written))
-               :meta (list :child-id cid))))))))))
+               :meta (append (list :child-id cid)
+                             (and worktree base (list :worktree-base base))))))))))))
 
 (harness-define-tool "spawn_agent"
   :label "Sub-agent"
-  :description "Run a sub-agent on a prompt and return at once, naming the child session: it runs in the background and its answer arrives later in a message of its own when it is done, so the call never blocks this conversation -- never wait or poll for a sub-agent. Start several at once, in several calls in the same step or one after another, and carry on; each reports back on its own. The child starts fresh, with only the prompt: a sub-agent never forks this session. worktree=true gives the child its own git worktree and branch so it can change files in parallel; merge its branch back afterwards through the merge queue. priority is the child session's own priority (low, medium or high), which orders the queues its work waits in: without it the child works at what it inherits from this session. thinking chooses the child's thinking level, one the child's model offers (after any model override); without it the child thinks at this session's level, and a level the model does not offer fails the call."
+  :description "Run a sub-agent on a prompt and return at once, naming the child session: it runs in the background and its answer arrives later in a message of its own when it is done, so the call never blocks this conversation -- never wait or poll for a sub-agent. Start several at once, in several calls in the same step or one after another, and carry on; each reports back on its own. The child starts fresh, with only the prompt: a sub-agent never forks this session. worktree=true gives the child its own git worktree and branch, started at this session's HEAD so it has your committed work, and it changes files there in parallel; merge its branch back afterwards through the merge queue. priority is the child session's own priority (low, medium or high), which orders the queues its work waits in: without it the child works at what it inherits from this session. thinking chooses the child's thinking level, one the child's model offers (after any model override); without it the child thinks at this session's level, and a level the model does not offer fails the call."
   :schema '(:type "object"
             :properties (:prompt (:type "string" :description "The task for the sub-agent.")
                          :model (:type "string" :description "Model id for the child (default: this session's model).")

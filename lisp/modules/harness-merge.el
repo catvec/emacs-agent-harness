@@ -72,8 +72,8 @@
 ;; A conflict never reaches the target's checkout.  The lock goes at
 ;; once and the target's HEAD has to be merged into the child's branch,
 ;; in the child's worktree, the conflicts resolved there and committed;
-;; the `merge_done' tool then queues the branch again.  A safety timer
-;; gives up on a conflict nobody resolves.
+;; the `merge_done' tool then queues the branch again.  Conflict resolution
+;; has no elapsed-time limit; it ends on completion, failure or cancellation.
 ;;
 ;; Who resolves them is `harness-merge-conflict-resolver'.  By default
 ;; the harness starts a fresh session for it (a `subagent' child of the
@@ -146,11 +146,6 @@ cost, and a PROVIDER:NAME is that model, at the child's level."
                  (string :tag "Model" :names model))
   :group 'harness)
 
-;;;; Constants
-
-(defconst harness-merge--hold-timeout 1800
-  "Seconds a child may take to resolve merge conflicts before it is aborted.")
-
 ;;;; State
 
 (defvar harness-merge--queues (make-hash-table :test 'equal)
@@ -179,7 +174,8 @@ Each is as `harness-merge--public' returns them, with `:reason' and
 `harness-merge--history-limit' of them.")
 
 (defvar harness-merge--timers (make-hash-table :test 'equal)
-  "Child session id -> safety timer of its unresolved conflict.")
+  "Legacy conflict timers, retained only for cleanup when reloading.
+New conflicts have no elapsed-time limit.")
 
 (defvar harness-merge--calls (make-hash-table :test 'equal)
   "Resolver session id -> its open spawn_agent call in the child's transcript.
@@ -630,7 +626,7 @@ merged, or when the ref is gone."
                                     (concat (harness-merge--merged-ref branch) "^{commit}"))
                 (lambda (r) (and (eql (plist-get r :exit) 0) (string-trim (plist-get r :stdout))))))
 
-(defun harness-merge--recorded-base (cwd branch tip)
+(defun harness-merge--recorded-base (cwd branch tip head)
   "Return a promise of the base BRANCH's merge was last computed from, or nil.
 CWD is the repository the recorded ref lives in.  The base is the tip
 BRANCH last merged as (`refs/harness/merged/BRANCH'), when it is an
@@ -639,14 +635,26 @@ uses git's own merge base.  A branch that carries on after it was
 squashed in needs its old tip: the target holds its earlier work as one
 commit, not as history, so git's merge base is its old fork point and
 the merge would replay -- and conflict with -- work the target already
-has."
+has.
+
+The recorded tip is not the base when HEAD, the target's commit, is
+already an ancestor of TIP.  A branch that merged the target into
+itself -- what a conflict resolver does -- then holds the target's work
+as history, so git's own merge base is HEAD itself.  Forcing the older
+recorded tip there would replay everything both sides already have, and
+report conflicts in work nobody disagrees about, which is how a branch
+stays in conflict with a target that has nothing left to conflict over."
   (harness-then
    (harness-merge--last-merged-tip cwd branch)
    (lambda (recorded)
      (when recorded
        (harness-then
-        (harness-merge--git cwd "merge-base" "--is-ancestor" recorded tip)
-        (lambda (r) (and (eql (plist-get r :exit) 0) recorded)))))))
+        (harness-all (list (harness-merge--git cwd "merge-base" "--is-ancestor" recorded tip)
+                           (harness-merge--git cwd "merge-base" "--is-ancestor" head tip)))
+        (lambda (results)
+          (let ((carried-on (plist-get (nth 0 results) :exit))
+                (holds-target (plist-get (nth 1 results) :exit)))
+            (and (eql carried-on 0) (not (eql holds-target 0)) recorded))))))))
 
 (defun harness-merge--record-merged-tip (cwd branch tip)
   "Record TIP as the tip of BRANCH the target has now merged.
@@ -779,7 +787,7 @@ counts the fresh attempts left when the target moves meanwhile."
                          (when (harness-merge--live-p entry)
                            (harness-merge--finish entry 'merged))
                        (harness-then
-                        (harness-merge--recorded-base cwd branch tip)
+                        (harness-merge--recorded-base cwd branch tip head)
                         (lambda (base)
                           (harness-then
                            (apply #'harness-merge--git cwd
@@ -899,9 +907,6 @@ and merge_done is called."
     (when (equal (gethash key harness-merge--locks) child-id)
       (remhash key harness-merge--locks))
     (harness-emit 'merge/conflict child-id (or parent-id key) files)
-    (puthash child-id
-             (run-at-time harness-merge--hold-timeout nil #'harness-merge--timeout entry)
-             harness-merge--timers)
     (let ((resolver (and (eq harness-merge-conflict-resolver 'fresh)
                          (harness-merge--start-resolver
                           entry child
@@ -1128,11 +1133,11 @@ stopped it."
           (error (harness-log 'warn "merge: could not record the result of the resolver %s: %s"
                               resolver-id (error-message-string err))))))))
 
-(defun harness-merge--timeout (entry)
-  "Give up on the unresolved conflict of ENTRY after `harness-merge--hold-timeout'."
-  (when (eq (plist-get entry :status) 'conflict)
-    (harness-merge--finish entry 'aborted
-                           (format "not resolved within %s" (harness-format-duration harness-merge--hold-timeout)))))
+(defun harness-merge--timeout (_entry)
+  "Ignore a legacy conflict timer scheduled before this module was reloaded.
+Conflict resolution ends on completion, failure or explicit cancellation,
+never solely because time elapsed."
+  nil)
 
 (defun harness-merge--unlock-worktree (entry)
   "Lift the harness's lock on the worktree of ENTRY's child, now merged.
@@ -1287,6 +1292,10 @@ session resolving a merge's conflicts works in the child's worktree."
 
 (defun harness-merge--init ()
   "Register the module's filters and subscribers (idempotent)."
+  ;; `defvar' preserves these timers across a reload.  Cancel only the old
+  ;; conflict deadlines, leaving entries, sessions and other timers intact.
+  (maphash (lambda (_child timer) (cancel-timer timer)) harness-merge--timers)
+  (clrhash harness-merge--timers)
   (harness-add-filter 'session/before-move #'harness-merge--before-move)
   (harness-add-filter 'agent/step #'harness-merge--hold 30)
   (harness-add-filter 'agent/before-turn #'harness-merge--hold 30)

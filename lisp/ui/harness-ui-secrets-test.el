@@ -251,6 +251,19 @@ They stay there after BODY."
   "Return the messages shown so far, oldest first."
   (reverse harness-ui-secrets-test--messages))
 
+(defun harness-ui-secrets-test--finished-p ()
+  "Return non-nil when the redaction report says the redaction finished.
+The buffer's status line is \"Redacting…\" while the harness works, and
+that line says the harness answers *when it is done*: a search for
+\"Done\" is case-insensitive and matched it, so a wait for the finished
+report went on while the redaction was still running.  The finished
+status is the one `harness-ui-secrets--redacted' writes, matched as it
+is written."
+  (with-current-buffer harness-ui-secrets-report-buffer-name
+    (save-excursion
+      (goto-char (point-min))
+      (re-search-forward "^Done: nothing found is left in the stores covered\\.$" nil t))))
+
 (defun harness-ui-secrets-test--form-field (key)
   "Return the new-source form's widget for KEY."
   (with-current-buffer harness-ui-secrets-add-buffer-name
@@ -1682,8 +1695,7 @@ does not show; the column stops growing at its limit."
             (harness-redact-secret)
             (harness-test-wait
              (lambda () (and (get-buffer harness-ui-secrets-report-buffer-name)
-                             (string-match-p "Done" (harness-ui-secrets-test--text
-                                                     harness-ui-secrets-report-buffer-name))))
+                             (harness-ui-secrets-test--finished-p)))
              30 "the redaction to finish"))
           ;; The scan counted before the question; the question names no value.
           (should (= 1 (length asked)))
@@ -1757,8 +1769,7 @@ report afterwards names the session; the session reports the cache dropped."
                "keys" '(:scope "all") nil)
               (harness-test-wait
                (lambda () (and (get-buffer harness-ui-secrets-report-buffer-name)
-                               (string-match-p "Done" (harness-ui-secrets-test--text
-                                                       harness-ui-secrets-report-buffer-name))))
+                               (harness-ui-secrets-test--finished-p)))
                30 "the redaction to finish")))
           ;; The question, asked on the scan, names the cost.
           (should (= 1 (length asked)))

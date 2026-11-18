@@ -68,8 +68,19 @@
 ;;   O TOKEN BASE64        bytes of its standard output
 ;;   E TOKEN BASE64        bytes of its standard error
 ;;   X TOKEN STATUS LIVE   it ended; LIVE processes of it are still there
-;;   P LIVE                processes of the instance no run owns
+;;   P LIVE SEQ            processes of the instance no run owns; SEQ is
+;;                         the number of the question it answers
 ;;   D                     the instance is going
+;;
+;; A count is a snapshot taken while the supervisor scans, and every
+;; process of a run still in flight is passed over -- that run owns them.
+;; So a `status' asked while a command runs is answered with a zero that
+;; says nothing about what the command leaves behind, and that zero
+;; arriving after the run ended would say the runtime holds nothing.  Each
+;; question is therefore numbered with the runtime's epoch, which every
+;; command that starts or ends bumps, and an answer whose number is no
+;; longer the runtime's own is dropped rather than believed: a runtime is
+;; not idle because nobody has counted what it holds.
 ;;
 ;; The harness decodes those frames in the process buffer Emacs fills from
 ;; the pipe itself, so no pathname a command can change is ever followed on
@@ -297,13 +308,20 @@ cut and dropped, so a broken supervisor cannot grow the harness's memory.")
      "  say K \"$1\" \"$(count_of \"$pids\")\""
      "}"
      "status_all() {"
-     "  local n=0 f tok"
+     "  local n=0 f tok seq=$1"
      "  for f in $(environs_of); do"
      "    tok=$(tr '\\0' '\\n' < \"$f\" 2>/dev/null | sed -n 's/^HARNESS_RUN=//p' | head -1)"
      "    [ -n \"$tok\" ] || continue"
-     "    case \" $live \" in *\" $tok \"*) ;; *) n=$((n+1));; esac"
+     ;; A run in flight is the one whose command file is still there:
+     ;; `run_one' writes it before the command starts and removes it
+     ;; when the command ends.  `live' cannot answer this -- `run_one'
+     ;; runs in the background, so the `untag' it does never reaches
+     ;; this shell and the list only ever grows -- and counting by it
+     ;; skipped every process of the instance, a leftover included.
+     "    if [ -f \"$scratch/$tok/cmd\" ]; then continue; fi"
+     "    n=$((n+1))"
      "  done"
-     "  say P \"$n\""
+     "  say P \"$n\" \"$seq\""
      "}"
      "while IFS=' ' read -r op a b c; do"
      "  case \"$op\" in"
@@ -313,7 +331,7 @@ cut and dropped, so a broken supervisor cannot grow the harness's memory.")
      ;; is in the background.
      "    run) if start_one \"$a\" \"$b\"; then run_one \"$a\" \"$b\" \"$c\" & fi ;;"
      "    kill) kill_one \"$a\" & ;;"
-     "    status) status_all & ;;"
+     "    status) status_all \"$a\" & ;;"
      "    quit) say D; exit 0 ;;"
      "  esac"
      "done"
@@ -336,7 +354,8 @@ that gives fewer tools says so rather than hang.")
 
 (defconst harness-sandbox-session--runtime-keys
   '(:session :instance :dir :scratch :process :buffer :partial :state
-    :reason :since :started :checked :idle-since :owned :asked :profile
+    :reason :since :started :checked :idle-since :owned :asked
+    :epoch :profile
     :cwd :generation :backend :capabilities :runs)
   "Every key a runtime's plist is given when it is made.
 It is not documentation only: `harness-sandbox-session--runtime' builds
@@ -846,9 +865,7 @@ believed until it is a frame of this protocol."
       ("O" (harness-sandbox-session--output runtime token (nth 2 parts) :stdout))
       ("E" (harness-sandbox-session--output runtime token (nth 2 parts) :stderr))
       ("X" (harness-sandbox-session--ended runtime token (nth 2 parts) (nth 3 parts)))
-      ("P" (setf (plist-get runtime :owned) (string-to-number (or token "0"))
-                 (plist-get runtime :asked) (float-time)
-                 (plist-get runtime :state) 'running))
+      ("P" (harness-sandbox-session--counted runtime token (nth 2 parts)))
       ("D" (setf (plist-get runtime :state) 'stopped))
       ((or "S" "") nil)
       (_
@@ -871,7 +888,39 @@ use: its runs are failed with that reason and it is ended."
       (harness-log 'debug "sandbox: %s ready (%s)" (plist-get runtime :instance)
                    (plist-get runtime :backend)))
   ;; The supervisor said it is up; the harness may ask what it holds.
-  (ignore-errors (harness-sandbox-session--send runtime "status"))))
+  (harness-sandbox-session--ask runtime)))
+
+(defun harness-sandbox-session--counted (runtime count epoch)
+  "Record COUNT, processes RUNTIME holds, from the answer numbered EPOCH.
+A count is a snapshot taken while the supervisor scans, so it can be
+older than what the harness already knows: the `status' sent when the
+runtime became ready is answered while a command is still in flight, and
+every process of that command is passed over as one the run owns, so the
+answer is a zero.  Arriving after the run has ended, it would say the
+runtime holds nothing and the poll would destroy it with the process the
+run left behind still in it.  An answer to a question asked before the
+last command started or ended is therefore dropped rather than believed:
+the epoch it carries is no longer the runtime's own."
+  (when (and (stringp epoch)
+             (equal epoch (number-to-string (or (plist-get runtime :epoch) 0))))
+    (setf (plist-get runtime :owned) (string-to-number (or count "0"))
+          (plist-get runtime :asked) (float-time)
+          (plist-get runtime :state) 'running)))
+
+(defun harness-sandbox-session--ask (runtime)
+  "Ask RUNTIME how many processes it holds, and number the question.
+The number is the runtime's `:epoch', which every command that starts or
+ends bumps, so an answer to a question asked before that change carries
+an epoch the runtime no longer has and is dropped."
+  (setf (plist-get runtime :asked) (float-time)
+        (plist-get runtime :owned) nil)
+  (ignore-errors
+    (harness-sandbox-session--send
+     runtime (format "status %s" (or (plist-get runtime :epoch) 0)))))
+
+(defun harness-sandbox-session--bump-epoch (runtime)
+  "Say that what RUNTIME holds changed, so an answer already asked for is stale."
+  (setf (plist-get runtime :epoch) (1+ (or (plist-get runtime :epoch) 0))))
 
 (defun harness-sandbox-session--run (runtime token)
   "Return the run of RUNTIME named TOKEN, or nil."
@@ -991,6 +1040,7 @@ within the log limit, and given to the caller's function as text."
       ;; it holds now: the run may have left processes behind, and only a
       ;; new count can say.  The run's own survivors are a lower bound, and
       ;; a zero is what says the instance may be idle.
+      (harness-sandbox-session--bump-epoch runtime)
       (setf (plist-get runtime :owned) (and (> survivors 0) survivors)
             (plist-get runtime :asked) (and (> survivors 0) (float-time)))
       (harness-sandbox-session--end-run
@@ -1083,13 +1133,20 @@ once `harness-sandbox-session-idle-seconds' is up."
       (let ((owned (plist-get runtime :owned))
             (asked (plist-get runtime :asked)))
         (cond
-         ;; The answer is older than the question, or there is none yet:
-         ;; ask again, and decide nothing until the supervisor says.  A
-         ;; runtime is not idle because nobody has counted what it holds.
-         ((not (and (integerp owned) asked (<= (- now asked) harness-sandbox-session--poll-answer)))
-          (setf (plist-get runtime :asked) now
-                (plist-get runtime :owned) nil)
-          (ignore-errors (harness-sandbox-session--send runtime "status"))
+         ;; Ask again once the last question has had its
+         ;; `harness-sandbox-session--poll-answer' to be answered.  The
+         ;; wait is on the question, not on the answer: asking while an
+         ;; answer is still owed used to send a `status' on every poll
+         ;; tick, and the supervisor answers each one by scanning every
+         ;; process's environment, so the questions starved the answer
+         ;; they were waiting for.
+         ((not (and asked (<= (- now asked) harness-sandbox-session--poll-answer)))
+          (harness-sandbox-session--ask runtime)
+          (setq keep t))
+         ;; Asked, and no answer has come back yet: decide nothing.  A
+         ;; runtime is not idle because nobody has counted what it holds,
+         ;; so an unanswered question is never read as owning nothing.
+         ((not (integerp owned))
           (setq keep t))
          ;; A process the session left running is work: the runtime stays,
          ;; and its idle clock starts again when that process goes.
@@ -1172,6 +1229,9 @@ why it cannot start."
                      :logged 0
                      :script (harness-sandbox-session--script cwd command)))))
     (setf (plist-get runtime :idle-since) nil)
+    ;; A command is starting: a count asked for before it is no answer to
+    ;; what the runtime holds now.
+    (harness-sandbox-session--bump-epoch runtime)
     (puthash token run (plist-get runtime :runs))
     ;; The runs of a session that has ended are not kept for ever.
     (when (> (hash-table-count (plist-get runtime :runs)) 200)

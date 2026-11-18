@@ -6901,6 +6901,14 @@ and the short form leaves the names out."
                     (list :kind "quota" :until soon :guess :false
                           :items (vector (list :label "Alpha") (list :key "beta") (list :label "Alpha")
                                          (list :id "b1"))))))
+    ;; A catalogue that cannot be read holds a task the same way, and its
+    ;; next read is the harness's guess, so it says retry.
+    (should (equal (format "catalogue · OpenRouter catalogue (m) · retry %s"
+                           (harness-ui-tasks-test--hh-mm soon))
+                   (harness-ui-tasks--hold-text
+                    (list :kind "catalogue" :until soon :guess t
+                          :items (list (list :label "OpenRouter catalogue (m)" :key "m"))))))
+    (should (equal "catalogue" (harness-ui-tasks--hold-text '(:kind "catalogue" :until nil) t)))
     ;; No end, and no names to give.
     (should (equal "budget · session"
                    (harness-ui-tasks--hold-text (list :kind "budget" :until nil
@@ -6986,9 +6994,10 @@ and the buttons on a second line under the title -- keeps both."
         (should (string-match-p "queued" (cadr lines)))))))
 
 (ert-deftest harness-ui-tasks-says-why-a-parked-task-waits ()
-  "A task that waited for quota or a budget names which, as nouns."
+  "A task that waited for quota, a budget or the catalogue names which, as nouns."
   (should (equal "quota" (harness-ui-tasks--returned-why '(:returned t :return-reason "quota"))))
   (should (equal "budget" (harness-ui-tasks--returned-why '(:returned t :return-reason "budget"))))
+  (should (equal "catalogue" (harness-ui-tasks--returned-why '(:returned t :return-reason "catalogue"))))
   (should (equal "paused" (harness-ui-tasks--returned-why '(:returned t :return-reason "returned")))))
 
 (ert-deftest harness-ui-tasks-card-actions-resume-and-pause ()
@@ -8065,6 +8074,348 @@ C-c . presses its keys, and the board is as it was once it is answered."
       (should (equal '("transcript" "summary") answers))
       (with-current-buffer board
         (should-not (harness-ui-carry-position))))))
+
+;;;; Live voice on the board's box
+
+;; The reported failure, on the surface that showed it: the board's box
+;; composes a task, names no session, and so said `Voice · no session'
+;; and offered no Start.  It is a target now -- a draft -- so a dictation
+;; is inserted as the task's words and C-c C-c submits them as a task.
+
+(ert-deftest harness-ui-tasks-live-voice-box-starts-and-dictates ()
+  "The board's box offers Start, takes a dictation, and submits a task.
+Nothing goes to a session: the words are the task's, and the ordinary
+submission path is what sends them."
+  (harness-ui-tasks-test-with
+    (require 'harness-ui-voice)
+    (let ((harness-voice--enabled t)
+          (harness-voice--owner nil)
+          (harness-voice--controls t)
+          (harness-voice-provider 'custom)
+          (harness-voice-live-command nil)
+          (harness-voice-live--process nil)
+          (harness-voice-live--buffer nil)
+          (harness-voice-live--state nil)
+          (harness-voice-live--route-kind 'session)
+          (harness-voice-live--route-draft nil)
+          (harness-voice-live--route-name nil)
+          (harness-voice-live--route-generation 0)
+          (harness-voice-live--session nil)
+          (harness-voice-live--error nil)
+          (harness-voice-live--pipeline (harness-voice-pipeline-create 'off))
+          (harness-voice-live--transcript nil)
+          (global-mode-string nil))
+      (harness-voice--reset)
+      (harness-voice--init)
+      (unwind-protect
+          (with-current-buffer board
+            (setq-local harness-compose-controls-functions (list #'harness-voice--controls))
+            ;; The box is a target, named for what it composes.
+            (should (harness-voice-live--target-p))
+            (should (equal (list :kind 'draft :name "Task board"
+                                 :identity (harness-ui-tasks--compose-identity))
+                           (harness-compose-context)))
+            (let ((route (harness-voice-live--route-of-buffer (current-buffer))))
+              (should (eq 'draft (plist-get route :kind)))
+              (should (equal "Task board" (plist-get route :name)))
+              (should (equal 'draft (car (plist-get route :draft))))
+              (should-not (cddr (plist-get route :draft)))
+              (should-not (plist-get route :session)))
+            ;; The controls say so, in the exact words, and offer Start.
+            (cl-letf (((symbol-function 'harness-compose--room)
+                       (lambda () (* 500 (frame-char-width)))))
+              (should (equal " Live · Off · [Start] · [Transcript] · [Setup]"
+                             (substring-no-properties (harness-voice--controls)))))
+            ;; A dictation is the box's own text.
+            (should (harness-voice-live--delegate-draft
+                     (harness-voice-live--route-of-buffer (current-buffer))
+                     "Fix the login bug"))
+            (should (equal "Fix the login bug" (harness-compose-text)))
+            ;; Submitting it is a task, as a typed one would be.
+            (harness-ui-tasks-submit))
+        (harness-voice--shutdown))
+    ;; The task the board took is the spoken words, with no session prompt.
+    (harness-ui-tasks-test--wait-text board "Fix the login bug")
+    (let ((tasks (harness-call 'task/list default-directory)))
+      (should (= 1 (length tasks)))
+      (should (string-match-p "Fix the login bug" (plist-get (car tasks) :prompt)))
+      (should (plist-get (car tasks) :session))))))
+
+(ert-deftest harness-ui-tasks-live-voice-message-goes-to-the-task-session ()
+  "A message composed on a card names that task's session, not a draft.
+The box says what it does, so the route follows the box's own target."
+  (harness-ui-tasks-test-with
+    (harness-ui-tasks-test--type-and-submit board "Write the docs")
+    (harness-ui-tasks-test--wait-text board "Completed  1")
+    (harness-ui-tasks-test--goto-card board "Write the docs")
+    (with-current-buffer board
+      ;; The box composes a new task again once the submission cleared it.
+      (should (equal (list :kind 'draft :name "Task board"
+                           :identity (harness-ui-tasks--compose-identity))
+                     (harness-compose-context)))
+      ;; A message to a task is a session route, named by that task.
+      (let* ((task (harness-ui-tasks--task))
+             (session (plist-get task :session)))
+        (should session)
+        (harness-ui-tasks-reply)
+        (should (equal (cons 'reply (plist-get task :id)) harness-ui-tasks--target))
+        (should (equal (list :kind 'session :session session :name "Task message")
+                       (harness-compose-context)))
+        ;; And a search is neither: its words stay in the box.
+        (setq harness-ui-tasks--target '(search))
+        (should (equal (list :kind 'draft :name "Search"
+                             :identity (harness-ui-tasks--compose-identity))
+                       (harness-compose-context)))))))
+
+(ert-deftest harness-ui-tasks-live-voice-box-names-which-draft-it-is ()
+  "The board's one box names each draft it composes, and only that changes.
+The board reuses this buffer for a new task, a search, an edit, an
+answer and feedback, so live voice has to be told which draft is there:
+the identity is the box's target, so a redraw, a keystroke and the
+Submit / Refine / Plan toggle leave it alone, while every
+`harness-ui-tasks--set-compose' to another purpose changes it."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      (let ((new (plist-get (harness-compose-context) :identity)))
+        (should (equal 'draft (car new)))
+        (should-not (cddr new))
+        ;; A redraw, a keystroke and the mode toggle are the same draft.
+        (harness-ui-tasks--render-tail)
+        (goto-char harness-compose-end)
+        (insert "Fix the tile")
+        (harness-ui-tasks--set-mode 'plan)
+        (harness-ui-tasks--set-mode 'submit)
+        (should (equal new (plist-get (harness-compose-context) :identity)))
+        ;; A search is another draft in the same buffer.
+        (harness-ui-tasks--set-compose "" '(search))
+        (should (equal '(search) (cddr (plist-get (harness-compose-context) :identity))))
+        ;; So is an edit of a task, and an answer, and feedback.
+        (harness-ui-tasks--set-compose "Reword it" (cons 'edit "t-1"))
+        (should (equal '(edit . "t-1")
+                       (cddr (plist-get (harness-compose-context) :identity))))
+        (harness-ui-tasks--set-compose "" (cons 'answer "t-2"))
+        (should (equal '(answer . "t-2")
+                       (cddr (plist-get (harness-compose-context) :identity))))
+        (harness-ui-tasks--set-compose "" (cons 'reject "t-3"))
+        (should (equal '(reject . "t-3")
+                       (cddr (plist-get (harness-compose-context) :identity))))
+        ;; A new task again has the purpose it began with -- and is still
+        ;; another draft, because every set-compose replaces the draft.
+        (harness-ui-tasks--set-compose "" nil)
+        (let ((again (plist-get (harness-compose-context) :identity)))
+          (should (equal (cddr new) (cddr again)))
+          (should-not (equal new again)))))))
+
+(ert-deftest harness-ui-tasks-live-voice-box-switch-is-a-move ()
+  "The board's box going from a new task to a search is a route move.
+The buffer is the same one -- the board reuses it -- so a target that
+compared only the buffer would call these two drafts identical and let
+speech captured for the new task be inserted into the search.  The
+draft's identity makes them two targets: the generation rises, and the
+speech spoken for the new task is dropped as `retargeted'."
+  (harness-ui-tasks-test-with
+    (require 'harness-ui-voice)
+    (let ((harness-voice-live--buffer nil)
+          (harness-voice-live--state nil)
+          (harness-voice-live--route-kind 'session)
+          (harness-voice-live--route-draft nil)
+          (harness-voice-live--route-name nil)
+          (harness-voice-live--route-generation 0)
+          (harness-voice-live--session nil)
+          (harness-voice-live--pending nil)
+          (harness-voice-live--utterance-routes nil)
+          (harness-voice-live--pipeline (harness-voice-pipeline-create 'off)))
+      (with-current-buffer board
+        ;; The call starts in the box that composes a new task.
+        (harness-voice-live--route-set
+         (harness-voice-live--route-of-buffer (current-buffer)))
+        (should (equal "Task board" harness-voice-live--route-name))
+        (should (equal 'draft (car harness-voice-live--route-draft)))
+        (let ((generation harness-voice-live--route-generation)
+              (spoken (harness-voice-live--route)))
+          ;; A burst is spoken there, and a turn is waiting to be sent.
+          (setq harness-voice-live--pending
+                (list :route spoken :items nil))
+          ;; The person presses the search key in the same box.
+          (harness-ui-tasks--set-compose "" '(search))
+          (should (harness-voice-live--route-set
+                   (harness-voice-live--route-of-buffer (current-buffer))))
+          ;; The move raised the generation and dropped what was spoken.
+          (should (> harness-voice-live--route-generation generation))
+          (should-not (harness-voice-live--route-current-p
+                       (plist-get spoken :generation)))
+          (should-not harness-voice-live--pending)
+          (should (equal "Search" harness-voice-live--route-name))
+          (should (equal '(search) (cddr harness-voice-live--route-draft)))
+          ;; A draft spoken into after the move is the search's own words.
+          (let ((route (harness-voice-live--route)))
+            (should (harness-voice-live--route-current-p
+                     (plist-get route :generation)))
+            (should (equal '(search) (cddr (plist-get route :draft)))))
+          ;; And an edit of a task in the same box is a third target.
+          (harness-ui-tasks--set-compose "Reword it" (cons 'edit "t-1"))
+          (should (harness-voice-live--route-set
+                   (harness-voice-live--route-of-buffer (current-buffer))))
+          (should (equal '(edit . "t-1")
+                         (cddr harness-voice-live--route-draft))))))))
+
+(ert-deftest harness-ui-tasks-live-voice-submit-reset-is-a-move ()
+  "Submitting a task and resetting the box are replacements, not the same draft.
+The box returns to a new task with the target it had before -- nil --
+so the target alone would call the empty box after a submit the very
+draft the spoken words went into.  The lifecycle nonce is what says it
+is a new draft: the route's generation rises, so speech captured for the
+submitted task is dropped as `retargeted' instead of being inserted into
+the next task's draft."
+  (harness-ui-tasks-test-with
+    (require 'harness-ui-voice)
+    (let ((harness-voice-live--buffer nil)
+          (harness-voice-live--state nil)
+          (harness-voice-live--route-kind 'session)
+          (harness-voice-live--route-draft nil)
+          (harness-voice-live--route-name nil)
+          (harness-voice-live--route-generation 0)
+          (harness-voice-live--session nil)
+          (harness-voice-live--pending nil)
+          (harness-voice-live--utterance-routes nil)
+          (harness-voice-live--pipeline (harness-voice-pipeline-create 'off)))
+      (with-current-buffer board
+        ;; The call starts in the box that composes a new task.
+        (harness-voice-live--route-set
+         (harness-voice-live--route-of-buffer (current-buffer)))
+        (let ((generation harness-voice-live--route-generation)
+              (spoken (harness-voice-live--route)))
+          ;; The person dictates a task, and a turn waits to be sent.
+          (harness-compose-set "Fix the login bug")
+          (setq harness-voice-live--pending (list :route spoken :items nil))
+          ;; It is submitted: the board empties the box back to a new task.
+          (harness-ui-tasks--set-compose "" nil)
+          ;; The target is the same one it started with...
+          (should (equal 'draft (car (harness-ui-tasks--compose-identity))))
+          (should-not (cddr (harness-ui-tasks--compose-identity)))
+          ;; ...but it is a new draft, so the route moves.
+          (should (harness-voice-live--route-set
+                   (harness-voice-live--route-of-buffer (current-buffer))))
+          (should (> harness-voice-live--route-generation generation))
+          (should-not (harness-voice-live--route-current-p
+                       (plist-get spoken :generation)))
+          (should-not harness-voice-live--pending)
+          ;; The words spoken for the submitted task are not in the new box.
+          (should (equal "" (harness-compose-text))))))))
+
+(ert-deftest harness-ui-tasks-live-voice-reset-keeps-typing-in-the-same-draft ()
+  "Typing, a redraw and the mode toggle are not replacements.
+Only `--set-compose' starts another draft, so dictation into the box
+that is still there still lands, and the route does not move under it."
+  (harness-ui-tasks-test-with
+    (require 'harness-ui-voice)
+    (let ((harness-voice-live--buffer nil)
+          (harness-voice-live--state nil)
+          (harness-voice-live--route-kind 'session)
+          (harness-voice-live--route-draft nil)
+          (harness-voice-live--route-name nil)
+          (harness-voice-live--route-generation 0)
+          (harness-voice-live--session nil)
+          (harness-voice-live--pipeline (harness-voice-pipeline-create 'off)))
+      (with-current-buffer board
+        (harness-voice-live--route-set
+         (harness-voice-live--route-of-buffer (current-buffer)))
+        (let ((generation harness-voice-live--route-generation))
+          (goto-char harness-compose-end)
+          (insert "Fix the")
+          (harness-ui-tasks--render-tail)
+          (harness-ui-tasks--set-mode 'plan)
+          (harness-ui-tasks--set-mode 'submit)
+          (harness-ui-tasks--render-tail)
+          ;; The same draft, so the same target: no move.
+          (should-not (harness-voice-live--route-set
+                       (harness-voice-live--route-of-buffer (current-buffer))))
+          (should (= generation harness-voice-live--route-generation))
+          ;; And its words are its words.
+          (should (harness-voice-live--delegate-draft
+                   (harness-voice-live--route) "tile grout"))
+          (should (equal "Fix the tile grout" (harness-compose-text))))))))
+;;;; A board of a big project over a socket
+
+(ert-deftest harness-ui-tasks-big-board-and-startup-fan-out-keep-the-connection ()
+  "A board of hundreds of tasks, refreshed from everywhere at once, sends one answer at a time.
+Connecting refreshes the sessions, opening the board refreshes them and
+asks for the tasks, the review count asks for every project's tasks,
+and events refresh the board again: on a project this size each answer
+is megabytes, and they all go out at the same moment.  A socket's
+writer holds a bounded backlog (`harness-process-send-max-bytes'), and
+the UI busy drawing the board does not read it, so the answers piled up
+past the bound and the harness closed the connection -- \"write backlog
+exceeded\" -- while it stayed healthy.  Now one listing is on the way
+at a time, and every view still gets its own whole answer."
+  (harness-ui-tasks-test-with
+    (let* ((harness-tasks-max-running 0)
+           (port (plist-get (harness-call 'acp/start :port 0) :port))
+           (address (format "127.0.0.1:%d" port))
+           (prompt (make-string 4000 ?x))
+           (n 300)
+           (outstanding 0)
+           (most 0)
+           (answered 0))
+      (unwind-protect
+          (progn
+            (dotimes (i n)
+              (harness-call 'task/submit default-directory (format "%d %s" i prompt)))
+            (harness-test-wait (lambda () (= n (length (harness-call 'task/list))))
+                               60 "the tasks submitted")
+            (harness-connect-remote address)
+            (harness-test-wait (lambda () (eq 'tcp (harness-acp-connection-kind harness-ui-connection)))
+                               10 "the socket")
+            ;; Count the big listings on their way to the socket together.
+            (let ((request (symbol-function 'harness-acp-request)))
+              (cl-letf (((symbol-function 'harness-acp-request)
+                         (lambda (conn method params)
+                           (if (member method harness-ui--bulk-methods)
+                               (let ((promise (funcall request conn method params)))
+                                 (setq most (max most (cl-incf outstanding)))
+                                 (harness-then promise
+                                               (lambda (v) (cl-decf outstanding) (cl-incf answered) v)
+                                               (lambda (e) (cl-decf outstanding)
+                                                 (signal (car-safe e) (cdr-safe e)))))
+                             (funcall request conn method params)))))
+                ;; The fan-out of a start: every view asks at once, as the
+                ;; connection's hooks and the board's do.
+                (with-current-buffer board
+                  (setq harness-ui-tasks--dir default-directory
+                        harness-ui-tasks--all nil
+                        harness-ui-tasks--loading t)
+                  (dolist (ask (list (lambda () (harness-ui-refresh-sessions))
+                                     (lambda () (harness-ui-tasks--fetch-review))
+                                     (lambda () (with-current-buffer board
+                                                  (harness-ui-tasks--fetch (current-buffer))))
+                                     (lambda () (harness-ui-tasks--fetch-review))
+                                     (lambda () (harness-ui-refresh-sessions))))
+                    (run-at-time 0 nil ask))
+                  (harness-test-wait
+                   (lambda ()
+                     (with-current-buffer board
+                       (and (not harness-ui-tasks--loading)
+                            (= n (length harness-ui-tasks--tasks)))))
+                   60 "the board of every task")
+                  (harness-test-wait (lambda () (zerop outstanding)) 30 "every answer"))))
+            ;; One listing on the way at a time, and every answer came whole.
+            (should (> answered 1))
+            (should (= 1 most))
+            (should (harness-acp-connected-p harness-ui-connection))
+            (should (eq 'open (process-status (harness-acp-connection-process
+                                               harness-ui-connection))))
+            (should (= n (length (harness-ui-user-sessions))))
+            (should (= n (length (harness-call 'task/list))))
+            ;; Nothing waits in the socket's writer: every answer went out.
+            (when-let* ((state (process-get (harness-acp-connection-process
+                                             harness-ui-connection)
+                                            'harness--async-send)))
+              (should (= 0 (harness--async-send-bytes state)))
+              (should (= 0 (harness--async-send-count state)))
+              (should-not (harness--async-send-queue state))))
+        (harness-call 'acp/stop)
+        (ignore-errors (harness-acp-close harness-ui-connection))
+        (setq harness-ui-connection-address nil)))))
 
 (provide 'harness-ui-tasks-test)
 ;;; harness-ui-tasks-test.el ends here

@@ -133,8 +133,13 @@ turn `harness-tasks-require-verification' on themselves."
 (defun harness-tasks-test-state (id) (plist-get (harness-tasks-test-task id) :state))
 
 (defun harness-tasks-test-wait-state (id state)
-  "Wait until task ID is in STATE: merges run git, slow on a busy machine."
-  (harness-test-wait (lambda () (eq (harness-tasks-test-state id) state)) 30
+  "Wait until task ID is in STATE: merges run git, slow on a busy machine.
+The bound is a minute, and `harness-test-wait' scales it by the number of
+suites sharing the machine.  It must stay well above the timeout of one
+git command (`harness-run-command' takes 120 seconds): a merge runs
+several of them in turn, so a bound that one command can exhaust reports
+a slow command as a test that timed out, and says nothing about the code."
+  (harness-test-wait (lambda () (eq (harness-tasks-test-state id) state)) 60
                      (format "task %s to become %s" id state)))
 
 (defun harness-tasks-test-submit (prompt &optional cwd)

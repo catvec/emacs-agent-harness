@@ -1249,4 +1249,307 @@ void main() {
     expect(status.copyWith(control: 'agent').userControl, isFalse);
     expect(status.copyWith(control: 'agent').display, ':99');
   });
+
+  test('a message names the thread it came from, or says nothing', () {
+    // The plain case: the thread that handles it, through the workspace's
+    // own profile, has nothing to say.
+    const plain = WorkspaceEntry(
+      kind: 'message',
+      thread: 't1',
+      role: 'user',
+      origin: 't1',
+      handling: 't1',
+      profile: 'text',
+    );
+    expect(plain.originLabel((id) => id == 't1' ? 'Kitchen' : ''), isNull);
+
+    // The router put the words in another thread: the thread they were
+    // addressed to is named.
+    const routed = WorkspaceEntry(
+      kind: 'message',
+      thread: 't2',
+      role: 'user',
+      origin: 't1',
+      handling: 't2',
+      profile: 'text',
+    );
+    expect(
+      routed.originLabel(
+        (id) => switch (id) { 't1' => 'Kitchen', 't2' => 'Quote', _ => '' },
+      ),
+      'From Kitchen',
+    );
+
+    // Another profile as well: both, in that order.
+    const spoken = WorkspaceEntry(
+      kind: 'message',
+      thread: 't2',
+      role: 'user',
+      origin: 't1',
+      handling: 't2',
+      profile: 'voice',
+    );
+    expect(
+      spoken.originLabel(
+        (id) => switch (id) { 't1' => 'Kitchen', 't2' => 'Quote', _ => '' },
+      ),
+      'From Kitchen · voice',
+    );
+
+    // An entry the harness kept no provenance for reads as plain.
+    const legacy = WorkspaceEntry(
+      kind: 'message',
+      thread: 't1',
+      role: 'user',
+    );
+    expect(legacy.originLabel((id) => id == 't1' ? 'Kitchen' : ''), isNull);
+  });
+
+  test('a reassignment names where the message went and who moved it', () {
+    const moved = WorkspaceEntry(
+      kind: 'reassignment',
+      thread: 't2',
+      origin: 't1',
+      handling: 't2',
+      reassignedTo: 't2',
+      reassignedBy: 'mediator',
+      delivery: 'queued',
+    );
+    expect(moved.isReassignment, isTrue);
+    expect(
+      moved.reassignedLabel(
+        (id) => switch (id) { 't1' => 'Kitchen', 't2' => 'Quote', _ => '' },
+      ),
+      'Reassigned to Quote · mediator',
+    );
+
+    // A message never moved says nothing about moving.
+    const stayed = WorkspaceEntry(kind: 'message', thread: 't1');
+    expect(stayed.reassignedLabel((id) => 'Kitchen'), isNull);
+  });
+
+  test('an inbox reads its items, groups and counts from the wire', () {
+    final inbox = WorkspaceInbox.fromWire({
+      'workspace': 'w1',
+      'name': 'Home',
+      'scope': 'workspace',
+      'revision': 3,
+      'items': [
+        {
+          'session': 's1',
+          'workspace': 'w1',
+          'workspace-name': 'Home',
+          'thread': 't1',
+          'title': 'Kitchen renovation',
+          'text': 'Try the slate.',
+          'state': 'queued',
+        },
+        {
+          'session': 's1',
+          'thread': 't1',
+          'title': 'Kitchen renovation',
+          'text': 'And the grout.',
+          'state': 'waiting',
+        },
+        {
+          'session': 's9',
+          'thread': 't2',
+          'title': 'Harness memory',
+          'text': '',
+          'state': 'unavailable',
+          'why': 'Session unavailable',
+        },
+      ],
+      'counts': {'queued': 1, 'waiting': 1, 'unavailable': 1},
+      'threads': [
+        {
+          'workspace': 'w1',
+          'name': 'Home',
+          'thread': 't1',
+          'title': 'Kitchen renovation',
+          'items': [],
+          'counts': {'queued': 1, 'waiting': 1, 'unavailable': 0},
+        },
+      ],
+    });
+    expect(inbox.items, hasLength(3));
+    expect(inbox.name, 'Home');
+    expect(inbox.items.first.workspaceName, 'Home');
+    expect(inbox.items.first.stateLabel, 'Queued');
+    expect(inbox.items[1].stateLabel, 'Waiting');
+    expect(inbox.items[2].stateLabel, 'Unavailable');
+    expect(inbox.items[2].isUnavailable, isTrue);
+    expect(inbox.items[2].why, 'Session unavailable');
+    expect(inbox.groups, hasLength(1));
+    expect(inbox.groups.first.queued, 1);
+    expect(inbox.countsLabel, '1 queued · 1 waiting · 1 unavailable');
+    expect(inbox.revision, 3);
+  });
+
+  test('an empty inbox says nothing about counts', () {
+    const inbox = WorkspaceInbox();
+    expect(inbox.isEmpty, isTrue);
+    expect(inbox.countsLabel, isEmpty);
+  });
+
+  test('a reassignment names each outcome in its own words', () {
+    String title(String id) => switch (id) {
+      't2' => 'Harness memory',
+      _ => id,
+    };
+    expect(
+      const WorkspaceReassignment(status: 'queued', thread: 't2').summary(
+        title,
+      ),
+      'Queued · Harness memory',
+    );
+    expect(
+      const WorkspaceReassignment(
+        status: 'forwarded',
+        thread: 't2',
+        delivery: 'delivered',
+      ).summary(title),
+      'Forwarded · Harness memory · delivered',
+    );
+    expect(
+      const WorkspaceReassignment(status: 'repeated', thread: 't2').summary(
+        title,
+      ),
+      'Repeated · Harness memory',
+    );
+    expect(
+      const WorkspaceReassignment(
+        status: 'stale',
+        thread: 't2',
+        why: 'No longer waiting',
+      ).summary(title),
+      'Stale · No longer waiting',
+    );
+    expect(
+      const WorkspaceReassignment(
+        status: 'unreachable',
+        thread: 't2',
+        why: 'Session ended',
+      ).summary(title),
+      'Unreachable · Session ended',
+    );
+  });
+
+  testWidgets('the inbox sheet names the thread, the message and the state', (
+    tester,
+  ) async {
+    final controller = _preview();
+    controller.inbox = WorkspaceInbox.fromWire({
+      'workspace': 'w1',
+      'name': 'Home',
+      'scope': 'workspace',
+      'items': [
+        {
+          'session': 's1',
+          'workspace': 'w1',
+          'workspace-name': 'Home',
+          'thread': 't1',
+          'title': 'Kitchen renovation',
+          'text': 'Try the slate.',
+          'state': 'queued',
+        },
+        {
+          'session': 's9',
+          'workspace': 'w1',
+          'workspace-name': 'Home',
+          'thread': 't2',
+          'title': 'Harness memory',
+          'text': '',
+          'state': 'unavailable',
+          'why': 'Session unavailable',
+        },
+      ],
+      'counts': {'queued': 1, 'waiting': 0, 'unavailable': 1},
+    });
+    await _pump(tester, controller);
+    await tester.tap(find.byKey(const ValueKey('inbox-header')));
+    await tester.pumpAndSettle();
+    expect(find.text('Inbox · Home'), findsOneWidget);
+    expect(find.text('Kitchen renovation'), findsWidgets);
+    expect(find.text('Queued'), findsOneWidget);
+    expect(find.text('Try the slate.'), findsOneWidget);
+    expect(find.text('Unavailable'), findsOneWidget);
+    expect(find.text('Session unavailable'), findsOneWidget);
+    expect(find.text('1 queued · 1 unavailable'), findsOneWidget);
+    for (final scope in const ['Workspace', 'Thread', 'Session', 'All']) {
+      expect(find.text(scope), findsWidgets, reason: scope);
+    }
+    // Each chip says what pressing it would show.
+    for (final help in const [
+      'Every thread of this workspace',
+      'The thread in view',
+      'The episode of the thread in view',
+      'Every workspace',
+    ]) {
+      expect(find.byTooltip(help), findsOneWidget, reason: help);
+    }
+  });
+
+  testWidgets('a row of the all scope names the workspace it waits in', (
+    tester,
+  ) async {
+    final controller = _preview();
+    controller.inbox = WorkspaceInbox.fromWire({
+      'workspace': 'w1',
+      'name': 'Home',
+      'scope': 'all',
+      'items': [
+        {
+          'session': 's1',
+          'workspace': 'w1',
+          'workspace-name': 'Home',
+          'thread': 't1',
+          'title': 'Kitchen renovation',
+          'text': 'Try the slate.',
+          'state': 'queued',
+        },
+        {
+          'session': 's2',
+          'workspace': 'w2',
+          'workspace-name': 'Studio',
+          'thread': 't3',
+          'title': 'Harness memory',
+          'text': 'Remember the grout.',
+          'state': 'waiting',
+        },
+      ],
+      'counts': {'queued': 1, 'waiting': 1, 'unavailable': 0},
+    });
+    await _pump(tester, controller);
+    await tester.tap(find.byKey(const ValueKey('inbox-header')));
+    await tester.pumpAndSettle();
+    // This workspace's own row leaves its name out: the title says it.
+    expect(find.text('Kitchen renovation'), findsWidgets);
+    expect(find.text('Home · Kitchen renovation'), findsNothing);
+    // A row waiting in another workspace says which one.
+    expect(find.text('Studio · Harness memory'), findsOneWidget);
+  });
+
+  testWidgets('an empty inbox is a fact, not a blank sheet', (tester) async {
+    final controller = _preview();
+    controller.inbox = const WorkspaceInbox();
+    await _pump(tester, controller);
+    await tester.tap(find.byKey(const ValueKey('inbox-header')));
+    await tester.pumpAndSettle();
+    expect(find.text('No messages waiting'), findsOneWidget);
+  });
+
+  testWidgets('a failed inbox read says why and offers another try', (
+    tester,
+  ) async {
+    final controller = _preview();
+    controller.inboxError = 'No workspace w1';
+    await _pump(tester, controller);
+    await tester.tap(find.byKey(const ValueKey('inbox-header')));
+    await tester.pumpAndSettle();
+    expect(find.text('Inbox · unavailable'), findsOneWidget);
+    expect(find.text('No workspace w1'), findsOneWidget);
+    expect(find.text('Retry'), findsOneWidget);
+    expect(find.text('No messages waiting'), findsNothing);
+  });
 }

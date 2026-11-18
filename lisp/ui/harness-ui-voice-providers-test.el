@@ -873,5 +873,36 @@ Customize saves them, and the next Emacs starts with the same ones."
                                 status (buffer-string))))))
       (kill-buffer buffer))))
 
+(ert-deftest harness-ui-voice-providers-name-no-container-engine ()
+  "Voice mode has no setting for Podman or Docker; the shared module has it.
+The provider record, its command and its reason name the pipeline, never
+an engine: a client on macOS must not be asked to choose between them,
+and the engine is the one the stacks use.  `harness-container-runtime'
+is the only place that choice is made."
+  (let ((engine-options
+         (cl-loop for symbol being the symbols
+                  when (and (string-prefix-p "harness-" (symbol-name symbol))
+                            (get symbol 'custom-type)
+                            (string-match-p
+                             "\\b\\(docker\\|podman\\)\\b"
+                             (downcase (or (documentation-property
+                                            symbol 'variable-documentation) ""))))
+                  collect symbol)))
+    ;; Neither voice module declares an engine option.
+    (should-not (cl-some (lambda (symbol)
+                           (string-prefix-p "harness-voice-" (symbol-name symbol)))
+                         engine-options))
+    ;; And no provider record carries one either: no engine field, and no
+    ;; provider's argv starts the container CLI.
+    (dolist (id (harness-voice-provider-ids))
+      (let ((record (harness-voice-provider-get id)))
+        (should-not (plist-member record :engine))
+        (should-not (plist-member record :runtime))
+        (should-not (member (car-safe (plist-get record :command))
+                            '("docker" "podman")))))
+    ;; The engine is a choice the shared module makes, and it has one.
+    (require 'harness-container-runtime)
+    (should (eq 'auto harness-container-runtime))))
+
 (provide 'harness-ui-voice-providers-test)
 ;;; harness-ui-voice-providers-test.el ends here

@@ -1112,6 +1112,99 @@ count, closed, and the changes a click away."
           (dolist (text texts)
             (should-not (invisible-p (1- (harness-ui-chat-test-find buf text))))))))))
 
+(ert-deftest harness-ui-chat-a-slot-note-that-keeps-its-newest-says-what-it-leaves-out ()
+  "A note that stands for more changes than it keeps says so when it is opened.
+The tool-slots-load module keeps a note's newest changes as lines and
+counts them all in its title (see its tests); the chat draws the lines
+it keeps, with the count of the ones it leaves out above them, in the
+indent the lines are at, and says nothing of them when it keeps them
+all."
+  (harness-ui-chat-test-with
+    (dolist (m '(priority tool-slots tool-slots-load)) (harness-test-load-module m))
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (harness-tool-slots-load--note-limit 2)
+           (texts '("Tool slots reduced from 18 to 5: system load 1.8x on this machine"
+                    "Tool slots restored to 18: system load back to normal"
+                    "Tool slots reduced from 18 to 9: system load 1.4x on this machine"
+                    "Tool slots raised from 9 to 12: system load 1.2x on this machine")))
+      (harness-call 'session/append sid '(:kind user :content "build it"))
+      (dolist (text texts)
+        (harness-tool-slots-load--announce text))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find buf "Slots changed due to system load (4 changes)"))
+                         5 "the note")
+      (with-current-buffer buf
+        ;; One line, closed, counting every change of the stretch.
+        (should (= 1 (length (harness-ui-chat-test-blocks buf "hint"))))
+        (let ((block (car (harness-ui-chat-test-blocks buf "hint"))))
+          (should (harness-chat-block-collapsed block))
+          (should (harness-ui-chat-test-find buf "Slots changed due to system load (4 changes)"))
+          ;; The two it leaves out are not drawn at all.
+          (should-not (harness-ui-chat-test-find buf (nth 0 texts)))
+          (should-not (harness-ui-chat-test-find buf (nth 1 texts)))
+          (goto-char (harness-ui-chat-test--fold-icon block))
+          (harness-chat-tab)
+          (should-not (harness-chat-block-collapsed block))
+          ;; Opened: the count of what it leaves out, at the lines' indent,
+          ;; then the newest two, each with its time.
+          (let ((pos (harness-ui-chat-test-find buf "2 earlier changes\n")))
+            (should pos)
+            (should-not (invisible-p (1- pos)))
+            ;; The margin's column, then the four the lines are indented by.
+            (should (equal "     " (get-text-property (1- pos) 'line-prefix))))
+          (dolist (text (cdr (cdr texts)))
+            (should-not (invisible-p (1- (harness-ui-chat-test-find buf text))))))))))
+
+(ert-deftest harness-ui-chat-a-fold-of-one-line-that-stands-for-more-is-folded ()
+  "A fold that keeps one line and stands for more is drawn folded, with its count.
+The tool-slots-load module can keep a note's one newest line while its
+title counts the stretch; the chat draws the fold rather than the note
+it would be, so the count is not lost."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (hint (harness-call 'session/append sid
+                               (list :kind 'hint
+                                     :content "Slots changed due to system load (3 changes)\n2 earlier changes\n12:15:05  newest"
+                                     :meta (list :fold (list :key "tool-slots-load"
+                                                             :title "Slots changed due to system load (3 changes)"
+                                                             :total 3
+                                                             :items (list (list :ts (float-time
+                                                                                     (encode-time
+                                                                                      (list 5 15 12 12 6 2026 nil -1 nil)))
+                                                                                :text "newest")))))))
+           (id (plist-get hint :id))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (let ((block (gethash id harness-chat--blocks)))
+          (should (harness-chat-block-fold block))
+          (should (harness-chat-block-collapsed block))
+          (should (harness-ui-chat-test-find buf "Slots changed due to system load (3 changes)"))
+          (should (invisible-p (1- (harness-ui-chat-test-find buf "2 earlier changes"))))
+          (goto-char (harness-ui-chat-test--fold-icon block))
+          (harness-chat-tab)
+          (should-not (invisible-p (1- (harness-ui-chat-test-find buf "2 earlier changes"))))
+          (should (harness-ui-chat-test-find buf "12:15:05  newest\n")))))))
+
+(ert-deftest harness-ui-chat-a-slot-notices-group-counts-the-changes-it-keeps ()
+  "A slot notice folded into a run says how many changes it stands for.
+A note keeps only its newest changes; the run's summary counts them all."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (cl-flet ((node (n) (harness-chat--on-node n)))
+          (harness-chat--on-node (list :id "c1" :kind "tool-call" :tool "read_file"
+                                       :call-id "c1" :title "Read a.el" :input '(:path "a.el")))
+          (harness-chat--on-node (list :id "c2" :kind "tool-call" :tool "read_file"
+                                       :call-id "c2" :title "Read b.el" :input '(:path "b.el")))
+          (node (list :id "slot" :kind "hint"
+                      :content "Slots changed due to system load (40 changes)\n39 earlier changes\n12:15:05  newest"
+                      :meta (list :fold (list :key "tool-slots-load"
+                                              :title "Slots changed due to system load (40 changes)"
+                                              :total 40
+                                              :items (list (list :ts 1760000105 :text "newest"))))))
+          (should (harness-ui-chat-test-find buf "· slots changed ×40")))))))
+
 ;;;; The settings line under the compose box
 
 (defun harness-ui-chat-test-settings (&optional room)
@@ -11343,8 +11436,9 @@ The redraw is debounced, once per buffer."
 
 (ert-deftest harness-ui-chat-hand-in-renders-its-report ()
   "A hand_in call draws the report the review draws, not raw input.
-The report rides the tool result's `:meta' (`:report'), and the call
-opens expanded, so the report shows without a click."
+The report rides the tool result's `:meta' (`:report').  The review opens
+the call of the round it waits on; opened, here by hand, the call shows
+the report."
   (harness-ui-chat-test-with
     (dolist (m '(ui-compose ui-popout ui-tasks ui-report))
       (harness-test-load-module m))
@@ -11368,6 +11462,10 @@ opens expanded, so the report shows without a click."
         (let ((block (car (harness-ui-chat-test-blocks buf "tool-call"))))
           (should block)
           (should (harness-chat-block-result block))
+          ;; Nothing says the report waits for review here: it folds, and
+          ;; the reader opens it.
+          (should (harness-chat-block-collapsed block))
+          (harness-chat-toggle-block (harness-chat-block-id block))
           (should-not (harness-chat-block-collapsed block))
           (let ((fold (harness-chat-block-fold block)))
             (should fold)
@@ -11382,8 +11480,8 @@ opens expanded, so the report shows without a click."
             ;; The generic input listing is not shown.
             (should-not (string-search "  input" text))))))))
 
-(ert-deftest harness-ui-chat-cannot-continue-hand-in-expands ()
-  "A hand_in that cannot continue opens expanded too, showing its report.
+(ert-deftest harness-ui-chat-cannot-continue-hand-in-shows-its-report ()
+  "A hand_in that cannot continue shows its report when opened, as any hand-in does.
 The report rides the result as any hand-in's does; the task then asks the
 user for a decision rather than waiting for review."
   (harness-ui-chat-test-with
@@ -11411,6 +11509,7 @@ user for a decision rather than waiting for review."
       (with-current-buffer buf
         (let ((block (car (harness-ui-chat-test-blocks buf "tool-call"))))
           (should block)
+          (harness-chat-toggle-block (harness-chat-block-id block))
           (should-not (harness-chat-block-collapsed block))
           (let* ((fold (harness-chat-block-fold block))
                  (text (buffer-substring-no-properties (overlay-start fold) (overlay-end fold))))
@@ -11438,6 +11537,7 @@ result meta; the chat rebuilds the report from what the call was given."
       (with-current-buffer buf
         (let ((block (car (harness-ui-chat-test-blocks buf "tool-call"))))
           (should block)
+          (harness-chat-toggle-block (harness-chat-block-id block))
           (should-not (harness-chat-block-collapsed block))
           (let* ((fold (harness-chat-block-fold block))
                  (text (buffer-substring-no-properties (overlay-start fold) (overlay-end fold))))
@@ -11474,6 +11574,7 @@ tail, so what it folds away is there to read when it opens."
         (with-current-buffer buf
           (let ((block (car (harness-ui-chat-test-blocks buf "tool-call"))))
             (should block)
+            (harness-chat-toggle-block (harness-chat-block-id block))
             (should-not (harness-chat-block-collapsed block))
             ;; The second hand-in of a task starts its evidence folded.
             (puthash (cons task-id "evidence") t harness-ui-report--folds)
@@ -11630,11 +11731,11 @@ same way."
           (goto-char (nth 1 card))
           (should (harness-quote-targets (point) (point))))))))
 
-(ert-deftest harness-ui-chat-hand-in-folds-when-its-report-shows-elsewhere ()
-  "A hand_in call stays folded while something else shows its report.
-A function on `harness-chat-hand-in-fold-functions' says so; once it
-says the report shows nowhere else, the module that knows synchronizes
-and the call opens again, its body the report."
+(ert-deftest harness-ui-chat-hand-in-opens-while-its-review-waits ()
+  "A hand_in call opens while its report waits for review.
+A function on `harness-chat-hand-in-open-functions' says so; the module
+that knows synchronizes and the call opens, its body the report.  Once
+nothing says so any more -- the work is decided -- the call folds."
   (harness-ui-chat-test-with
     (dolist (m '(ui-compose ui-popout ui-tasks ui-report))
       (harness-test-load-module m))
@@ -11646,10 +11747,10 @@ and the call opens again, its body the report."
                                                             :problem "The parser drops nested quotes."
                                                             :evidence (list (list :kind "note" :text "A note")))
                                               :task-id "t-chat"))))
-    (let* ((sid (harness-ui-chat-test-session "hand-in folded"))
+    (let* ((sid (harness-ui-chat-test-session "hand-in open"))
            (buf (harness-ui-chat-test-open sid))
-           (harness-chat-hand-in-fold-functions
-            (list (lambda (_block _result) "the review banner shows it")))
+           (harness-chat-hand-in-open-functions
+            (list (lambda (_block _result) "the review is the call")))
            (harness-provider-demo-script-override
             '((:type tool-call :id "h1" :name "hand_in"
                      :input (:problem "The parser drops nested quotes."
@@ -11660,8 +11761,8 @@ and the call opens again, its body the report."
         (let ((block (car (harness-ui-chat-test-blocks buf "tool-call"))))
           (should block)
           (should (harness-chat-block-result block))
-          (should (harness-chat-block-collapsed block))
-          (should (overlay-get (harness-chat-block-fold block) 'invisible))
+          (should-not (harness-chat-block-collapsed block))
+          (should-not (overlay-get (harness-chat-block-fold block) 'invisible))
           ;; What the fold holds is the report, not the call's raw input.
           (let* ((fold (harness-chat-block-fold block))
                  (text (buffer-substring-no-properties (overlay-start fold) (overlay-end fold))))
@@ -11669,17 +11770,22 @@ and the call opens again, its body the report."
             (should (string-search "The parser drops nested quotes." text))
             (should (string-search "A note" text))
             (should-not (string-search "  input" text)))
-          ;; The report is shown elsewhere no longer: the call opens.
-          (setq harness-chat-hand-in-fold-functions nil)
+          ;; The work is decided: nothing says the report waits for review,
+          ;; and the call folds.
+          (setq harness-chat-hand-in-open-functions nil)
+          (should (harness-chat-sync-hand-in-folds))
+          (should (harness-chat-block-collapsed block))
+          (should (overlay-get (harness-chat-block-fold block) 'invisible))
+          ;; Waiting again: it opens, the report with it.
+          (setq harness-chat-hand-in-open-functions
+                (list (lambda (_block _result) t)))
           (should (harness-chat-sync-hand-in-folds))
           (should-not (harness-chat-block-collapsed block))
           (should-not (overlay-get (harness-chat-block-fold block) 'invisible))
-          ;; Saying so again folds it again.
-          (setq harness-chat-hand-in-fold-functions
-                (list (lambda (_block _result) t)))
-          (should (harness-chat-sync-hand-in-folds))
-          (should (harness-chat-block-collapsed block))
-          (should (overlay-get (harness-chat-block-fold block) 'invisible)))))))
+          (should (string-search "The parser drops nested quotes."
+                                 (buffer-substring-no-properties
+                                  (overlay-start (harness-chat-block-fold block))
+                                  (overlay-end (harness-chat-block-fold block))))))))))
 
 (ert-deftest harness-ui-chat-image-only-messages-keep-the-shared-renderer-output ()
   "A drawn image is not an empty user message, including while queued."
@@ -11718,6 +11824,20 @@ and the call opens again, its body the report."
               (should (text-property-not-all 0 (length cut) 'harness-test-picture nil cut)))))))))
 
 ;;;; Timestamps
+
+(defun harness-ui-chat-test--earlier-today (seconds)
+  "Return a float time SECONDS before now, on this day whatever the hour.
+Half an hour before now is yesterday in the half hour after midnight,
+and a sender line names the day of a time that is not today.  A test
+that wants a time on this day asks for it here, so it reads the same
+at every hour: early in the day the time is midnight's instead."
+  (let* ((now (float-time))
+         (since-midnight (- now (float-time (encode-time
+                                             0 0 0
+                                             (decoded-time-day (decode-time now))
+                                             (decoded-time-month (decode-time now))
+                                             (decoded-time-year (decode-time now)))))))
+    (- now (min seconds (max 0 since-midnight)))))
 
 (defun harness-ui-chat-test--append (sid kind content ts &optional plist)
   "Append a node of KIND with CONTENT and TS to SID, with PLIST; return its id."
@@ -11797,8 +11917,9 @@ none."
 It is absent when that message shows its own timestamp on the line the
 window starts on, and when no message shows."
   (harness-ui-chat-test-with
-    (let* ((now (float-time))
-           (t1 (- now 1800)) (t2 (- now 1700)) (t3 (- now 800))
+    (let* ((t1 (harness-ui-chat-test--earlier-today 1800))
+           (t2 (harness-ui-chat-test--earlier-today 1700))
+           (t3 (harness-ui-chat-test--earlier-today 800))
            (sid (harness-ui-chat-test-session))
            (b1 (harness-ui-chat-test--append sid 'user "one" t1))
            (b2 (harness-ui-chat-test--append sid 'assistant "two" t2))
@@ -11956,12 +12077,16 @@ opens the turn, and the time line under the header repeats it only when
 that line scrolled away."
   (harness-ui-chat-test-with
     (let* ((now (float-time))
-           (t1 (- now 1800))
+           ;; A fixed hour today, not half an hour before now: the agent
+           ;; line carries the sender line's label, which names the day
+           ;; when the time is not today, and half an hour before now is
+           ;; yesterday in the half hour after midnight.
+           (t1 (harness-ui-chat-test--earlier-today 1800))
            (sid (harness-ui-chat-test-session)))
       (harness-ui-chat-test--append sid 'tool-call "call" t1
                                     (list :tool "read_file" :call-id "c1"
                                           :title "Read a.el" :input '(:path "a.el")))
-      (harness-ui-chat-test--append sid 'tool-result "done" (- now 1790)
+      (harness-ui-chat-test--append sid 'tool-result "done" (+ t1 10)
                                     (list :call-id "c1" :output "done"))
       (let ((buf (harness-ui-chat-test-open sid)))
         (with-current-buffer buf

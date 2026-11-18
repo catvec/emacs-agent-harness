@@ -59,6 +59,7 @@ unlocked and used by no working session.
 
 - `worktree/branch` (path) — Return a promise of the branch checked out at PATH, or nil when detached.
 - `worktree/create` (root &rest opts) — Create a worktree of the repository at ROOT; return a promise of its plist.
+- `worktree/head` (path) — Return a promise of the commit HEAD names at PATH.
 - `worktree/list` (root) — Return a promise of the worktrees of the repository at ROOT.
 - `worktree/lock` (root path &optional reason) — Lock the worktree at PATH of the repository at ROOT; return a promise.
 - `worktree/lock-existing` (root) — Lock the worktrees the harness keeps for ROOT that have no lock yet.

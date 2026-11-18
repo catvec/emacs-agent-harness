@@ -1476,6 +1476,394 @@ captures link the page and are its backlinks."
         (should (equal "unavailable" (plist-get page :status)))
         (should (null (plist-get page :blocks)))))))
 
+;;;; Mediation: provenance, inbox, reassignment, opening
+
+(defun harness-workspace-test-thread (id thread)
+  "Return THREAD of workspace ID, as `workspace/thread' reads it."
+  (harness-call 'workspace/thread id thread))
+
+(defun harness-workspace-test-settle (id)
+  "Wait until workspace ID has answered and its thread is idle."
+  (harness-workspace-test-wait-for
+   (lambda () (harness-workspace-test-assistant-messages id)))
+  (dolist (thread (plist-get (harness-call 'workspace/get id) :threads))
+    (when-let* ((live (plist-get thread :live)))
+      (harness-workspace-test-wait-idle live))))
+
+(defun harness-workspace-test-entry (id predicate)
+  "Return the first timeline entry of workspace ID that PREDICATE accepts."
+  (cl-find-if predicate (harness-call 'workspace/timeline id)))
+
+(ert-deftest harness-workspace-a-message-keeps-its-origin-and-handling ()
+  "A routed message says the thread it was addressed to and the one that answers.
+The person writes in one continuous conversation; the router may put
+the words in another thread.  Both places are written on the message
+and on its node, so no client has to guess from the words."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-settle id)
+      (let* ((thread (car (plist-get (harness-call 'workspace/get id) :threads)))
+             (tid (plist-get thread :id))
+             (entry (harness-workspace-test-entry
+                     id (lambda (entry)
+                          (and (equal "message" (format "%s" (plist-get entry :kind)))
+                               (equal "user" (format "%s" (plist-get entry :role))))))))
+        (should entry)
+        (should (equal tid (plist-get entry :origin)))
+        (should (equal tid (plist-get entry :handling)))
+        (should (equal "text" (plist-get entry :profile)))
+        ;; The node the episode's transcript holds says the same.
+        (let* ((node (harness-call 'session/node (plist-get thread :live)
+                                   (plist-get entry :node)))
+               (meta (plist-get node :meta)))
+          (should (equal tid (plist-get meta :origin)))
+          (should (equal tid (plist-get meta :handling)))
+          (should (equal "text" (plist-get meta :profile)))))
+      ;; The default profile says nothing, so the plain case has no label.
+      (should-not (harness-workspace--origin-label
+                   (harness-workspace--get id)
+                   (harness-workspace-test-entry
+                    id (lambda (entry)
+                         (and (equal "message" (format "%s" (plist-get entry :kind)))
+                              (equal "user" (format "%s" (plist-get entry :role))))))))))
+
+)
+
+(ert-deftest harness-workspace-inbox-reads-the-sessions-own-queue ()
+  "The inbox shows what waits in each session's queue, never a copy.
+A queued item is read where the session keeps it, so sending or
+withdrawing it elsewhere is seen at once, and an unreadable session
+says so instead of reading as empty."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-settle id)
+      (let* ((thread (car (plist-get (harness-call 'workspace/get id) :threads)))
+             (session (plist-get thread :live))
+             (item (harness-call 'session/queue session "A second thought.")))
+        (let* ((inbox (harness-call 'workspace/inbox id))
+               (items (plist-get inbox :items)))
+          (should (= 1 (length items)))
+          (should (equal (plist-get item :id) (plist-get (car items) :id)))
+          (should (equal "queued" (plist-get (car items) :state)))
+          (should (equal (plist-get thread :id) (plist-get (car items) :thread)))
+          ;; The item says which workspace it waits in, so the "all"
+          ;; scope can name it, and the answer names the workspace too.
+          (should (equal id (plist-get (car items) :workspace)))
+          (should (equal (plist-get workspace :name)
+                         (plist-get (car items) :workspace-name)))
+          (should (equal (plist-get workspace :name) (plist-get inbox :name)))
+          (should (equal 1 (plist-get (plist-get inbox :counts) :queued)))
+          (should (equal (plist-get thread :id)
+                         (plist-get (car (plist-get inbox :threads)) :thread))))
+        ;; Withdrawing it from the session empties the inbox too.
+        (harness-call 'session/queue-remove session (plist-get item :id))
+        (should (null (plist-get (harness-call 'workspace/inbox id) :items)))
+        ;; A session that cannot be read is one item, not an empty inbox.
+        (let ((inbox (harness-call 'workspace/inbox id
+                                   (list :scope "session" :session "s-gone"))))
+          (should (equal "unavailable"
+                         (plist-get (car (plist-get inbox :items)) :state))))))))
+
+
+(ert-deftest harness-workspace-the-all-scope-names-each-workspace ()
+  "The all scope says which workspace every item waits in.
+A person reading across workspaces is not asked to tell an id from a
+name: each item carries both, and the answer names the one it was read
+for."
+  (harness-workspace-test-with
+    (let* ((home (harness-workspace-test-workspace))
+           (home-id (plist-get home :id)))
+      (harness-call 'workspace/prompt home-id "The tile is matte.")
+      (harness-workspace-test-settle home-id)
+      (let* ((studio (harness-call 'workspace/create
+                                   :name "Studio"
+                                   :root (expand-file-name "studio/" harness-state-directory)
+                                   :model "demo:scripted"))
+             (studio-id (plist-get studio :id)))
+        (harness-call 'workspace/prompt studio-id "The grout is warm.")
+        (harness-workspace-test-settle studio-id)
+        (let* ((home-thread (car (plist-get (harness-call 'workspace/get home-id) :threads)))
+               (studio-thread (car (plist-get (harness-call 'workspace/get studio-id) :threads)))
+               (home-item (harness-call 'session/queue (plist-get home-thread :live)
+                                        "A second thought."))
+               (studio-item (harness-call 'session/queue (plist-get studio-thread :live)
+                                          "A third thought."))
+               (inbox (harness-call 'workspace/inbox home-id (list :scope "all")))
+               (items (plist-get inbox :items))
+               (of-home (cl-find-if (lambda (item)
+                                      (and (equal (plist-get home-item :id) (plist-get item :id))
+                                           (equal (plist-get home-thread :live)
+                                                  (plist-get item :session))))
+                                    items))
+               (of-studio (cl-find-if (lambda (item)
+                                        (and (equal (plist-get studio-item :id) (plist-get item :id))
+                                             (equal (plist-get studio-thread :live)
+                                                    (plist-get item :session))))
+                                      items)))
+          (should (equal "Home" (plist-get inbox :name)))
+          (should (equal home-id (plist-get of-home :workspace)))
+          (should (equal "Home" (plist-get of-home :workspace-name)))
+          (should (equal studio-id (plist-get of-studio :workspace)))
+          (should (equal "Studio" (plist-get of-studio :workspace-name)))
+          ;; Each group says which workspace its thread is in as well.
+          (let ((groups (plist-get inbox :threads)))
+            (should (cl-find studio-id groups
+                             :key (lambda (group) (plist-get group :workspace))
+                             :test #'equal))
+            (should (cl-find "Studio" groups
+                             :key (lambda (group) (plist-get group :name))
+                             :test #'equal))))))))
+
+(ert-deftest harness-workspace-a-queued-message-moves-to-another-thread ()
+  "A message nothing has read yet moves: out of one queue, into the other.
+The origin keeps its own entry as it was; the target's timeline gains a
+reassignment naming where the words began and who moved them, and
+asking again returns the first answer instead of sending twice."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-settle id)
+      (let* ((first (car (plist-get (harness-call 'workspace/get id) :threads)))
+             (first-live (plist-get first :live))
+             (second (harness-call 'workspace/thread/create id "Kitchen"))
+             (second-live (harness-call 'workspace/thread/revive
+                                         id (plist-get second :id)))
+             (item (harness-call 'session/queue first-live
+                                  "The grout is warm grey.")))
+        (let ((answer (harness-call 'workspace/reassign
+                                    id
+                                    (list :queue (plist-get item :id)
+                                          :text (plist-get item :text)
+                                          :thread (plist-get first :id))
+                                    (plist-get second :id))))
+          (should (equal "queued" (plist-get answer :status)))
+          (should (equal "queued" (plist-get answer :delivery)))
+          (should (equal (plist-get first :id) (plist-get answer :origin)))
+          (should (null (plist-get (harness-call 'session/get first-live) :queue)))
+          (should (equal "The grout is warm grey."
+                         (plist-get
+                          (car (plist-get (harness-call 'session/get second-live)
+                                          :queue))
+                          :text)))
+          (let ((entry (harness-workspace-test-entry
+                        id (lambda (entry)
+                             (equal "reassignment"
+                                    (format "%s" (plist-get entry :kind)))))))
+            (should entry)
+            (should (equal (plist-get second :id) (plist-get entry :thread)))
+            (should (equal (plist-get first :id) (plist-get entry :origin)))
+            (should (equal (plist-get second :id) (plist-get entry :handling))))
+          (let ((again (harness-call 'workspace/reassign
+                                      id
+                                      (list :queue (plist-get item :id)
+                                            :text (plist-get item :text)
+                                            :thread (plist-get first :id))
+                                      (plist-get second :id))))
+            (should (equal "repeated" (plist-get again :status)))
+            (should (= 1 (length (plist-get (harness-call 'session/get second-live)
+                                             :queue))))))))))
+
+
+(ert-deftest harness-workspace-a-delivered-message-is-forwarded-not-replayed ()
+  "A message the model already read cannot be moved, so it is forwarded.
+The target gets the words as a message that names where they began, the
+answer says the original was delivered, and nothing claims to have
+retracted what the origin's transcript already holds."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-settle id)
+      (let* ((first (car (plist-get (harness-call 'workspace/get id) :threads)))
+             (entry (harness-workspace-test-entry
+                     id (lambda (entry)
+                          (and (equal "message"
+                                      (format "%s" (plist-get entry :kind)))
+                               (equal "user" (format "%s" (plist-get entry :role)))))))
+             (second (harness-call 'workspace/thread/create id "Kitchen"))
+             (second-live (harness-call 'workspace/thread/revive
+                                         id (plist-get second :id))))
+        (let ((answer (harness-call 'workspace/reassign
+                                    id (list :node (plist-get entry :node)
+                                             :thread (plist-get first :id))
+                                    (plist-get second :id))))
+          (should (equal "forwarded" (plist-get answer :status)))
+          (should (equal "delivered" (plist-get answer :delivery)))
+          (should (equal (plist-get first :id) (plist-get answer :origin)))
+          (should (equal second-live (plist-get answer :session)))
+          ;; The origin still holds the message it always held, with its own
+          ;; text and no sign of having moved.
+          (let ((kept (harness-workspace-test-entry
+                       id (lambda (candidate)
+                            (equal (plist-get candidate :node)
+                                   (plist-get entry :node))))))
+            (should (equal "The tile is matte." (plist-get kept :text)))
+            (should (equal (plist-get first :id) (plist-get kept :thread)))
+            (should-not (plist-get kept :reassigned)))
+          ;; The target read the words, named as coming from the other thread.
+          (harness-workspace-test-settle id)
+          (should (cl-find-if
+                   (lambda (node)
+                     (and (equal "user" (format "%s" (plist-get node :kind)))
+                          (string-match-p "The tile is matte"
+                                          (or (plist-get node :content) ""))
+                          (string-match-p "Reassigned from"
+                                          (or (plist-get node :content) ""))))
+                   (harness-call 'session/nodes second-live))))))))
+
+(ert-deftest harness-workspace-open-thread-names-one-existing-thread ()
+  "The open-thread tool finds the thread a request names, and only that one.
+An id wins over words of a title, words that fit two titles answer nil
+so the caller asks rather than guessing, and opening names the thread
+and its workspace without starting anything."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-settle id)
+      (let* ((tiles (car (plist-get (harness-call 'workspace/get id) :threads)))
+             (kitchen (harness-call 'workspace/thread/create id "Kitchen"))
+             (plumbing (harness-call 'workspace/thread/create id "Kitchen plumbing")))
+        (let ((all (harness-workspace--get id)))
+          ;; An exact id names that thread, whatever its title.
+          (should (equal (plist-get tiles :id)
+                         (plist-get (harness-workspace--thread-by-name
+                                    all (plist-get tiles :id))
+                                    :id)))
+          ;; A word only one title holds finds that thread.
+          (should (equal (plist-get plumbing :id)
+                         (plist-get (harness-workspace--thread-by-name
+                                    all "plumbing")
+                                    :id)))
+          ;; Two titles hold the words, so neither is chosen.
+          (should-not (harness-workspace--thread-by-name all "kitchen"))
+          (should-not (harness-workspace--thread-by-name all "nothing here"))
+          ;; Opening names the thread's project and the thread itself.
+          (let ((params (harness-workspace--open-thread-params all kitchen)))
+            (should (equal "workspace" (plist-get params :view)))
+            (should (equal id (plist-get params :workspace)))
+            (should (equal (plist-get kitchen :id) (plist-get params :thread)))
+            (should (file-directory-p (plist-get params :project)))))))))
+
+(ert-deftest harness-workspace-the-reassign-tool-moves-the-last-message ()
+  "The reassign tool names the message and the thread, and refuses a guess.
+`last' is the last user message the workspace shows -- not the latest
+answer, and not one still waiting in a queue -- and a title two threads
+hold is refused rather than moved to whichever came first."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id)))
+      (harness-call 'workspace/prompt id "The tile is matte.")
+      (harness-workspace-test-settle id)
+      (let* ((first (car (plist-get (harness-call 'workspace/get id) :threads)))
+             (session (plist-get first :live))
+             (kitchen (harness-call 'workspace/thread/create id "Kitchen"))
+             (plumbing (harness-call 'workspace/thread/create id "Kitchen plumbing"))
+             (ctx (list :session-id session)))
+        ;; A title two threads hold names neither, so nothing moves.
+        (let ((answer (harness-workspace--tool-reassign
+                       (list :thread "kitchen") ctx)))
+          (should (plist-get answer :is-error))
+          (should (string-match-p "No thread" (plist-get answer :content))))
+        ;; One thread's own word finds it, and the last user message the
+        ;; workspace shows moves.  The transcript already held it, so the
+        ;; answer says it was forwarded rather than retracted.
+        (let ((answer (harness-workspace--tool-reassign
+                       (list :thread "plumbing") ctx)))
+          (should-not (plist-get answer :is-error))
+          (should (string-match-p "^Forwarded · Kitchen plumbing · delivered"
+                                  (plist-get answer :content))))
+        ;; The origin keeps its own entry, and the reassignment names both.
+        (let ((entry (harness-workspace-test-entry
+                      id (lambda (entry)
+                           (equal "reassignment"
+                                  (format "%s" (plist-get entry :kind)))))))
+          (should entry)
+          (should (equal (plist-get plumbing :id) (plist-get entry :thread)))
+          (should (equal (plist-get first :id) (plist-get entry :origin))))
+        ;; The same request again says so and sends nothing twice.
+        (let ((answer (harness-workspace--tool-reassign
+                       (list :thread "plumbing") ctx)))
+          (should (string-match-p "^Repeated · Kitchen plumbing"
+                                  (plist-get answer :content))))
+        ;; A message waiting in a queue is not what `last' names: it is not
+        ;; in the conversation yet, so the tool moves the shown message.
+        (harness-call 'session/queue session "The grout is warm grey.")
+        (let ((answer (harness-workspace--tool-reassign
+                       (list :thread (plist-get kitchen :id)) ctx)))
+          (should (string-match-p "^Forwarded · Kitchen · delivered"
+                                  (plist-get answer :content))))
+        (should (equal "The grout is warm grey."
+                       (plist-get (car (plist-get (harness-call 'session/get session)
+                                                  :queue))
+                                  :text)))))))
+
+(ert-deftest harness-workspace-the-reassign-tool-is-a-workspace-tool ()
+  "An episode is offered the workspace's tools; another session is not.
+Both tools act on the workspace a session is an episode of, so a session
+that is not one gets neither."
+  (harness-workspace-test-with
+    (should (equal '("workspace_open_thread" "workspace_reassign" "list_dir")
+                   (harness-workspace--tools
+                    (list "list_dir")
+                    (list :ext (list :workspace "w-1")))))
+    (should (equal '("list_dir")
+                   (harness-workspace--tools
+                    (list "list_dir" "workspace_open_thread" "workspace_reassign")
+                    (list :ext nil))))
+    (should (harness-tool-get "workspace_reassign"))
+    (should (equal "Reassign message"
+                   (harness-tool-label (harness-tool-get "workspace_reassign"))))))
+
+(ert-deftest harness-workspace-replies-near-each-other-notify-once ()
+  "Several threads that finish together notify once, at the cutoff.
+A thread that finishes after that notification starts a new wait, so its
+reply is not lost and is not spoken twice."
+  (harness-workspace-test-with
+    (let* ((workspace (harness-workspace-test-workspace))
+           (id (plist-get workspace :id))
+           (tiles (harness-call 'workspace/thread/create id "Tiles"))
+           (kitchen (harness-call 'workspace/thread/create id "Kitchen"))
+           (quote (harness-call 'workspace/thread/create id "Quote"))
+           (sent nil)
+           (harness-workspace-notification-cutoff 0.01)
+           (harness-workspace--notification-ready nil)
+           (harness-workspace--notification-threads nil))
+      (unwind-protect
+          (let ((exists (symbol-function 'harness-method-exists-p)))
+            (cl-letf (((symbol-function 'harness-method-exists-p)
+                       (lambda (method)
+                         (or (eq method 'notification/send)
+                             (funcall exists method))))
+                      ((symbol-function 'harness-call-async)
+                       (lambda (method args &rest _)
+                         (when (eq method 'notification/send)
+                           (push args sent))
+                         (harness-resolved t))))
+            ;; Two threads finish within the cutoff.
+            (harness-workspace--queue-notification workspace tiles "s1")
+            (harness-workspace--queue-notification workspace kitchen "s2")
+            (should (timerp harness-workspace--notification-timer))
+            (should (= 1 (length harness-workspace--notification-ready)))
+            (should (= 2 (length (cdr (assoc id harness-workspace--notification-threads)))))
+            (harness-workspace--send-notification)
+            (should (= 1 (length sent)))
+            (should (equal "2 replies ready" (plist-get (car sent) :title)))
+            (should (string-match-p "Tiles" (plist-get (car sent) :body)))
+            (should (string-match-p "Kitchen" (plist-get (car sent) :body)))
+            ;; A third, later reply notifies on its own.
+            (harness-workspace--queue-notification workspace quote "s3")
+            (harness-workspace--send-notification)
+            (should (= 2 (length sent)))
+              (should (equal "Reply ready: Quote" (plist-get (car sent) :title)))))
+        (when (timerp harness-workspace--notification-timer)
+          (cancel-timer harness-workspace--notification-timer)
+          (setq harness-workspace--notification-timer nil))))))
 ;;;; The dream
 
 (defun harness-workspace-test-graph-page (name)

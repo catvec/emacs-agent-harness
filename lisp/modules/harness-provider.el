@@ -291,6 +291,23 @@ A provider that names no patterns offers every model it lists."
                         models)
     models))
 
+(defun harness-provider--allow-patterns (patterns)
+  "Return PATTERNS, a provider's `:allow-models', as a list of globs or nil.
+A single string stands for a list of one.  An entry that is not a
+non-blank string is dropped rather than kept as a pattern that matches
+nothing, so a stray nil in a hand-written list does not narrow the
+provider away; nil -- what is left of an empty list -- offers every
+model the provider lists."
+  (let ((list (cond ((null patterns) nil)
+                    ((stringp patterns) (list patterns))
+                    ((listp patterns) patterns)
+                    (t nil))))
+    (delq nil (mapcar (lambda (pattern)
+                        (and (stringp pattern)
+                             (not (string-blank-p pattern))
+                             (string-trim pattern)))
+                      list))))
+
 (defun harness-provider-model-refusal (model-id)
   "Return why the harness may not use MODEL-ID, or nil when it may.
 Both allowlists are checked: the harness-wide `harness-allowed-models',
@@ -571,7 +588,7 @@ need no slots they lack.")
 
 (cl-defun harness-define-provider (id &key label doc models complete fork quota
                                       capabilities tiers allow-models
-                                      warm close resolve embed)
+                                      warm close resolve embed system-one)
   "Register provider ID.
 LABEL and DOC describe it.  MODELS is a function returning a promise of
 model plists; one that takes an argument is passed non-nil when a
@@ -591,8 +608,10 @@ list of glob patterns of model ids (the same ones
 `harness-allowed-models' takes) naming the models this provider offers:
 only those are listed, offered and chosen for a tier, and a request for
 any other is refused before the provider sees it.  Nil, the default,
-offers every model the provider lists.  It narrows this provider only
-and never widens `harness-allowed-models'; both apply.  WARM, when
+offers every model the provider lists, and so does an entry that is not
+a non-blank string: a stray nil in a hand-written list narrows nothing
+away.  It narrows this provider only and never widens
+`harness-allowed-models'; both apply.  WARM, when
 given, takes a request plist without messages and prepares what such a
 request will need, a process say, so it answers sooner
 \(`provider/warm'); CLOSE takes a session id and frees what the
@@ -603,22 +622,27 @@ returns a model plist for it or nil (see `provider/model').  EMBED, when
 given, takes a model NAME, a list of TEXTS and an OPTS plist
 \(`:dimensions'), and returns a promise of (:vectors VECTORS :usage
 \(:input N)), one vector, a list of numbers, per text in order: the
-provider's models embed text (`provider/embed').  Defining ID again
+provider's models embed text (`provider/embed').  SYSTEM-ONE, when
+given, takes a model NAME and a request plist and answers it with
+System One decisions (`provider/system-one'): the provider's models
+decide what a completion model cannot.  Defining ID again
 replaces it and forgets the models it listed, which it is asked for
 again when needed; other providers' models stay cached."
   (puthash id (make-harness-provider :id id :label (or label (symbol-name id)) :doc doc
                                      :models-fn models :complete-fn complete
                                      :fork-fn fork :quota-fn quota
                                      :capabilities capabilities :tiers tiers
-                                     :allow-models allow-models)
+                                     :allow-models (harness-provider--allow-patterns allow-models))
            harness-providers)
-  (puthash id (list :warm warm :close close :resolve resolve :embed embed) harness-provider--lifecycle)
+  (puthash id (list :warm warm :close close :resolve resolve :embed embed
+                    :system-one system-one)
+           harness-provider--lifecycle)
   (harness-provider--forget id)
   id)
 
 (defun harness-provider--hook (id key)
   "Return provider ID's hook KEY, or nil.
-KEY is `:warm', `:close', `:resolve' or `:embed'."
+KEY is `:warm', `:close', `:resolve', `:embed' or `:system-one'."
   (plist-get (gethash id harness-provider--lifecycle) key))
 
 (defun harness-provider-get (id)
@@ -1351,29 +1375,89 @@ is logged: the request then goes on unrecorded."
                             job (harness-error-message err))
                nil)))))
 
-(defun harness-provider--job-events (id on-event)
+(defun harness-provider--job-recorder (id on-event)
   "Wrap ON-EVENT so that internal session ID records the call's events.
-Every event reaches ON-EVENT unchanged, and is recorded after it: the
-text the model writes is gathered for the reply, its usage is added to
-the session's (`session/usage-add'), and `done', whatever its stop
-reason, finishes the session (`session/internal-finish').  An error of
-the recording is logged, never passed on; one of ON-EVENT still is,
-to `harness-provider--guard-events', which wraps this."
-  (let ((reply nil))
-    (lambda (event)
-      (unwind-protect
-          (funcall on-event event)
-        (condition-case err
-            (pcase (plist-get event :type)
-              ('text (when (stringp (plist-get event :delta))
-                       (push (plist-get event :delta) reply)))
-              ('usage (harness-call 'session/usage-add id (harness-plist-remove event :type)))
-              ('done (harness-call 'session/internal-finish id
-                                   :reply (apply #'concat (reverse reply))
-                                   :stop-reason (plist-get event :stop-reason)
-                                   :error (plist-get event :error))))
-          (error (harness-log 'warn "provider: recording %S in internal session %s failed: %s"
-                              (plist-get event :type) id (harness-error-message err))))))))
+Return a plist of `:on-event', the wrapper, and `:finish', the function
+that ends the record once.
+
+Every event reaches ON-EVENT unchanged, and is recorded before it, so a
+caller that cancels or fails from its own handler cannot rewrite what
+the call has already done: the text the model writes is gathered for
+the reply, its usage is added to the session's (`session/usage-add'),
+and `done', whatever its stop reason, finishes the session
+\(`session/internal-finish').
+
+A call is ended once.  The first of a `done' and `:finish' called as
+`cancelled' is its end; everything after that is late and recorded no
+further -- a repeated cancel, a `done' that arrives after the caller
+stopped the call, and one a provider emits from inside its own cancel
+alike.  `session/internal-finish' is not terminal-idempotent: it
+appends the reply and the hint again, so this is the one place that
+keeps a call's record from being ended twice.  An error of the
+recording is logged, never passed on; one of ON-EVENT still is, to
+`harness-provider--guard-events', which wraps this."
+  (let ((reply nil) (ended nil))
+    (cl-labels
+        ((finish (stop-reason error)
+           (unless ended
+             (setq ended t)
+             (condition-case err
+                 (harness-call 'session/internal-finish id
+                               :reply (apply #'concat (reverse reply))
+                               :stop-reason stop-reason
+                               :error error)
+               (error (harness-log 'warn "provider: finishing internal session %s failed: %s"
+                                   id (harness-error-message err))))))
+         (record (event)
+           (unless ended
+             (condition-case err
+                 (pcase (plist-get event :type)
+                   ('text (when (stringp (plist-get event :delta))
+                            (push (plist-get event :delta) reply)))
+                   ('usage (harness-call 'session/usage-add id (harness-plist-remove event :type)))
+                   ('done (finish (plist-get event :stop-reason) (plist-get event :error))))
+               (error (harness-log 'warn "provider: recording %S in internal session %s failed: %s"
+                                   (plist-get event :type) id (harness-error-message err)))))))
+      (list :on-event (lambda (event) (record event) (funcall on-event event))
+            :finish #'finish))))
+
+(defun harness-provider--job-handle (handle finish)
+  "Return HANDLE, whose `:cancel' ends a recorded call once.
+FINISH ends the record of the call (`harness-provider--job-recorder').
+The provider's own cancel still runs first, so a call is stopped
+exactly as it was: whatever the provider does -- nothing, a `done' it
+emits from inside its cancel, or an error -- the record is then
+finished once, as cancelled where the provider ended nothing itself,
+and a repeated cancel neither reaches the provider again nor records
+anything more.  A handle with nothing to cancel is given one all the
+same: the record of a call that never reached a transport has no other
+end."
+  (let* ((inner (plist-get handle :cancel))
+         (handle (copy-sequence handle))
+         (cancelled nil))
+    (plist-put handle :cancel
+               (lambda ()
+                 (unless cancelled
+                   (setq cancelled t)
+                   (unwind-protect
+                       (when (functionp inner) (funcall inner))
+                     (funcall finish 'cancelled nil)))
+                 nil))
+    handle))
+
+(defun harness-provider--job-recorded-handle (handle recorder job-id)
+  "Return HANDLE of a call recorded as internal session JOB-ID.
+RECORDER is that call's record, whose `:finish' ends it; the handle's
+`:cancel' ends it once, as cancelled, after the provider's own cancel
+\(see `harness-provider--job-handle').  The session is named as
+`:session', for a caller that shows what the call asked and answered.
+With no JOB-ID nothing is recorded and HANDLE is returned as it is."
+  (if (null job-id)
+      handle
+    (let ((handle (plist-put (copy-sequence handle) :session job-id)))
+      (if recorder
+          (harness-provider--job-handle handle (plist-get recorder :finish))
+        handle))))
 
 (harness-defmethod provider/complete (request)
   "Start a completion for REQUEST; return a handle plist with `:cancel'.
@@ -1385,9 +1469,12 @@ what a call the harness makes on its own is for, such as \"Permission
 judge\", is recorded as an internal session (`session/internal-start'),
 made for the session `:job-parent' names, in the project `:job-project'
 names; it is finished when the request is done, refused or failed
-alike.  The provider never sees those keys, and the handle then carries
-the internal session's id as `:session', for a caller that shows what
-the call asked and answered."
+alike, and when the caller cancels it -- the handle's `:cancel' stops
+the call as the provider's does and ends the record once, as
+cancelled, for a provider whose cancel emits no `done'.  The provider
+never sees those keys, and the handle then carries the internal
+session's id as `:session', for a caller that shows what the call
+asked and answered."
   (pcase-let* ((job-id (harness-provider--job-start request))
                (request (if (or (plist-member request :job) (plist-member request :job-parent)
                                 (plist-member request :job-project))
@@ -1395,11 +1482,13 @@ the call asked and answered."
                           request))
                (`(,pid . ,_) (harness-provider-parse-model (plist-get request :model)))
                (provider (and pid (harness-provider-get pid)))
+               (recorder (and job-id (harness-provider--job-recorder
+                                      job-id (or (plist-get request :on-event) #'ignore))))
                (on-event (let ((caller (or (plist-get request :on-event) #'ignore)))
                            ;; Inside the guard, so the recording too sees
                            ;; `done' once.
                            (harness-provider--guard-events
-                            (if job-id (harness-provider--job-events job-id caller) caller))))
+                            (if recorder (plist-get recorder :on-event) caller))))
                ;; One place bounds what a completion may ask a model to
                ;; write, and it does nothing unless the user set a ceiling
                ;; (`harness-provider-max-output-tokens'): an ordinary
@@ -1411,29 +1500,22 @@ the call asked and answered."
      (refusal
       (harness-log 'warn "provider/complete: %s" refusal)
       (funcall on-event (list :type 'done :stop-reason 'error :error refusal))
-      (if job-id
-          (list :cancel #'ignore :session job-id)
-        (list :cancel #'ignore)))
+      (harness-provider--job-recorded-handle (list :cancel #'ignore) recorder job-id))
      ((null provider)
       (funcall on-event (list :type 'done :stop-reason 'error
                               :error (format "No provider for model %s" (plist-get request :model))))
-      (if job-id
-          (list :cancel #'ignore :session job-id)
-        (list :cancel #'ignore)))
+      (harness-provider--job-recorded-handle (list :cancel #'ignore) recorder job-id))
      (t
       (condition-case err
           (let ((handle (or (harness-provider--send provider pid request)
                             (list :cancel #'ignore))))
             ;; A recorded call says which internal session holds it, so a
-            ;; caller can show the prompt, the reply and any error.
-            (if job-id
-                (plist-put (copy-sequence handle) :session job-id)
-              handle))
+            ;; caller can show the prompt, the reply and any error; its
+            ;; cancel ends that record when the provider's emits nothing.
+            (harness-provider--job-recorded-handle handle recorder job-id))
         (error
          (funcall on-event (list :type 'done :stop-reason 'error :error (harness-error-message err)))
-         (if job-id
-             (list :cancel #'ignore :session job-id)
-           (list :cancel #'ignore))))))))
+         (harness-provider--job-recorded-handle (list :cancel #'ignore) recorder job-id)))))))
 
 
 (defun harness-provider--send (provider pid request)
@@ -1480,6 +1562,81 @@ warmed."
   "Non-nil when MODEL-ID's provider embeds text (see `provider/embed')."
   (pcase-let ((`(,pid . ,_) (harness-provider-parse-model model-id)))
     (and pid (harness-provider-get pid) (harness-provider--hook pid :embed) t)))
+
+(defvar harness-provider-system-one)
+;; The module that owns the System One contract sets this, and defines
+;; `provider/system-one-validate', so a request is checked against the
+;; model before its provider is called.  It is declared here for the same
+;; reason `harness-admission' is: `provider/system-one' is the funnel, and
+;; a harness without that module asks a provider exactly what it always
+;; asked.
+(defun harness-provider--system-one-problems (model-id request)
+  "Return what is wrong with REQUEST for MODEL-ID, as strings.
+The contract that says what a request is belongs to the module that owns
+it (harness-provider-system-one.el), which answers through
+`provider/system-one-validate'; a harness without that module has no
+contract to check against, and asks what it is asked."
+  (if (and (bound-and-true-p harness-provider-system-one)
+           (harness-method-exists-p 'provider/system-one-validate))
+      (condition-case err
+          (harness-call 'provider/system-one-validate model-id request)
+        (error (list (harness-error-message err))))
+    nil))
+
+(harness-defmethod provider/system-one-p (model-id)
+  "Non-nil when MODEL-ID's provider answers System One decisions.
+A System One model is asked a state and typed questions about it, and
+answers each with a typed value rather than prose (see
+`provider/system-one').  It is a capability of the provider, not a kind
+of provider: a model that also completes, or embeds, declares this too."
+  (pcase-let ((`(,pid . ,_) (harness-provider-parse-model model-id)))
+    (and pid (harness-provider-get pid) (harness-provider--hook pid :system-one) t)))
+
+(harness-defmethod provider/system-one (model-id request)
+  "Ask MODEL-ID, a System One model, for the decisions REQUEST asks.
+REQUEST is `(:state STATE :questions QUESTIONS)' and whatever else the
+contract adds (see harness-provider-system-one.el): STATE is the content
+to judge, sent once, and QUESTIONS maps a name the caller chose to a
+typed question about it.  Return a handle plist with `:cancel' whose
+`:promise' resolves with one typed answer per question, or rejects when
+there is none.  It rejects when `harness-allowed-models' does not allow
+MODEL-ID, which no provider is then asked for, when the provider of
+MODEL-ID does not answer System One decisions, and when the request is
+not one the model's contract allows."
+  (pcase-let* ((`(,pid . ,name) (harness-provider-parse-model model-id))
+               (p (and pid (harness-provider-get pid)))
+               (hook (and p (harness-provider--hook pid :system-one)))
+               (refusal (harness-provider-model-refusal model-id))
+               (refuse (lambda (message)
+                         (list :call nil :provider pid :model model-id :cancel #'ignore
+                               :promise (harness-rejected (list 'harness-error message))))))
+    (cond
+     (refusal (funcall refuse refusal))
+     ((null pid) (funcall refuse (format "No provider in model %s: give it as PROVIDER:NAME" model-id)))
+     ((null p) (funcall refuse (format "No provider for model %s" model-id)))
+     ((null hook) (funcall refuse (format "The provider of %s does not answer System One decisions" model-id)))
+     (t
+      (let ((problems (harness-provider--system-one-problems model-id request)))
+        (if problems
+            (progn
+              (harness-log 'warn "provider/system-one: %s" (string-join problems "; "))
+              (funcall refuse (string-join problems "; ")))
+          (condition-case err
+              (let ((answer (if (and (bound-and-true-p harness-provider-system-one)
+                                     (harness-method-exists-p 'provider/system-one-dispatch))
+                                ;; The module that owns the contract owns the
+                                ;; deadline, the cancellation and the
+                                ;; settle-once guard, so it builds the handle.
+                                (harness-call 'provider/system-one-dispatch model-id request)
+                              (funcall hook name request))))
+                (cond
+                 ;; A provider may answer with the promise itself, and then
+                 ;; there is nothing to cancel: the call has already begun.
+                 ((harness-promise-p answer) (list :promise answer :cancel #'ignore))
+                 ((and (listp answer) (harness-promise-p (plist-get answer :promise))) answer)
+                 (t (funcall refuse (format "The provider of %s returned no promise of a decision"
+                                            model-id)))))
+            (error (list :cancel #'ignore :promise (harness-rejected err))))))))))
 
 (harness-defmethod provider/embed (model-id texts &optional opts)
   "Return a promise of the embeddings of TEXTS, strings, by MODEL-ID.

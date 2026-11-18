@@ -142,8 +142,21 @@ Report focused tests, the full suite and lint separately. A failing full
 suite must be labeled **full suite FAILED**, with its exit status and the
 failing test names, even when the same failure exists at the branch's base.
 That comparison can explain the cause, but cannot turn a failed run into
-"all tests pass". Fix an appropriate stale test or regression; otherwise
-report the failure as a blocker. Link the tool call for the actual test
+"all tests pass".
+
+**Every failure is work to do, not a baseline to cite.** A suite that
+fails is a defect in this tree, whether this branch made it or it was
+already on main: investigate it, find the cause, and repair it with a
+regression that fails before the fix and passes after it. Leave the code
+better than you found it. Never dismiss a failure as pre-existing,
+somebody else's, flaky, or out of scope; never skip, delete, weaken,
+`@skip` or relabel a test to get green; never treat a narrower rerun, a
+passing wrapper or a stamp as the failing run's result. A repair another
+live task already owns is coordinated by naming that task and its
+evidence, not by leaving the failure in place. When a genuine
+environment or access blocker stops a repair, report the failing command,
+its exit status, the tests it affects, the evidence, and the smallest next
+action -- the run stays failed. Link the tool call for the actual test
 run, not a wrapper whose last `echo` happened to return zero.
 
 ## Check a provider and a model against a real account
@@ -376,11 +389,15 @@ Kotlin from scratch every time).  When `tool/` differs from the base's it runs
 the tools' own tests too.  The whole output of each step is kept in
 `scripts/.dev/client-check/logs/`, one file a step.
 
-The app's tests are compared with the base's by name.  A test that fails
-here and failed at the base too is somebody else's breakage: it is listed
-and held against nobody, so a red main does not stop every branch; a test
-that fails here and passed there fails the check, and so does a test file
-that no longer loads.
+**A failing test fails the check.**  The app's tests are compared with the
+base's by name, but only to say which failures this branch brought and which
+it found: a test that fails here and failed at the base too is a defect in
+the tree all the same, and the check stays failed until it is mended.  There
+is no baseline waiver -- a red main is work to do, not a licence for every
+branch to go in red on top of it.  A test file that no longer loads fails the
+check too.  The check prints what to do about it: *investigate and repair
+every failure*, with a regression that fails before the fix and passes
+after it, and never by skipping, deleting, weakening or relabelling a test.
 
 When everything passed the check writes
 `scripts/.dev/client-check/stamp.json`, naming the commit.  The plugin

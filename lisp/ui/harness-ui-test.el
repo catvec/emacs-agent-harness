@@ -35,6 +35,20 @@ in BODY, it would give the windows above its second line."
        (mapc #'kill-buffer (list other chat menu))
        (ignore-errors (delete-other-windows)))))
 
+(ert-deftest harness-ui-update-and-event-listeners-have-named-timing-boundaries ()
+  "A slow listener is identified individually without retaining its input."
+  (let ((harness-ui-update-functions '(ignore))
+        (harness-ui-event-functions '(ignore))
+        seen)
+    (cl-letf (((symbol-function 'harness-latency-call)
+               (lambda (category name fn &rest args)
+                 (push (list category name) seen)
+                 (apply fn args))))
+      (harness-ui--dispatch-ui "session/update"
+                              '(:sessionId "x" :update (:sessionUpdate "test")) nil)
+      (harness-ui--run-event-functions "test" nil))
+    (should (equal '((ui-event ignore) (ui-update ignore)) seen))))
+
 (ert-deftest harness-ui-menu-from-side-window-leaves-other-windows-alone ()
   (harness-ui-test-with-layout
     (let* ((other-window (get-buffer-window other))
@@ -4763,6 +4777,162 @@ never replaced.  Quitting leaves the main area and both slots intact."
         (setq harness-ui-turn-accepted-functions nil)))
     (harness-resolve answer '(:stopReason "end_turn"))
     (should answered)))
+
+;;;; Pacing the big listings
+
+(defmacro harness-ui-test-with-fake-socket (sent &rest body)
+  "Run BODY against a fake open socket, recording its requests in SENT.
+Each request is answered only when the test settles it, as a socket's
+is: SENT collects (METHOD PARAMS PROMISE) in the order they went out.
+Nothing connects: `harness-ui-connection' is the fake, and it is open."
+  (declare (indent 1))
+  `(let ((harness-ui-connection (harness-acp--make-connection :kind 'tcp :address "127.0.0.1:9"))
+         (harness-ui--bulk-queue nil)
+         (harness-ui--bulk-active nil)
+         (,sent nil))
+     (cl-letf (((symbol-function 'harness-ui-connection) (lambda () harness-ui-connection))
+               ((symbol-function 'harness-acp-open-p) (lambda (_conn) t))
+               ((symbol-function 'harness-acp-request)
+                (lambda (_conn method params)
+                  (let ((promise (harness-make-promise)))
+                    (setq ,sent (append ,sent (list (list method params promise))))
+                    promise))))
+       ,@body)))
+
+(ert-deftest harness-ui-big-listings-go-one-at-a-time-on-a-socket ()
+  "Sessions and tasks never have two answers on their way at once.
+The UI asks for both from several places at once -- connecting, opening
+a board, the review count -- and their answers are megabytes each, so a
+burst of them would pass the connection's write bound and the harness
+would drop the connection.  The first goes at once, the others wait
+their turn, each sent only once the one before was answered, and every
+caller still gets its own whole answer."
+  (harness-ui-test-with-fake-socket sent
+    (let ((sessions (harness-ui-request "_harness/session/list" '(:filter (:lean t))))
+          (tasks (harness-ui-request "_harness/task/list" nil))
+          (review (harness-ui-request "_harness/task/list" nil)))
+      ;; One is out; the task listing waits its turn, and is asked for once.
+      (should (= 1 (length sent)))
+      (should (= 1 (length harness-ui--bulk-queue)))
+      (should (eq tasks review))
+      ;; Another request, which is not a big listing, goes straight out.
+      (harness-ui-request "_harness/session/get" '(:id "s1"))
+      (should (= 2 (length sent)))
+      ;; Answering the first sends the task listing, the only one waiting.
+      (harness-resolve (nth 2 (nth 0 sent)) (list '(:id "s1")))
+      (should (= 3 (length sent)))
+      (should-not harness-ui--bulk-queue)
+      (should (equal '("_harness/session/list" "_harness/session/get" "_harness/task/list")
+                     (mapcar #'car sent)))
+      ;; Every caller got a whole answer of its own.
+      (should (equal '((:id "s1")) (harness-promise-value sessions)))
+      (harness-resolve (nth 2 (nth 2 sent)) '((:id "t1")))
+      (should-not harness-ui--bulk-active)
+      (should (equal '((:id "t1")) (harness-promise-value tasks)))
+      (should (equal '((:id "t1")) (harness-promise-value review))))))
+
+(ert-deftest harness-ui-big-listings-fail-through-to-their-callers ()
+  "A listing that fails rejects its caller, and the next still goes.
+One answer at a time does not mean one failure stops the queue."
+  (harness-ui-test-with-fake-socket sent
+    (let ((first (harness-ui-request "_harness/session/list" nil))
+          (second (harness-ui-request "_harness/task/list" nil)))
+      (should (= 1 (length sent)))
+      (harness-reject (nth 2 (nth 0 sent)) '(acp-error -32000 "write backlog exceeded" nil))
+      (should (eq 'rejected (harness-promise-state first)))
+      ;; The one behind it went, on the same connection.
+      (should (= 2 (length sent)))
+      (harness-resolve (nth 2 (nth 1 sent)) nil)
+      (should (eq 'resolved (harness-promise-state second))))))
+
+(ert-deftest harness-ui-big-listings-are-not-paced-in-process ()
+  "The harness in this Emacs has no writer to overflow: nothing waits.
+Its answers come back on the spot, so pacing them would only delay
+every view that asks."
+  (let ((harness-ui-connection (harness-acp--make-connection :kind 'local))
+        (harness-ui--bulk-queue nil)
+        (harness-ui--bulk-active nil)
+        (asked 0))
+    (cl-letf (((symbol-function 'harness-ui-connection) (lambda () harness-ui-connection))
+              ((symbol-function 'harness-acp-request)
+               (lambda (_conn _method _params)
+                 (cl-incf asked)
+                 (harness-resolved nil))))
+      (harness-ui-request "_harness/session/list" nil)
+      (harness-ui-request "_harness/task/list" nil)
+      (should (= 2 asked))
+      (should-not harness-ui--bulk-queue))))
+
+(ert-deftest harness-ui-a-listing-waits-for-the-connection-to-carry-it ()
+  "Nothing goes out on a connection that is not open yet, and all of it does once it is.
+The first listing of a start is asked for while the socket connects."
+  (let ((harness-ui-connection (harness-acp--make-connection :kind 'tcp :address "127.0.0.1:9"))
+        (harness-ui--bulk-queue nil)
+        (harness-ui--bulk-active nil)
+        (harness-ui--queue nil)
+        (sent nil))
+    (cl-letf (((symbol-function 'harness-ui-connection) (lambda () harness-ui-connection))
+              ((symbol-function 'harness-acp-request)
+               (lambda (_conn method params)
+                 (setq sent (append sent (list (list method params))))
+                 (harness-resolved (list '(:id "s1")))))
+              ((symbol-function 'harness-acp-open-p) (lambda (_conn) nil)))
+      (let ((promise (harness-ui-request "_harness/session/list" nil)))
+        (should-not sent)
+        (should (= 1 (length harness-ui--bulk-queue)))
+        ;; Open now: the queued listing goes.
+        (cl-letf (((symbol-function 'harness-acp-open-p) (lambda (_conn) t)))
+          (harness-ui--flush-queue))
+        (should (equal '("_harness/session/list") (mapcar #'car sent)))
+        (should-not harness-ui--bulk-queue)
+        (should (eq 'resolved (harness-promise-state promise)))))))
+
+(ert-deftest harness-ui-a-connection-that-closes-rejects-what-waited-its-turn ()
+  "Nothing waits for an answer on a connection that is gone.
+What was already sent is rejected by the connection
+\(`harness-acp-close'); what waited its turn here is rejected the same
+way, with the same reason, so no view waits for good."
+  (harness-ui-test-with-fake-socket sent
+    (let ((out (harness-ui-request "_harness/session/list" nil))
+          (waiting (harness-ui-request "_harness/task/list" nil)))
+      (should (= 1 (length sent)))
+      (harness-ui--abandon "connection broken by remote peer")
+      (should (eq 'rejected (harness-promise-state waiting)))
+      (should (equal "connection broken by remote peer"
+                     (harness-acp-closed-reason (harness-promise-value waiting))))
+      ;; The one that went out has no answer coming either: it is rejected
+      ;; the same way, so no view waits for one.
+      (should (eq 'rejected (harness-promise-state out)))
+      (should (equal "connection broken by remote peer"
+                     (harness-acp-closed-reason (harness-promise-value out))))
+      ;; Nothing is held as out any more, so a request on the next
+      ;; connection goes at once.
+      (should-not harness-ui--bulk-active)
+      (should-not harness-ui--bulk-queue))))
+
+
+(ert-deftest harness-ui-a-pacing-that-stalls-lets-the-queue-go-on ()
+  "A listing whose answer never comes does not hold the board for good.
+An answer always comes -- the harness answers every request, and the
+connection rejects the pending ones when it closes -- but a harness busy
+for minutes must not keep every board from loading."
+  (harness-ui-test-with-fake-socket sent
+    (let* ((harness-ui--bulk-stall-seconds 0.05)
+           (harness-ui--bulk-stall-timer nil)
+           (first (harness-ui-request "_harness/session/list" nil)))
+      (should (= 1 (length sent)))
+      (should (timerp harness-ui--bulk-stall-timer))
+      (let ((second (harness-ui-request "_harness/task/list" nil)))
+        (should (= 1 (length sent)))
+        ;; The answer to the first never comes: the queue goes on without it.
+        (harness-test-wait (lambda () (= 2 (length sent))) 5 "the next listing")
+        (should (eq 'rejected (harness-promise-state first)))
+        (should (= harness-acp-error-transport (nth 1 (harness-promise-value first))))
+        ;; The one that went out is answered as usual.
+        (harness-resolve (nth 2 (nth 1 sent)) nil)
+        (should (eq 'resolved (harness-promise-state second)))
+        (should-not harness-ui--bulk-active)
+        (should-not harness-ui--bulk-stall-timer)))))
 
 
 (provide 'harness-ui-test)

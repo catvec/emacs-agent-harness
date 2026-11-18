@@ -592,6 +592,34 @@ this machine's player, so the speaker stays local."
       (should-not harness-voice--job)
       (should (equal "Voice ready · Microphone off" (harness-voice--status))))))
 
+(ert-deftest harness-ui-voice-live-mode-requires-a-session-route-and-compose ()
+  "A live session needs both its nonempty id and an actual compose box."
+  (dolist (session '(nil "" 7 "voice-session"))
+    (harness-ui-voice-test-with
+      (let ((harness-voice-provider 'custom)
+            (harness-voice-live--process nil)
+            (harness-voice-live--buffer nil))
+        (setq harness-ui-session-id session)
+        (if (equal session "voice-session")
+            (progn
+              (harness-voice-mode 1)
+              (should harness-voice-mode)
+              (should (eq harness-voice--owner buf)))
+          (should (equal "Live voice compose unavailable"
+                         (error-message-string
+                          (should-error (harness-voice-mode 1) :type 'user-error))))
+          (should-not harness-voice-mode)
+          (should-not harness-voice--owner))
+        ;; A remembered session without its box is not a live target,
+        ;; even in a buffer whose major mode names a chat.
+        (setq harness-ui-session-id "voice-session"
+              major-mode 'harness-chat-mode)
+        (harness-compose-hide)
+        (should (equal "Live voice compose unavailable"
+                       (error-message-string
+                        (should-error (harness-voice-mode 1) :type 'user-error))))
+        (should-not harness-voice-mode)))))
+
 ;;;; The receipt of an accepted request (WAV capability)
 
 ;; A real player process would need a speaker, which no test machine has:

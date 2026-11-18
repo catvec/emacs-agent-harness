@@ -274,6 +274,26 @@ The build is straight's kind, links into a clone; the clone moved on."
                               (harness-update-test--failure (harness--update-checkout clone))))
       (should (equal head (harness-update-test--git clone "rev-parse" "HEAD"))))))
 
+(ert-deftest harness-update-a-git-that-cannot-start-is-not-a-missing-remote ()
+  "A git the machine could not start is not a checkout without a remote.
+The two say different things about the checkout, and only one of them is
+the person's to act on: told there is no remote, they would look for a
+remote they already have.  A machine out of processes, as a full run can
+leave it, makes `make-process' fail with `file-error' rather than git
+failing with a message of its own."
+  (harness-update-test-with-clone
+    (let ((head (harness-update-test--git clone "rev-parse" "HEAD"))
+          (real (symbol-function 'make-process)))
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest args)
+                   (if (equal (plist-get args :name) "harness-revision-git")
+                       (signal 'file-error (list "Opening process" "Resource temporarily unavailable"))
+                     (apply real args)))))
+        (let ((problem (harness-update-test--failure (harness--update-checkout clone))))
+          (should-not (string-match-p "has no remote to update from" problem))
+          (should (string-match-p "Resource temporarily unavailable" problem))))
+      (should (equal head (harness-update-test--git clone "rev-parse" "HEAD"))))))
+
 (ert-deftest harness-update-lists-a-commit-body ()
   "The commits an update brought are read as changelog entries, body included."
   (harness-update-test-with-clone

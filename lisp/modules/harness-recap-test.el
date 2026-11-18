@@ -156,26 +156,27 @@ and the tasks module would prompt the session while a test runs."
     (should-not (harness-recap--due-p task 1 1 1119.0))
     (should (harness-recap--due-p task 1 1 1120.0))))
 
-(ert-deftest harness-recap-reads-a-small-tail-of-the-transcript ()
+(ert-deftest harness-recap-reads-a-small-part-of-the-transcript ()
   "A recap is one line, so it reads a few thousand characters, not the log.
-The request carries the tail of the transcript the session keeps, cut
-to `harness-tasks-recap-context' at a line boundary, so a long turn of
-file dumps and test logs costs the same as a short one."
+The request carries the newest of what the transcript holds, cut to
+`harness-tasks-recap-context', so a long turn of file dumps and test
+logs costs the same as a short one, and a first line says how much was
+left out."
   (harness-recap-test-with
     (let ((sid (harness-recap-test-session)))
       (dotimes (i 50)
         (harness-call 'session/append sid
                       (list :kind 'assistant
                             :content (format "step %02d %s" i (make-string 300 ?x)))))
-      (let ((tail (harness-recap--tail sid)))
-        (should (<= (length tail) (1+ harness-tasks-recap-context)))
-        (should (string-prefix-p "…[assistant] " tail))
-        (should (string-suffix-p (format "step 49 %s" (make-string 300 ?x)) tail))
-        (should-not (string-match-p "step 00 " tail)))
+      (let ((work (harness-recap--work (harness-call 'session/nodes sid) nil)))
+        (should (<= (length work) (+ harness-tasks-recap-context 60)))
+        (should (string-match-p "\\`\\[[0-9]+ earlier entries left out\\]\n" work))
+        (should (string-suffix-p (format "step 49 %s" (make-string 300 ?x)) work))
+        (should-not (string-match-p "step 00 " work)))
       ;; Zero carries the whole transcript, as it always did.
       (let ((harness-tasks-recap-context 0))
-        (should (> (length (harness-recap--tail sid)) 10000)))
-      ;; The request carries the tail, not the whole log: the task and a
+        (should (> (length (harness-recap--work (harness-call 'session/nodes sid) nil)) 10000)))
+      ;; The request carries that, not the whole log: the assignment and a
       ;; line of progress above it cost a few hundred characters.
       (let* ((task (list :prompt "Make the widget faster"))
              (session (harness-call 'session/get sid))
@@ -186,11 +187,11 @@ file dumps and test logs costs the same as a short one."
         (should-not (string-match-p "step 00 " prompt))
         (should (< (length prompt) (+ harness-tasks-recap-context 1000)))))))
 
-(ert-deftest harness-recap-a-tool-result-takes-a-small-part-of-the-tail ()
+(ert-deftest harness-recap-a-tool-result-takes-a-small-part-of-the-work ()
   "A long tool result is cut short, so the entries around it are read.
-The tail a recap carries is cut to `harness-tasks-recap-context': a
-file dump or a test log that fills it would leave the messages and
-calls that say what the work is doing out of the request."
+The work a recap carries is cut to `harness-tasks-recap-context': a file
+dump or a test log that fills it would leave the messages and calls that
+say what the work is doing out of the request."
   (harness-recap-test-with
     (let ((sid (harness-recap-test-session)))
       (harness-call 'session/append sid (list :kind 'assistant :content "Before the dump."))
@@ -199,20 +200,16 @@ calls that say what the work is doing out of the request."
                           :output (mapconcat (lambda (i) (format "line %03d %s" i (make-string 200 ?x)))
                                              (number-sequence 1 50) "\n")))
       (harness-call 'session/append sid (list :kind 'assistant :content "After the dump."))
-      (let* ((text (harness-call 'session/transcript-text sid))
-             (compact (harness-recap--compact text))
+      (let* ((nodes (harness-call 'session/nodes sid))
+             (work (harness-recap--work nodes nil))
              (result (cl-find-if (lambda (line) (string-prefix-p "[result] " line))
-                                 (split-string compact "\n"))))
-        (should (string-match-p "Before the dump\\." compact))
-        (should (string-match-p "After the dump\\." compact))
+                                 (split-string work "\n"))))
+        (should (string-match-p "Before the dump\\." work))
+        (should (string-match-p "After the dump\\." work))
         (should result)
         (should (<= (length result) harness-recap--result-chars))
-        (should-not (string-match-p "line 010" compact))
-        ;; What a recap carries holds both entries and the cut result.
-        (let ((tail (harness-recap--tail sid)))
-          (should (string-match-p "Before the dump\\." tail))
-          (should (string-match-p "After the dump\\." tail))
-          (should (< (length tail) 2000)))))))
+        (should-not (string-match-p "line 010" work))
+        (should (< (length work) 2000))))))
 
 (ert-deftest harness-recap-turn-threshold-makes-one ()
   "Crossing the turn threshold sends a short request and stores the recap."
@@ -254,9 +251,9 @@ calls that say what the work is doing out of the request."
         (should (eq t (plist-get req :no-thinking)))
         (should-not (plist-get req :thinking))
         (should (string-match-p "Do the widget" text))
-        (should (string-match-p "Progress: 2 turns, 1 tool call" text))
+        (should (string-match-p "Work so far: 2 turns, 1 tool call" text))
         (should (string-match-p "\\[tool read_file\\]" text))
-        (should (string-match-p "Recap this task now" text))))))
+        (should (string-match-p "Write the recap now" text))))))
 
 (ert-deftest harness-recap-honours-a-thinking-level ()
   "A configured recap thinking level goes out instead of `:no-thinking'."
@@ -388,7 +385,7 @@ calls that say what the work is doing out of the request."
              (text (plist-get (car (plist-get message :content)) :text)))
         (should (equal "demo:scripted" (plist-get req :model)))
         (should (string-match-p "Do the widget" text))
-        (should (string-match-p "Progress: 0 turns, 0 tool calls" text))))
+        (should (string-match-p "Work so far: 0 turns, 0 tool calls" text))))
     ;; Another session's recap is not written here: only a sub-agent's.
     (let* ((sid (harness-recap-test-session))
            (harness-provider-demo-script-override harness-recap-test-script))
@@ -581,10 +578,10 @@ has run, and counting starts anew with each recap."
                (message (car (last (plist-get req :messages))))
                (text (plist-get (car (plist-get message :content)) :text)))
           (should (equal "Recap" (plist-get req :job)))
-          (should (string-match-p "Task: refactor the parser" text))
-          (should-not (string-match-p "Task: an old request" text))
+          (should (string-match-p "Task (the assignment; do not restate it): refactor the parser" text))
+          (should-not (string-match-p "do not restate it): an old request" text))
           (should (string-match-p "Progress: the current turn has been running for" text))
-          (should-not (string-match-p "Progress: [0-9]+ turns" text)))
+          (should-not (string-match-p "Work so far: [0-9]+ turns" text)))
         ;; Counting began again with it: one more call is not due, two are.
         (harness-recap-test-tool-results sid 1)
         (should (= 1 (length requests)))
@@ -782,3 +779,200 @@ tool calls that follow it, not twice in a row."
       (harness-recap-test-tool-results sid 2)
       (harness-test-wait (lambda () (harness-recap-history sid)) 5 "the recap, after the module started again")
       (harness-recap--shutdown))))
+
+;;;; What a recap says: recent work, not the assignment
+
+;; The request is what makes a recap concrete.  These tests read the
+;; prompt it sends: the assignment is labelled and must not be restated,
+;; the work since the previous recap is what it carries, and a recap in
+;; hand travels with it so the model can tell what is new.  They read the
+;; answers too: `UNCHANGED', and a line that only repeats what is already
+;; known, leave the recap in hand in place rather than make one up.
+
+(defun harness-recap-test-prompt-text (request)
+  "Return the text of the user message of REQUEST, a recap request."
+  (plist-get (car (plist-get (car (last (plist-get request :messages))) :content)) :text))
+
+(ert-deftest harness-recap-prompt-asks-for-the-work-since-the-last-one ()
+  "The request labels the assignment, and carries the recap in hand and the work after it."
+  (harness-recap-test-with
+    (let ((sid (harness-recap-test-session)))
+      (harness-call 'session/append sid '(:kind user :content "Make the widget faster"))
+      (harness-call 'session/append sid '(:kind assistant :content "Reading the widget code."))
+      (harness-call 'session/append sid '(:kind tool-call :tool "read_file" :call-id "c1"
+                                                       :title "Read widget.el"))
+      (let* ((first-node (plist-get (car (last (harness-call 'session/nodes sid))) :id))
+             (task (list :id "t-1" :prompt "Make the widget faster"))
+             (session (harness-call 'session/get sid))
+             (first (harness-recap--prompt task session)))
+        ;; Before any recap the request labels the assignment, says what
+        ;; the work is so far, and carries the transcript from its start.
+        (should (string-match-p
+                 "\\`Task (the assignment; do not restate it): Make the widget faster" first))
+        (should (string-match-p "Work so far: 0 turns, 1 tool call" first))
+        (should (string-match-p "Recent transcript (oldest first, newest last):" first))
+        (should (string-match-p "\\[tool read_file\\] Read widget.el" first))
+        (should (string-match-p "Write the recap now: one short sentence" first))
+        (should-not (string-match-p "Previous recap:" first))
+        ;; Now it has one: the next request carries it, counts the work
+        ;; since it was made, and carries only what came after its node.
+        (harness-call 'session/append sid '(:kind assistant :content "The parser test fails."))
+        (harness-call 'session/append sid '(:kind tool-call :tool "bash" :call-id "c2"
+                                                         :title "Bash: scripts/test.sh"))
+        (let* ((task (list :id "t-1" :prompt "Make the widget faster"
+                           :recap "Read widget.el; the parser test fails"
+                           :recap-turns 0 :recap-tools 1 :recap-node first-node))
+               (second (harness-recap--prompt task session)))
+          (should (string-match-p "Previous recap: Read widget.el; the parser test fails" second))
+          (should (string-match-p "Since the previous recap: 0 turns, 1 tool call" second))
+          (should (string-match-p
+                   "What happened since the previous recap (oldest first, newest last):" second))
+          (should (string-match-p "\\[agent\\] The parser test fails\\." second))
+          (should (string-match-p "\\[tool bash\\] Bash: scripts/test.sh" second))
+          ;; What the last recap already told of is not asked about again:
+          ;; the work section starts after its node.
+          (let ((work (substring second (string-match-p "What happened since the previous recap" second))))
+            (should-not (string-match-p "Reading the widget code" work))
+            (should-not (string-match-p "Read widget.el" work))))))))
+
+(ert-deftest harness-recap-prompt-carries-a-blocker ()
+  "A turn that stopped for the user is the blocker the request reports."
+  (harness-recap-test-with
+    (let ((sid (harness-recap-test-session)))
+      (harness-call 'session/append sid '(:kind user :content "Make the widget faster"))
+      (harness-call 'session/pending-add sid (list :kind 'permission
+                                                   :payload (list :tool "Bash" :title "Bash: npm test")))
+      (harness-call 'session/append sid '(:kind assistant :content "The parser test fails."))
+      (let* ((task (list :id "t-1" :prompt "Make the widget faster"))
+             (prompt (harness-recap--prompt task (harness-call 'session/get sid))))
+        (should (string-match-p "The work waits on the engineer: permission for Bash" prompt))
+        (should (string-match-p "Say what it waits for\\." prompt))
+        ;; It comes before the work, which the engineer's answer unblocks.
+        (should (< (string-match-p "The work waits on the engineer" prompt)
+                   (string-match-p "Recent transcript" prompt)))))))
+
+(ert-deftest harness-recap-unchanged-keeps-the-line-in-hand ()
+  "UNCHANGED leaves the recap as it was: no new line, no new history, no made-up work."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-session))
+           (id (harness-recap-test-task sid))
+           (harness-provider-demo-script-override
+            (harness-recap-test-script-of "Read the parser" "UNCHANGED"))
+           (harness-tasks-recap-tool-calls 1)
+           (changes 0))
+      (harness-call 'session/append sid '(:kind user :content "Do the widget"))
+      (harness-recap-test-add-tool-calls sid 1)
+      (should (equal "Read the parser" (harness-test-await (harness-recap--maybe sid))))
+      (should (equal "Read the parser" (harness-recap-test-recap id)))
+      (should (equal '("Read the parser") (harness-recap-test-texts sid)))
+      (let ((node (plist-get (car (last (harness-call 'session/nodes sid))) :id)))
+        (should (equal node (plist-get (harness-recap-test-record id) :recap-node))))
+      (harness-on 'recap/done (lambda (&rest _) (cl-incf changes)))
+      ;; More work comes, the model is asked, and finds nothing new in it.
+      (harness-recap-test-add-tool-calls sid 1)
+      (should (equal "Read the parser" (harness-test-await (harness-recap--maybe sid t))))
+      (should (equal "Read the parser" (harness-recap-test-recap id)))
+      ;; The line in hand stays, alone in the history: nothing was made up.
+      (should (equal '("Read the parser") (harness-recap-test-texts sid)))
+      (should (zerop changes))
+      ;; The counters moved on, so the same stretch is not asked about again.
+      (should (= 2 (plist-get (harness-recap-test-record id) :recap-tools))))))
+
+(ert-deftest harness-recap-a-restatement-is-no-new-progress ()
+  "A line that only repeats the task or the recap in hand is not a new accomplishment."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-session))
+           (id (harness-recap-test-task sid))
+           (harness-provider-demo-script-override
+            (harness-recap-test-script-of "Read the parser" "Do the widget" "Read the parser"))
+           (harness-tasks-recap-tool-calls 1))
+      (harness-call 'session/append sid '(:kind user :content "Do the widget"))
+      (harness-recap-test-add-tool-calls sid 1)
+      (harness-test-await (harness-recap--maybe sid))
+      (should (equal '("Read the parser") (harness-recap-test-texts sid)))
+      ;; The assignment, word for word: the recap in hand stays.
+      (harness-recap-test-add-tool-calls sid 1)
+      (should (equal "Read the parser" (harness-test-await (harness-recap--maybe sid t))))
+      (should (equal "Read the parser" (harness-recap-test-recap id)))
+      (should (equal '("Read the parser") (harness-recap-test-texts sid)))
+      ;; And so does the recap in hand, said again in other punctuation.
+      (harness-recap-test-add-tool-calls sid 1)
+      (should (equal "Read the parser" (harness-test-await (harness-recap--maybe sid t))))
+      (should (equal '("Read the parser") (harness-recap-test-texts sid))))))
+
+(ert-deftest harness-recap-a-quiet-task-is-not-asked-again ()
+  "A task whose transcript has not moved since its recap makes no request."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-session))
+           (id (harness-recap-test-task sid))
+           (harness-provider-demo-script-override harness-recap-test-script)
+           (harness-tasks-recap-turns 1)
+           (requests 0))
+      (harness-call 'session/append sid '(:kind user :content "Do the widget"))
+      (harness-call 'session/usage-add sid '(:turns 1))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (cl-incf requests) (funcall orig req))))
+        (harness-test-await (harness-recap--maybe sid))
+        (should (= 1 requests))
+        ;; The threshold is crossed again -- a turn, a tool call -- but the
+        ;; transcript did not grow: there is nothing new to report.
+        (harness-call 'session/usage-add sid '(:turns 1))
+        (should-not (harness-recap--maybe sid))
+        (should (= 1 requests))
+        ;; A node arrives, and the next is asked for.
+        (harness-call 'session/append sid '(:kind assistant :content "Wrote the parser test."))
+        (should (harness-recap--maybe sid))
+        (harness-test-wait (lambda () (= 2 requests)) 5 "the next recap")))))
+
+(ert-deftest harness-recap-a-session-recap-reads-the-work-since-its-own ()
+  "A sub-agent's recap, refreshed, carries the line in hand and only what came after it."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-child))
+           (harness-provider-demo-script-override
+            (harness-recap-test-script-of "Read the parser" "Fixed the parser test"))
+           (harness-tasks-recap-tool-calls 1)
+           (requests nil))
+      (harness-call 'session/append sid '(:kind user :content "do the widget"))
+      (harness-recap-test-add-tool-calls sid 1)
+      (harness-test-await (harness-recap--session-maybe sid (harness-call 'session/get sid) nil))
+      (cl-letf* ((orig (symbol-function 'harness-method/provider/complete))
+                 ((symbol-function 'harness-method/provider/complete)
+                  (lambda (req) (push req requests) (funcall orig req))))
+        (harness-call 'session/append sid '(:kind assistant :content "The parser test passes."))
+        (harness-recap-test-add-tool-calls sid 1)
+        (harness-test-await (harness-recap--session-maybe sid (harness-call 'session/get sid) nil)))
+      (let* ((req (car requests))
+             (text (harness-recap-test-prompt-text req)))
+        (should (string-match-p "Previous recap: Read the parser" text))
+        (should (string-match-p "What happened since the previous recap" text))
+        (should (string-match-p "\\[agent\\] The parser test passes\\." text))
+        ;; The work the first recap told of is left out of the second.
+        (should-not (string-match-p "\\[engineer\\] do the widget" text)))
+      (should (equal '("Read the parser" "Fixed the parser test")
+                     (harness-recap-test-texts sid))))))
+
+(ert-deftest harness-recap-unchanged-does-not-repeat-the-same-line-in-history ()
+  "A session recap answered UNCHANGED keeps the line in hand and adds nothing."
+  (harness-recap-test-with
+    (let* ((sid (harness-recap-test-child))
+           (harness-provider-demo-script-override
+            (harness-recap-test-script-of "Read the parser" "UNCHANGED"))
+           (harness-tasks-recap-tool-calls 1))
+      (harness-call 'session/append sid '(:kind user :content "do the widget"))
+      (harness-recap-test-add-tool-calls sid 1)
+      (harness-test-await (harness-recap--session-maybe sid (harness-call 'session/get sid) nil))
+      (harness-call 'session/append sid '(:kind assistant :content "Still reading."))
+      (harness-recap-test-add-tool-calls sid 1)
+      (should (equal "Read the parser"
+                     (harness-test-await (harness-recap--session-maybe sid (harness-call 'session/get sid) nil))))
+      (should (equal '("Read the parser") (harness-recap-test-texts sid)))
+      (should (equal "Read the parser" (plist-get (harness-recap-session sid) :text))))))
+
+(ert-deftest harness-recap-the-system-prompt-asks-for-what-changed ()
+  "The registry's system prompt forbids restating the task and makes up nothing."
+  (let ((system (harness-prompt-default 'recap-system)))
+    (should (string-match-p "since the previous recap" system))
+    (should (string-match-p "Do not restate the task" system))
+    (should (string-match-p "UNCHANGED" system)))
+  (should (string-match-p "UNCHANGED" (harness-prompt-default 'recap-ask))))

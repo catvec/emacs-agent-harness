@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="955" height="1896" viewBox="0 0 955 1896">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<g font-family="DejaVu Sans Mono, monospace" fill="#14171a">
+<text x="24" y="40" font-size="14"></text>
+<text x="24" y="62" font-size="14">== The provider narrows itself</text>
+<text x="24" y="84" font-size="14">------------------------------</text>
+<text x="24" y="106" font-size="14">openrouter lists 12 models and offers 4 of them:</text>
+<text x="24" y="128" font-size="14">  :allow-models ("openrouter:deepseek/deepseek-v4.1-flash-20261017" "openrouter:qwen/*")</text>
+<text x="24" y="150" font-size="14">  left out: openrouter:deepseek/deepseek-v4.1-flash-20260910, openrouter:deepseek/deepseek-v4.1-flash-1017,</text>
+<text x="24" y="172" font-size="14">    openrouter:meta-llama/llama-4-maverick-128e, openrouter:meta-llama/llama-4-maverick-17b-128e,</text>
+<text x="24" y="194" font-size="14">    openrouter:google/gemini-2.5-pro-preview, openrouter:google/gemini-2.5-pro-stable</text>
+<text x="24" y="216" font-size="14">  ... and the rest of the 12</text>
+<text x="24" y="238" font-size="14"></text>
+<text x="24" y="260" font-size="14">== The catalogue every surface reads</text>
+<text x="24" y="282" font-size="14">------------------------------------</text>
+<text x="24" y="304" font-size="14">provider/models: openrouter:deepseek/deepseek-v4.1-flash-20261017</text>
+<text x="24" y="326" font-size="14">                 openrouter:qwen/qwen3-coder-480b</text>
+<text x="24" y="348" font-size="14">                 openrouter:qwen/qwen3-coder-32b</text>
+<text x="24" y="370" font-size="14">                 openrouter:qwen/qwen3-coder-7b</text>
+<text x="24" y="392" font-size="14">                 gemini:gemini-2.5-pro</text>
+<text x="24" y="414" font-size="14">                 gemini:gemini-2.5-flash</text>
+<text x="24" y="436" font-size="14">                 gemini:gemini-2.0-flash</text>
+<text x="24" y="458" font-size="14">                 static:qwen-3</text>
+<text x="24" y="480" font-size="14">                 static:qwen-4</text>
+<text x="24" y="502" font-size="14"></text>
+<text x="24" y="524" font-size="14">== It narrows that provider only</text>
+<text x="24" y="546" font-size="14">--------------------------------</text>
+<text x="24" y="568" font-size="14">gemini, which names no patterns, still lists all 3:</text>
+<text x="24" y="590" font-size="14">  gemini:gemini-2.5-pro, gemini:gemini-2.5-flash, gemini:gemini-2.0-flash</text>
+<text x="24" y="612" font-size="14"></text>
+<text x="24" y="634" font-size="14">== A static listing is narrowed the same way</text>
+<text x="24" y="656" font-size="14">--------------------------------------------</text>
+<text x="24" y="678" font-size="14">static lists qwen-3, qwen-4 and llama-4, offers static:qwen-3, static:qwen-4</text>
+<text x="24" y="700" font-size="14"></text>
+<text x="24" y="722" font-size="14">== A pattern that matches nothing offers nothing</text>
+<text x="24" y="744" font-size="14">------------------------------------------------</text>
+<text x="24" y="766" font-size="14">broken's models: nil</text>
+<text x="24" y="788" font-size="14">broken's tier:     (nil . unlisted)</text>
+<text x="24" y="810" font-size="14"></text>
+<text x="24" y="832" font-size="14">== A tier picks inside the narrowed set</text>
+<text x="24" y="854" font-size="14">---------------------------------------</text>
+<text x="24" y="876" font-size="14">openrouter :simple: openrouter:qwen/qwen3-coder-7b</text>
+<text x="24" y="898" font-size="14">openrouter :frontier: openrouter:deepseek/deepseek-v4.1-flash-20261017</text>
+<text x="24" y="920" font-size="14">The prices are made up and rise with the name's length, so the</text>
+<text x="24" y="942" font-size="14">cheapest model of the whole listing (deepseek-v4.1-flash-1017) and its</text>
+<text x="24" y="964" font-size="14">dearest (llama-4-maverick-17b-128e) are both left out: a price-ranked</text>
+<text x="24" y="986" font-size="14">tier can only pick from the four the endpoint offers.</text>
+<text x="24" y="1008" font-size="14"></text>
+<text x="24" y="1030" font-size="14">== A request for a model left out is refused, not sent</text>
+<text x="24" y="1052" font-size="14">------------------------------------------------------</text>
+<text x="24" y="1074" font-size="14">refused: Model openrouter:meta-llama/llama-4-maverick-128e is not allowed: openrouter's :allow-models allows</text>
+<text x="24" y="1096" font-size="14">    only openrouter:deepseek/deepseek-v4.1-flash-20261017, openrouter:qwen/*</text>
+<text x="24" y="1118" font-size="14">reached the provider's transport: no</text>
+<text x="24" y="1140" font-size="14"></text>
+<text x="24" y="1162" font-size="14">== Both allowlists apply, and neither widens the other</text>
+<text x="24" y="1184" font-size="14">------------------------------------------------------</text>
+<text x="24" y="1206" font-size="14">harness-allowed-models: ("openrouter:qwen/*" "gemini")</text>
+<text x="24" y="1228" font-size="14">catalogue: openrouter:qwen/qwen3-coder-480b, openrouter:qwen/qwen3-coder-32b,</text>
+<text x="24" y="1250" font-size="14">    openrouter:qwen/qwen3-coder-7b, gemini:gemini-2.5-pro, gemini:gemini-2.5-flash, gemini:gemini-2.0-flash</text>
+<text x="24" y="1272" font-size="14">openrouter:qwen/qwen3-coder-480b -&gt; offered</text>
+<text x="24" y="1294" font-size="14">openrouter:deepseek/deepseek-v4.1-flash-20261017 -&gt; Model openrouter:deepseek/deepseek-v4.1-flash-20261017</text>
+<text x="24" y="1316" font-size="14">    is not allowed: harness-allowed-models allows only openrouter:qwen/*, gemini</text>
+<text x="24" y="1338" font-size="14">gemini:gemini-2.5-flash -&gt; offered</text>
+<text x="24" y="1360" font-size="14"></text>
+<text x="24" y="1382" font-size="14">The provider offers the deepseek model, but the global list does</text>
+<text x="24" y="1404" font-size="14">not, so the global one refuses it.  The global list allowing every</text>
+<text x="24" y="1426" font-size="14">openrouter model would still leave the endpoint's own narrowing in</text>
+<text x="24" y="1448" font-size="14">force, which the first section shows.</text>
+<text x="24" y="1470" font-size="14"></text>
+<text x="24" y="1492" font-size="14">== One pattern, several, and none at all</text>
+<text x="24" y="1514" font-size="14">----------------------------------------</text>
+<text x="24" y="1536" font-size="14">none                   offers 12</text>
+<text x="24" y="1558" font-size="14">one                    offers 1</text>
+<text x="24" y="1580" font-size="14">several                offers 5</text>
+<text x="24" y="1602" font-size="14">the provider's name    offers 12</text>
+<text x="24" y="1624" font-size="14"></text>
+<text x="24" y="1646" font-size="14">No patterns offers every model the provider lists: the key is a</text>
+<text x="24" y="1668" font-size="14">narrowing, never a widening.</text>
+<text x="24" y="1690" font-size="14"></text>
+<text x="24" y="1712" font-size="14">== What the endpoint editor shows</text>
+<text x="24" y="1734" font-size="14">---------------------------------</text>
+<text x="24" y="1756" font-size="14">Allowed models -- the key's label</text>
+<text x="24" y="1778" font-size="14">Provider, model or pattern -- a pattern's label, as the global</text>
+<text x="24" y="1800" font-size="14">option labels one</text>
+<text x="24" y="1822" font-size="14">The key's description is a setting description, the one place the</text>
+<text x="24" y="1844" font-size="14">copy rule allows prose.</text>
+</g>
+</svg>

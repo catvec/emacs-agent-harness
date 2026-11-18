@@ -23,6 +23,26 @@
 RESPONSE is (:status N :chunks (STRING…)) for streamed replies or
 \(:status N :body STRING) for plain ones; :hang t never answers.")
 
+(defun harness-openai-test--thaw (value)
+  "Return VALUE, read as raw JSON, as the harness holds a body.
+An empty array stays a vector and an empty object `:empty', so a body read
+back is the one the adapter built."
+  (cond
+   ((hash-table-p value)
+    (if (zerop (hash-table-count value))
+        :empty
+      (let (out)
+        (maphash (lambda (key item)
+                   (push (intern (concat ":" key)) out)
+                   (push (harness-openai-test--thaw item) out))
+                 value)
+        (nreverse out))))
+   ((vectorp value)
+    (if (zerop (length value))
+        []
+      (mapcar #'harness-openai-test--thaw (append value nil))))
+   (t value)))
+
 (defun harness-openai-test--fake-request (url &rest args)
   "Record a request to URL with ARGS and replay the matching canned response."
   (let* ((response (cdr (cl-find-if (lambda (cell) (string-match-p (car cell) url))
@@ -30,8 +50,21 @@ RESPONSE is (:status N :chunks (STRING…)) for streamed replies or
          (handle (make-harness-http-handle :url url :callback (plist-get args :callback)
                                            :on-chunk (plist-get args :on-chunk)
                                            :started (float-time))))
+    ;; A body given as text is what the transport sends, byte for byte;
+    ;; :json is that body as the harness holds it, so a test reads either.
     (push (list :url url :method (or (plist-get args :method) "GET")
-                :headers (plist-get args :headers) :json (plist-get args :json) :args args)
+                :headers (plist-get args :headers)
+                :json (or (plist-get args :json)
+                          ;; Read back as the harness holds a body: an
+                          ;; empty array stays one, so a test comparing it
+                          ;; with the plist the adapter built sees the same.
+                          (harness-openai-test--thaw
+                           (and (stringp (plist-get args :body))
+                                (json-parse-string
+                                 (decode-coding-string (plist-get args :body) 'utf-8)
+                                 :object-type 'hash-table :array-type 'array
+                                 :null-object nil :false-object :false))))
+                :body (plist-get args :body) :args args)
           harness-openai-test--requests)
     (unless (plist-get response :hang)
       (harness-run-soon
@@ -516,8 +549,10 @@ that names none sends no such field at all."
                                           '(:choices ((:index 0 :delta (:content "{\"decision\":\"allow\"}")
                                                        :finish_reason "stop")))
                                           "[DONE]")))))
-    (let ((schema '(:type "object" :properties (:decision (:type "string" :enum ["allow" "deny"]))
-                    :required ["decision"] :additionalProperties :false)))
+    ;; Written as lists: the body is read back from the bytes that went
+    ;; out, where every JSON array is a list again.
+    (let ((schema '(:type "object" :properties (:decision (:type "string" :enum ("allow" "deny")))
+                    :required ("decision") :additionalProperties :false)))
       ;; No schema named: no field.
       (harness-openai-test--complete harness-openai-test-openai-endpoint
                                      '(:model "testopenai:gpt-x"
@@ -532,7 +567,8 @@ that names none sends no such field at all."
       (let ((format (plist-get (harness-openai-test--last-request-json) :response_format)))
         (should (equal "json_schema" (plist-get format :type)))
         (should (equal "verdict" (plist-get (plist-get format :json_schema) :name)))
-        (should (equal t (plist-get (plist-get format :json_schema) :strict)))
+        ;; JSON's `true', which is `t' here: a keyword would encode as a string.
+        (should (eq t (plist-get (plist-get format :json_schema) :strict)))
         (should (equal schema (plist-get (plist-get format :json_schema) :schema)))
         ;; The strictness must be the JSON boolean `true' on the wire, not
         ;; the string ":true": DeepInfra refused the latter with HTTP 422
@@ -902,6 +938,97 @@ stays a reading, the miss it is."
                        :cost-source "observed" :observed-cost 0.00042)
                      (nth 4 events)))
       (should (equal '(:type done :stop-reason end-turn) (car (last events)))))))
+
+(ert-deftest harness-provider-openai-wire-tool-aliases-cover-schema-and-history ()
+  "Illegal tool names are aliased consistently without changing the transcript."
+  (let* ((names '("board.discuss" "board_discuss" "board-dis cuss" "scene.read"
+                  "grammar.describe" "history.undo" "patch.commit" "patch.preview"
+                  "board.pin" "scene.edit" "工具" "K"))
+         (names (append names (list (make-string 80 ?a))))
+         (tools (mapcar (lambda (name) (list :name name)) names))
+         (request (list :model "testrouter:m" :tools tools
+                        :messages '((:role assistant :content
+                                     ((:type "tool_use" :id "old" :name "scene.read" :input (:x 1))
+                                      (:type "tool_use" :id "retired" :name "old.tool" :input nil)))
+                                    (:role user :content
+                                     ((:type "tool_result" :tool_use_id "old" :content "ok")
+                                      (:type "tool_result" :tool_use_id "retired" :content "ok"))))))
+         (before (copy-tree request))
+         (body (harness-openai--body harness-openai-test-endpoint "m" request))
+         (wire (mapcar (lambda (spec) (plist-get (plist-get spec :function) :name))
+                       (plist-get body :tools))))
+    (dolist (name wire)
+      (should (string-match-p "\\`[A-Za-z0-9_-]+\\'" name))
+      (should (<= (length name) 64)))
+    (should (= (length names) (length (delete-dups (copy-sequence wire)))))
+    (should (equal "board_discuss" (nth 1 wire)))
+    (let* ((calls (plist-get (car (plist-get body :messages)) :tool_calls))
+           (history-name (plist-get (plist-get (car calls) :function) :name)))
+      (should (equal (nth 3 wire) history-name))
+      (should (equal (harness-openai--tool-wire-name "old.tool")
+                     (plist-get (plist-get (cadr calls) :function) :name)))
+      (should (equal "old" (plist-get (cadr (plist-get body :messages)) :tool_call_id))))
+    (should (equal request before))
+    ;; Retrying or extending a history must not rename earlier tools.
+    (should (equal body (harness-openai--body harness-openai-test-endpoint "m" request)))
+    (let* ((alias (car wire))
+           (extra (list :tools (append (reverse tools) (list (list :name alias)))))
+           (map (harness-openai--tool-names extra)))
+      ;; A tool literally named like an alias lives at another wire name.
+      (should (equal "board.discuss" (cdr (assoc alias map))))
+      (should (equal alias (cdr (assoc (harness-openai--tool-wire-name alias) map))))
+      (should-not (equal alias (harness-openai--tool-wire-name alias))))))
+
+(ert-deftest harness-provider-openai-wire-tool-alias-collision-refuses-before-send ()
+  "Even a hash collision cannot cause dispatch to the wrong tool."
+  (harness-openai-test-with-fake nil
+    (cl-letf (((symbol-function 'secure-hash) (lambda (&rest _) (make-string 64 ?a))))
+      (should-error
+       (harness-openai--complete
+        harness-openai-test-endpoint
+        '(:model "testrouter:m" :tools ((:name "a.b") (:name "a b"))))
+       :type 'error)
+      (should-not harness-openai-test--requests))))
+
+(ert-deftest harness-provider-openai-wire-tool-alias-streams-back-to-original ()
+  "Fragmented function names and inputs are mapped back for tool dispatch."
+  (let ((wire (harness-openai--tool-wire-name "scene.edit")))
+    (harness-openai-test-with-fake
+        `(("chat/completions"
+           . (:chunks
+              (,(harness-openai-test--sse
+                 `(:choices ((:index 0 :delta (:tool_calls
+                                              ((:index 0 :id "call_alias" :type "function"
+                                                :function (:name ,(substring wire 0 20)
+                                                           :arguments "{\"x\":"))))
+                              :finish_reason nil)))
+                 `(:choices ((:index 0 :delta (:tool_calls
+                                              ((:index 0 :function (:name ,(substring wire 20)
+                                                                   :arguments "1}"))
+                                               (:index 1 :id "call_plain" :type "function"
+                                                :function (:name "scene_edit" :arguments "{}"))))
+                              :finish_reason "tool_calls")))
+                 "[DONE]")))))
+      (let* ((events (car (harness-openai-test--complete
+                          harness-openai-test-endpoint
+                          '(:model "testrouter:m" :tools ((:name "scene.edit") (:name "scene_edit"))
+                            :messages ((:role user :content "go"))))))
+             (calls (cl-remove-if-not (lambda (e) (eq (plist-get e :type) 'tool-call)) events)))
+        (should (equal '("scene.edit" "scene_edit") (mapcar (lambda (e) (plist-get e :name)) calls)))
+        (should (equal '(:x 1) (plist-get (car calls) :input)))
+        (should (equal "call_alias" (plist-get (car calls) :id)))
+        (should (eq 'tool-use (plist-get (car (last events)) :stop-reason)))))))
+
+(ert-deftest harness-provider-openai-wire-tool-alias-map-is-request-local ()
+  "Another request's map cannot reinterpret an unknown wire function."
+  (let* ((wire (harness-openai--tool-wire-name "scene.edit"))
+         (one (make-harness-openai--stream
+               :tool-names (harness-openai--tool-names '(:tools ((:name "scene.edit"))))))
+         (two (make-harness-openai--stream
+               :tool-names (harness-openai--tool-names '(:tools ((:name "scene.read")))))))
+    (should (equal "scene.edit" (harness-openai--stream-tool-name one wire)))
+    (should (equal wire (harness-openai--stream-tool-name two wire)))
+    (should (equal "unknown" (harness-openai--stream-tool-name one "unknown")))))
 
 (ert-deftest harness-provider-openai-tool-call-assembled-from-fragments ()
   (harness-openai-test-with-fake
@@ -1751,6 +1878,27 @@ server that answers out of order must not make the quota go backwards."
     (should (harness-test-fits-p (get 'harness-openai-endpoints 'custom-type)
                                  '((:id "named-by-a-string" :api-key "sk-x" :weird 3
                                     :models ("a" (:name "b" :context-window 4096 :pricing (:input 1)))))))))
+
+(ert-deftest harness-openai-allow-models-widget-is-copy-in-nouns ()
+  "The endpoint editor shows the new key in nouns, as the copy rule asks.
+The key's label is `Allowed models' and a pattern's is `Provider, model or
+pattern', the words the global option's entry uses; its description is a
+setting description, the one place prose belongs."
+  (let* ((options (plist-get (cdr harness-openai--endpoint-type) :options))
+         (allow (car (seq-filter (lambda (o) (eq :allow-models (car o))) options)))
+         (props (harness-test--widget-properties (car (cdr allow)))))
+    (should (equal "Allowed models" (plist-get props :tag)))
+    (should (equal "Provider, model or pattern"
+                   (plist-get (harness-test--widget-properties
+                               (nth 5 (car (cdr allow))))
+                              :tag)))
+    ;; A pattern is labelled as the global option labels one.
+    (let ((global (get 'harness-allowed-models 'custom-type)))
+      (should (equal (plist-get (harness-test--widget-properties
+                                 (nth 5 (car (cdr allow))))
+                                :tag)
+                     (plist-get (harness-test--widget-properties (car (cdr global))) :tag))))
+    (should (plist-get props :doc))))
 
 (provide 'harness-provider-openai-test)
 ;;; harness-provider-openai-test.el ends here

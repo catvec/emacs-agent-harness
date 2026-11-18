@@ -145,7 +145,10 @@
         (should-error (insert "x") :type 'text-read-only)))))
 
 (ert-deftest harness-ui-popout-compose-box-sends-and-comes-and-goes ()
-  "The box shows while :compose returns a SUBMIT; C-c C-c hands it the text."
+  "The box shows while :compose returns a SUBMIT; C-c C-c hands it the text.
+The box composes a draft named by the popout's title: its words answer
+the item the popout shows, never a chat, so live voice may dictate into
+it and its own submit is what sends them."
   (harness-ui-popout-test-with
     (let* ((open t)
            (sent nil)
@@ -156,6 +159,11 @@
                     :placeholder "Your answer...")))
       (with-current-buffer buffer
         (should (harness-compose-live-p))
+        ;; A popout is a draft, named for the item it shows, and it names
+        ;; the item itself: the popout buffer of another item is another
+        ;; draft, whatever the two are titled.
+        (should (equal (list :kind 'draft :name "Box" :identity '(test box))
+                       (harness-compose-context)))
         (should (eq 'harness-ui-popout-submit (key-binding (kbd "C-c C-c"))))
         (goto-char harness-compose-end)
         (insert "half")

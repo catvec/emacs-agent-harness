@@ -701,13 +701,15 @@ which needs a larger budget to fit."
 
 (defcustom harness-tasks-recap-context 3000
   "Characters of transcript a recap request may carry.
-The tail of the transcript, so the request stays short on a long task.
-A recap is one line about what the work is doing, and most of a long
-tail is tool output -- a file's contents, a test log -- so a few
-thousand characters carry what it needs; the task, its plan and its
-todos come with the request already.  The call is one the harness makes
-for itself, on the cheap tier (`harness-tasks-recap-model'), and how
-much it reads is what it costs."
+The newest entries of the work since the last recap, so the request
+stays short on a long task.  A recap is one line about what the work is
+doing, and most of a long stretch is tool output -- a file's contents, a
+test log -- so a few thousand characters carry what it needs; each
+result is cut shorter first (`harness-recap--result-chars'), and the
+assignment, the recap in hand and the todos come with the request
+already.  The call is one the harness makes for itself, on the cheap
+tier (`harness-tasks-recap-model'), and how much it reads is what it
+costs."
   :type 'integer :group 'harness)
 
 (defcustom harness-tasks-recap-interval 30
@@ -886,6 +888,18 @@ began, goes back to the queue (`harness-tasks--park') and waits until
 the budget has room (`harness-tasks--hold'): its period ended, or it was
 raised or removed.  When the queue starts it, its own session carries
 on, told so by this message.")
+
+(defconst harness-tasks--catalogue-message
+  "Resumed: the OpenRouter endpoint catalogue is readable again. Your last turn stopped while it was unavailable and any workers or sub-agents were stopped (see above). Your changes are still there: check where you left off and carry on."
+  "Message that starts a task again after it waited for the catalogue.
+A task whose turn stopped because OpenRouter's endpoint catalogue could
+not be read -- the price of every endpoint it may use is read from it,
+so nothing can be sent without it -- goes back to the queue
+\(`harness-tasks--park') and waits until a reading is back
+\(`harness-tasks--hold', `openrouter/catalogue-hold').  When the queue
+starts it, its own session carries on, told so by this message, and the
+catalogue is read again for it: a reading that comes back is what the
+task's next request is checked against, price and all.")
 
 (defconst harness-tasks--sent-back-message
   "Sent back from review; it waited for a slot until now. Address the feedback, then finish as before."
@@ -2531,6 +2545,12 @@ SUSPENDED), which the boards follow."
 ;;   budget  a hard budget that covers the task's session is spent
 ;;           (`usage/budget-hold'); `:until' is when its period ends, nil
 ;;           when only changing or deleting the budget lets the task go on.
+;;   catalogue  OpenRouter's endpoint catalogue cannot be read
+;;           (`openrouter/catalogue-hold', only for a task on an
+;;           OpenRouter model): a read that failed transiently, with no
+;;           reading inside the policy's `:freshness', so no price can be
+;;           read and nothing can be sent.  `:until' is when the
+;;           episode's next re-read is due, nil when one is under way.
 ;;   stalled a transient failure ended the task's turn (`:stall' says
 ;;           what): a connection that failed, a rate limit, a provider's
 ;;           process that died, a catalogue that could not be read.
@@ -2538,19 +2558,20 @@ SUSPENDED), which the boards follow."
 ;;           bounded by the shared retry layer's
 ;;           (`harness-tasks-stall-retries').
 ;;
-;; Quota and budget holds are worked out, not stored: the scheduler asks
-;; the fallback and the usage module at every pass
-;; (`harness-tasks--refresh-holds'), for tasks that never started as much
-;; as for tasks parked by a stopped turn, so a task is never started
-;; into an outage only to fail at once, and one a restart finds waiting
-;; needs nothing kept to know why.  What makes a hold end is told by
-;; events -- `fallback/changed' (a mark ended or was cleared, a quota
-;; report came), `usage/budgets-changed', `config/changed' for the
-;; fallback list and the Budget setting -- and by a timer at the
-;; earliest `:until' there is (`harness-tasks--arm-hold-timer'), each of
-;; which runs the scheduler.  A hold that ended starts the task like any
-;; queued task: by priority, within the limit, unless its queue is
-;; suspended.
+;; Quota, budget and catalogue holds are worked out, not stored: the
+;; scheduler asks the fallback, the usage and the OpenRouter module at
+;; every pass (`harness-tasks--refresh-holds'), for tasks that never
+;; started as much as for tasks parked by a stopped turn, so a task is
+;; never started into an outage only to fail at once, and one a restart
+;; finds waiting needs nothing kept to know why.  What makes a hold end
+;; is told by events -- `fallback/changed' (a mark ended or was cleared,
+;; a quota report came), `usage/budgets-changed',
+;; `openrouter/catalogue-recovered' (a reading settled),
+;; `config/changed' for the fallback list and the Budget setting -- and
+;; by a timer at the earliest `:until' there is
+;; (`harness-tasks--arm-hold-timer'), each of which runs the scheduler.
+;; A hold that ended starts the task like any queued task: by priority,
+;; within the limit, unless its queue is suspended.
 ;;
 ;; A stall's hold is the task's own record (`harness-tasks--stall-hold'),
 ;; so it needs no event to keep it: `:retry-at' is the time, and the same
@@ -2558,13 +2579,15 @@ SUSPENDED), which the boards follow."
 ;; that ends any other way clears it.
 ;;
 ;; Parking: a turn that ends `error' or `blocked' while its task is held
-;; for quota or a budget -- every provider ran out, or a hard budget
-;; stopped the turn between two steps or before it began -- is no
-;; failure of the task.  It goes back to pending (`harness-tasks--park')
-;; as a task returned to pending does, keeping its session, branch and
-;; worktree, with `:return-reason' `quota' or `budget'; when the hold
+;; for quota, a budget or the endpoint catalogue -- every provider ran
+;; out, a hard budget stopped the turn between two steps or before it
+;; began, or the catalogue could not be read at all -- is no failure of
+;; the task.  It goes back to pending (`harness-tasks--park') as a task
+;; returned to pending does, keeping its session, branch and worktree,
+;; with `:return-reason' `quota', `budget' or `catalogue'; when the hold
 ;; ends it carries on where it stopped, told why by
-;; `harness-tasks--quota-message' or `harness-tasks--budget-message'.
+;; `harness-tasks--quota-message', `harness-tasks--budget-message' or
+;; `harness-tasks--catalogue-message'.
 ;; So does a turn a transient stall ended (`harness-tasks--stall-try'):
 ;; nothing about the task's work was judged, and the next attempt usually
 ;; answers.
@@ -2607,27 +2630,81 @@ Nil while no hard budget that covers it is spent.  The answer of
                           session-id (harness-error-message err))
              nil))))
 
+(defun harness-tasks--catalogue-hold (task)
+  "Return the OpenRouter catalogue hold on TASK's work, or nil.
+The answer of `openrouter/catalogue-hold' for TASK's model, as a hold:
+\(:kind catalogue :reason TEXT :until TIME :guess :true :items ITEMS).
+A catalogue that is *out* -- a read that failed transiently, with no
+reading inside the policy's freshness bound -- is no more a failure of
+the task than a provider out of quota: nothing about the task can be
+sent until a price can be read, and the catalogue is read again by
+itself.  So the task waits in its queue instead of among the failures,
+and starts again when a reading comes back.
+
+The question is the catalogue's, not a session's, so it is asked once
+and shared: every task the policy routes waits for the same outage.  It
+is asked only when the module is loaded -- a harness without OpenRouter
+has no catalogue to wait for -- and an error from it is no hold, as a
+quota question that fails is no hold."
+  (when (harness-method-exists-p 'openrouter/catalogue-hold)
+    (condition-case err
+        (when-let* ((hold (harness-call 'openrouter/catalogue-hold
+                                        (harness-tasks--catalogue-model task))))
+          (list :kind 'catalogue
+                :reason (plist-get hold :reason)
+                :until (plist-get hold :until)
+                :guess (if (plist-get hold :guess) t :false)
+                :items (plist-get hold :items)))
+      (error (harness-log 'warn "tasks: asking whether the OpenRouter catalogue is readable failed: %s"
+                          (harness-error-message err))
+             nil))))
+
+(defun harness-tasks--catalogue-model (task)
+  "Return the OpenRouter model TASK's session runs on, or nil.
+A session's model is `openrouter:MODEL', so this is the model whose
+policy governs the task's requests."
+  (let* ((session (harness-tasks--session task))
+         (model (plist-get session :model)))
+    (and (stringp model)
+         (string-prefix-p "openrouter:" model)
+         (not (string-empty-p (substring model (length "openrouter:"))))
+         (substring model (length "openrouter:")))))
+
 (defun harness-tasks--compute-hold (task)
-  "Return the quota, budget or stall hold on TASK's work as it is now, or nil.
+  "Return the quota, budget, catalogue or stall hold on TASK's work, or nil.
 Quota first: a task out of both is shown the quota, and its budget once
-that is back.  A task a stalled turn parked (`harness-tasks--stall-hold')
-is held by its own record until its next try is due.  Nil for a task with
-no session.  This asks; the scheduler's table
+that is back.  The catalogue is asked next, since it stops the work
+whatever the account can do, and only for a task this policy routes.  A
+task a stalled turn parked (`harness-tasks--stall-hold') is held by its
+own record until its next try is due.  Nil for a task with no session.
+This asks; the scheduler's table
 \(`harness-tasks--holds') is what the rest reads."
   (when-let* ((sid (plist-get task :session)))
     (or (harness-tasks--quota-hold sid)
         (harness-tasks--budget-hold sid)
+        (and (harness-tasks--routed-p task)
+             (harness-tasks--catalogue-hold task))
         (harness-tasks--stall-hold task))))
+
+(defun harness-tasks--routed-p (task)
+  "Non-nil when TASK's session is one an OpenRouter routing policy routes.
+A task on another provider's model has no catalogue of this module's to
+wait for, and must not be held back by one: the hold is asked only for
+the sessions the policy actually governs, which are the ones on an
+OpenRouter model, and only when the module that owns the catalogue is
+loaded."
+  (and (harness-method-exists-p 'openrouter/route)
+       (harness-tasks--catalogue-model task)))
 
 (defun harness-tasks--hold (task)
   "Return why queued TASK is held back from starting, a plist, or nil.
 `:kind' is `paused' (the user paused it, `:since' when), `quota',
-`budget' or `stalled' (`harness-tasks--compute-hold', as the scheduler
-found it at its last pass); `:reason' says what for, `:until' when it
-ends (nil: not by itself), `:guess' whether that is a retry time rather
-than a reset, `:items' the marks, budgets or attempts behind it.  Nil for
-a task that is not in the queue (`harness-tasks--queued-p') and for one
-nothing holds."
+`budget', `catalogue' or `stalled' (`harness-tasks--compute-hold', as the
+scheduler found it at its last pass); `:reason' says what for, `:until'
+when it ends (nil: not by itself), `:guess' whether that is a retry time
+rather than a reset, `:items' the marks, budgets, catalogue or attempts
+behind it.  Nil for a task that is not in the queue
+\(`harness-tasks--queued-p') and for one nothing holds."
   (when (harness-tasks--queued-p task)
     (if (harness-tasks--paused-p task)
         (let ((since (plist-get task :paused)))
@@ -2695,11 +2772,20 @@ lifting is looked at again then, not in a loop."
   (harness-tasks--schedule))
 
 (defun harness-tasks--on-hold-event (&rest _)
-  "Look at the holds again soon: quota or a budget changed.
+  "Look at the holds again soon: quota, a budget or the catalogue changed.
 On `fallback/changed' (a mark ended or was cleared, a quota report
 came, a session moved) and `usage/budgets-changed'.  The scheduler
 starts the tasks whose hold is over.  Once for a burst of events."
   (harness-debounce 'harness-tasks-holds 0.1 #'harness-tasks--schedule))
+
+(defun harness-tasks--on-catalogue-recovered (&rest _)
+  "Start the tasks waiting for the endpoint catalogue, once one is readable.
+On `openrouter/catalogue-recovered': a reading settled, so the catalogue
+hold (`harness-tasks--catalogue-hold') may be over.  The scheduler works
+the holds out again and starts what a reading lets through, by priority
+and within the limit, as it starts any queued task.  Once for a burst of
+readings."
+  (harness-debounce 'harness-tasks-catalogue 0.1 #'harness-tasks--schedule))
 
 (defun harness-tasks--park-hint (hold)
   "Return the hint saying in a task's session that HOLD sent it back to the queue."
@@ -3441,8 +3527,8 @@ lender took back the slot it borrowed (`harness-tasks--preempt')."
 
 (defun harness-tasks--stop-reason (task)
   "Return why the work TASK's session left running is stopped, a short text.
-TASK waits in the queue: pre-empted (`harness-tasks--preempt') or
-returned to pending."
+TASK waits in the queue: pre-empted, sent back, returned to pending, or
+waiting for quota, a budget or the endpoint catalogue."
   (let ((by (harness-tasks--label (plist-get task :preempted-by))))
     (pcase (harness-tasks--return-reason task)
       ('preempted (format "its task was pre-empted by task %s, sent back from review" by))
@@ -3450,6 +3536,7 @@ returned to pending."
       ('sent-back "its task waits for a slot")
       ('quota "its task waits for quota")
       ('budget "its task waits for its budget")
+      ('catalogue "its task waits for the endpoint catalogue")
       (_ "its task was paused"))))
 
 (defun harness-tasks--stop-outstanding (id)
@@ -3828,7 +3915,8 @@ the user waits before it lends its slot: the timers that wait for that
 follow the new value (`harness-tasks--arm-lend-timers'), and a loan the
 new value ends stops no task at work.  The list of fallbacks
 \(`harness-fallback-models') and the Budget setting (`harness-budget')
-decide whether a queued task is held for quota or a budget
+decide whether a queued task is held for quota, a budget or the
+catalogue
 \(`harness-tasks--hold'): an entry that works, or a budget raised,
 starts the tasks that waited for them, so the holds are looked at
 again."
@@ -4357,6 +4445,7 @@ through.  Return the task's view."
                         :phase harness-tasks-phase-working :cannot-continue nil :no-merge nil
                         :verified nil :verified-at nil :merge-attempts 0
                         :recap nil :recap-at nil :recap-turns nil :recap-tools nil
+                        :recap-node nil
                         :sent-back (float-time)
                         :feedback (harness-tasks--feedback-round task feedback))))
 
@@ -4378,7 +4467,8 @@ in its transcript instead.  Return the task's view."
          (view (harness-tasks--to-pending id :return-reason 'sent-back :sent-back (float-time)
                                           :archived nil
                                           :feedback (harness-tasks--feedback-round task feedback))))
-    ;; A task that waits for quota or a budget says so as it joins the queue.
+    ;; A task that waits for quota, a budget or the catalogue says so as it
+    ;; joins the queue.
     (harness-tasks--refresh-holds)
     (if text
         (harness-tasks--queue-message id text attachments)
@@ -4566,8 +4656,9 @@ It says why it waited (`harness-tasks--return-reason'):
 `harness-tasks--reclaimed-message' for one whose lender took back the
 slot it borrowed, `harness-tasks--sent-back-message' for one sent back
 from review while no slot could take it, `harness-tasks--quota-message',
-`harness-tasks--budget-message' and `harness-tasks--stall-message' for
-one that waited for quota, a budget or a stalled turn's next try, and
+`harness-tasks--budget-message', `harness-tasks--catalogue-message' and
+`harness-tasks--stall-message' for one that waited for quota, a budget,
+the endpoint catalogue or a stalled turn's next try, and
 `harness-tasks--paused-message' for one returned to pending by hand or
 paused."
   (pcase (harness-tasks--return-reason task)
@@ -4577,6 +4668,7 @@ paused."
     ('quota harness-tasks--quota-message)
     ('budget harness-tasks--budget-message)
     ('stalled harness-tasks--stall-message)
+    ('catalogue harness-tasks--catalogue-message)
     (_ harness-tasks--paused-message)))
 
 (defun harness-tasks--start-paused (id cwd worktree)
@@ -4658,6 +4750,7 @@ Return the task's view."
            :merge-status nil :merge-attempts 0
            :verified nil :verified-at nil
            :recap nil :recap-at nil :recap-turns nil :recap-tools nil
+           :recap-node nil
            plist)))
 
 (defun harness-tasks--stop-turn (id)
@@ -4689,6 +4782,7 @@ TASK waits in the queue (`harness-tasks--before-turn')."
               ('reclaimed (format "slot taken back by task %s" (plist-get task :preempted-by)))
               ('quota "waiting for quota")
               ('budget "waiting for its budget")
+              ('catalogue "waiting for the endpoint catalogue")
               (_ "paused")))))
 
 (defun harness-tasks--holds-turns-p (task from)
@@ -6426,12 +6520,13 @@ That is the project module's name for it, else its directory's."
 (defun harness-tasks--queue-summary (project)
   "Return the queue of PROJECT as `task/queues' lists it, a plist.
 `:state' is \"paused\" while the queue is suspended, \"held\" while tasks
-wait and none of them can start for quota or a budget (or because the
-user paused it), else \"running\".  `:working' counts the tasks holding a
-slot, `:waiting' those in the queue, `:paused' those of them paused by
-hand and `:held' those waiting for quota or a budget, whose reasons
-`:holds' lists once each, with the number of tasks it holds back and the
-marks or budgets behind it (`:items', as a task's `:hold' has them)."
+wait and none of them can start for quota, a budget or the endpoint
+catalogue (or because the user paused it), else \"running\".  `:working'
+counts the tasks holding a slot, `:waiting' those in the queue, `:paused'
+those of them paused by hand and `:held' those waiting for quota, a
+budget or the catalogue, whose reasons `:holds' lists once each, with
+the number of tasks it holds back and the marks, budgets or catalogue
+behind it (`:items', as a task's `:hold' has them)."
   (let ((queued (harness-tasks--sorted
                  (lambda (task) (and (equal (harness-tasks--slot-project task) project)
                                      (harness-tasks--queued-p task)))))
@@ -6487,10 +6582,11 @@ plist of `:project' (its root), `:name', `:state' (\"running\",
 none can start, for quota, a budget or a pause), `:suspended', `:limit'
 \(`harness-tasks-max-running'), `:working' (tasks holding a slot),
 `:waiting' (tasks in the queue), `:paused' (of those, paused by hand),
-`:held' (of those, waiting for quota or a budget) and `:holds' (the
-reasons of those, each as `:kind' quota or budget, `:reason', `:until',
-`:guess', `:items' and `:count'), and of `:totals', the same counts over every
-queue, with `:queues' and `:suspended', how many queues are suspended."
+`:held' (of those, waiting for quota, a budget or the endpoint
+catalogue) and `:holds' (the reasons of those, each as `:kind' quota,
+budget or catalogue, `:reason', `:until', `:guess', `:items' and
+`:count'), and of `:totals', the same counts over every queue, with
+`:queues' and `:suspended', how many queues are suspended."
   (harness-tasks--load)
   (harness-tasks--queues-report))
 
@@ -6663,7 +6759,8 @@ merging, done or in the backlog.  Return the task."
 (harness-defmethod task/resume (id)
   "End the pause of task ID, which then waits for its turn in the queue.
 The queue starts it by priority within the limit, unless its project's
-queue is suspended or it is held for quota or a budget meanwhile
+queue is suspended or it is held for quota, a budget or the endpoint
+catalogue meanwhile
 \(`harness-tasks--hold'); it carries on where it stopped, told by the
 harness it was paused.  `task/start' starts it at once instead.  A task
 parked in the backlog (`task/park') stays there: resuming it only ends
@@ -6810,7 +6907,8 @@ follows the start's own carry-on."
           (harness-call 'session/resume sid))
         (when (plist-get task :archived) (harness-tasks--set id :archived nil))
         (harness-tasks--set id :merge-attempts 0
-                            :recap nil :recap-at nil :recap-turns nil :recap-tools nil)
+                            :recap nil :recap-at nil :recap-turns nil :recap-tools nil
+                            :recap-node nil)
         (if (harness-tasks--refinement-p task)
             (progn
               ;; A message the board sends a backlog task is feedback on
@@ -7008,8 +7106,10 @@ exactly one."
 (harness-defmethod task/set-recap (id &rest plist)
   "Store recap fields PLIST on task ID; return its view.
 The recap module writes a card's subtitle with it: `:recap' the line
-shown, `:recap-at' when it was made, and `:recap-turns' plus
-`:recap-tools' the counters it was made at.  A nil `:recap' clears it."
+shown, `:recap-at' when it was made, `:recap-turns' plus `:recap-tools'
+the counters it was made at, and `:recap-node' the transcript's newest
+node then, which the next recap reads the work after.  A nil `:recap'
+clears it."
   (apply #'harness-tasks--set id plist))
 
 (harness-defmethod task/hand-in (id report)
@@ -7331,10 +7431,12 @@ process's own, and goes on."
   (harness-on 'merge/finished #'harness-tasks--on-merge-finished)
   (harness-on 'config/changed #'harness-tasks--on-config-changed)
   (harness-on 'session/ext-changed #'harness-tasks--on-priority-changed)
-  ;; What ends a hold for quota or a budget: a mark that ended or was
-  ;; cleared, a quota report, a budget raised, removed or made soft.
+  ;; What ends a hold for quota, a budget or the endpoint catalogue: a
+  ;; mark that ended or was cleared, a quota report, a budget raised,
+  ;; removed or made soft, a catalogue reading that settled.
   (harness-on 'fallback/changed #'harness-tasks--on-hold-event)
   (harness-on 'usage/budgets-changed #'harness-tasks--on-hold-event)
+  (harness-on 'openrouter/catalogue-recovered #'harness-tasks--on-catalogue-recovered)
   (harness-add-filter 'worktree/lock-existing-p #'harness-tasks--lock-existing-p)
   (harness-add-filter 'agent/system-prompt #'harness-tasks--system-prompt 60)
   (harness-add-filter 'agent/system-prompt #'harness-tasks--btw-system-prompt 60)

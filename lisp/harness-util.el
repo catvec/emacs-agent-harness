@@ -774,13 +774,19 @@ That is the `:meta' `:fold' of NODE:
   (:key KEY      ; the part of the harness that writes it, which finds
                  ; the hint again to add to it
    :title TITLE  ; what the hint says while it is folded
-   :items ITEMS) ; the lines under it, oldest first, each (:ts TIME :text TEXT)
+   :items ITEMS  ; the lines under it, oldest first, each (:ts TIME :text TEXT)
+   :total TOTAL) ; how many lines it stands for, when it keeps only some
 
 An item with no text is left out, and a hint with no title or no item
-is no fold.  Strings and numbers may have travelled over JSON."
+is no fold.  Strings and numbers may have travelled over JSON.  A fold
+that stands for more than its items keep -- a note of something that
+happens again and again, which keeps its newest lines -- says how many
+in `:total'; a `:total' that is no number, or no more than the items
+it kept, is none, and the fold is its items."
   (let ((fold (plist-get (plist-get node :meta) :fold)))
     (when (and (consp fold) (keywordp (car fold)))
       (let ((title (plist-get fold :title))
+            (total (plist-get fold :total))
             (items (delq nil
                          (mapcar (lambda (item)
                                    (let ((text (and (consp item) (plist-get item :text)))
@@ -790,7 +796,9 @@ is no fold.  Strings and numbers may have travelled over JSON."
                                  (let ((items (plist-get fold :items)))
                                    (and (sequencep items) (append items nil)))))))
         (when (and (stringp title) (not (string-empty-p title)) items)
-          (list :key (plist-get fold :key) :title title :items items))))))
+          (append (list :key (plist-get fold :key) :title title :items items)
+                  (and (numberp total) (> total (length items))
+                       (list :total total))))))))
 
 ;;;; Messages
 ;;
@@ -2173,13 +2181,52 @@ reading, the first thing to know when the harness slows down.")
   (queue nil :documentation "Strings that wait, newest first.")
   (start (float-time) :documentation "When the write began, a `float-time'.")
   (eof nil :documentation "Non-nil when end-of-file goes out after the queue.")
+  (timer nil :documentation "The independent write deadline, when requested.")
   (warned nil :documentation "Non-nil once the wait was logged."))
 
+;; A socket write must not hold a server dispatch or a UI callback open.
+;; Network processes belong to their creating thread by default, so their
+;; filters/sentinels stay there while this thread only writes.  Timers are
+;; explicitly disabled in the writer too: they otherwise run inside its
+;; `process-send-string' wait, with none of the owner's dynamic bindings.
+(require 'thread)
+
+(defvar harness-process-send-timeout 120
+  "Maximum age in seconds of an outstanding asynchronous write.
+The watchdog enforces this without needing another send.  A socket
+write counts as delivered when the OS accepts it, not when its peer
+acknowledges it.  Watchdogs, like all Emacs timers, require the owning
+thread to yield; this is not a real-time bound on CPU-bound Lisp.")
+
+(defvar harness-process-send-max-bytes (* 32 1024 1024)
+  "Maximum outstanding encoded bytes per asynchronous writer.
+Includes the write in flight, not just queued messages.  32 MiB permits
+large transcripts and tool results without an unbounded slow-client
+backlog.  An over-limit peer is closed, never sent a truncated message.")
+
+(defvar harness-process-send-max-messages 65536
+  "Maximum outstanding messages per asynchronous writer.
+Bounds queue overhead even for empty strings.")
+
+(cl-defstruct (harness--async-send (:constructor harness--async-send-create) (:copier nil))
+  "A per-process FIFO writer, shared with its IO-only thread.
+Queue entries are (STRING ENCODED-BYTES DEADLINE); ACTIVE is included
+in BYTES and COUNT until its write completes.  Only the owning thread
+runs the watchdog, logs failures or closes the process."
+  queue tail active (bytes 0) (count 0) eof eof-sent finish failure closed
+  mutex ready thread timer)
+
 (defun harness-process-sending-p (proc)
-  "Non-nil while a write to PROC is under way, further up some stack.
-What is written to PROC meanwhile waits in line behind it (see
-`harness-process-send')."
-  (and (process-get proc 'harness--send) t))
+  "Non-nil while a write to PROC is under way or queued.
+See `harness-process-send' and `harness-process-send-async'."
+  (or (and (process-get proc 'harness--send) t)
+      (when-let* ((state (process-get proc 'harness--async-send)))
+        (with-mutex (harness--async-send-mutex state)
+          (and (or (harness--async-send-active state)
+                   (harness--async-send-queue state)
+                   (and (harness--async-send-eof state)
+                        (not (harness--async-send-eof-sent state))))
+               t)))))
 
 (defun harness--process-send-wait (proc state string limit)
   "Put STRING in line behind STATE, the write under way to PROC.
@@ -2212,10 +2259,11 @@ a write to a process already being written to waits in line instead,
 and the write under way sends what waits once it is done, in order.
 
 LIMIT, when non-nil, is how many seconds a write may wait for room:
-past that, the next write to PROC deletes it, since a peer that has not
-read for so long is gone (a phone asleep), and the write under way
-then fails.  A write that waits that long is logged either way, after
-`harness-process-send-slow' seconds.
+a timer deletes PROC past that, even without another send.  A write
+that waits that long is logged either way, after
+`harness-process-send-slow' seconds.  This function still waits in its
+caller; sockets serving independent clients use
+`harness-process-send-async' instead.
 
 Return non-nil.  Signal the error of a failed write to its caller, the
 one under way; what waited behind it is dropped with it."
@@ -2224,6 +2272,13 @@ one under way; what waited behind it is dropped with it."
         (harness--process-send-wait proc state string limit)
       (setq state (harness--send-create))
       (process-put proc 'harness--send state)
+      (when limit
+        (setf (harness--send-timer state)
+              (run-at-time limit nil
+                           (lambda ()
+                             (when (and (eq state (process-get proc 'harness--send))
+                                        (process-live-p proc))
+                               (delete-process proc))))))
       (unwind-protect
           (let ((chunk string))
             (while chunk
@@ -2234,20 +2289,186 @@ one under way; what waited behind it is dropped with it."
               (setf (harness--send-queue state) nil))
             (when (harness--send-eof state)
               (process-send-eof proc)))
+        (when (harness--send-timer state) (cancel-timer (harness--send-timer state)))
         (process-put proc 'harness--send nil)
         (let ((waited (- (float-time) (harness--send-start state))))
           (when (and (> waited harness-process-send-slow) (fboundp 'harness-log))
             (harness-log 'info "process: a write to %s waited %.0fs for room" (process-name proc) waited)))))
     t))
 
+(defun harness--process-send-async-write (proc state)
+  "Drain STATE to PROC in its writer thread, without dispatching timers.
+All shared state changes are under the mutex, never the blocking IO.
+Failures are reported by the owner's watchdog, not from this thread."
+  (let ((timer-list nil)
+        (timer-idle-list nil))
+    (condition-case nil
+        (catch 'done
+          (while t
+            (let ((entry
+                   (with-mutex (harness--async-send-mutex state)
+                     (while (not (or (harness--async-send-closed state)
+                                     (harness--async-send-queue state)
+                                     (harness--async-send-eof state)))
+                       (condition-wait (harness--async-send-ready state)))
+                     (when (harness--async-send-closed state) (throw 'done nil))
+                     (let ((item (pop (harness--async-send-queue state))))
+                       (unless (harness--async-send-queue state)
+                         (setf (harness--async-send-tail state) nil))
+                       (setf (harness--async-send-active state)
+                             (or item (list nil 0 (harness--async-send-eof state))))))))
+              (if (car entry)
+                  (process-send-string proc (car entry))
+                (process-send-eof proc))
+              (with-mutex (harness--async-send-mutex state)
+                (unless (harness--async-send-closed state)
+                  (cl-decf (harness--async-send-bytes state) (cadr entry))
+                  (when (car entry) (cl-decf (harness--async-send-count state)))
+                  (setf (harness--async-send-active state) nil)
+                  (unless (car entry)
+                    (setf (harness--async-send-eof-sent state) t)))
+                (unless (car entry) (throw 'done nil)))
+              ;; A healthy socket can accept a long run without blocking.
+              ;; Yield between messages too, not just on kernel backpressure.
+              (thread-yield))))
+      ((error quit)
+       (with-mutex (harness--async-send-mutex state)
+         (setf (harness--async-send-failure state) t))))))
+
+(defun harness-process-send-cancel (proc)
+  "Discard PROC's asynchronous writer and wake its thread for shutdown.
+The caller must also close PROC: a write already in flight can only
+be interrupted by closing its descriptor.  Safe to call repeatedly,
+including from a socket sentinel."
+  (when-let* ((state (process-get proc 'harness--async-send)))
+    (process-put proc 'harness--async-send nil)
+    (when (harness--async-send-timer state)
+      (cancel-timer (harness--async-send-timer state))
+      (setf (harness--async-send-timer state) nil))
+    (with-mutex (harness--async-send-mutex state)
+      (setf (harness--async-send-closed state) t
+            (harness--async-send-queue state) nil
+            (harness--async-send-tail state) nil
+            (harness--async-send-active state) nil
+            (harness--async-send-bytes state) 0
+            (harness--async-send-count state) 0)
+      (condition-notify (harness--async-send-ready state) t))))
+
+(defun harness--process-send-async-close (proc reason)
+  "Close PROC for REASON on the owning thread, discarding its writes."
+  (harness-process-send-cancel proc)
+  ;; Closing must not depend on logging or a log subscriber succeeding.
+  (when (process-live-p proc) (delete-process proc))
+  (when (fboundp 'harness-log)
+    (harness-log 'warn "process: closing %s: %s" (process-name proc) reason)))
+
+(defun harness--process-send-async-watch (proc state)
+  "Check STATE's oldest write to PROC, independently of further sends."
+  (when (eq state (process-get proc 'harness--async-send))
+    (if (not (process-live-p proc))
+        (harness-process-send-cancel proc)
+      (let ((reason
+             (with-mutex (harness--async-send-mutex state)
+               (cond
+                ((and (harness--async-send-finish state) (harness--async-send-eof-sent state)) 'done)
+                ((harness--async-send-failure state) "write failed")
+                ((let ((entry (or (harness--async-send-active state)
+                                  (car (harness--async-send-queue state)))))
+                   (when-let* ((deadline (or (nth 2 entry)
+                                            (and (not (harness--async-send-eof-sent state))
+                                                 (harness--async-send-eof state)))))
+                     (>= (float-time) deadline)))
+                 "write deadline exceeded")))))
+        (if (eq reason 'done)
+            (progn
+              (harness-process-send-cancel proc)
+              (when (process-live-p proc) (delete-process proc)))
+          (when reason (harness--process-send-async-close proc reason)))))))
+
+(defun harness-process-send-async (proc string &optional limit)
+  "Queue a snapshot of STRING to PROC without waiting for it to read.
+Return non-nil.  One IO-only thread per process sends a FIFO, never
+concatenating its backlog.  Process filters/sentinels retain their
+thread ownership; no timer or application callback runs in the writer.
+Do not mix this with synchronous writes to the same process.
+
+LIMIT (default `harness-process-send-timeout') bounds the age of each
+queued write, including time waiting behind others.  A watchdog closes
+the socket within a further 0.1 seconds of yielding to timers, even if
+no more sends occur.  `harness-process-send-max-bytes' counts encoded
+bytes including the in-flight write; `harness-process-send-max-messages'
+also bounds queue overhead.  Overflow closes the peer immediately.
+A partial write is never retried: disconnect/replay is the only safe
+recovery for a framed protocol.  Closing the process must call
+`harness-process-send-cancel' to release idle workers promptly."
+  (unless (process-live-p proc) (error "Process %s is closed" (process-name proc)))
+  (let* ((text (substring-no-properties string))
+         (bytes (string-bytes
+                 (encode-coding-string text (cdr (process-coding-system proc)) t)))
+         (entry (list text bytes (+ (float-time) (or limit harness-process-send-timeout))))
+         (state (process-get proc 'harness--async-send))
+         overflow)
+    (unless state
+      (let ((mutex (make-mutex "harness writer")))
+        (setq state (harness--async-send-create
+                     :mutex mutex :ready (make-condition-variable mutex "harness writer"))))
+      (process-put proc 'harness--async-send state)
+      (setf (harness--async-send-timer state)
+            (run-at-time 0.1 0.1 #'harness--process-send-async-watch proc state)))
+    (with-mutex (harness--async-send-mutex state)
+      (when (harness--async-send-eof state) (error "Process %s EOF already queued" (process-name proc)))
+      (setq overflow (or (> (+ bytes (harness--async-send-bytes state)) harness-process-send-max-bytes)
+                         (>= (harness--async-send-count state) harness-process-send-max-messages)))
+      (unless overflow
+        (let ((cell (list entry)))
+          (if (harness--async-send-tail state)
+              (setcdr (harness--async-send-tail state) cell)
+            (setf (harness--async-send-queue state) cell))
+          (setf (harness--async-send-tail state) cell))
+        (cl-incf (harness--async-send-bytes state) bytes)
+        (cl-incf (harness--async-send-count state))
+        (condition-notify (harness--async-send-ready state))))
+    (if overflow
+        (progn
+          (harness--process-send-async-close proc "write backlog exceeded")
+          (error "Process %s write backlog exceeded" (process-name proc)))
+      (unless (harness--async-send-thread state)
+        (condition-case err
+            (setf (harness--async-send-thread state)
+                  (make-thread (lambda ()
+                                 (with-temp-buffer (harness--process-send-async-write proc state)))
+                               (concat "harness writer " (process-name proc))))
+          (error
+           (harness--process-send-async-close proc "writer unavailable")
+           (signal (car err) (cdr err))))))
+    t))
+
 (defun harness-process-send-eof (proc)
   "Send end-of-file to PROC once what waits to go out to it has gone.
-A write under way to PROC (see `harness-process-send') sends it after
-the strings that wait behind it; else it goes out now."
-  (let ((state (process-get proc 'harness--send)))
-    (if state
-        (setf (harness--send-eof state) t)
-      (process-send-eof proc))))
+Synchronous and asynchronous writes both send it after their FIFO.
+Further asynchronous writes after EOF are refused."
+  (let ((state (process-get proc 'harness--send))
+        (async (process-get proc 'harness--async-send)))
+    (cond
+     (async
+      (with-mutex (harness--async-send-mutex async)
+        (unless (harness--async-send-eof async)
+          (setf (harness--async-send-eof async) (+ (float-time) harness-process-send-timeout)))
+        (condition-notify (harness--async-send-ready async))))
+     (state (setf (harness--send-eof state) t))
+     (t (process-send-eof proc)))))
+
+(defun harness-process-send-close (proc)
+  "Close PROC after its asynchronous FIFO and end-of-file have gone out.
+The owning thread closes it, never the writer.  The same watchdog and
+byte bound apply while draining.  Without an asynchronous writer,
+close immediately."
+  (if-let* ((state (process-get proc 'harness--async-send)))
+      (progn
+        (with-mutex (harness--async-send-mutex state)
+          (setf (harness--async-send-finish state) t))
+        (harness-process-send-eof proc))
+    (when (process-live-p proc) (delete-process proc))))
 
 (cl-defun harness-run-command (command &key cwd (timeout 120) stdin on-output name env
                                        merge-remote-stderr)

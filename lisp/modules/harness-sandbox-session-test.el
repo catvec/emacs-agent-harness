@@ -566,8 +566,11 @@ processes, and report zero afterwards while the foreign process lives."
                                   "supervisor" (number-to-string harness-sandbox-session--protocol)
                                   instance scratch)))
             (await-frame "^R 1$")
-            (process-send-string supervisor "status\n")
-            (should (equal "P 1" (await-frame "^P [0-9]+$")))
+            ;; A count is numbered with the question it answers, so a `P'
+            ;; frame is only believed for the state it counted: the answer
+            ;; echoes the number the question carried.
+            (process-send-string supervisor "status 7\n")
+            (should (equal "P 1 7" (await-frame "^P [0-9]+ [0-9]+$")))
             (should (process-live-p owned))
             (should (process-live-p foreign))
             ;; Start a real command with that token before cancelling it:
@@ -584,8 +587,8 @@ processes, and report zero afterwards while the foreign process lives."
             (should-not (process-live-p owned))
             (should (process-live-p foreign))
             (with-current-buffer frames (erase-buffer))
-            (process-send-string supervisor "status\n")
-            (should (equal "P 0" (await-frame "^P [0-9]+$"))))
+            (process-send-string supervisor "status 8\n")
+            (should (equal "P 0 8" (await-frame "^P [0-9]+ [0-9]+$"))))
         (when (and supervisor (process-live-p supervisor))
           (ignore-errors
             (process-send-string supervisor (format "kill %s\n" token))
@@ -705,6 +708,79 @@ is what `harness-sandbox-session--profile-now' re-authorises."
       (should-not (plist-get (plist-get (harness-sandbox-session-sandbox sid) :profile)
                              :cwd-writable)))))
 
+(ert-deftest harness-sandbox-session-an-answer-older-than-the-change-is-dropped ()
+  "A count taken before a command ended never answers for afterwards.
+The supervisor scans while it counts, and passes over every process of a
+run still in flight -- that run owns them.  So the `status' sent when the
+runtime became ready is answered with a zero when it is read during a
+command, and that zero says nothing about what the command leaves behind.
+Arriving after the run ended, it used to be believed: the runtime looked
+empty, and with no idle time to wait for the poll destroyed it with the
+process the run had left in it still running.
+
+The answer is dropped because the epoch it carries is not the runtime's
+any more.  The ordering here is the one that matters: the question is
+asked, the runtime changes, and only then does the answer arrive -- with
+no new question in between, so the answer is not superseded by a fresher
+one but simply describes a state that is gone."
+  (harness-sandbox-session-test--setup)
+  (let* ((runtime (harness-sandbox-session--runtime
+                   (list :session "s" :instance "i" :runs (make-hash-table :test 'equal)
+                         :state 'running)))
+         (run (harness-sandbox-session--new-run
+               (list :id "r1" :token "r1" :session "s" :command "true" :cwd "/"
+                     :seconds 30 :started (float-time) :deadline (+ (float-time) 30)
+                     :state 'running))))
+    (puthash "r1" run (plist-get runtime :runs))
+    ;; The question goes out with the runtime's epoch, which no command has
+    ;; changed yet.
+    (harness-sandbox-session--ask runtime)
+    (should (null (plist-get runtime :epoch)))
+    ;; The command ends, leaving nothing of its own; the runtime has
+    ;; changed, and the answer owed to that first question is now old.
+    (harness-sandbox-session--ended runtime "r1" "0" "0")
+    (should (eql 1 (plist-get runtime :epoch)))
+    ;; The old answer arrives, carrying the epoch it was asked under.  It
+    ;; says the instance holds nothing; it is not believed, so the count
+    ;; stays unanswered.  That is the whole point: the poll decides
+    ;; nothing on an unanswered count -- a runtime is not idle because
+    ;; nobody has counted what it holds -- where a believed zero would
+    ;; have started the idle clock and ended it with the process the
+    ;; command left behind still in it.
+    (harness-sandbox-session--frame runtime "P 0 0")
+    (should-not (integerp (plist-get runtime :owned)))
+    ;; Asked again, the answer carries the runtime's own epoch and is kept.
+    (harness-sandbox-session--ask runtime)
+    (harness-sandbox-session--frame runtime "P 1 1")
+    (should (eql 1 (plist-get runtime :owned)))))
+
+(ert-deftest harness-sandbox-session-answers-out-of-order-leave-the-newest ()
+  "A late answer to an older question never replaces a newer count.
+Two questions can be in the supervisor's pipe at once, and its answers
+can come back in either order.  Each carries the epoch it was asked
+under, so the older one is recognised even when it arrives last."
+  (harness-sandbox-session-test--setup)
+  (let* ((runtime (harness-sandbox-session--runtime
+                   (list :session "s" :instance "i" :runs (make-hash-table :test 'equal)
+                         :state 'running))))
+    ;; The first question is asked under epoch 0 and answered: two held.
+    (harness-sandbox-session--ask runtime)
+    (harness-sandbox-session--frame runtime "P 2 0")
+    (should (eql 2 (plist-get runtime :owned)))
+    ;; A command starts and ends, so the runtime has moved to epoch 1, and
+    ;; a second question is asked under it and answered: none held.
+    (harness-sandbox-session--bump-epoch runtime)
+    (harness-sandbox-session--ask runtime)
+    (harness-sandbox-session--frame runtime "P 0 1")
+    (should (eql 0 (plist-get runtime :owned)))
+    ;; The first answer, delayed, arrives now -- after the newer one.  It
+    ;; is not the answer to the question in hand and does not replace it.
+    (harness-sandbox-session--frame runtime "P 2 0")
+    (should (eql 0 (plist-get runtime :owned)))
+    ;; The current epoch's answer is believed, in its turn.
+    (harness-sandbox-session--frame runtime "P 3 1")
+    (should (eql 3 (plist-get runtime :owned)))))
+
 (ert-deftest harness-sandbox-session-a-late-report-still-says-how-a-run-ended ()
   "A run the harness ended itself keeps what the supervisor reports afterwards.
 The deadline kill and the supervisor's own report race: the harness may
@@ -760,6 +836,247 @@ promised."
                                             :cancel nil
                                             :enumerate nil
                                             :destroy t))))))
+
+;;;; What an instance counts as its own
+
+(ert-deftest harness-sandbox-session-a-foreign-instances-processes-are-not-its-own ()
+  "A runtime counts what this instance left, never what an outer sandbox holds.
+A runtime started from inside another sandbox inherits that sandbox's
+`HARNESS_RUN', so the supervisor and the helpers it starts for itself
+carry a token this instance never issued.  Counting every tagged process
+as a leftover makes such a runtime look busy for ever and it is never
+torn down.  The condition is made real here -- the outer token is in the
+environment the runtime is built with -- and a runtime holding nothing
+of its own is idle all the same, and goes."
+  (harness-sandbox-session-test-with-bwrap
+    (let* ((harness-sandbox-session-idle-seconds 0)
+           (process-environment
+            (cons "HARNESS_RUN=outertoken123"
+                  (cons "HARNESS_INSTANCE=outerinstance" process-environment)))
+           (runtime (harness-sandbox-session-ensure ctx root)))
+      (should (process-live-p (plist-get runtime :process)))
+      ;; The outer token really is inside the instance: this is not a
+      ;; runtime with a clean environment that would pass anyway.
+      (let ((tagged (harness-sandbox-session-test-run
+                     ctx (concat "grep -lzx 'HARNESS_RUN=outertoken123'"
+                                 " /proc/[0-9]*/environ 2>/dev/null | wc -l")
+                     30)))
+        (should (>= (string-to-number (string-trim (plist-get tagged :stdout))) 1)))
+      ;; Asked what it holds, it answers nothing of its own -- not the
+      ;; supervisor's helpers, and not the outer instance's work.
+      (harness-test-wait (lambda () (integerp (plist-get runtime :owned)))
+                         20 "the instance to count what it owns")
+      (should (eql 0 (plist-get runtime :owned)))
+      ;; Holding nothing, with no idle time to wait for, it goes.
+      (harness-test-wait (lambda () (null (harness-sandbox-session-sandbox sid)))
+                         30 "the fresh runtime, holding nothing of its own, to go")
+      (should-not (process-live-p (plist-get runtime :process))))))
+
+(ert-deftest harness-sandbox-session-a-server-it-holds-outlives-an-empty-run-and-a-count ()
+  "A process the instance holds keeps it alive across a run that leaves nothing.
+A run that ends with no survivors of its own is no answer to what the
+instance holds: an older background server is still there, and a fresh
+count taken after that run says so.  The runtime stays through the
+whole answer window and the poll ticks inside it, with no idle time to
+wait for, and the server it holds is still the one that answers."
+  (harness-sandbox-session-test-with-bwrap
+    (let* ((harness-sandbox-session-idle-seconds 0)
+           (port (+ 20000 (% (abs (sxhash-equal (format "%s-%s" (float-time) (emacs-pid))))
+                             20000)))
+           (runtime nil))
+      ;; Run A leaves a server the instance holds, and ends itself.
+      (let ((first (harness-sandbox-session-test-run
+                    ctx (format (concat "printf 'held-by-the-instance\\n' > held.txt\n"
+                                        "setsid python3 -m http.server %d --bind 127.0.0.1 >/dev/null 2>&1 &\n"
+                                        "echo started")
+                                port)
+                    30)))
+        (should (eql 0 (plist-get first :exit)))
+        (should (string-search "started" (plist-get first :stdout))))
+      ;; The runtime the server is in is read now, not before: with no
+      ;; idle time to wait for, a runtime holding nothing is gone already,
+      ;; so the one to watch is the one run A's own leftovers kept.
+      (setq runtime (harness-sandbox-session-sandbox sid))
+      (should runtime)
+      (should (process-live-p (plist-get runtime :process)))
+      (should (>= (plist-get runtime :owned) 1))
+      ;; Run B completes and leaves nothing of its own: its own count is
+      ;; zero, which is what makes the next one the instance's business.
+      (let ((second (harness-sandbox-session-test-run ctx "true" 30)))
+        (should (eql 0 (plist-get second :exit)))
+        (should (eql 0 (or (plist-get second :owned) 0))))
+      ;; The empty run's zero is discarded, not read as the instance's
+      ;; answer: a count is asked for again, and it finds the server.
+      (harness-test-wait (lambda () (and (integerp (plist-get runtime :owned))
+                                         (>= (plist-get runtime :owned) 1)))
+                         20 "a fresh count after the empty run, finding the server")
+      ;; It is not torn down: it stays through a whole answer window and
+      ;; the poll ticks inside it, with no idle time to wait for.
+      (sleep-for (+ harness-sandbox-session--poll-answer 0.5))
+      (accept-process-output nil 0.3)
+      (should (eq runtime (harness-sandbox-session-sandbox sid)))
+      (should (process-live-p (plist-get runtime :process)))
+      (should (>= (plist-get (harness-sandbox-session-sandbox sid) :owned) 1))
+      ;; And the server it holds is still the one that answers.
+      (unwind-protect
+          (let ((reached (harness-sandbox-session-test-run
+                          ctx (format "curl -fsS --max-time 2 http://127.0.0.1:%d/held.txt" port) 20)))
+            (should (string-search "held-by-the-instance"
+                                   (or (plist-get reached :stdout) ""))))
+        (ignore-errors
+          (harness-sandbox-session-test-run
+           ctx (format "pkill -f 'http.server %d' || true" port) 15))))))
+
+(ert-deftest harness-sandbox-session-a-cancel-accounts-for-every-child-and-leaks-no-runtime ()
+  "A cancel finds setsid children, a double fork and a nested shell, and leaks nothing.
+Every one of them carries the run's token, so the cancel finds them all
+rather than guessing at a process group.  The answer is that nothing of
+the run is left, the instance holds nothing of it afterwards, and the
+runtime it was in is still the session's own -- alive and running the
+next command -- rather than leaked or replaced."
+  (harness-sandbox-session-test-with-bwrap
+    ;; The runtime is not to be torn down under the assertions: what is
+    ;; measured here is the cancel, not the idle rule.
+    (let* ((harness-sandbox-session-idle-seconds nil)
+           (runtime (harness-sandbox-session-ensure ctx root))
+           (run (harness-sandbox-session-start-run
+                 ctx root
+                 (concat
+                  ;; The command and its children ignore TERM, so the
+                  ;; cancel has to escalate, as it does for a real one.
+                  "trap '' TERM\n"
+                  ;; A child in a session of its own.
+                  "setsid bash -c 'trap \"\" TERM; sleep 300' &\n"
+                  ;; A double fork: the middle process goes at once and
+                  ;; its child is reparented, still carrying the token.
+                  "( setsid bash -c 'trap \"\" TERM; sleep 300' & ) &\n"
+                  ;; A nested shell that starts one more of its own.
+                  "bash -c 'sleep 300' &\n"
+                  "sleep 300")
+                 :seconds 200))
+           (token (plist-get run :token))
+           (count (lambda ()
+                    (let ((probe (harness-sandbox-session-test-run
+                                  ctx (format (concat "grep -lzx 'HARNESS_RUN=%s'"
+                                                      " /proc/[0-9]*/environ 2>/dev/null | wc -l")
+                                              token)
+                                  30)))
+                      (string-to-number
+                       (string-trim (or (plist-get probe :stdout) "0")))))))
+      (harness-test-wait
+       (lambda ()
+         (and (eq 'running (harness-sandbox-session-state
+                            (harness-sandbox-session-sandbox sid)))
+              (harness-sandbox-session-live-runs (harness-sandbox-session-sandbox sid))))
+       15 "the supervisor to start the command")
+      ;; Every kind of child is found by the token before the cancel.
+      (harness-test-wait (lambda () (>= (funcall count) 4)) 15
+                        "the command's children to carry its token")
+      (harness-sandbox-session-kill-run run)
+      (let ((result (harness-test-await (harness-sandbox-session-wait run) 90)))
+        (should (eq 'stopped (plist-get result :state)))
+        (should (eql 0 (or (plist-get result :owned) 0))))
+      ;; Nothing of the token is left in the instance.
+      (should (= 0 (funcall count)))
+      ;; And no runtime was leaked: the session still has the one it had,
+      ;; alive, and the next command runs in it.
+      (should (= 1 (length (harness-sandbox-session-sandboxes))))
+      (should (eq runtime (harness-sandbox-session-sandbox sid)))
+      (should (process-live-p (plist-get runtime :process)))
+      (let ((after (harness-sandbox-session-test-run ctx "echo still-here" 30)))
+        (should (string-search "still-here" (plist-get after :stdout)))))))
+
+(ert-deftest harness-sandbox-session-cancelling-one-run-does-not-signal-another ()
+  "Cancelling one run leaves another run of the same runtime, and the validator, untouched.
+Two distinct runs are in flight in one runtime at once, each with its
+own token and its own process group.  Cancelling the first ends every
+process of it -- setsid children and a double fork included -- and
+answers only when nothing of it is left.  The second is still running,
+its processes still carry only its own token, it finishes with its own
+exit status, and the runtime and the enclosing Emacs are still there:
+a cancel reaches the processes the run it names created, and nothing
+else."
+  (harness-sandbox-session-test-with-bwrap
+    ;; The runtime is not to be torn down under the assertions.
+    (let* ((harness-sandbox-session-idle-seconds nil)
+           (runtime (harness-sandbox-session-ensure ctx root))
+           ;; The run to cancel: it ignores TERM so the cancel must escalate.
+           (doomed (harness-sandbox-session-start-run
+                    ctx root
+                    (concat "trap '' TERM\n"
+                            "setsid bash -c 'trap \"\" TERM; sleep 300' &\n"
+                            "( setsid bash -c 'trap \"\" TERM; sleep 300' & ) &\n"
+                            "sleep 300")
+                    :seconds 200))
+           (doomed-token (plist-get doomed :token))
+           ;; The run that must survive it.  It waits for a file this test
+           ;; writes only after the cancel, so its end is not a race with
+           ;; how long the checks above take.
+           (keeper (harness-sandbox-session-start-run
+                    ctx root
+                    (concat "trap '' TERM\n"
+                            ;; The detached child writes nothing and holds
+                            ;; none of the run's own descriptors: a reader of
+                            ;; those ends at EOF, and a child keeping them
+                            ;; open would delay the run's own report past the
+                            ;; shell's exit, so the status it exited with
+                            ;; would arrive only when that child died.
+                            "setsid bash -c 'trap \"\" TERM; sleep 300' >/dev/null 2>&1 &\n"
+                            "child=$!\n"
+                            "echo keeper-started\n"
+                            "while [ ! -f keeper-go ]; do sleep 0.2; done\n"
+                            "echo keeper-finished\n"
+                            ;; It goes with the run that made it.
+                            "kill -KILL -- \"-$child\" 2>/dev/null\n"
+                            "kill -KILL \"$child\" 2>/dev/null\n"
+                            "exit 7")
+                    :seconds 120))
+           (keeper-token (plist-get keeper :token))
+           (count-of (lambda (token)
+                       (let ((probe (harness-sandbox-session-test-run
+                                     ctx (format (concat "grep -lzx 'HARNESS_RUN=%s'"
+                                                         " /proc/[0-9]*/environ 2>/dev/null | wc -l")
+                                                 token)
+                                     30)))
+                         (string-to-number
+                          (string-trim (or (plist-get probe :stdout) "0")))))))
+      ;; Both runs are in flight in the one runtime, each under its own token.
+      (harness-test-wait
+       (lambda ()
+         (and (eq 'running (harness-sandbox-session-state
+                            (harness-sandbox-session-sandbox sid)))
+              (= 2 (length (harness-sandbox-session-live-runs
+                            (harness-sandbox-session-sandbox sid))))))
+       15 "both runs to be in flight")
+      (should-not (equal doomed-token keeper-token))
+      (harness-test-wait (lambda () (>= (funcall count-of doomed-token) 3)) 15
+                        "the cancelled run's children to carry its token")
+      (harness-test-wait (lambda () (>= (funcall count-of keeper-token) 2)) 15
+                        "the surviving run's children to carry its token")
+      ;; Cancel only the first.
+      (harness-sandbox-session-kill-run doomed)
+      (let ((result (harness-test-await (harness-sandbox-session-wait doomed) 90)))
+        (should (eq 'stopped (plist-get result :state)))
+        (should (eql 0 (or (plist-get result :owned) 0))))
+      ;; Nothing of the cancelled run is left ...
+      (should (= 0 (funcall count-of doomed-token)))
+      ;; ... and the other run was not signalled by it: it is still running,
+      ;; and its processes are alive under its own token.
+      (should (eq 'running (harness-sandbox-session-run-state keeper)))
+      (should (>= (funcall count-of keeper-token) 2))
+      ;; It finishes on its own, with its own exit status and its own output.
+      (with-temp-file (expand-file-name "keeper-go" root) (insert "go\n"))
+      (let ((kept (harness-test-await (harness-sandbox-session-wait keeper) 90)))
+        (should (eql 7 (plist-get kept :exit)))
+        (should (string-search "keeper-started" (plist-get kept :stdout)))
+        (should (string-search "keeper-finished" (plist-get kept :stdout))))
+      ;; The runtime the two shared is the session's own and alive, and the
+      ;; enclosing Emacs is untouched: the cancel named one run's processes.
+      (should (= 1 (length (harness-sandbox-session-sandboxes))))
+      (should (eq runtime (harness-sandbox-session-sandbox sid)))
+      (should (process-live-p (plist-get runtime :process)))
+      (let ((after (harness-sandbox-session-test-run ctx "echo validator-alive" 30)))
+        (should (string-search "validator-alive" (plist-get after :stdout)))))))
 
 (provide 'harness-sandbox-session-test)
 ;;; harness-sandbox-session-test.el ends here

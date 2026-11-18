@@ -79,6 +79,18 @@ if stamp.get("dirty") is not False or dirty:
     problems.append("the tested tree or current tree has uncommitted changes")
 for problem in problems:
     print(f"UNVERIFIED: {problem}")
+if problems:
+    # The directive names work to do, so it is printed only when the run it
+    # reports on actually failed.  A run that passed on a commit that is no
+    # longer HEAD has no failure to repair -- it has to be run again -- and
+    # saying "repair EVERY one of them" there names failures that are not.
+    if stamp.get("result") != "pass" or stamp.get("failed"):
+        print("TEST FAILURES: investigate and repair EVERY one of them, including")
+        print("  those that already fail on main; a baseline failure is still a failure,")
+        print("  and the run stays failed until it is mended.  Read the saved logs.")
+    else:
+        print("Run the full suite again on this commit; a pass on another one is not")
+        print("  a pass on this one.")
 print(f"Saved logs: {stamp.get('logs', 'scripts/.dev/test-logs')}")
 sys.exit(bool(problems))
 PY
@@ -310,6 +322,9 @@ run_suite() {
   # really do; the harness process ignores it itself, as it does in the
   # UI's own spawn (see `harness-server--sigpipe-shell').
   (trap '' PIPE
+   # A suite waits for its own asynchronous work; several suites share the
+   # machine, so it is told how many do and lengthens its waits to match.
+   export HARNESS_TEST_JOBS="$JOBS"
    timeout "$TIMEOUT" ${priority[@]+"${priority[@]}"} emacs -Q --batch -L lisp -L lisp/modules -L lisp/ui -L test -L . \
      -l test/harness-test-helpers.el -l "$f" \
      --eval "(ert-run-tests-batch-and-exit (quote $selector))" >"$LOGS/$base.log" 2>&1)
@@ -363,6 +378,26 @@ sayf() { local fmt=$1; shift; printf "$fmt\n" "$@" | tee -a "$REPORT"; }
 
 sayf '== test.sh %s (%d files)' "$(date '+%Y-%m-%d %H:%M:%S')" "${#files[@]}"
 
+# What a failing run tells the agent, before the suites it names.  A
+# baseline failure is still a failure: it is not a pass, not a waiver, and
+# not somebody else's to leave alone.  It is printed only by a failing run,
+# so a passing run stays a plain report of what passed.
+failing_advice() {
+  say ""
+  say "TEST FAILURES: investigate and repair EVERY one of them."
+  say "  A suite that fails here is a defect in this tree, whether this branch made it"
+  say "  or it was already on main: leave the code better than you found it.  A failure"
+  say "  that also fails at the branch's base is still a failure -- never a pass, a"
+  say "  waiver, a baseline note or somebody else's to leave alone -- and the run stays"
+  say "  failed until it is mended."
+  say "  Read each failing suite's whole log below, find the cause, and fix the code"
+  say "  (or the stale test, when the test is what is wrong) with a regression that"
+  say "  fails before the fix and passes after it.  Do not skip, delete, weaken or"
+  say "  relabel a test to get green, and do not rerun a narrower selection in place of"
+  say "  this run."
+  say ""
+}
+
 fail=0
 failed=()
 for f in "${files[@]}"; do
@@ -392,6 +427,7 @@ if [ "$run_head" != "$(git rev-parse HEAD 2>/dev/null || true)" ] ||
 fi
 write_stamp "$([ "$fail" = 0 ] && echo pass || echo fail)" || fail=1
 
+[ "$fail" = 0 ] || failing_advice
 say ""
 say "TEST RESULT: $([ "$fail" = 0 ] && echo PASS || echo FAIL) ($([ "$full" = 1 ] && echo full || echo selected) run)"
 say "result record: $STAMP"
@@ -402,6 +438,10 @@ done
 sayf '%s: %d files, %d failed, %ds wall (%d at a time)' \
      "$(basename "$0")" "${#files[@]}" "${#failed[@]}" "$((SECONDS - started))" "$JOBS"
 [ "${#failed[@]}" -eq 0 ] || sayf 'failed: %s' "${failed[*]}"
+if [ "${#failed[@]}" -gt 0 ]; then
+  say "failed suites, each to be repaired (a baseline failure is still a failure):"
+  for f in "${failed[@]}"; do say "  $(basename "$f")"; done
+fi
 app_reminder | while IFS= read -r line; do say "$line"; done
 cp "$REPORT" "$LOGS/last-run.txt"
 exit $fail

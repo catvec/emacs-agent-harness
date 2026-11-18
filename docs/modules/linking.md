@@ -8,6 +8,7 @@ Links in what agents write: sessions, messages, tool calls, tasks and review thr
 - **Source:** [lisp/modules/harness-linking.el](../../lisp/modules/harness-linking.el)
 - **Loaded:** by default
 - **Requires:** [session](session.md)
+- **Required by:** [board-store](board-store.md)
 - **Brings along:** [ui-linking](ui-linking.md) (its UI)
 
 ## About

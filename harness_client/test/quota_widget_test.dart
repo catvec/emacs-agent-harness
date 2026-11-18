@@ -249,10 +249,12 @@ void main() {
     testWidgets('a session list row says who pays', (tester) async {
       final rig = await _rig();
       await _pump(tester, rig);
-      // s1 and s3 are paid by the plan; s2 needs the user; s4 bills per
-      // token.
-      expect(find.byKey(const Key('session-row-spend')), findsNWidgets(3));
+      // Every row says who pays: s1 and s3 by the plan, s2 partly by it
+      // (its last calls went past the plan's window and were billed as
+      // extra usage), and s4 per token, having no plan.
+      expect(find.byKey(const Key('session-row-spend')), findsNWidgets(4));
       expect(find.text('Max'), findsNWidgets(2));
+      expect(find.text(r'$0.12+Max'), findsOneWidget);
       expect(find.text(r'$0.21'), findsOneWidget);
     });
   });

@@ -2676,6 +2676,62 @@ the mounts are the whole of what `:containers' adds."
                                     (harness-sandbox-test--binds cmd))))))
         (delete-directory cwd t)))))
 
+(ert-deftest harness-sandbox-containers-use-the-stacks-engine ()
+  "The socket and the CLI the sandbox shows are the ones the stacks use.
+A machine whose stacks run on Podman is shown no Docker socket it never
+had, and its sandboxed commands run the Podman the stacks run.  The
+engine answer runs nothing, so asking for it cannot ask this probe back."
+  (harness-sandbox-test--setup)
+  (harness-test-load-module 'container-runtime)
+  (let* ((cwd (harness-test-temp-dir))
+         (default-directory cwd))
+    (unwind-protect
+        (progn
+          ;; A Docker socket is there, and the runtime says the engine is
+          ;; Podman: the socket is not the engine's, so it is not shown.
+          (let ((socket (expand-file-name "docker.sock" cwd)))
+            (with-temp-file socket (insert ""))
+            (cl-letf (((symbol-function 'harness-container-runtime-engine)
+                       (lambda (&optional _id)
+                         (list :id 'podman :label "Podman"
+                               :program "/opt/homebrew/bin/podman" :socket nil)))
+                      ((symbol-function 'harness-sandbox--container-socket-paths)
+                       (lambda () (list socket))))
+              (should-not (harness-sandbox--container-socket))
+              (should (equal "/opt/homebrew/bin/podman"
+                             (harness-sandbox--container-cli)))))
+          ;; The engine's own socket is the one shown, at its own path.
+          (let ((socket (expand-file-name "podman.sock" cwd)))
+            (with-temp-file socket (insert ""))
+            (cl-letf (((symbol-function 'harness-container-runtime-engine)
+                       (lambda (&optional _id)
+                         (list :id 'docker :label "Docker"
+                               :program "/usr/bin/docker" :socket socket))))
+              (should (equal socket (harness-sandbox--container-socket)))
+              (should (equal "/usr/bin/docker" (harness-sandbox--container-cli)))
+              ;; And the probe reports it as the binary and the socket it found.
+              (let ((probe (harness-sandbox--container-probe)))
+                (should (equal "/usr/bin/docker" (plist-get probe :binary)))
+                (should (equal socket (plist-get probe :socket))))))
+          ;; With no container runtime module, the known paths are looked at,
+          ;; as they were before there was one.
+          (cl-letf (((symbol-function 'fboundp) (lambda (&rest _) nil)))
+            (should-not (harness-sandbox--container-engine)))
+          ;; A missing CLI names the engine the machine has, not both.
+          (cl-letf (((symbol-function 'harness-container-runtime-engine)
+                     (lambda (&optional _id)
+                       (list :id 'podman :label "Podman" :program nil :socket nil)))
+                    ((symbol-function 'harness-sandbox--policy) (lambda (&optional _) 'preferred))
+                    ((symbol-function 'harness-sandbox--backend) (lambda (&optional _) 'bwrap))
+                    ((symbol-function 'harness-sandbox--container-socket) (lambda () nil))
+                    ((symbol-function 'harness-sandbox--container-socket-state)
+                     (lambda (_path) 'connected))
+                    ((symbol-function 'file-exists-p) (lambda (&rest _) t)))
+            (let ((probe (harness-sandbox--container-probe)))
+              (should (eq 'binary (plist-get probe :stage)))
+              (should (equal "Container CLI missing · Podman" (plist-get probe :why))))))
+      (delete-directory cwd t))))
+
 (ert-deftest harness-sandbox-containers-without-a-socket ()
   "With no engine socket there is no socket bind, and the rest still holds.
 The private /run is what a runtime directory needs; a container command

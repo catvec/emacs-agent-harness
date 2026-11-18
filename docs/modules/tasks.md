@@ -492,6 +492,8 @@ here logs, emits or returns one.
 - `merge/status` ([merge](merge.md)), when it is loaded
 - `naming/name` ([naming](naming.md)), when it is loaded
 - `naming/title` ([naming](naming.md)), when it is loaded
+- `openrouter/catalogue-hold` ([provider-openrouter](provider-openrouter.md)), when it is loaded
+- `openrouter/route` ([provider-openrouter](provider-openrouter.md)), when it is loaded
 - `project/name` ([project](project.md))
 - `project/root` ([project](project.md))
 - `provider/tier-model` ([provider](provider.md)), when it is loaded
@@ -527,6 +529,7 @@ here logs, emits or returns one.
 - `merge/conflict` → `harness-tasks--on-merge-conflict`
 - `merge/finished` → `harness-tasks--on-merge-finished`
 - `merge/started` → `harness-tasks--on-merge-started`
+- `openrouter/catalogue-recovered` → `harness-tasks--on-catalogue-recovered`
 - `session/deleted` → `harness-tasks--on-session-deleted`
 - `session/ext-changed` → `harness-tasks--on-priority-changed`
 - `session/pending-changed` → `harness-tasks--on-pending-changed`

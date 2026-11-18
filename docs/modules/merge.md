@@ -82,8 +82,8 @@ as it was.
 A conflict never reaches the target's checkout.  The lock goes at
 once and the target's HEAD has to be merged into the child's branch,
 in the child's worktree, the conflicts resolved there and committed;
-the `merge_done` tool then queues the branch again.  A safety timer
-gives up on a conflict nobody resolves.
+the `merge_done` tool then queues the branch again.  Conflict resolution
+has no elapsed-time limit; it ends on completion, failure or cancellation.
 
 Who resolves them is `harness-merge-conflict-resolver`.  By default
 the harness starts a fresh session for it (a `subagent` child of the

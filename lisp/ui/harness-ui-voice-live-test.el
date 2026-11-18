@@ -108,6 +108,10 @@ chat or a workspace looks like to the live transport."
            (harness-voice-live--state nil) (harness-voice-live--error nil)
            (harness-voice-live--notice nil)
            (harness-voice-live--muted nil) (harness-voice-live--working nil)
+           (harness-voice-live--output-suppressed nil)
+           (harness-voice-live--interrupt-seq 0) (harness-voice-live--control-status nil)
+           (harness-voice-live--control-seq 0) (harness-voice-live--agent-turn nil)
+           (harness-voice-live--agent-watch 0)
            (harness-voice-live--turn-active nil) (harness-voice-live--closing nil)
            (harness-voice-live--delegation nil) (harness-voice-live--delegations nil)
            (harness-voice-live--nodes nil) (harness-voice-live--order nil)
@@ -123,6 +127,8 @@ chat or a workspace looks like to the live transport."
            (harness-voice-live--pending-token 0) (harness-voice-live--turn-held nil)
            (harness-voice-live--input-chunks nil) (harness-voice-live--input-seq 0)
            (harness-voice-live--input-anonymous nil)
+           (harness-voice-live--input-overlap nil) (harness-voice-live--submissions nil)
+           (harness-voice-live-submit-functions nil) (harness-voice-live-reset-functions nil)
            (harness-voice-live--caption-hold nil) (harness-voice-live--caption-text "")
            (harness-voice-live--caption-hold-order 0) (harness-voice-live--caption-recovery nil)
            (harness-voice-live--utterance-routes nil)
@@ -144,6 +150,8 @@ chat or a workspace looks like to the live transport."
            (harness-voice-live--route-kind 'session)
            (harness-voice-live--route-workspace nil)
            (harness-voice-live--route-thread nil)
+           (harness-voice-live--route-draft nil)
+           (harness-voice-live--route-resolved-thread nil)
            (harness-voice-live--route-name nil)
            (harness-voice-live--route-generation 0)
            (harness-voice-live--pipeline-timer nil)
@@ -180,6 +188,8 @@ chat or a workspace looks like to the live transport."
                             (push (list id method params)
                                   harness-ui-voice-live-test--calls)
                             nil))
+                         ((symbol-function 'harness-ui-fetch-tools)
+                          (lambda () (harness-resolved (make-hash-table :test 'equal))))
                          ((symbol-function 'harness-ui-call)
                           (lambda (method params _callback &optional _on-error)
                             (setq harness-ui-voice-live-test--sends
@@ -786,92 +796,533 @@ none of them is delivered twice."
      (list :event "delegation" :id "d-3" :utterance 3 :text "Request 3."))
     (should (= 3 (length harness-ui-voice-live-test--calls)))))
 
-;;;; A compose box with no target
+;;;; A compose box that composes a draft
 
-;; The reported failure: voice mode would not start on a machine whose
-;; voice controls were shown in the task board's compose box.  That box
-;; names no session and no workspace thread, so the start had nowhere to
-;; send its words and failed with "Live voice session unavailable"; the
-;; box kept offering a Start control that could only fail.  A box is a
-;; target exactly when the start has somewhere to go.
+;; The reported failure: voice mode would not start where the person
+;; composes a task.  The task board's box and a popout's name no session
+;; and no workspace thread, so the transport called them no target: the
+;; box said `Voice · no session`, offered no Start, and `C-c v' refused.
+;; The pipeline had started; nothing could route.  A box is a target
+;; because it says what it composes into, and a box that composes a draft
+;; takes a dictation as its own text -- never a message to any chat.
 
-(defun harness-ui-voice-live-test--box-without-target ()
-  "Make a compose box that names no session and no workspace thread.
-It is what the task board's box and a popout's box are."
+(defun harness-ui-voice-live-test--draft-box (&optional name identity)
+  "Make a compose box that composes a draft, named NAME, of IDENTITY.
+It is what the task board's box and a popout's box are: a real compose
+host whose own submit sends the words somewhere this transport never
+guesses.  A host that reuses one buffer for drafts of different
+purposes names each with IDENTITY (`harness-compose-context')."
   (let ((buffer (generate-new-buffer " *live voice board*")))
     (with-current-buffer buffer
       (use-local-map harness-compose-map)
       (harness-compose-setup :project (lambda () default-directory)
-                             :redraw #'ignore)
+                             :redraw #'ignore
+                             :context (lambda ()
+                                        (list :kind 'draft
+                                              :name (or name "Task board")
+                                              :identity identity)))
       (let ((inhibit-read-only t))
         (insert (propertize "Board\n" 'read-only t))
         (harness-compose-insert))
       (harness-compose-capture))
     buffer))
 
-(ert-deftest harness-ui-voice-live-box-without-a-target-offers-no-start ()
-  "A box that names no session shows no Start control, and says why.
-The exact rendered copy is pinned: the status, its tooltip, and the
-absence of both controls that could only fail there."
+(defun harness-ui-voice-live-test--recompose (buffer name identity)
+  "Have BUFFER's box compose a draft named NAME, of IDENTITY.
+It is what a host does when it reuses its one box for another purpose:
+the buffer, and every marker in it, stay exactly where they were."
+  (with-current-buffer buffer
+    (setq-local harness-compose-context-function
+                (lambda ()
+                  (list :kind 'draft :name name :identity identity)))))
+
+(ert-deftest harness-ui-voice-live-draft-box-is-a-target-with-start ()
+  "A box that composes a draft is a live target, and offers Start.
+The exact rendered copy is pinned: the status, its tooltip and both
+controls that start and show the call, with no `no session' anywhere."
   (harness-ui-voice-live-test-with
-    (let ((box (harness-ui-voice-live-test--box-without-target)))
+    (let ((box (harness-ui-voice-live-test--draft-box)))
       (unwind-protect
           (with-current-buffer box
-            (should-not (harness-voice-live--target-p))
-            (should-not (harness-voice-live--route-of-buffer (current-buffer)))
+            (should (harness-voice-live--target-p))
+            (let ((route (harness-voice-live--route-of-buffer (current-buffer))))
+              (should (eq 'draft (plist-get route :kind)))
+              (should (equal "Task board" (plist-get route :name)))
+              (should-not (plist-get route :session)))
             (let* ((line (harness-voice-live--controls))
                    (text (substring-no-properties line)))
               ;; The words, exactly.
-              (should (equal " Voice · no session · [Setup]" text))
-              ;; No control that would fail, and no failed status.
-              (should-not (string-search "[Start]" text))
-              (should-not (string-search "[Use here]" text))
-              (should-not (string-search "Live · Failed" text))
-              ;; The tooltip is a noun phrase naming the missing target.
-              (should (equal "Live voice · no session target"
-                             (get-text-property (string-match "Voice · no session" line)
+              (should (equal " Live · Off · [Start] · [Transcript] · [Setup]" text))
+              (should-not (string-search "no session" text))
+              ;; The tooltip is a noun phrase naming the status.
+              (should (equal "Live voice status"
+                             (get-text-property (string-match "Live · Off" line)
+                                                'help-echo line)))
+              (should (equal "Live voice · sidecar session"
+                             (get-text-property (string-match "\\[Start\\]" line)
                                                 'help-echo line)))))
         (when (buffer-live-p box) (kill-buffer box))))
-    ;; A box that names a session is a target, and still offers Start.
+    ;; A box that names a session is still a target, unchanged.
     (should (harness-voice-live--target-p))
     (should (string-search "[Start]" (harness-voice-live--controls)))))
 
-(ert-deftest harness-ui-voice-live-box-without-a-target-refuses-the-start ()
-  "The start from a box with no target is one line, not a failure.
-`harness-voice-dictate' and the mouse press name the missing target
-before any process, sidecar or permission is touched."
+(ert-deftest harness-ui-voice-live-draft-box-starts-the-call-here ()
+  "`C-c v' and `harness-voice' start the call in the board's own box.
+No voice chat is opened, and the sidecar starts with this box as its
+target, so the words the person speaks next go into it."
   (harness-ui-voice-live-test-with
-    (let ((box (harness-ui-voice-live-test--box-without-target)))
-      (unwind-protect
-          (with-current-buffer box
-            (setq-local harness-compose-controls-functions (list #'harness-voice--controls))
-            (should (equal "Live voice · no session target"
-                           (error-message-string (should-error (harness-voice-dictate)))))
-            (should (equal "Live voice · no session target"
-                           (error-message-string (should-error (harness-voice-hold)))))
-            ;; Nothing started, and the controls did not turn into a failure.
-            (should-not (harness-voice-live--active-p))
-            (should-not harness-voice-live--process)
-            (should-not (eq harness-voice-live--state 'failed)))
-        (when (buffer-live-p box) (kill-buffer box))))))
-
-(ert-deftest harness-ui-voice-live-box-without-a-target-opens-a-voice-chat ()
-  "`harness-voice' in a box with no target gets a voice chat instead.
-That is where an ordinary buffer already goes; a compose box with no
-session must not be a dead end."
-  (harness-ui-voice-live-test-with
-    (let ((box (harness-ui-voice-live-test--box-without-target))
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (let ((box (harness-ui-voice-live-test--draft-box))
           (opened nil))
       (unwind-protect
           (with-current-buffer box
+            (setq-local harness-compose-controls-functions (list #'harness-voice--controls))
             (cl-letf (((symbol-function 'harness-new-session)
                        (lambda (dir position _callback)
                          (push (list dir position) opened))))
-              (harness-voice)
-              (should (= 1 (length opened)))
-              ;; The board's own box gained no controls of its own.
-              (should-not (harness-voice-live--active-p))))
+              ;; The keyboard entry point starts the call here.
+              (harness-voice-dictate)
+              (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                                 5 "sidecar ready")
+              (should-not opened)
+              (should (harness-voice-live--active-p))
+              (should (eq box harness-voice-live--buffer))
+              (should (eq 'draft harness-voice-live--route-kind))
+              (should (equal "Task board" harness-voice-live--route-name))
+              (should-not harness-voice-live--session)
+              ;; The box says so, in its own words: it is the target, so
+              ;; its own status needs no name; the mode line, which is one
+              ;; indicator for the frame, does name it.
+              (should (equal "Live · Listening" (harness-voice-live--status)))
+              (should (equal "Live · Listening · Task board"
+                             (let ((harness-voice-live--status-names-target t))
+                               (harness-voice-live--status))))
+              (should (string-search "[End]" (harness-voice-live--controls)))
+              (should (string-search "[Mute C-c v]"
+                                     (harness-voice-live--controls))))
+            (harness-voice-live-stop)
+            (harness-test-wait (lambda () (null harness-voice-live--state)) 5 "sidecar closed"))
         (when (buffer-live-p box) (kill-buffer box))))))
+
+(ert-deftest harness-ui-voice-live-draft-box-mouse-press-starts-the-call ()
+  "The mouse press on a draft box starts the call there, as `C-c v' does.
+It is the other entry point that used to name a missing target and touch
+nothing; now it starts, or mutes, the one call."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (let ((box (harness-ui-voice-live-test--draft-box)))
+      (unwind-protect
+          (with-current-buffer box
+            (set-window-buffer (selected-window) box)
+            (let ((event (list 'down-mouse-1
+                               (list (selected-window) (point)
+                                     (cons (point) (selected-window)) 0))))
+              (harness-voice-hold event))
+            (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                               5 "sidecar ready")
+            (should (harness-voice-live--active-p))
+            (should (eq box harness-voice-live--buffer))
+            (should (eq 'draft harness-voice-live--route-kind))
+            (should-not harness-voice-live--error)
+            (harness-voice-live-stop)
+            (harness-test-wait (lambda () (null harness-voice-live--state)) 5 "sidecar closed"))
+        (when (buffer-live-p box) (kill-buffer box))))))
+
+(ert-deftest harness-ui-voice-live-draft-takes-the-dictation-as-its-text ()
+  "A delegation to a draft is inserted in its box, and sent to no one.
+The words become the box's text, which its own submit sends; the
+sidecar is answered with no text and no turn, and no session prompt,
+workspace prompt or conversation turn is made."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (let ((box (harness-ui-voice-live-test--draft-box)))
+      (unwind-protect
+          (with-current-buffer box
+            (harness-voice-live-start)
+            (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                               5 "sidecar ready")
+            (harness-compose-set "Fix the tile")
+            (harness-ui-voice-live-test--delegate-after-grace
+             (list :event "delegation" :id "d-draft" :text "and check the grout"))
+            ;; The words are the box's text, after the draft it held.
+            (should (equal "Fix the tile and check the grout" (harness-compose-text)))
+            ;; Nothing was sent to any session or workspace.
+            (should-not harness-ui-voice-live-test--calls)
+            (should-not harness-ui-voice-live-test--sends)
+            ;; The call is still listening, not working on a turn.
+            (should (eq 'listening harness-voice-live--state))
+            (should-not harness-voice-live--working)
+            (should-not harness-voice-live--delegation)
+            ;; The sidecar is answered, with no text: the words are a draft.
+            (let ((result (harness-ui-voice-live-test--wait-event
+                           harness-ui-voice-live-test--inbox "delegate_result")))
+              (should (equal "d-draft" (plist-get result :id)))
+              (should (equal "" (plist-get result :text)))
+              (should-not (plist-get result :error)))
+            ;; The transcript records where the words went.
+            (should (string-search "Draft" (harness-ui-voice-live-test--transcript)))
+            (should (string-search "and check the grout"
+                                   (harness-ui-voice-live-test--transcript))))
+        (when (buffer-live-p box) (kill-buffer box))))))
+
+(ert-deftest harness-ui-voice-live-running-pipeline-takes-the-board-dictation ()
+  "A call on an already-running pipeline moves to the board's box.
+The reported case: the pipeline started at login, the person was in a
+chat, and the words spoken at the board had nowhere to go.  The call is
+not restarted -- the pipeline is used as it is -- the route moves to the
+board's draft, and the words become the draft, sent to no session."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-provider 'unmute
+          harness-voice-live-command (harness-ui-voice-live-test--command "quiet"))
+    (let ((starts 0))
+      (cl-letf (((symbol-function 'harness-voice-pipeline-state) (lambda () 'running))
+                ((symbol-function 'harness-voice-unmute-need) (lambda () nil))
+                ((symbol-function 'harness-voice-pipeline-start)
+                 (lambda (&optional _callback) (cl-incf starts)))
+                ((symbol-function 'harness-voice-unmute-command)
+                 (lambda () harness-voice-live-command)))
+        (let ((chat (harness-ui-voice-live-test--box "session-a"))
+              (board (harness-ui-voice-live-test--draft-box "Task board")))
+          (unwind-protect
+              (progn
+                ;; The call starts in the chat, on the pipeline already up.
+                (with-current-buffer chat
+                  (harness-voice-live-start)
+                  (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                                     5 "sidecar ready")
+                  (should (eq 'session harness-voice-live--route-kind)))
+                (should (= 0 starts))
+                ;; The person goes to the board and speaks there.
+                (with-current-buffer board
+                  (harness-compose-set "")
+                  (should (harness-voice-live-retarget (current-buffer))))
+                (should (eq 'draft harness-voice-live--route-kind))
+                (should (equal "Task board" harness-voice-live--route-name))
+                (should (= 0 starts))
+                (harness-ui-voice-live-test--delegate-after-grace
+                 (list :event "delegation" :id "d-running" :text "Fix the login bug"))
+                ;; The words are the board's draft, and no session got them.
+                (should (equal "Fix the login bug"
+                               (with-current-buffer board (harness-compose-text))))
+                (should-not harness-ui-voice-live-test--calls)
+                ;; The chat's own refresh requests are not voice sends: what
+                ;; matters is that no prompt went to any session.
+                (should-not (cl-find-if (lambda (send) (equal "session/prompt" (car send)))
+                                        harness-ui-voice-live-test--sends))
+                (should (eq 'listening harness-voice-live--state))
+                ;; The pipeline was used, never restarted.
+                (should (= 0 starts)))
+            (when (buffer-live-p chat) (kill-buffer chat))
+            (when (buffer-live-p board) (kill-buffer board))))))))
+
+(ert-deftest harness-ui-voice-live-draft-closed-keeps-the-words-in-the-transcript ()
+  "A draft that closed before its words arrive loses nothing.
+The words are kept in the transcript with the reason, nothing is sent
+anywhere, and no failure ends the call."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (let ((box (harness-ui-voice-live-test--draft-box))
+          (route nil))
+      (with-current-buffer box
+        (harness-voice-live-start)
+        (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                           5 "sidecar ready")
+        ;; The route the words were spoken under, then the box closes.
+        (setq route (harness-voice-live--route))
+        (kill-buffer box))
+      ;; The words arrive for a draft that is no longer there.
+      (should-not (harness-voice-live--delegate-draft route "the matte tile"))
+      (should-not harness-ui-voice-live-test--calls)
+      (should-not harness-ui-voice-live-test--sends)
+      (should (string-search "the matte tile"
+                             (harness-ui-voice-live-test--transcript)))
+      (should (string-search "no box"
+                             (harness-ui-voice-live-test--transcript)))
+      (should (equal "Live voice · Draft · no box"
+                     harness-voice-live--notice))
+      (should (harness-voice-live--active-p))
+      (should-not harness-voice-live--error))))
+
+(ert-deftest harness-ui-voice-live-draft-switch-drops-the-burst ()
+  "A burst spoken in the board's box is dropped when a chat is selected.
+The target moved, so the words go nowhere -- exactly as they do for a
+session or a workspace -- and the chat they were not said in gets
+nothing, nor is the stale burst put in the board's box."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (let ((box (harness-ui-voice-live-test--draft-box))
+          (chat (harness-ui-voice-live-test--box "session-b")))
+      (unwind-protect
+          (progn
+            (with-current-buffer box
+              (harness-voice-live-start)
+              (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                                 5 "sidecar ready")
+              ;; A burst opens in the board's box.
+              (harness-voice-live--handle (list :event "hearing" :utterance 1)))
+            ;; The person selects a chat before the transcript lands.
+            (should (harness-voice-live-retarget chat))
+            (should (equal "session-b" harness-voice-live--session))
+            (harness-voice-live--handle
+             (list :event "user_delta" :text "Check the grout." :final t :utterance 1))
+            (harness-ui-voice-live-test--delegate-after-grace
+             (list :event "delegation" :id "d-board" :utterance 1
+                   :text "Check the grout."))
+            ;; Nothing went to the chat, and the stale burst is not put in
+            ;; the board's box as if it were still the target.
+            (should-not harness-ui-voice-live-test--calls)
+            (should-not harness-ui-voice-live-test--sends)
+            (should (equal "" (with-current-buffer box (harness-compose-text))))
+            (let ((result (harness-ui-voice-live-test--wait-event
+                           harness-ui-voice-live-test--inbox "delegate_result")))
+              (should (equal "d-board" (plist-get result :id)))
+              (should (equal "retargeted" (plist-get result :message))))
+            ;; The next words go to the chat the person selected.
+            (harness-ui-voice-live-test--delegate-after-grace
+             (list :event "delegation" :id "d-chat" :utterance 2
+                   :text "Now check the tests."))
+            (should (equal "session-b" (car (car harness-ui-voice-live-test--calls)))))
+        (when (buffer-live-p box) (kill-buffer box))
+        (when (buffer-live-p chat) (kill-buffer chat))))))
+
+(ert-deftest harness-ui-voice-live-two-drafts-are-two-targets ()
+  "Moving from the board's box to a popout's moves the call.
+Both compose a draft, which names no session, workspace or thread; the
+box is the target, so the second is not the first and the generation
+rises.  A draft already the target is not a move."
+  (harness-ui-voice-live-test-with
+    (let ((board (harness-ui-voice-live-test--draft-box "Task board"))
+          (popout (harness-ui-voice-live-test--draft-box "Popout")))
+      (unwind-protect
+          (with-current-buffer board
+            (harness-voice-live--route-set
+             (harness-voice-live--route-of-buffer (current-buffer)))
+            (let ((generation harness-voice-live--route-generation))
+              ;; The same box again is the same target.
+              (should-not (harness-voice-live--route-set
+                           (harness-voice-live--route-of-buffer (current-buffer))))
+              (should (= generation harness-voice-live--route-generation))
+              ;; Another draft box is not.
+              (should (harness-voice-live--route-set
+                       (harness-voice-live--route-of-buffer popout)))
+              (should (> harness-voice-live--route-generation generation))
+              (should (eq popout harness-voice-live--buffer))
+              (should (eq 'draft harness-voice-live--route-kind))
+              (should (equal "Popout" harness-voice-live--route-name))))
+        (when (buffer-live-p board) (kill-buffer board))
+        (when (buffer-live-p popout) (kill-buffer popout))))))
+
+;;;; A box the host reuses for another purpose
+
+;; The board composes a new task, a search, an edit, an answer, feedback
+;; and a message in one buffer (`harness-ui-tasks--set-compose').  The
+;; buffer is therefore not what tells two drafts apart: a burst spoken
+;; for a new task must not be inserted into the search box that replaced
+;; it, and it must not be dropped while the person is merely typing.
+
+(ert-deftest harness-ui-voice-live-following-into-another-purpose-drops-the-burst ()
+  "Following the selected box drops what was spoken for the box it left.
+The person speaks at the board's new-task box and then switches that same
+box to a search: the selected box is still the board's, so following
+moves the route, and the identity is what tells the words' target from
+the box there now.  Nothing is inserted, and the sidecar is answered."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet")
+          harness-voice-live-follow-selection t)
+    (let ((board (harness-ui-voice-live-test--draft-box "Task board" 'compose)))
+      (unwind-protect
+          (with-current-buffer board
+            (set-window-buffer (selected-window) board)
+            (harness-voice-live-start)
+            (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                               5 "sidecar ready")
+            (harness-compose-set "Fix the")
+            (should (equal 'compose harness-voice-live--route-draft))
+            ;; The burst opens in the box that composes a new task, and its
+            ;; first words are already transcribed.
+            (harness-voice-live--handle (list :event "hearing" :utterance 1))
+            (harness-voice-live--handle
+             (list :event "user_delta" :text "Fix the tile" :final t :utterance 1))
+            ;; The burst is recorded where it was spoken: the new task.
+            (let ((record (harness-voice-live--input-record "u-1")))
+              (should (equal 'compose (plist-get (plist-get record :route) :draft)))
+              (should (harness-voice-live--route-current-p
+                       (plist-get (plist-get record :route) :generation))))
+            ;; The person presses the search key in that same box.
+            (harness-ui-voice-live-test--recompose board "Search" '(search))
+            (should (harness-voice-live--follow-selection))
+            (should (equal '(search) harness-voice-live--route-draft))
+            (should (equal "Fix the" (harness-compose-text)))
+            ;; Its delegation is answered, never inserted or sent.
+            (harness-ui-voice-live-test--delegate-after-grace
+             (list :event "delegation" :id "d-followed" :utterance 1 :text "Fix the tile"))
+            (should-not harness-ui-voice-live-test--calls)
+            (should-not harness-ui-voice-live-test--sends)
+            (should (equal "Fix the" (harness-compose-text)))
+            (let ((result (harness-ui-voice-live-test--wait-event
+                           harness-ui-voice-live-test--inbox "delegate_result")))
+              (should (equal "d-followed" (plist-get result :id)))
+              (should (equal "retargeted" (plist-get result :message)))))
+        (when (buffer-live-p board) (kill-buffer board))))))
+
+(ert-deftest harness-ui-voice-live-same-buffer-drafts-are-two-targets ()
+  "The board's box becoming a search, an edit or an answer is a move.
+Every one of those drafts lives in the board's buffer, which stays the
+same one: the draft's identity is what moved, and the generation rises
+with it, so what was spoken for the old purpose is dropped as
+`retargeted' instead of landing in the replacement."
+  (harness-ui-voice-live-test-with
+    (let ((board (harness-ui-voice-live-test--draft-box "Task board" 'compose)))
+      (unwind-protect
+          (with-current-buffer board
+            (harness-voice-live--route-set
+             (harness-voice-live--route-of-buffer (current-buffer)))
+            (let ((generation harness-voice-live--route-generation))
+              ;; Typing in the same draft is not a move, however the box
+              ;; is drawn again.
+              (harness-compose-set "Fix the tile")
+              (harness-ui-voice-live-test--draw)
+              (should-not (harness-voice-live--route-set
+                           (harness-voice-live--route-of-buffer (current-buffer))))
+              (should (= generation harness-voice-live--route-generation))
+              ;; The same box, composing another draft, is another target.
+              (harness-ui-voice-live-test--recompose board "Search" '(search))
+              (should (harness-voice-live--route-set
+                       (harness-voice-live--route-of-buffer (current-buffer))))
+              (should (> harness-voice-live--route-generation generation))
+              (should (eq 'draft harness-voice-live--route-kind))
+              (should (equal "Search" harness-voice-live--route-name))
+              (should (equal '(search) harness-voice-live--route-draft))
+              (should (eq board harness-voice-live--buffer))))
+        (when (buffer-live-p board) (kill-buffer board))))))
+
+(ert-deftest harness-ui-voice-live-draft-replaced-keeps-the-burst-out ()
+  "A burst spoken for a new task never lands in the search that replaced it.
+The route moved while the words were being transcribed, so they are
+dropped as `retargeted': the search box gets nothing, and no session is
+asked anything."
+  (harness-ui-voice-live-test-with
+    (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
+    (setq harness-voice-live-command
+          (harness-ui-voice-live-test--command "quiet"))
+    (let ((board (harness-ui-voice-live-test--draft-box "Task board" 'compose)))
+      (unwind-protect
+          (with-current-buffer board
+            (harness-voice-live-start)
+            (harness-test-wait (lambda () (eq harness-voice-live--state 'listening))
+                               5 "sidecar ready")
+            (should (equal 'compose harness-voice-live--route-draft))
+            ;; A burst opens in the box that composes a new task.
+            (harness-voice-live--handle (list :event "hearing" :utterance 1))
+            ;; The person presses the search key instead of finishing.
+            (harness-ui-voice-live-test--recompose board "Search" '(search))
+            (should (harness-voice-live--route-set
+                     (harness-voice-live--route-of-buffer (current-buffer))))
+            (should (equal '(search) harness-voice-live--route-draft))
+            ;; The transcript of the old burst arrives now.
+            (harness-voice-live--handle
+             (list :event "user_delta" :text "Fix the tile" :final t :utterance 1))
+            (harness-ui-voice-live-test--delegate-after-grace
+             (list :event "delegation" :id "d-replaced" :utterance 1 :text "Fix the tile"))
+            (should-not harness-ui-voice-live-test--calls)
+            (should-not harness-ui-voice-live-test--sends)
+            ;; The search box holds none of the old purpose's words.
+            (should (equal "" (harness-compose-text)))
+            (let ((result (harness-ui-voice-live-test--wait-event
+                           harness-ui-voice-live-test--inbox "delegate_result")))
+              (should (equal "d-replaced" (plist-get result :id)))
+              (should (equal "retargeted" (plist-get result :message))))
+            (should (harness-voice-live--active-p)))
+        (when (buffer-live-p board) (kill-buffer board))))))
+
+(ert-deftest harness-ui-voice-live-draft-replaced-keeps-the-words-in-the-transcript ()
+  "Words that arrive after the box took another purpose are kept, not lost.
+The route a burst was spoken under names the draft that is gone, so its
+words and the reason `replaced' go into the transcript -- not into the
+box that composes something else now -- and the call goes on."
+  (harness-ui-voice-live-test-with
+    (let ((board (harness-ui-voice-live-test--draft-box "Task board" 'compose))
+          (route nil))
+      (unwind-protect
+          (progn
+            (with-current-buffer board
+              (setq route (harness-voice-live--route-of-buffer (current-buffer)))
+              (harness-ui-voice-live-test--recompose board "Search" '(search)))
+            ;; The draft the words were spoken into is not the box there now.
+            (should-not (harness-voice-live--delegate-draft route "the matte tile"))
+            (should (equal "" (with-current-buffer board (harness-compose-text))))
+            (should (string-search "the matte tile"
+                                   (harness-ui-voice-live-test--transcript)))
+            (should (string-search "replaced"
+                                   (harness-ui-voice-live-test--transcript)))
+            (should (equal "Live voice · Draft · replaced"
+                           harness-voice-live--notice)))
+        (when (buffer-live-p board) (kill-buffer board))))))
+
+(ert-deftest harness-ui-voice-live-submitted-draft-keeps-its-burst-out ()
+  "A burst spoken into a draft that was submitted does not enter the next one.
+The box is reused for the same purpose -- a new task -- so its target is
+unchanged by the submit; the draft's lifecycle nonce is what moved.  The
+route rises, the speech is `retargeted', and the words that arrive
+afterwards are kept in the transcript rather than typed into the empty
+box the board now shows."
+  (harness-ui-voice-live-test-with
+    (let ((board (harness-ui-voice-live-test--draft-box "Task board" 'compose))
+          (route nil))
+      (unwind-protect
+          (progn
+            (with-current-buffer board
+              (harness-compose-set "Fix the login bug")
+              (setq route (harness-voice-live--route-of-buffer (current-buffer)))
+              ;; The task is submitted: the box is emptied back to a new
+              ;; task, so its target is what it was, and the next draft is
+              ;; named by its lifecycle nonce.
+              (harness-compose-set "")
+              (harness-ui-voice-live-test--recompose board "Task board"
+                                                    '(compose . 1)))
+            (should-not (harness-voice-live--delegate-draft route "and check the grout"))
+            ;; The replacement draft is empty: the words are not in it.
+            (should (equal "" (with-current-buffer board (harness-compose-text))))
+            ;; They are kept, with the reason, and the call goes on.
+            (should (string-search "and check the grout"
+                                   (harness-ui-voice-live-test--transcript)))
+            (should (string-search "replaced"
+                                   (harness-ui-voice-live-test--transcript)))
+            (should (equal "Live voice · Draft · replaced"
+                           harness-voice-live--notice)))
+        (when (buffer-live-p board) (kill-buffer board))))))
+
+(ert-deftest harness-ui-voice-live-draft-kept-identity-takes-the-dictation ()
+  "Typing in one draft does not make the next words a stranger.
+A box redrawn, retitled or typed into keeps its identity, so the burst
+that started there is still its words: they are inserted, not lost."
+  (harness-ui-voice-live-test-with
+    (let ((board (harness-ui-voice-live-test--draft-box "Task board" 'compose))
+          (route nil))
+      (unwind-protect
+          (progn
+            (with-current-buffer board
+              (harness-compose-set "Fix the")
+              (setq route (harness-voice-live--route-of-buffer (current-buffer)))
+              ;; A redraw, another title, more typing: the same draft.
+              (harness-ui-voice-live-test--draw)
+              (harness-ui-voice-live-test--recompose board "Task board" 'compose)
+              (should (harness-voice-live--delegate-draft route "tile grout"))
+              (should (equal "Fix the tile grout" (harness-compose-text)))))
+        (when (buffer-live-p board) (kill-buffer board))))))
 
 ;;;; End to end through the real sidecar
 
@@ -1263,7 +1714,8 @@ come, and the burst says why it stopped."
     (harness-test-wait (lambda () (eq harness-voice-live--state 'listening)) 5 "sidecar ready")
     (setq harness-voice-live--working t)
     (harness-voice-live-interrupt)
-    (should (eq harness-voice-live--state 'interrupted))
+    (should (eq harness-voice-live--state 'listening))
+    (should (harness-voice-live--microphone-on-p))
     (should harness-voice-live--working)
     (should-not harness-ui-voice-live-test--notifications)
     (should (harness-ui-voice-live-test--wait-event
@@ -1272,20 +1724,25 @@ come, and the burst says why it stopped."
     (should (equal "Live · Working" (harness-voice-live--status)))))
 
 (ert-deftest harness-ui-voice-live-cancel-is-separate ()
-  "Cancel work uses the ordinary session cancellation, not playback."
+  "Cancel work silences playback and targets the captured turn, not a new one."
   (harness-ui-voice-live-test-with
     (unless (executable-find "python3") (ert-skip "Python 3 unavailable"))
     (setq harness-voice-live-command
           (harness-ui-voice-live-test--command "quiet"))
     (harness-voice-live-start)
     (harness-test-wait (lambda () (eq harness-voice-live--state 'listening)) 5 "sidecar ready")
+    (setq harness-voice-live--agent-turn "backend-turn-1"
+          harness-voice-live--working t)
     (harness-voice-live-cancel)
-    (should (equal '(("session/cancel" (:sessionId "live-session")))
-                   harness-ui-voice-live-test--notifications))
-    (should-not (cl-find "interrupt"
-                         (harness-ui-voice-live-test--events
-                          harness-ui-voice-live-test--inbox)
-                         :key (lambda (e) (plist-get e :event)) :test #'equal))
+    (should (equal '("_harness/agent/voice-control"
+                     (:session-id "live-session" :action "cancel"
+                      :opts (:turn-id "backend-turn-1")))
+                   (car (last harness-ui-voice-live-test--sends))))
+    (should-not harness-ui-voice-live-test--notifications)
+    (should-not harness-ui-voice-live-test--calls)
+    (should (harness-ui-voice-live-test--wait-event
+             harness-ui-voice-live-test--inbox "interrupt"))
+    (should (harness-voice-live--microphone-on-p))
     (should (eq harness-voice-live--state 'listening))))
 
 (ert-deftest harness-ui-voice-live-a-camera-provider-is-paused-not-muted ()
@@ -1350,7 +1807,7 @@ input is a camera.  A microphone provider keeps Mute and Muted."
     (should (equal "Live · Muted" (harness-voice-live--status)))
     (should (eq 'muted harness-voice-live--stage))
     (harness-test-wait
-     (lambda () (string-search "\"on\":false"
+     (lambda () (string-search "\"on\":true"
                                (harness-ui-voice-live-test--file-text
                                 harness-ui-voice-live-test--inbox)))
      5 "the mute event")
@@ -1359,7 +1816,7 @@ input is a camera.  A microphone provider keeps Mute and Muted."
     (should (equal "Live · Listening" (harness-voice-live--status)))
     (should (eq 'listening harness-voice-live--stage))
     (harness-test-wait
-     (lambda () (string-search "\"on\":true"
+     (lambda () (string-search "\"on\":false"
                                (harness-ui-voice-live-test--file-text
                                 harness-ui-voice-live-test--inbox)))
      5 "the unmute event")))
@@ -1512,28 +1969,30 @@ a speech server answers with no audio at all."
 (ert-deftest harness-ui-voice-live-stage-line-follows-the-session ()
   "The transcript stage line names every stage the session is in."
   (harness-ui-voice-live-test-with
-    (harness-voice-live--transcript-buffer)
-    (should-not (harness-voice-live--stage-text))
-    (harness-voice-live--handle (list :event "hearing"))
-    (should (string-search "Hearing you" (harness-voice-live--stage-text)))
-    (harness-voice-live--handle (list :event "transcribing"))
-    (should (string-search "Transcribing" (harness-voice-live--stage-text)))
-    (harness-voice-live--handle (list :event "delegation" :id "d-9" :text "Do it."))
-   (should (equal "● Finishing thought" (harness-voice-live--stage-text)))
-   (should-not harness-ui-voice-live-test--calls)
-   ;; This is a renderer-only test with no sidecar.  The live tests cross
-   ;; grace before agent delivery; render the subsequent stage explicitly.
-   (harness-voice-live--pending-cancel "cancelled")
-   (harness-voice-live--stage-set 'thinking)
-    (should (string-search "Working" (harness-voice-live--stage-text)))
-    (setq harness-voice-live--stage-since (- (float-time) 1.4))
-    (harness-voice-live--stage-redraw)
-    (should (string-search "1.4s" (harness-voice-live--status)))
-    (should (string-search "1.4s" (harness-voice-live--stage-text)))
-    (harness-voice-live--handle (list :event "speaking"))
-    (should (string-search "Speaking" (harness-voice-live--stage-text)))
-    (harness-voice-live--handle (list :event "interrupted"))
-    (should (string-search "Listening" (harness-voice-live--stage-text)))))
+    ;; Renderer-only fixture: mock the open sidecar, not the stage logic.
+    (cl-letf (((symbol-function 'harness-voice-live--active-p) (lambda () t))
+              ((symbol-function 'harness-voice-live--send) (lambda (_) t)))
+      (harness-voice-live--transcript-buffer)
+      (should-not (harness-voice-live--stage-text))
+      (harness-voice-live--handle (list :event "hearing"))
+      (should (string-search "Hearing you" (harness-voice-live--stage-text)))
+      (harness-voice-live--handle (list :event "transcribing"))
+      (should (string-search "Transcribing" (harness-voice-live--stage-text)))
+      (harness-voice-live--handle (list :event "delegation" :id "d-9" :text "Do it."))
+      (should (equal "● Finishing thought" (harness-voice-live--stage-text)))
+      (should-not harness-ui-voice-live-test--calls)
+      ;; The live tests cross grace before delivery; render the next stage.
+      (harness-voice-live--pending-cancel "cancelled")
+      (harness-voice-live--stage-set 'thinking)
+      (should (string-search "Working" (harness-voice-live--stage-text)))
+      (setq harness-voice-live--stage-since (- (float-time) 1.4))
+      (harness-voice-live--stage-redraw)
+      (should (string-search "1.4s" (harness-voice-live--status)))
+      (should (string-search "1.4s" (harness-voice-live--stage-text)))
+      (harness-voice-live--handle (list :event "speaking"))
+      (should (string-search "Speaking" (harness-voice-live--stage-text)))
+      (harness-voice-live--handle (list :event "interrupted"))
+      (should (string-search "Listening" (harness-voice-live--stage-text))))))
 
 (ert-deftest harness-ui-voice-live-stage-indicators ()
   "Waiting animates, and each idle stage has its own mark."
@@ -2535,6 +2994,381 @@ a speech server answers with no audio at all."
      5 "both receipts")))
 
 
+(ert-deftest harness-ui-voice-live-submit-arbitrates-before-blocked-turn-queue ()
+  "An input owner can finish a control while the current agent waits."
+  (harness-ui-voice-live-test-clock
+   (let ((active (list :id "active" :session "live-session")) captured complete continue)
+     (setq harness-voice-live--delegation active
+           harness-voice-live--working t
+           harness-voice-live-submit-functions
+           (list (lambda (job pass done)
+                   (setq captured job continue pass complete done) t)))
+     (harness-ui-voice-live-test--utterance 1 "Exact  answer.")
+     (harness-voice-live-send-now)
+     (should (equal "Exact  answer." (plist-get captured :text)))
+     (should-not harness-ui-voice-live-test--calls)
+     (should-not harness-voice-live--delegations)
+     (should-not (harness-voice-conversation-turns harness-voice-live--conversation))
+     (funcall complete)
+     (funcall complete)
+     (funcall continue)
+     (should (eq active harness-voice-live--delegation))
+     (should harness-voice-live--working)
+     (should-not harness-voice-live--submissions)
+     (should-not harness-ui-voice-live-test--calls)
+     (should (= 1 (cl-count "delegate_result" harness-ui-voice-live-test--output
+                             :key (lambda (e) (plist-get e :event)) :test #'equal)))
+     (should (eq 'answered (plist-get (harness-voice-pipeline--segment
+                                     harness-voice-live--pipeline "u-1") :stage))))))
+
+(ert-deftest harness-ui-voice-live-submit-continuation-is-once-only-and-reset-safe ()
+  (harness-ui-voice-live-test-clock
+   (let (continue (resets 0))
+     (setq harness-voice-live-submit-functions
+           (list (lambda (_job pass _done) (setq continue pass) t))
+           harness-voice-live-reset-functions (list (lambda () (cl-incf resets))))
+     (harness-ui-voice-live-test--utterance 1 "Run  exactly this.")
+     (harness-voice-live-send-now)
+     (funcall continue)
+     (funcall continue)
+     (should (equal "Run  exactly this." (harness-ui-voice-live-test--latest-prompt)))
+     (should (= 1 (length harness-ui-voice-live-test--calls)))
+     (harness-voice-live--finish-turn "end-turn")
+     (harness-ui-voice-live-test--utterance 2 "Do not send after reset.")
+     (harness-voice-live-send-now)
+     (harness-voice-live--pending-cancel "retargeted")
+     (should (= 1 resets))
+     (funcall continue)
+     (should (= 1 (length harness-ui-voice-live-test--calls)))
+     (should-not harness-voice-live--submissions))))
+
+(ert-deftest harness-ui-voice-live-submit-captures-playback-overlap-at-onset ()
+  (harness-ui-voice-live-test-clock
+   (let (captured)
+     (setq harness-voice-live-submit-functions
+           (list (lambda (job _pass done) (setq captured job) (funcall done) t))
+           harness-voice-live--state 'speaking)
+     (harness-voice-live--handle '(:event "speech" :utterance 1 :active t))
+     (harness-voice-live--handle '(:event "speech" :utterance 1 :active nil))
+     (harness-voice-live--handle '(:event "listening"))
+     (harness-ui-voice-live-test--utterance 1 "Answer.")
+     (harness-voice-live-send-now)
+     (should (eq t (plist-get captured :playback-overlap)))
+     (harness-ui-voice-live-test--utterance 2 "Fresh answer.")
+     (harness-voice-live-send-now)
+     (should-not (plist-get captured :playback-overlap)))))
+
+;;;; Interruption recovery, control ownership and held-command routing
+
+(ert-deftest harness-ui-voice-live-interruption-keeps-capture-and-input ()
+  "Both sidecar event orders keep capture open; mute and input stay authoritative."
+  (dolist (events '(("listening" "interrupted") ("interrupted" "listening")))
+    (harness-ui-voice-live-test-clock
+     (dotimes (_ 3)
+       (dolist (event events) (harness-voice-live--handle (list :event event)))
+       (should (harness-voice-live--microphone-on-p))
+       (should (eq 'listening harness-voice-live--stage)))
+     (should-not harness-ui-voice-live-test--calls)
+     (should-not (harness-voice-conversation-turns harness-voice-live--conversation))
+     (should-not (string-search "wait, stop what you are doing?"
+                                (harness-ui-voice-live-test--transcript)))
+     (harness-voice-live--handle '(:event "speech" :utterance 1 :active t))
+     (harness-voice-live-interrupt)
+     (should harness-voice-live--speech-active)
+     (should (eq 'hearing harness-voice-live--stage))
+     (harness-voice-live--handle '(:event "speech" :utterance 1 :active nil))
+     (harness-ui-voice-live-test--utterance 1 "Actual  dictation.")
+     (harness-voice-live-send-now)
+     (should (equal "Actual  dictation." (harness-ui-voice-live-test--latest-prompt)))
+     (harness-voice-live--finish-turn "end-turn")
+     (should (harness-voice-live--microphone-on-p))
+     (harness-voice-live-mute)
+     (harness-voice-live-interrupt)
+     (harness-voice-live--handle '(:event "listening"))
+     (should harness-voice-live--muted)
+     (should-not (harness-voice-live--microphone-on-p))
+     (should (eq 'muted harness-voice-live--stage)))))
+
+(ert-deftest harness-ui-voice-live-interrupt-suppresses-completion-not-next-turn ()
+  "Late stream/tool completion stays silent; explicit echoes cannot silence a new turn."
+  (harness-ui-voice-live-test-clock
+   (harness-ui-voice-live-test--utterance 1 "First request.")
+   (harness-voice-live-send-now)
+   (setq harness-voice-live--agent-turn "first-turn")
+   (harness-voice-live-interrupt)
+   (let ((interrupt harness-voice-live--interrupt-seq))
+     (harness-voice-live--speak "Late old sentence." "old-node")
+     (harness-voice-live--handle '(:event "speaking"))
+     (harness-voice-live--finish-turn "end-turn")
+     (should (harness-voice-live--microphone-on-p))
+     (should (eq 'listening harness-voice-live--stage))
+     (should-not (cl-find "commentary" harness-ui-voice-live-test--output
+                         :key (lambda (event) (plist-get event :event)) :test #'equal))
+     (let ((result (cl-find "delegate_result" harness-ui-voice-live-test--output
+                            :key (lambda (event) (plist-get event :event)) :test #'equal)))
+       (should (equal "" (plist-get result :text)))
+       (should-not (plist-get result :error)))
+     (harness-ui-voice-live-test--utterance 2 "Second request.")
+     (harness-voice-live-send-now)
+     (should-not harness-voice-live--output-suppressed)
+     (harness-voice-live--speak "New sentence." "new-node")
+     (should (cl-find "commentary" harness-ui-voice-live-test--output
+                      :key (lambda (event) (plist-get event :event)) :test #'equal))
+     (harness-voice-live--handle '(:event "speaking"))
+     (harness-voice-live--handle (list :event "interrupted" :interrupt_id interrupt))
+     (harness-voice-live--handle (list :event "listening" :interrupt_id interrupt))
+     (should (eq 'speaking harness-voice-live--state))
+     (should-not harness-voice-live--output-suppressed)
+     (setq harness-voice-live--state 'ending)
+     (harness-voice-live--handle '(:event "interrupted"))
+     (harness-voice-live--handle '(:event "listening"))
+     (should (eq 'ending harness-voice-live--state)))))
+
+(ert-deftest harness-ui-voice-live-control-results-exact-copy-and-tooltips ()
+  "Cancellation outcomes and tool capabilities are controls, never user text."
+  (pcase-dolist (`(,status ,copy)
+                 '((requested "Cancellation requested") (completed "Turn completed")
+                   (stale "Cancellation stale") (unavailable "Cancellation unavailable")))
+    (harness-ui-voice-live-test-clock
+     (let (callback)
+       (setq harness-voice-live--agent-turn "turn-a")
+       (cl-letf (((symbol-function 'harness-ui-call)
+                  (lambda (method params success &optional _error)
+                    (should (equal "_harness/agent/voice-control" method))
+                    (should (equal '(:session-id "live-session" :action "cancel"
+                                     :opts (:turn-id "turn-a")) params))
+                    (setq callback success)))
+                 ((symbol-function 'window-body-width) (lambda (&rest _) 500))
+                 ((symbol-function 'harness-compose--room)
+                  (lambda () (* 500 (frame-char-width))))
+                 ((symbol-function 'harness-ui-tool-label) (lambda (_) "Bash"))
+                 ((symbol-function 'format-time-string) (lambda (&rest _) "12:34")))
+         (harness-voice-live-cancel)
+         (funcall callback (list :status status
+                                 :tools '((:tool "bash" :status requested)
+                                          (:tool "bash" :status completed)
+                                          (:tool "bash" :status unavailable))))
+         (should (equal copy harness-voice-live--control-status))
+         (should (equal (concat " Live · Listening · [End] · [Interrupt C-c V] · " copy
+                                " · [Mute C-c v] · [Transcript] · [Setup]")
+                        (car (harness-ui-voice-live-test--control-lines))))
+         (let* ((line (harness-voice-live--controls)) (at (string-search copy line)))
+           (should at)
+           (should (equal copy (get-text-property at 'help-echo line))))
+         (setq harness-voice-live--working t)
+         (let* ((line (harness-voice-live--controls))
+                (at (string-search "[Cancel work]" line)))
+           (should at)
+           (should (equal "Agent turn · cancellation" (get-text-property at 'help-echo line))))
+         (should (string-search (concat "Control · 12:34\n  " copy "\n"
+                                        "  Tool cancellation requested · Bash\n"
+                                        "  Tool completed · Bash\n"
+                                        "  Tool cancellation unavailable · Bash\n")
+                                (harness-ui-voice-live-test--transcript)))
+         (should-not harness-ui-voice-live-test--calls)
+         (should-not (harness-voice-conversation-turns harness-voice-live--conversation)))))))
+
+(ert-deftest harness-ui-voice-live-control-callbacks-and-snapshots-have-owners ()
+  "A result from an old route/turn cannot change newer output or cancellation identity."
+  (harness-ui-voice-live-test-clock
+   (let (callback failure snapshot)
+     (cl-letf (((symbol-function 'harness-ui-call)
+                (lambda (method _params success &optional error)
+                  (if (equal "_harness/agent/activity" method)
+                      (setq snapshot success)
+                    (setq callback success failure error)))))
+       (setq harness-voice-live--working t)
+       (harness-voice-live--capture-agent-turn)
+       (harness-voice-live--clear-turn)
+       (setq harness-voice-live--working t harness-voice-live--agent-turn "new-turn")
+       (funcall snapshot '(:turn-id "old-turn"))
+       (should (equal "new-turn" harness-voice-live--agent-turn))
+       (harness-voice-live-cancel)
+       (cl-incf harness-voice-live--route-generation)
+       (setq harness-voice-live--control-status "New route")
+       (funcall callback '(:status requested))
+       (funcall failure "old error")
+       (should (equal "New route" harness-voice-live--control-status))
+       (harness-voice-live-cancel)
+       (harness-voice-live--clear-turn)
+       (setq harness-voice-live--state 'speaking)
+       (funcall callback '(:status completed))
+       (should-not harness-voice-live--control-status)
+       (should (eq 'speaking harness-voice-live--state))))))
+
+(ert-deftest harness-ui-voice-live-control-tool-label-fetch-is-owner-scoped ()
+  (harness-ui-voice-live-test-clock
+   (let ((fetch (harness-make-promise)) callback)
+     (setq harness-voice-live--agent-turn "turn-a")
+     (cl-letf (((symbol-function 'harness-ui-call)
+                (lambda (_method _params success &optional _error) (setq callback success)))
+               ((symbol-function 'harness-ui-fetch-tools) (lambda () fetch)))
+       (harness-voice-live-cancel)
+       (funcall callback '(:status requested :tools ((:tool "bash" :status requested))))
+       (should (equal "Cancellation requested" harness-voice-live--control-status))
+       (should-not (string-search "Tool cancellation requested"
+                                  (harness-ui-voice-live-test--transcript)))
+       (harness-voice-live--clear-turn)
+       (harness-resolve fetch (make-hash-table :test 'equal))
+       (should-not (string-search "Tool cancellation requested"
+                                  (harness-ui-voice-live-test--transcript)))))))
+
+(ert-deftest harness-ui-voice-live-cancel-without-token-never-targets-new-work ()
+  (harness-ui-voice-live-test-clock
+   (setq harness-voice-live--working t)
+   (harness-voice-live-cancel)
+   (should-not harness-ui-voice-live-test--sends)
+   (should (equal "Cancellation unavailable" harness-voice-live--control-status))
+   (should (harness-voice-live--microphone-on-p))
+   (harness-voice-live--finish-turn "cancelled")
+   (should (eq 'listening harness-voice-live--stage))
+   (should-not harness-ui-voice-live-test--calls)))
+
+(ert-deftest harness-ui-voice-live-turn-standalone-hold-and-explicit-send ()
+  (harness-ui-voice-live-test-clock
+   (harness-ui-voice-live-test--utterance 1 "Fix  only the parser test.")
+   (let ((old harness-voice-live--pending-timer))
+     (harness-ui-voice-live-test--utterance 2 "Hold on.")
+     (should (equal "Fix  only the parser test." (harness-voice-live--pending-text)))
+     (should (eq 'continuation (harness-voice-live--pending-reason)))
+     (should-not harness-voice-live--pending-timer)
+     (harness-ui-voice-live-test--fire old)
+     (should-not harness-ui-voice-live-test--calls)
+     (harness-ui-voice-live-test--utterance 3 "Oh, actually send it.")
+     (should (equal "Fix  only the parser test." (harness-ui-voice-live-test--latest-prompt)))
+     (should (= 1 (length harness-ui-voice-live-test--calls)))
+     (should (string-search "Hold on." (harness-ui-voice-live-test--transcript)))
+     (should (string-search "Oh, actually send it." (harness-ui-voice-live-test--transcript)))
+     (harness-voice-live--handle
+      '(:event "delegation" :id "retry" :utterance 3 :text "Oh, actually send it."))
+     (should (= 1 (length harness-ui-voice-live-test--calls))))))
+
+(ert-deftest harness-ui-voice-live-turn-controls-keep-source-order ()
+  (harness-ui-voice-live-test-clock
+   (dolist (id '("u-1" "u-2" "u-3"))
+     (harness-voice-live--handle (list :event "segment" :id id :state "accepted")))
+   (harness-ui-voice-live-test--utterance 3 "Oh, actually send it.")
+   (harness-ui-voice-live-test--utterance 2 "Hold on.")
+   (should-not harness-ui-voice-live-test--calls)
+   (harness-ui-voice-live-test--utterance 1 "Keep  my spacing.")
+   (should (= 1 (length harness-ui-voice-live-test--calls)))
+   (should (equal "Keep  my spacing." (harness-ui-voice-live-test--latest-prompt)))))
+
+(ert-deftest harness-ui-voice-live-turn-quoted-embedded-and-unbuffered-controls-are-data ()
+  (dolist (text '("\"Oh, actually send it.\"" "The button is named send it."
+                  "Do not send it." "Tell them to send it." "Send it to the printer."
+                  "Say \"hold on\"." "The phrase hold on."))
+    (harness-ui-voice-live-test-clock
+     (harness-ui-voice-live-test--utterance 1 "Fix it, hold on.")
+     (harness-ui-voice-live-test--utterance 2 text)
+     (should (equal (concat "Fix it, hold on. " text) (harness-voice-live--pending-text)))
+     (should-not harness-ui-voice-live-test--calls)))
+  (harness-ui-voice-live-test-clock
+   (harness-ui-voice-live-test--utterance 1 "Oh, actually send it.")
+   (should-not harness-ui-voice-live-test--calls)
+   (harness-ui-voice-live-test--fire harness-voice-live--pending-timer)
+   (should (equal "Oh, actually send it." (harness-ui-voice-live-test--latest-prompt)))))
+
+(ert-deftest harness-ui-voice-live-workspace-first-episode-before-cache ()
+  "Real workspace compose attaches the first episode before its debounced fetch."
+  (require 'harness-ui-workspace)
+  (dolist (initial-thread '(nil "thread-a"))
+    (harness-ui-voice-live-test-clock
+     (harness-ui-workspace-mode)
+     (setq harness-voice-live-follow-selection t
+           harness-ui-workspace--id "workspace-a"
+           harness-ui-workspace--thread initial-thread
+           harness-ui-workspace--state 'ready
+           harness-ui-workspace--data
+           (list :id "workspace-a" :name "Mock workspace" :root dir
+                 :threads (and initial-thread
+                               (list (list :id initial-thread :title "First thread" :live nil))))
+           harness-ui-workspace--entries nil)
+     (cl-letf (((symbol-function 'harness-compose-fetch-completions) #'ignore))
+       (harness-ui-workspace--render)
+       (harness-voice-live-retarget (current-buffer))
+       (should-not harness-ui-session-id)
+       (should-not harness-voice-live--session)
+       (harness-ui-voice-live-test--utterance 1 "First workspace request.")
+       (harness-voice-live-send-now)
+       (should (equal "_harness/workspace/prompt"
+                      (car (car (last harness-ui-voice-live-test--sends)))))
+       (let ((generation harness-voice-live--route-generation)
+             (thread '(:id "thread-a" :title "First thread" :live "episode-a")))
+         ;; This is the server's actual wire payload; no workspace cache
+         ;; update has happened when the episode starts its agent turn.
+         (harness-voice-live--on-event "workspace/episode-changed"
+                                       (list "workspace-a" thread "episode-a" nil))
+         (should (equal "episode-a" harness-voice-live--session))
+         (should (equal "episode-a" (plist-get harness-voice-live--delegation :session)))
+         (should-not (harness-ui-workspace--live-session))
+         (harness-voice-live--on-event "agent/turn-started" '("episode-a"))
+         (harness-voice-live--on-update
+          "episode-a" '(:sessionUpdate "_harness/activity" :activity (:turn-id "turn-a")))
+         (should (equal "turn-a" harness-voice-live--agent-turn))
+         (harness-voice-live--on-update
+          "episode-a" '(:sessionUpdate "agent_message_chunk" :_harness (:nodeId "reply-a")
+                        :content (:text "Actual workspace response.")))
+         (harness-voice-live--handle '(:event "speech" :utterance 2 :active t))
+         (harness-voice-live--handle '(:event "speech" :utterance 2 :active nil))
+         (harness-ui-voice-live-test--utterance 2 "Second workspace request.")
+         (should (= generation harness-voice-live--route-generation))
+         (should harness-voice-live--pending)
+         (should harness-voice-live--delegation)
+         ;; Simulate the genuine workspace fetch catching up.  Episode
+         ;; metadata is still the same target, never a retarget/drop.
+         (setq harness-ui-workspace--thread "thread-a")
+         (setf (plist-get harness-ui-workspace--data :threads) (list thread))
+         (harness-ui-workspace--render)
+         (harness-voice-live--follow-selection)
+         (should (= generation harness-voice-live--route-generation))
+         (should harness-voice-live--pending)
+         (harness-voice-live--on-event "workspace/episode-changed"
+                                      '("workspace-a" (:id "other-thread") "other-episode" nil))
+         (should (equal "episode-a" harness-voice-live--session))
+         (harness-voice-live--on-event "agent/turn-ended" '("episode-a" "end-turn"))
+         (should-not harness-voice-live--delegation)
+         (should-not harness-voice-live--working)
+         (let ((result (cl-find "delegate_result" harness-ui-voice-live-test--output
+                                :key (lambda (event) (plist-get event :event)) :test #'equal)))
+           (should (equal "Actual workspace response." (plist-get result :text))))
+         (harness-voice-live-send-now)
+         (let ((request (cl-find "_harness/workspace/prompt"
+                                 (reverse harness-ui-voice-live-test--sends) :key #'car :test #'equal)))
+           (should (equal '(:id "workspace-a" :text "Second workspace request."
+                            :opts (:thread "thread-a")) (cadr request))))
+         ;; A real thread switch still invalidates old captured input.
+         (setq harness-ui-workspace--thread "other-thread")
+         (setf (plist-get harness-ui-workspace--data :threads)
+               (list '(:id "other-thread" :title "Other thread" :live nil)))
+         (harness-voice-live--follow-selection)
+         (should (> harness-voice-live--route-generation generation)))))))
+
+(ert-deftest harness-ui-voice-live-unresolved-workspace-cannot-follow-a-retargeted-session ()
+  (harness-ui-voice-live-test-clock
+   (harness-voice-live--route-set
+    (list :kind 'workspace :workspace "old-workspace" :thread "old-thread"
+          :session nil :buffer (current-buffer)))
+   (harness-ui-voice-live-test--utterance 1 "Old request.")
+   (harness-voice-live-send-now)
+   (harness-voice-live--route-set
+    (list :kind 'session :session "new-session" :buffer (current-buffer)))
+   (let ((job harness-voice-live--delegation)
+         (generation harness-voice-live--route-generation))
+     (harness-voice-live--on-event "agent/turn-started" '("new-session"))
+     (harness-voice-live--on-update
+      "new-session" '(:sessionUpdate "_harness/activity" :activity (:turn-id "wrong-token")))
+     (harness-voice-live--on-event "agent/turn-ended" '("new-session" "end-turn"))
+     (should (eq job harness-voice-live--delegation))
+     (should-not harness-voice-live--agent-turn)
+     (harness-voice-live--on-event "workspace/episode-changed"
+                                  '("old-workspace" (:id "old-thread") "old-session" nil))
+     (should (equal "old-session" (plist-get harness-voice-live--delegation :session)))
+     (should (equal "new-session" harness-voice-live--session))
+     (should (= generation harness-voice-live--route-generation))
+     (harness-voice-live--on-event "agent/turn-ended" '("old-session" "end-turn"))
+     (should-not harness-voice-live--delegation))))
+
 ;;;; Taking back a premature voice turn
 
 (defvar harness-ui-voice-live-test--nodes nil
@@ -2545,8 +3379,6 @@ a speech server answers with no audio at all."
   "The heads the recovery asked for, oldest first.")
 (defvar harness-ui-voice-live-test--requests nil
   "The UI calls the recovery made, as (METHOD PARAMS), oldest first.")
-(defvar harness-ui-voice-live-test--timers nil
-  "The timers the transport scheduled, as (TIMER DELAY REPEAT FUNCTION ARGS).")
 
 (defmacro harness-ui-voice-live-test-with-recovery (&rest body)
   "Run BODY in a live call whose recovery can be driven deterministically.

@@ -4011,7 +4011,7 @@ once, if the chain the verdict feeds into allows it."
                    ;; A handle no call will keep: its request is stopped.
                    ;; What its internal record needs is the provider's
                    ;; business, which owns that record (see
-                   ;; `harness-provider--job-events').
+                   ;; `harness-provider--job-recorder').
                    (ignore-errors (funcall (plist-get h :cancel))))
              (ask (n text)
                   (let ((reply "") (live (setq attempt n)) (ended nil))

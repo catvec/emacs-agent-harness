@@ -248,9 +248,20 @@ the test can read back."
          (harness-provider-unregister 'checkfake)))))
 
 (defun harness-provider-check-test-run (model &optional suite embedding-model)
-  "Run a check job on MODEL and return its results, waiting for them."
-  (let ((job (harness-provider-check-start model suite embedding-model)))
-    (harness-await (harness-provider-check-job-promise job) 10)))
+  "Run a check job on MODEL and return its results, waiting for them.
+The job's own total timeout bounds it, so a slow machine finishes its
+checks rather than reporting the ones that got in first: a test that
+gave up early would call a check that never ran a nil result, and a
+nil is not a verdict about anything."
+  (let* ((job (harness-provider-check-start model suite embedding-model))
+         ;; The job's own total timeout bounds it; the extra is for the
+         ;; settle of its last check, which the machine's load can delay.
+         (bound (+ 5 harness-provider-check-total-timeout))
+         (results (harness-await (harness-provider-check-job-promise job) bound)))
+    (unless (= (harness-provider-check-job-total job) (length results))
+      (error "The check job finished with %d of %d results"
+             (length results) (harness-provider-check-job-total job)))
+    results))
 
 (defun harness-provider-check-test-by-name (results name)
   "Find the check called NAME in RESULTS."
@@ -1278,17 +1289,20 @@ asserts that the blocks it built reached the request."
 (ert-deftest harness-provider-check-total-timeout-stops-a-job ()
   "A job has a whole-run bound too, and reports what it completed."
   (harness-provider-check-test-with
-    (setq harness-provider-check-timeout 30
-          harness-provider-check-total-timeout 1)
-    (harness-define-provider 'checkfake
-      :models #'harness-provider-check-test--models
-      :complete #'harness-provider-check-test--hang)
-    (let* ((job (harness-provider-check-start "checkfake:model" 'provider))
-           (results (harness-await (harness-provider-check-job-promise job) 6))
-           (finished (car (harness-provider-check-test-events 'finished))))
-      (should (listp results))
-      (should (harness-json-true-p (plist-get (nth 3 finished) :timed-out)))
-      (should (harness-json-true-p (plist-get (nth 3 finished) :cancelled))))))
+    ;; Let-bound, not set: a global left at one second would give every
+    ;; later test in this Emacs a one-second whole-run budget, and their
+    ;; jobs would be cancelled with the checks it had not reached yet.
+    (let ((harness-provider-check-timeout 30)
+          (harness-provider-check-total-timeout 1))
+      (harness-define-provider 'checkfake
+        :models #'harness-provider-check-test--models
+        :complete #'harness-provider-check-test--hang)
+      (let* ((job (harness-provider-check-start "checkfake:model" 'provider))
+             (results (harness-await (harness-provider-check-job-promise job) 6))
+             (finished (car (harness-provider-check-test-events 'finished))))
+        (should (listp results))
+        (should (harness-json-true-p (plist-get (nth 3 finished) :timed-out)))
+        (should (harness-json-true-p (plist-get (nth 3 finished) :cancelled)))))))
 
 ;;;; Cache evidence and independent-prefix identity
 

@@ -663,12 +663,12 @@ and those of `sandbox exec', with the command last."
     (harness-openshell-test-with-home home
       (ignore home)
       (let* ((cwd (harness-test-temp-dir))
-             (process-environment (append (list "LANG=en\nUS" (concat "TZ=" (make-string 33000 ?x)) "LANGUAGE=en")
+             (process-environment (append (list "LANG=en\nUS" (concat "TZ=" (make-string 33000 ?x)) "LANGUAGE=en" "LC_ALL=C.UTF-8")
                                           process-environment))
              (cmd (harness-sandbox--openshell-command "openshell" cwd '("true")))
              (env (cl-loop for (flag value) on (harness-openshell-test--exec-args cmd) by #'cddr
                            when (equal flag "--env") collect value)))
-        (should (equal `("HARNESS_SANDBOX=openshell" ,(concat "HOME=" harness-sandbox--home) "LANGUAGE=en") env))
+        (should (equal `("HARNESS_SANDBOX=openshell" ,(concat "HOME=" harness-sandbox--home) "LANGUAGE=en" "LC_ALL=C.UTF-8") env))
         (delete-directory cwd t)))))
 
 ;;;; The methods

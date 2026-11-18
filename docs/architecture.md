@@ -1135,11 +1135,14 @@ whose request and why.
 A hint that has the same kind of thing to say again and again keeps the
 lot in one hint rather than a hint each (tool-slots-load does, for the
 tool slots a busy machine takes away and gives back).  Its `:meta`
-`:fold` is `(:key KEY :title TITLE :items ((:ts TIME :text TEXT) …))`:
-KEY names the module that writes it, which finds the hint again to add
-to it, TITLE is what the hint says while it is folded, and ITEMS are
-the lines under it, oldest first.  Read it with `harness-node-fold`
-(harness-util), which tolerates what travelled over JSON.  `:content`
+`:fold` is `(:key KEY :title TITLE :items ((:ts TIME :text TEXT) …)
+:total N)`: KEY names the module that writes it, which finds the hint
+again to add to it, TITLE is what the hint says while it is folded,
+ITEMS are the lines under it, oldest first, and TOTAL, when it is more
+than the items, is how many lines the hint stands for: it keeps the
+newest and counts the rest.  Read it with `harness-node-fold`
+(harness-util), which tolerates what travelled over JSON, and leaves a
+TOTAL that is no number or no more than the items out.  `:content`
 says the same in plain text, the title and then a line to an item, for
 a client that does not fold; with one item it is that item's text, so a
 hint of one line is the note it would have been.  The module adds a line
@@ -4758,6 +4761,91 @@ alternatives and the parts staged for later are in
   capabilities and its window.  `access/describe` carries the same
   `computer/access` plist as `:computers`.
 
+### provider-system-one
+
+A *System One* model answers with decisions rather than text: it is given
+a `state` -- the content to judge, once -- and named, typed questions
+about it, and it answers each with a typed value (a probability, one
+option of a closed set, a position on ordered levels, a box in an
+image).  That is a capability of the provider interface, as embedding
+text is, and not a second interface: `harness-define-provider` takes
+`:system-one`, `provider/system-one-p` says which models have it, and
+`provider/system-one` asks for a decision.  A model that also completes,
+or embeds, declares that too -- the day one model does both, it is one
+provider with two capabilities, not two kinds of provider.  Its design
+note is [the provider-system-one page](provider-system-one.md).
+
+```elisp
+(harness-define-provider 'ID
+  :models FN            ; () → (MODEL…), a model whose :capabilities say
+                        ; (:noul t :choice t :score t …)
+  :system-one FN)       ; (NAME REQUEST) → promise, or (:promise P :cancel FN)
+```
+
+- The capability's own keys in a model's `:capabilities` are `:noul`,
+  `:choice`, `:score`, `:box`, `:images`, `:long-context`,
+  `:confidence`, `:calibrated`, `:abstain`, `:stream`, `:audio`,
+  `:embeddings`, `:carried-state` and `:schema`, beside `:vision` and
+  `:thinking`.  A question of a type the model does not answer, and a
+  request for an image, a larger context, audio, embeddings,
+  carried-over state, a response schema or partial results on a model
+  that does not declare the capability that promises it, are refused
+  before the provider is called.
+- A REQUEST is `(:model PROVIDER:NAME :state STATE :questions QUESTIONS
+  :schema-version N)` and optionally `:deadline`, `:assets`,
+  `:long-context`, `:audio`, `:embeddings`, `:carried-state`,
+  `:response-schema` and `:on-partial`.  STATE is the content every
+  question is judged against, sent once: text, a plist (a JSON object)
+  or a list (a JSON array).  QUESTIONS maps a name the caller chose to
+  a question `(:type "noul"|"choice"|"score"|"box" :instructions …
+  :criteria …)`.
+- A RESULT carries `:answers`, one per question keyed by the same name
+  and of the type that question asked for, or `:abstained t` with a
+  `:reason` instead.  Every answer is checked against the question that
+  asked it -- a choice among the options offered, a score on its
+  levels, a legend that names them, probabilities in 0..1 -- before a
+  caller reads it, so no consumer re-decides what malformed means.
+- `provider/system-one MODEL-ID REQUEST` → a handle
+  `(:promise :cancel)`; `harness-provider-system-one-decide REQUEST` →
+  the full handle `(:call :provider :model :promise :cancel :deadline)`,
+  which bounds the call by `:deadline` (or
+  `harness-provider-system-one-timeout`, 10 s), cancels it
+  (`harness-provider-system-one-cancel`, which the handle's `:cancel`
+  does too) and settles it once: an answer, a failure or a partial
+  result that arrives after the call was cancelled, timed out or
+  answered is dropped.  A model `harness-allowed-models` does not allow
+  is never asked.
+- A confidence is the model's own number about how peaked its answer
+  was.  It reads as a probability of being right only when the model
+  declares `:calibrated` *and* its artifact records how the calibration
+  was fitted (`:method`, and a `:source` for where that is documented).
+  No threshold is read here: the caller owns its policy.
+- ARTIFACT is what a model was trained and evaluated on:
+  `(:schema-version N :artifact (:id :version) :model (:id :version)
+  :questions QUESTIONS :dataset (:name :version :provenance
+  :splits ((:name :count)…)) :evaluation (:split :metrics
+  ((:name :value)…) :calibration (:method :source)) :runtime (:kind
+  local|remote :requires (…))).  `harness-provider-system-one-artifact-problems`
+  validates it, and `harness-provider-system-one-artifact-agrees-p
+  ARTIFACT REQUEST` says what in the request is not the shape the
+  artifact was made for: another question, another type, another option
+  set, another number of levels.  The fixture in
+  `test/fixtures/system-one/` is that agreement made concrete.
+- `harness-provider-system-one-register-jev ID :model … :base-url …`
+  registers a provider whose System One model is TypeSafe's Jev at
+  `POST /v1/systemone`: `model`, `state` and `questions` (and `assets`
+  for images), the key in `Authorization`, the danger-zone headers only
+  when the request needs them, and the answer's `answers`, `model` and
+  `usage` read back.  The model the answer names is kept, because an
+  alias resolves to a version.
+  `harness-provider-system-one-jev-refresh-models ID` reads
+  `GET /v1/models` on request.
+- `harness-provider-system-one-register-fixture ID DIRECTORY` registers a
+  provider that answers from `artifact.json` and `cases.jsonl` with no
+  model call.
+- Event `provider/system-one-decided REQUEST RESULT`, after the result
+  was validated.
+
 ### decisions
 
 Lasting decisions: answers that hold beyond their moment, kept with
@@ -7287,7 +7375,7 @@ loads on its own.
   `worktree/prune-merged ROOT &optional DRY-RUN`,
   `worktree/lock ROOT PATH &optional REASON`,
   `worktree/unlock ROOT PATH &optional ANY`, `worktree/lock-existing ROOT`,
-  `worktree/root-of PATH`, `worktree/branch PATH`,
+  `worktree/root-of PATH`, `worktree/branch PATH`, `worktree/head PATH`,
   `worktree/status PATH` → `(:dirty :ahead :behind :branch)`.  All return promises.
 - Sessions created with `:worktree PATH` get `:cwd` = PATH.
 - `worktree/list` gives `(:path :branch :head :bare :detached :locked
@@ -7678,7 +7766,7 @@ Task mode: one session per task.  TASK =
 :error "…" :duplicate-of ID :main-tree BOOL :worktree DIR :branch NAME :base NAME :merge-target TARGET :merge-status nil|queued|merging|conflict
 :merge-queued F :conflicts (FILE…) :merged BOOL :archived BOOL :created F :started F :finished F
 :queued-at F :waits ((:at F :seconds F :priority "low|medium|high") ...)
-:paused nil|F :return-reason returned|preempted|reclaimed|sent-back|quota|budget
+:paused nil|F :return-reason returned|preempted|reclaimed|sent-back|quota|budget|catalogue
 :verified BOOL :verified-at F :feedback ((:text "..." :at F) ...))`, and a
 read of a queued task also has `:hold` (below) while something holds it back.
 `:base` is the task's merge base: the branch checked out where it was
@@ -8284,7 +8372,7 @@ priority).
   seconds), so a task submitted into a free slot -- started before its
   title can come -- is named after it too; no other part of a start waits.
 - Holds.  A queued task (`harness-tasks--queued-p`) can be held:
-  `harness-tasks--hold TASK` is nil or `(:kind paused|quota|budget
+  `harness-tasks--hold TASK` is nil or `(:kind paused|quota|budget|catalogue
   :reason TEXT :until F :guess BOOL :items (…) [:since F])`, the view's
   `:hold`.  The scheduler leaves a held task in the queue, taking no
   slot from the tasks behind it.
@@ -8299,17 +8387,29 @@ priority).
   - `budget`: a hard budget covering the session is spent
     (`usage/budget-hold`); `:until` is when its period ends, nil when only
     an edit lets go, `:items` the budgets.
-  Quota and budget holds are worked out, not stored: the table
+  - `catalogue`: OpenRouter's endpoint catalogue cannot be read
+    (`openrouter/catalogue-hold`, only for a session on an OpenRouter
+    model): a read that failed *transiently*, with no reading inside the
+    policy's `:freshness`, so no price can be read and nothing can be
+    sent.  `:until` is when the episode's next re-read is due (nil when
+    one is already under way, so the recovery starts the tasks),
+    `:items` the model whose catalogue is out.  A refusal -- a 401, a
+    body that is an `error` object -- is not a hold: it is the
+    catalogue's answer, and the task waits for a person instead.  See
+    `docs/openrouter-pinning.md`.
+  Quota, budget and catalogue holds are worked out, not stored: the table
   `harness-tasks--holds` (id → hold) is refreshed at the start of every
   scheduling pass (`harness-tasks--refresh-holds`), for tasks that never
   started as much as for parked ones, so a restart needs nothing kept to
   find them again; a hold that began, changed or ended is announced as a
   `task/changed` with the new `:hold`.  A quota hold comes before a
-  budget hold for a task out of both.  The pass is run again
+  budget hold for a task out of both, and the catalogue last, since it
+  stops the work whatever the account can do.  The pass is run again
   when something that decides a hold changes: `fallback/changed` (a mark
   ended or was cleared, a quota report moved one, a session switched
-  model) and `usage/budgets-changed`, debounced
-  (`harness-tasks--on-hold-event`); `config/changed` for
+  model), `usage/budgets-changed` and `openrouter/catalogue-recovered`
+  (a reading settled), debounced (`harness-tasks--on-hold-event`,
+  `harness-tasks--on-catalogue-recovered`); `config/changed` for
   `harness-fallback-models` and `harness-budget`; and a timer set to the
   earliest `:until` of all holds plus a second, never sooner than two
   seconds on (`harness-tasks--arm-hold-timer`, `harness-tasks--hold-due`).
@@ -8317,27 +8417,30 @@ priority).
   the limit, not while its queue is suspended.  `task/start` ignores holds
   as it ignores the limit; a message to a held task through `task/prompt`
   is kept (`:queued`) for its start like one to a task in a suspended
-  queue; work sent back from review into a quota or budget hold waits
-  in the queue with its feedback (`harness-tasks--make-room` finds no
-  room: `harness-tasks--hold-back`).
+  queue; work sent back from review into a quota, budget or catalogue
+  hold waits in the queue with its feedback (`harness-tasks--make-room`
+  finds no room: `harness-tasks--hold-back`).
 - Parking.  A turn that ends `error` or `blocked`
   (`harness-tasks--on-turn-ended`) while its task is not in the merge queue
-  and a quota or budget hold stands now (`harness-tasks--compute-hold`) is
-  no failure of the task: every provider it could run on ran out, or the
-  budget gate stopped the turn before it began or between two steps of
-  a running one (the `agent/before-turn` and `agent/step` gates of
-  usage).  `harness-tasks--park` returns the task to pending as
-  `task/return-to-pending` does -- session, branch and worktree kept, first
-  of its priority, `:returned` set -- with `:return-reason` `quota` or
-  `budget`, the hold in the table so the `task/changed` that announces
-  it already says why, a hint in its session ("Back in the queue until
-  it can go on: …"), and what its session left running outside its turn
-  stopped (the reason "its task waits for quota" / "for its budget").  The
-  turn is over, so nothing is cancelled and the scheduling pass leaves
+  and a quota, budget or catalogue hold stands now
+  (`harness-tasks--compute-hold`) is no failure of the task: every
+  provider it could run on ran out, the budget gate stopped the turn
+  before it began or between two steps of a running one (the
+  `agent/before-turn` and `agent/step` gates of usage), or OpenRouter's
+  catalogue could not be read at all.  `harness-tasks--park` returns the
+  task to pending as `task/return-to-pending` does -- session, branch and
+  worktree kept, first of its priority, `:returned` set -- with
+  `:return-reason` `quota`, `budget` or `catalogue`, the hold in the table
+  so the `task/changed` that announces it already says why, a hint in its
+  session ("Back in the queue until it can go on: …"), and what its
+  session left running outside its turn stopped (the reason "its task
+  waits for quota" / "for its budget" / "for the endpoint catalogue").
+  The turn is over, so nothing is cancelled and the scheduling pass leaves
   the task out as a return does.  When the hold ends the start prompts the
-  session with `harness-tasks--quota-message` or
-  `harness-tasks--budget-message`, and `fallback`'s `agent/before-turn`
-  moves it to the first entry of the list that works, as before any turn.
+  session with `harness-tasks--quota-message',
+  `harness-tasks--budget-message` or `harness-tasks--catalogue-message`,
+  and `fallback`'s `agent/before-turn` moves it to the first entry of the
+  list that works, as before any turn.
   A turn that failed for another reason stays an `error` outcome in
   needs-input, as before.
 - Pausing.  `task/pause ID` is the board's Pause, and it sticks: a task at
@@ -8518,7 +8621,8 @@ priority).
   report, a missing one too (`harness-tasks--missing-recorded-p`):
   the reply it ends with is to that session.  The board's button for
   a missing report reads [No report], its popout says "Not handed
-  in", and the session's review banner says so in a line.
+  in", and the session's tail says so in a line, there being no call
+  to hold the review.
 - Events `task/changed TASK`, `task/deleted ID`, `task/review TASK` (its
   work waits for the user's review), `task/done TASK HOW` (it became
   done; HOW is `merged` when the merge queue merged its branch,
@@ -9918,6 +10022,27 @@ whose strict syntax it reads, and the correction of a malformed reply;
   when the task leaves the working phase, and when it is sent or
   dropped.  The agent's own close, a close in a task waiting for
   review, and a thread of drafts offer none.
+- The last reviewed.  The user marks the closes they looked at, one at a
+  time (`mark-reviewed`) or all at once (the UI's bulk mark, which sends
+  one `mark-reviewed` per close).  Marking the last close that waited
+  leaves nothing of the agent's work to look at, and in a task at work
+  the module keeps the harness's message that no close is left to review
+  (`harness-patch-review-last-reviewed-message`, from "review") as a
+  draft of the task's session (`harness-patch-review-draft-on-last-reviewed`,
+  on by default), by the same path as the last close's: it waits with the
+  drafts, `patch-review/send-replies` sends it after the replies (the
+  send returns `:last-reviewed` beside `:last-close`), and
+  `patch-review/discard-last-reviewed` drops it unsent.  A mark of a
+  close that was already marked is no transition, so it offers no second
+  message; a close the agent makes afterwards waits again, and the draft
+  that said no close was left goes.  It is kept in
+  `patch-review-last-reviewed/TASK-ID.json`, announced in
+  `patch-review/last-reviewed TASK-ID DRAFT`, and given by
+  `patch-review/last-reviewed TASK-ID`.  It is about the review of the
+  closes, not the task: a close marked reviewed is no verification, no
+  merge and no completion, and a task waiting for review offers none.
+  The two messages are one kind of thing (`harness-patch-review--kinds`),
+  kept, announced, re-read and sent together.
 - The files viewed.  The files the reviewer compared in Ediff and those
   approved are kept in `patch-review-viewed/TASK-ID.json`: `:seen` and
   `:approved`, lists of `(:path PATH :blob BLOB)` -- the blob the file
@@ -11181,6 +11306,40 @@ recaps (`harness-recap--on-turn-started'), so a chat never shows them
 above the new turn's line; a task's are kept, as its card keeps its
 recap.
 
+What a recap says is the work since the previous one, not the
+assignment.  The request (`harness-recap--prompt') puts the assignment
+first, labelled as context the recap must not restate, then the recap
+in hand (`Previous recap: ...`), then the counts since it was made
+(`Since the previous recap: 2 turns, 9 tool calls`), the todos, the
+item in hand and what the session waits on (`The work waits on the
+engineer: permission for Bash`), and then the work itself: the
+transcript from the node the recap in hand was made at, as lines of what
+the agent wrote, asked and got back (`harness-recap--entry'), each tool
+result cut to `harness-recap--result-chars', the newest that fit
+`harness-tasks-recap-context` with a first line saying how many were
+left out (`harness-recap--work`).  The task record keeps that node as
+`:recap-node` beside `:recap-turns` and `:recap-tools`
+(`task/set-recap`), and the per-session record keeps it too.  With no
+recap in hand there is no node to start from, so the request carries the
+newest work and the counts of the session so far (`Work so far: ...`).
+
+That makes a recap concrete and keeps it from repeating itself.  The
+registry's `recap-system` says so in words -- report what happened
+since the previous recap, name the file, function, test, command and
+result, do not restate the task, the plan or the previous recap, do not
+claim work the transcript does not show, and answer `UNCHANGED` when
+nothing has changed -- and the module holds to it in code.  A task whose
+transcript has not grown since its recap is not asked again whatever
+the thresholds say (`harness-recap--idle-p`), though a forced one -- a
+turn that ended blocked or on an error -- still is, since the blocker is
+news.  An answer of `UNCHANGED`, or a line that only says again the
+task's first line or the recap in hand
+(`harness-recap--repeats-p`), leaves the recap in hand in place: the
+counters and `:recap-node` move on, no `recap/done` is said, and no
+duplicate goes into the history.  A recap that does move the work on is
+stored and said as it always was, and the next request starts where it
+left off.
+
 A `bash' command still running notes itself under the call from the
 start and then at most every `harness-tools-shell--note-interval'
 (0.25 s) as its output arrives: "still running · 12 lines so far", and
@@ -12056,12 +12215,18 @@ the chat draws it as that one line, closed, with a line to a change
 under it, each with its time (see ui-chat).  A change after a quieter
 spell, in a session that has moved on since the note, starts a note of
 its own, so the transcript still shows where in the session's work the
-load moved; so does one that finds the note full
-(`harness-tool-slots-load--note-limit`, 20 changes, so a load that moves
-for hours does not write one ever longer note anew at each change), or
-off the branch the session's transcript is on now, or gone.  Only the
-module's own notes (by `:key`) are added to.  The window and the limit
-are internal variables, not options (see the configuration audit).
+load moved; so does one that finds the note off the branch the
+session's transcript is on now, or gone.  A note that has kept its fill
+of changes is not closed, though: a stretch that runs for hours, or for
+days in a session that stands still, stays one line, the note keeping
+the newest changes as its lines
+(`harness-tool-slots-load--note-limit`, 20 of them, so a load that moves
+for hours does not write one ever longer note anew at each change) and
+counting them all in its title and in its fold's `:total`.  Opened, it
+says how many it leaves out -- "40 earlier changes" -- above the newest
+ones.  Only the module's own notes (by `:key`) are added to.  The
+window and the limit are internal variables, not options (see the
+configuration audit).
 
 The note is the history, and it stands where the first change of its
 stretch landed, far up a session that went on since.  How the slots
@@ -13130,8 +13295,11 @@ is one line, its title, with the fold's button hanging in the indent
 before it, and the lines in the fold, each with the time it was said;
 the block starts folded, and a line added to the hint draws it again
 where it stands, as open or closed as the user left it
-(`harness-chat--render-folded-hint`).  With one line it is the plain
-note it would have been, which has nothing to fold.
+(`harness-chat--render-folded-hint`).  A fold that stands for more
+lines than it keeps says how many it leaves out, "40 earlier changes",
+above the lines it keeps.  With one line it is the plain note it would
+have been, which has nothing to fold -- unless it stands for more than
+that one, which is drawn folded too.
 Only the calls of tools on an allow list fold: the tools that say
 `:coalescable` (see tools), which the UI reads from `tools/list`.  It
 holds the quiet reads: `read_file`, `grep`, `glob`, `list_dir`,
@@ -14018,7 +14186,7 @@ its own under `harness-state-directory/clips/` deduplicated by the
 SHA-1 of the bytes, which `M-y` goes back through and
 `C-u M-x harness-compose-attach-clipboard` picks from; `yank-media`
 attaches them too (`harness-compose-yank-media`).  The box binds no
-`C-c C-v`: in a chat that is the review banner's [Verify], so the two
+`C-c C-v`: in a chat that is the review's [Verify], so the two
 never fight, and other MIME types are chosen from with
 `M-x harness-compose-attach-clipboard`.
 Inline chips and tokens: an attachment gets a token in the text, where
@@ -14249,7 +14417,7 @@ harness: the box is only the composition it quotes into.
   message that is the host says: text it marks with a `compose-quote`
   property, a string, is quoted as that Markdown (a report's summary
   carries it, `harness-ui-report--insert-message`, into the chat's
-  review banner too), and elsewhere the buffer-local
+  hand_in call too), and elsewhere the buffer-local
   `compose-quote-function` returns it -- the chat's
   `harness-chat--quote-at-point` the response, plan or thinking point is
   on, else the nearest response or plan above point, so the last one
@@ -15016,8 +15184,9 @@ clicked.  `config/changed` brings every board the new values.  RET opens the ses
 directory the session works in; elsewhere a task's worktree belongs to
 the main checkout's board (`harness-files-main-root`).  A click on a
 card, or RET, opens its task's session in whatever column the task is:
-the session is where a task is handled.  Above its compose box a task in
-review has the review banner, a task waiting in the backlog its own, and
+the session is where a task is handled.  In its transcript a task in
+review has the review of its round, in the hand_in call it was handed in
+with, a task waiting in the backlog its own banner, and
 every other task's state is on the session's settings line, in the
 board's words, with the buttons that move it through the queue --
 [Start], [Pause] and [Resume] (`harness-ui-tasks--queue-items',
@@ -16555,7 +16724,7 @@ opens its file, its thread and its directory as it is written
 it cut (`change-review-ui--trimmed`): `TAB` goes one line, conversation,
 all of it when it did, one line again.
 `change-review-ui-thread-line` is the same thread as one row of a list.  The threads of the report, of
-the review banner and of the tree beside Ediff
+the review and of the tree beside Ediff
 (`change-review-ui-threads-string`, the body of the threads view as a
 string, and `change-review-ui-threads-heading`, the line with the
 filter's buttons), the threads view (`change-review-open-threads`, which
@@ -16816,7 +16985,7 @@ its buttons draw that buffer again, and an operation that changed the
 set draws every surface through the library's own refresh):
 
 - the report: the panel is on `harness-ui-report-panel-functions` at depth
-  -10, before the review banner, and returns the changes of a task in
+  -10, before the review's banner, and returns the changes of a task in
   review that has a branch, and nothing for any other task.  A task that
   left review can still show its changes: `harness-ui-patch-review-open`,
   on C-c C-d in a task's session or on a board card
@@ -16828,14 +16997,14 @@ set draws every surface through the library's own refresh):
   it is in; a report opened anew, a popout buffer it has not drawn in yet,
   reads the branch again (`harness-ui-patch-review--ensure-loaded`),
   unless it opens only for the box beside Ediff.
-- the review banner of the task's session: `ui-review` has a hook of its
+- the hand_in call of the task's session: `ui-review` has a hook of its
   own, `harness-ui-review-changes-functions`, called in the chat buffer on
-  every draw of the banner's tail with the task, whose strings go between
-  the report the task handed in and [Verify], indented as the banner's
-  text (a function that fails says so in a line and the banner stays);
-  the module's function (`harness-ui-patch-review--banner-panel`) draws
-  the changes of a task in review that has a branch, remembers the chat
-  buffer in the review (`banners`) and starts reading the branch if no
+  every draw of the review with the task, whose strings go between the
+  report the task handed in and [Verify], indented as the review's text
+  (a function that fails says so in a line and the review stays); the
+  module's function (`harness-ui-patch-review--chat-changes`) draws the
+  changes of a task in review that has a branch, remembers the chat
+  buffer in the review (`chats`) and starts reading the branch if no
   surface did.  `harness-ui-review--shown` includes the task's branch,
   base and project, so the tail draws again when what the changes are
   read from changes, not for any other change of the record.  The tail of
@@ -16870,9 +17039,9 @@ its older definition made wrong -- the slots after the new one are shifted
 by one, and the last ones lie past the end -- so the report failed with
 `args-out-of-range`, whose message printed the whole review (the task, its
 hand-in, the files with their patches); the panel's failure took the
-panels after it, the review banner with [Verify] and [Send back], out of
-the report; and the module's listener of `task/changed` and `task/review`,
-ahead of the review banner's own in `harness-ui-event-functions`, failed
+panels after it, the review with [Verify] and [Send back], out of the
+report; and the module's listener of `task/changed` and `task/review`,
+ahead of the review's own in `harness-ui-event-functions`, failed
 on the task's events and kept the banner from hearing the task was handed
 in.  A review therefore remembers, in a weak table beside it
 (`harness-ui-patch-review--made-with`, not in a slot, which a review of
@@ -17128,8 +17297,8 @@ beside Ediff
 the side windows go too (`ignore-window-parameters`).  Ediff starts in
 the frame of the window the review was started from, which git's
 answer may reach when another frame is the selected one: the report's,
-else the window of the review banner's chat.  q sets the configuration
-back.  The buffer the Ediff was started from, when it is a review banner
+else the window of the review's chat.  q sets the configuration
+back.  The buffer the Ediff was started from, when it is a hand_in call
 (`origin`), gets point on the row of the next file to review, in sight,
 and the report, drawn again meanwhile, gets its window start and point
 anew, since its markers in the configuration went with the text they

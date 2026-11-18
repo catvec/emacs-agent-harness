@@ -56,6 +56,22 @@
              (make-string (* 2 samples) 0))
      t)))
 
+(defmacro harness-speech-test-with-runtime (&rest body)
+  "Run BODY with a stopped fixture stack, never the host's containers.
+Tests that exercise start failures override the fake runner explicitly.
+A status query returns an empty compose listing; a real command is an
+error, so removing command URLs cannot discover the user's voice stack."
+  (declare (indent 0))
+  `(let ((harness-stacks--states (make-hash-table :test 'eq))
+         (harness-stacks--commands (make-hash-table :test 'eq))
+         (harness-stacks--failures (make-hash-table :test 'eq)))
+     (cl-letf (((symbol-function 'harness-compose-stack-available-p) (lambda () t))
+               ((symbol-function 'harness-stacks--exec-for-stack)
+                (lambda (&rest _) (cons 0 "[]")))
+               ((symbol-function 'harness-stacks--run)
+                (lambda (&rest _) (error "Unexpected container command in speech test"))))
+       ,@body)))
+
 (defmacro harness-speech-test-with (bindings &rest body)
   "Run BODY with the speech module loaded, and BINDINGS inside it.
 The pipeline runs the fixture on two free ports, which is how a test
@@ -66,7 +82,8 @@ asks a container runtime for anything."
      (harness-test-reset-bus)
      (dolist (m '(store project config container-runtime stacks speech))
        (harness-test-load-module m))
-     (let* ((harness-speech-test--stt-port (harness-speech-test--port))
+     (harness-speech-test-with-runtime
+      (let* ((harness-speech-test--stt-port (harness-speech-test--port))
             (harness-speech-test--tts-port (harness-speech-test--port))
             (harness-speech-local-stt-command
              (list (or (executable-find "python3") "python3")
@@ -88,7 +105,7 @@ asks a container runtime for anything."
        (let ,bindings
          (unwind-protect
              (progn ,@body)
-           (harness-speech--stop-all))))))
+           (harness-speech--stop-all)))))))
 
 (defmacro harness-speech-test-with-stack (&rest body)
   "Run BODY with the bundled compose stack, and its runtime stubbed out."
@@ -97,14 +114,15 @@ asks a container runtime for anything."
      (harness-test-reset-bus)
      (dolist (m '(store project config container-runtime stacks speech))
        (harness-test-load-module m))
-     (let ((harness-speech-local-stt-command nil)
+     (harness-speech-test-with-runtime
+      (let ((harness-speech-local-stt-command nil)
            (harness-speech-local-tts-command nil)
            (harness-speech-local-stt-url nil)
            (harness-speech-local-tts-url nil)
            (harness-stacks--states (make-hash-table :test 'eq))
            (harness-stacks--commands (make-hash-table :test 'eq))
            (harness-speech--status nil))
-       ,@body)))
+       ,@body))))
 
 ;;;; The stack it declares
 
@@ -267,6 +285,52 @@ it ran and the exit status, so a client can show what actually failed."
       (let ((status (harness-call 'speech/stop)))
         (should (equal "stopped" (plist-get status :state)))
         (should (equal "Local voice pipeline · stopped" (plist-get status :reason)))))))
+
+;;;; The engine it runs on
+
+(ert-deftest harness-speech-runs-on-the-engine-the-machine-has ()
+  "Voice mode starts through the Podman a Mac has, with no engine of its own.
+That is the macOS case the module exists for: Emacs started from the
+Dock has no Homebrew on `exec-path', and the machine has Podman where
+Docker never was.  The pipeline asks the stacks, which ask the
+container runtime: nothing in the voice path names an engine, and the
+command it runs is the Podman that is installed."
+  (harness-speech-test-with-stack
+    (let* ((directory (make-temp-file "harness-speech-bin" t))
+           (podman (expand-file-name "podman" directory))
+           (harness-container-runtime-program-directories (list directory))
+           (exec-path nil)
+           (harness-container-runtime 'auto)
+           argv)
+      (unwind-protect
+          (progn
+            (with-temp-file podman (insert "#!/bin/sh\nexit 0\n"))
+            (set-file-modes podman #o755)
+            ;; Docker is nowhere, and Podman is not on `exec-path'.
+            (cl-letf (((symbol-function 'harness-container-runtime--exec)
+                       (lambda (command &optional _env _directory)
+                         (setq argv command)
+                         (cons 0 "podman version 5.2.0\n")))
+                      ((symbol-function 'harness-container-runtime--found-socket)
+                       (lambda () nil))
+                      ((symbol-function 'harness-container-runtime--sandbox-need)
+                       (lambda () nil)))
+              (harness-container-runtime-forget-availability)
+              ;; The engine is Podman, named by what is installed.
+              (should (eq 'podman (harness-container-runtime-resolve)))
+              (should (equal "Podman" (harness-container-runtime-label)))
+              ;; The pipeline's start command is Podman's compose command.
+              (let* ((stack (harness-compose-stack-get harness-speech-local-stack))
+                     (command (harness-compose-stack--argv stack "up" "-d")))
+                (should (equal '("podman" "compose")
+                               (seq-take command 2)))
+                ;; Running it starts Podman, not Docker.
+                (setq argv nil)
+                (should (eql 0 (car (harness-container-runtime-exec command))))
+                (should (equal "podman" (car argv))))
+              ;; Nothing in the voice path configures an engine.
+              (should (eq 'auto harness-container-runtime))))
+        (delete-directory directory t)))))
 
 ;;;; The commands it runs
 

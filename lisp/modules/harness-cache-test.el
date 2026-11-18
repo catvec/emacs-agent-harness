@@ -464,11 +464,13 @@ first miss says nothing, and one inside the cooldown does not repeat it."
                                      (lambda (node) (eq (plist-get node :kind) 'hint))
                                      nodes)))))
               (should hint)
-              (should (equal "Prompt cache miss · 25% cached · 2 calls · 70k tokens re-sent"
+              (should (equal "Cache reuse low · 25% cached · 2 calls · 70k tokens re-sent"
                              (plist-get hint :content))))
             (should (= 1 (length notified)))
             (let ((notification (car notified)))
-              (should (equal "Prompt cache miss" (plist-get notification :title)))
+              ;; The alert says what was measured, never that the cache missed:
+              ;; a request that read 80% of its previous prompt did not.
+              (should (equal "Cache reuse low" (plist-get notification :title)))
               (should (equal "Session · 2 calls · 70k tokens re-sent"
                              (plist-get notification :body)))
               (should (equal sid (plist-get notification :session))))
@@ -507,6 +509,38 @@ good read: the streak is the misses in a row."
         (harness-cache-test--reuse sid :ratio 0.5 :cache-read 20000
                                    :previous 40000 :wasted 20000)
         (should (= 1 (length alerts)))))))
+
+(ert-deftest harness-cache-health-does-not-call-a-good-read-a-miss ()
+  "A request that read most of its previous prompt is not a miss, in
+any wording the user sees: the alert states the share and the cost,
+and leaves the judgement to the threshold.  Overnight 11 of 29 alerts
+were at 90% cached or better, each one calling a working cache broken."
+  (harness-cache-test-with
+    (let ((harness-cache-health-streak 2)
+          (harness-cache-health-threshold 0.5)
+          (harness-cache-health-min-context 1000)
+          (hints nil) (notified nil))
+      (harness-register-method 'notification/send
+                               (lambda (notification &optional _providers)
+                                 (push notification notified) t))
+      (unwind-protect
+          (let ((sid (harness-cache-test-session 300 0)))
+            (harness-cache-test--reuse sid :ratio 0.4 :cache-read 16000
+                                       :previous 40000 :wasted 24000)
+            (harness-cache-test--reuse sid :ratio 0.4 :cache-read 16000
+                                       :previous 40000 :wasted 24000)
+            (setq hints (cl-remove-if-not
+                         (lambda (node) (eq (plist-get node :kind) 'hint))
+                         (harness-call 'session/nodes sid)))
+            (should (= 1 (length hints)))
+            ;; The exact rendered line: the share, never a verdict.
+            (should (equal "Cache reuse low · 40% cached · 2 calls · 48k tokens re-sent"
+                           (plist-get (car hints) :content)))
+            (should-not (string-match-p "miss" (plist-get (car hints) :content)))
+            (should (= 1 (length notified)))
+            (should (equal "Cache reuse low" (plist-get (car notified) :title)))
+            (should-not (string-match-p "miss" (plist-get (car notified) :title))))
+        (harness-unregister-method 'notification/send)))))
 
 (ert-deftest harness-cache-health-says-nothing-of-a-small-prompt-or-an-internal-session ()
   "A prompt below the minimum is not worth a cache, nor an alert; a

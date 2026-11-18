@@ -119,7 +119,7 @@ class QuotaExtra {
   final String? currency;
   final String? disabledReason;
 
-  /// "Extra usage: off (out of credits), $0.00 used of $50.0".
+  /// "Extra usage: off (out of credits), $0.00 used of $50.00".
   String describe() {
     final reason = disabledReason;
     final spent = used;

@@ -85,6 +85,16 @@ Two ways for a model to run things:
   has the backend table and what each path does and does not promise).
   `sandbox/session` says which of the two a session has, and why.
 
+  Voice cancellation (`agent/voice-control`) supports an in-flight bash
+  call only in that shared runtime.  The `agent/tool-canceller` filter
+  captures its actual run by the originating context's `:turn-id` and
+  `:call-id`, never by the session's current work.  Invoking it requests
+  `harness-sandbox-session-kill-run` for that run only, not runtime
+  teardown or job cancellation (the sandbox's existing fail-safe may
+  still tear down a run that cannot stop).  A run already ended is
+  reported completed; unshared commands and other tools have no supported
+  canceller.  A cancellation request promises neither undo nor rollback.
+
   A shared runtime costs one thing, and the settings say it: its mounts
   are fixed when it starts, so a change to what the session may reach
   -- a granted or a revoked directory, a directory made read-only, a
@@ -176,4 +186,12 @@ Two ways for a model to run things:
 - `sandbox/wrap` ([sandbox](sandbox.md)), when it is loaded
 - `session/tmp-dir` ([session](session.md)), when it is loaded
 - `skills/directories` ([skills](skills.md)), when it is loaded
+
+### Events it handles
+
+- `tools/finished` → `harness-tools-shell--on-tool-finished` at 90
+
+### Filter chains it joins
+
+- `agent/tool-canceller` → `harness-tools-shell--tool-canceller`
 

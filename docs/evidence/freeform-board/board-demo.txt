@@ -1,0 +1,335 @@
+Loading /home/noah/documents/ai/emacs-agent-harness/.worktrees/task-implement-freeform-agent-board-canvas-4q79s0z4/test/fixtures/harness-board-fixture.el (source)...
+Loading /home/noah/documents/ai/emacs-agent-harness/.worktrees/task-implement-freeform-agent-board-canvas-4q79s0z4/test/harness-test-helpers.el (source)...
+
+=== the freeform board, driven through the agent's own tools ===
+
+=== 1. the grammar, before anything is drawn
+  schema 1 · 6 shapes · 20 operations · 3 themes
+  units: x right, y down, angles clockwise degrees
+  no search, no ranking, no lifecycle: an agent reads, decides and edits
+
+=== 2. the drawing a person arranged, read through scene.read
+
+$ scene.read b-fixture
+  board b-fixture · atlas / fieldnotes · revision 1 · theme electric-commons
+  diagram d-overview · overview · viewport x 0 y 0 zoom 1 · selection none
+  diagrams: d-overview (overview), d-queue (queue detail) in d-overview
+  
+  13 objects
+  · f-system · frame · the system
+    role: declared
+    shape: rect 618x380
+    frame: [1 0 0 1 34 155] · box 34 155 618 380 · z 0
+  
+  · f-unknowns · frame · unknowns
+    role: unknown
+    shape: rect 280x166
+    frame: [1 0 0 1 700 393] · box 700 393 280 166 · z 0
+  
+  · n-questions · note · questions
+    text: what happens after a
+  timeout?
+  could a retry charge twice?
+    role: unknown
+    shape: rect 246x122
+    frame: [1 0 0 1 60 190] · box 60 190 246 122 · z 2
+    anchors: right [246 61], left [0 61]
+  
+  · n-retry · note · retry key
+    text: reuse the request key
+  across retries
+    role: proposed
+    shape: rect 232x96
+    frame: [1 0 0 1 60 330] · box 60 330 232 96 · z 2
+  
+  · n-reference · image · reference · kinopio
+    role: observed
+    shape: image 248x155 src data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 240 150'><rect width='240' height='150' fill='%23eceee7'/><rect x='14' y='14' width='212' height='92' fill='none' stroke='%2355545f'/><rect x='14' y='14' width='212' height='14' fill='%23c5ff54'/><text x='24' y='62' font-family='Helvetica' font-size='15' fill='%2325272c'>kinopio · spatial notes</text><text x='24' y='86' font-family='Helvetica' font-size='12' fill='%234d5058'>square corners, bright accents</text></svg>
+    frame: [1 0 0 1 772 190] · box 772 190 248 155 · z 2
+  
+  · n-api · component · api
+    text: accepts jobs
+    role: declared
+    shape: rect 164x91
+    frame: [1 0 0 1 330 214] · box 330 214 164 91 · z 3
+    anchors: right [164 45], left [0 45], tip [164 45]
+    links: 2
+      task t-board-fixture · unsupported · no task board is loaded
+      document docs/design/freeform-agent-board.md · resolved · readable
+  
+  · n-workers · component · worker pool
+    text: executes jobs
+    role: declared
+    shape: rect 183x91
+    frame: [1 0 0 1 560 226] · box 560 226 183 91 · z 3
+    anchors: left [0 45], right [183 45]
+  
+  · n-queue · component · queue
+    text: holds jobs
+    role: proposed
+    shape: rect 150x78
+    frame: [1 0 0 1 336 388] · box 336 388 150 78 · z 3
+  
+  · n-store · path · event store
+    role: observed
+    shape: path M 0 16 C 0 0 183 0 183 16 L 183 75 C 183 93 0 93 0 75 Z  M 0 16 C 0 33 183 33 183 16
+    frame: [1 0 0 1 540 400] · box 540 400 183 93 · z 3
+    links: 1
+      symbol atlas@a17c:EventStore.append · declared · static evidence at a revision: definitions and uses, not runtime flow
+  
+  · n-open · note · open question
+    text: how long should a
+  request key survive?
+    role: unknown
+    shape: rect 238x96
+    frame: [1 0 0 1 716 427] · box 716 427 238 96 · z 3
+    links: 1
+      message s-fixture/n-1 · missing · no such message
+  
+  · n-store-name · label · event store
+    text: event store
+    role: observed
+    shape: text "event store" size 20
+    frame: [1 0 0 1 566 438] · box 566 438 127.60000000000002 25.0 · z 4
+  
+  · n-ink · ink · ink
+    role: declared
+    shape: path M 0 8 L 9 3 L 19 9 L 30 4 L 41 9 L 54 5 L 63 9 L 78 4 · raw ink
+    frame: [1 0 0 1 736 534] · box 736 537 78 6 · z 4
+  
+  · n-marker · marker · review marker
+    text: review · 2
+    role: declared
+    shape: rect 13x13
+    frame: [1 0 0 1 336 318] · box 336 318 13 13 · z 5
+    source: unsupported · task · no task board
+  
+  3 relationships
+  · e-jobs · flow · d-overview
+    n-api.right → n-workers.left · jobs
+  · e-queue · flow · d-overview
+    n-queue.right → n-store.left · retry
+  · e-question · association · d-overview
+    n-questions.right → n-api.left · asked
+
+=== 3. an agent proposes; nothing is written until it commits
+
+$ scene.edit b-fixture
+  Patch p-c21377cee5f4 · revision 1 · 2 created · 1 changed
+  Created: n-replay, e-replay
+  Changed: n-queue
+  Diagnostics (warnings, not refusals):
+    warning · overlap: n-store and n-store-name overlap in d-overview
+  Not committed: patch.commit applies exactly this batch.
+
+  the board is still at revision 1: the edit wrote nothing
+
+=== 4. the commit: one atomic revision
+
+$ patch.preview b-fixture
+  Patch p-d8ce9a3df663 · revision 1 · 2 created · 1 changed
+  Created: n-replay, e-replay
+  Changed: n-queue
+  Diagnostics (warnings, not refusals):
+    warning · overlap: n-store and n-store-name overlap in d-overview
+  Not committed: patch.commit applies exactly this batch.
+
+$ patch.commit b-fixture
+  Patch p-d8ce9a3df663 committed at revision 2.
+  
+  Diagnostics:
+    warning · overlap: n-store and n-store-name overlap in d-overview
+  revision 2 · 2 commits in its history
+
+=== 5. a drill-down: one meaning, two views
+  n-api appears in: d-overview, d-queue
+
+$ scene.read b-fixture
+  board b-fixture · atlas / fieldnotes · revision 2 · theme electric-commons
+  diagram d-queue · queue detail · viewport x 0 y 0 zoom 1 · selection none
+  diagrams: d-overview (overview), d-queue (queue detail) in d-overview
+  
+  3 objects
+  · n-handler · component · retry handler
+    text: looks up the key
+    role: observed
+    shape: rect 200x91
+    frame: [1 0 0 1 120 160] · box 120 160 200 91 · z 0
+  
+  · n-record · component · idempotency record
+    text: returns the prior result
+    role: proposed
+    shape: rect 210x91
+    frame: [1 0 0 1 420 160] · box 420 160 210 91 · z 0
+  
+  · n-api · component · api
+    text: accepts jobs
+    role: declared
+    shape: rect 164x91
+    frame: [1 0 0 1 330 214] · box 330 214 164 91 · z 3
+    anchors: right [164 45], left [0 45], tip [164 45]
+    links: 2
+      task t-board-fixture · unsupported · no task board is loaded
+      document docs/design/freeform-agent-board.md · resolved · readable
+  
+  1 relationships
+  · e-handler-record · flow · d-queue
+    n-handler.right → n-record.left · lookup key
+
+=== 6. a reflection of a shape, and never of a label
+
+$ scene.edit b-fixture
+  Patch p-0d25dd5c1c03 · revision 2 · 0 created · 1 changed
+  Changed: n-store
+  No diagnostics.
+  Not committed: patch.commit applies exactly this batch.
+
+$ scene.edit b-fixture
+  precondition: reflecting n-store-name would mirror its label; pass "text": true to mean it
+  (refused: precondition)
+
+=== 7. undo: a compensating edit, and a conflict reported
+
+$ history.undo b-fixture
+  Applied 3 operations · revision 3
+  Taking back revision 2.
+  Operations: delete n-replay, delete e-replay, restore n-queue
+  No conflicts.
+
+=== 8. the three themes, one drawing
+  electric-commons
+  open-labels
+  night-commons
+
+=== 9. the revision a task hands in, pinned as the artifact
+
+$ board.pin b-fixture
+  Pinned revision 3 of b-fixture as pin-r18u70m6, landing in d-overview.
+  Artifact: harness:board/b-fixture/diagram/d-overview/object/n-api/revision/3
+  Current board: harness:board/b-fixture/diagram/d-overview/object/n-api
+  The artifact holds 15 objects of revision 3; edits since do not reach it.
+
+$ patch.preview b-fixture
+  Patch p-66b795fa2d17 · revision 3 · 0 created · 1 changed
+  Changed: n-api
+  Diagnostics (warnings, not refusals):
+    warning · overlap: n-store and n-store-name overlap in d-overview
+  Not committed: patch.commit applies exactly this batch.
+
+$ patch.commit b-fixture
+  Patch p-66b795fa2d17 committed at revision 4.
+  
+  Diagnostics:
+    warning · overlap: n-store and n-store-name overlap in d-overview
+  the pin keeps revision 3; the board is at 4 now
+  artifact: harness:board/b-fixture/diagram/d-overview/object/n-api/revision/3
+  current:  harness:board/b-fixture/diagram/d-overview/object/n-api
+
+=== 10. what a model is handed: the exact scene and the picture
+
+$ scene.read b-fixture
+  board b-fixture · atlas / fieldnotes · revision 4 · theme electric-commons
+  diagram d-overview · overview · viewport x 0 y 0 zoom 1 · selection none
+  diagrams: d-overview (overview), d-queue (queue detail) in d-overview
+  
+  13 objects
+  · f-system · frame · the system
+    role: declared
+    shape: rect 618x380
+    frame: [1 0 0 1 34 155] · box 34 155 618 380 · z 0
+  
+  · f-unknowns · frame · unknowns
+    role: unknown
+    shape: rect 280x166
+    frame: [1 0 0 1 700 393] · box 700 393 280 166 · z 0
+  
+  · n-questions · note · questions
+    text: what happens after a
+  timeout?
+  could a retry charge twice?
+    role: unknown
+    shape: rect 246x122
+    frame: [1 0 0 1 60 190] · box 60 190 246 122 · z 2
+    anchors: right [246 61], left [0 61]
+  
+  · n-retry · note · retry key
+    text: reuse the request key
+  across retries
+    role: proposed
+    shape: rect 232x96
+    frame: [1 0 0 1 60 330] · box 60 330 232 96 · z 2
+  
+  · n-reference · image · reference · kinopio
+    role: observed
+    shape: image 248x155 src data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 240 150'><rect width='240' height='150' fill='%23eceee7'/><rect x='14' y='14' width='212' height='92' fill='none' stroke='%2355545f'/><rect x='14' y='14' width='212' height='14' fill='%23c5ff54'/><text x='24' y='62' font-family='Helvetica' font-size='15' fill='%2325272c'>kinopio · spatial notes</text><text x='24' y='86' font-family='Helvetica' font-size='12' fill='%234d5058'>square corners, bright accents</text></svg>
+    frame: [1 0 0 1 772 190] · box 772 190 248 155 · z 2
+  
+  · n-api · component · api
+    text: accepts jobs
+    role: declared
+    shape: rect 164x91
+    frame: [1 0 0 1 342 222] · box 342 222 164 91 · z 3
+    anchors: right [164 45], left [0 45], tip [164 45]
+    links: 2
+      task t-board-fixture · unsupported · no task board is loaded
+      document docs/design/freeform-agent-board.md · resolved · readable
+  
+  · n-workers · component · worker pool
+    text: executes jobs
+    role: declared
+    shape: rect 183x91
+    frame: [1 0 0 1 560 226] · box 560 226 183 91 · z 3
+    anchors: left [0 45], right [183 45]
+  
+  · n-queue · component · queue
+    text: holds jobs
+    role: proposed
+    shape: rect 150x78
+    frame: [1 0 0 1 336 388] · box 336 388 150 78 · z 3
+  
+  · n-store · path · event store
+    role: observed
+    shape: path M 0 16 C 0 0 183 0 183 16 L 183 75 C 183 93 0 93 0 75 Z  M 0 16 C 0 33 183 33 183 16
+    frame: [1 0 0 1 540 400] · box 540 400 183 93 · z 3
+    links: 1
+      symbol atlas@a17c:EventStore.append · declared · static evidence at a revision: definitions and uses, not runtime flow
+  
+  · n-open · note · open question
+    text: how long should a
+  request key survive?
+    role: unknown
+    shape: rect 238x96
+    frame: [1 0 0 1 716 427] · box 716 427 238 96 · z 3
+    links: 1
+      message s-fixture/n-1 · missing · no such message
+  
+  · n-store-name · label · event store
+    text: event store
+    role: observed
+    shape: text "event store" size 20
+    frame: [1 0 0 1 566 438] · box 566 438 127.60000000000002 25.0 · z 4
+  
+  · n-ink · ink · ink
+    role: declared
+    shape: path M 0 8 L 9 3 L 19 9 L 30 4 L 41 9 L 54 5 L 63 9 L 78 4 · raw ink
+    frame: [1 0 0 1 736 534] · box 736 537 78 6 · z 4
+  
+  · n-marker · marker · review marker
+    text: review · 2
+    role: declared
+    shape: rect 13x13
+    frame: [1 0 0 1 336 318] · box 336 318 13 13 · z 5
+    source: unsupported · task · no task board
+  
+  3 relationships
+  · e-jobs · flow · d-overview
+    n-api.right → n-workers.left · jobs
+  · e-queue · flow · d-overview
+    n-queue.right → n-store.left · retry
+  · e-question · association · d-overview
+    n-questions.right → n-api.left · asked
+  1 picture, 8302 bytes, drawn from the same geometry a person sees
+
+0 places shown, 0 pictures
+
+=== nothing here searched, ranked or re-arranged anything ===

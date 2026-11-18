@@ -45,9 +45,9 @@ their models statically with `:models`.
 
 An endpoint that lists far more than anyone wants to pick from --
 OpenRouter's several hundred -- narrows itself with `:allow-models`,
-the same glob patterns `harness-allowed-models` takes.  The
-provider module filters, where a provider's models are settled, so
-the catalogue, tier selection and every picker see one narrowed set
+the same glob patterns `harness-allowed-models` takes.  The core
+filters where a provider's models are settled, so the catalogue, the
+model index, tier selection and every picker see one narrowed set,
 and a request for a model left out is refused before it is sent.
 
 A hosted service with no credential offers no models, however

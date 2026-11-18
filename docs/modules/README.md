@@ -22,6 +22,10 @@ them out, so that supervisor loads only when it is named.
 (harness-enable-modules
  :features
  ;;acp-remote         ; ACP for phones and other devices on the network: WebSocket, sign-in by…
+ ;;board              ; The freeform board's grammar: the typed, attributed spatial graph a…
+ ;;board-edit         ; The board's edit half: the operations a patch may apply, validation…
+ ;;board-store        ; The board as the harness serves it: the documents kept under the state…
+ ;;board-svg          ; One renderer for a board, from its own geometry: the SVG a person sees…
  ;;cache              ; Watches the sessions' prompt caches: says when one is about to lapse…
  ;;cache-compact      ; Compacts a conversation just before its prompt cache lapses, when the…
  ;;cache-warm         ; Keeps a session's prompt cache warm while its user is around or a tool…
@@ -76,7 +80,9 @@ them out, so that supervisor loads only when it is named.
  ;;openai             ; OpenAI-compatible chat completions provider (OpenAI, local servers,…
  ;;openrouter         ; OpenRouter provider: request fields, price-aware endpoint pinning,…
  ;;responses          ; OpenAI Responses API paid for by a ChatGPT plan (Sign in with ChatGPT).
+ ;;system-one         ; System One decision models: typed questions and answers, as a…
  :tools
+ ;;board              ; The board tools an agent works with: scene.read, grammar.describe,…
  ;;compact            ; The compact tool: an agent compacts its own conversation, on a running…
  ;;events             ; watch_events and unwatch_events: a session watches harness events, and…
  ;;gremlin            ; Slow, hanging, noisy, lying and boundary-testing chaos tools.
@@ -116,6 +122,10 @@ them out, so that supervisor loads only when it is named.
 | [acp-remote](acp-remote.md) |  | [acp](acp.md) | ACP for phones and other devices on the network: WebSocket, sign-in by approval in Emacs or OpenID Connect, session secrets. |
 | [admission](admission.md) | by default | [provider](provider.md) | Let one provider account's work in a piece at a time: a pool per provider, resting when the provider is rate limiting and recovering gradually. |
 | [agent](agent.md) | by default | [session](session.md), [provider](provider.md), [tools](tools.md) | The turn loop: prompt, stream, run tools, steer, queue. |
+| [board](board.md) |  |  | The freeform board's grammar: the typed, attributed spatial graph a person and an agent draw on -- the primitives, the matrices, the named local anchors, the attachment order, the themes as palettes and the distinct ways a document is refused.  No lifecycle, no re-layout, no search. |
+| [board-edit](board-edit.md) |  | [board](board.md) | The board's edit half: the operations a patch may apply, validation against the document as each operation leaves it, the patch a commit names, and the compensating edit undo proposes from the preimages a commit kept. |
+| [board-store](board-store.md) |  | [board](board.md), [board-edit](board-edit.md), [store](store.md), [linking](linking.md) | The board as the harness serves it: the documents kept under the state directory, the atomic commits with their idempotency keys, the client state navigation writes without a revision, and the bus methods the tools and clients call. |
+| [board-svg](board-svg.md) |  | [board](board.md), [board-store](board-store.md) | One renderer for a board, from its own geometry: the SVG a person sees on the Emacs page, a model is handed as a picture, and a client can show beside its live canvas. |
 | [cache](cache.md) |  | [session](session.md) | Watches the sessions' prompt caches: says when one is about to lapse (cache/pre-expire), whether the user is around, and alerts when a request reads too little of the last prompt (cache/poor-hit). |
 | [cache-compact](cache-compact.md) |  | [session](session.md), [compaction](compaction.md), [cache](cache.md), [cowboy](cowboy.md) | Compacts a conversation just before its prompt cache lapses, when the compaction request's own prefix is cached, as the user saved for a cold cache and where they would not be asked. |
 | [cache-warm](cache-warm.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md), [cache](cache.md) | Keeps a session's prompt cache warm while its user is around or a tool runs: reads it again just before it lapses, for as long as that costs less than sending the conversation again. |
@@ -144,7 +154,7 @@ them out, so that supervisor loads only when it is named.
 | [naming](naming.md) | by default | [session](session.md), [provider](provider.md), [agent](agent.md) | Name nameless sessions with a cheap model as soon as their first message is sent. |
 | [notifications](notifications.md) |  |  | Notifications for the user through pluggable providers: desktop (system) and Gotify. |
 | [otel](otel.md) | when named | [agent](agent.md), [tools](tools.md) | Opt-in OpenTelemetry export of turns, model requests and tool calls, over OTLP/HTTP. |
-| [patch-review](patch-review.md) |  | [store](store.md), [tasks](tasks.md), [tools-review](tools-review.md), [thread-reply](thread-reply.md) | The threads of a task's review: kept in the state directory, delivered with the feedback, answered by the agent. |
+| [patch-review](patch-review.md) |  | [store](store.md), [tasks](tasks.md), [tools-review](tools-review.md), [thread-reply](thread-reply.md) | The threads of a task's review: kept in the state directory, delivered with the feedback, answered by the agent, with the messages their transitions leave. |
 | [perms](perms.md) | by default | [config](config.md), [tools](tools.md) | Directory jail, directory requests, permission modes, auto judge, user prompts with a cheap model's summary of the call, and the user's approval of denied calls. |
 | [pet](pet.md) |  | [store](store.md), [provider](provider.md) | A companion pet: hatched with random bones, named and voiced by a cheap model, growing with use. |
 | [plugins](plugins.md) |  | [session](session.md) | Projects' plugins: what a project's trusted .dir-locals.el loads, and the plugin modules each session froze. |
@@ -161,10 +171,11 @@ them out, so that supervisor loads only when it is named.
 | [provider-openai](provider-openai.md) |  | [provider](provider.md) | OpenAI-compatible chat completions provider (OpenAI, local servers, custom endpoints). |
 | [provider-openrouter](provider-openrouter.md) |  | [provider](provider.md), [provider-openai](provider-openai.md), [retry](retry.md) | OpenRouter provider: request fields, price-aware endpoint pinning, error detail. |
 | [provider-responses](provider-responses.md) |  | [provider](provider.md), [chatgpt-plan](chatgpt-plan.md) | OpenAI Responses API paid for by a ChatGPT plan (Sign in with ChatGPT). |
+| [provider-system-one](provider-system-one.md) |  | [provider](provider.md) | System One decision models: typed questions and answers, as a capability of the provider interface. |
 | [readonly](readonly.md) | by default | [session](session.md), [tools](tools.md) | Read-only sessions: the sessions a module's policy names (a supervisor, a task's write-up or plan) get only reading tools and read-only, offline bash, enforced by the harness. |
 | [recap](recap.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md), [tasks](tasks.md) | Write the recaps task cards and running chats show, with a short model call. |
 | [redact](redact.md) |  | [secrets](secrets.md), [session](session.md), [store](store.md) | Takes a secret out of the transcripts and every other copy the harness keeps. |
-| [replay](replay.md) | by default | [store](store.md), [session](session.md) | Keeps what a session's model was sent: the responses it made and the payload of its last request, so that a restart and a change of the rendering code keep the prompt cache. |
+| [replay](replay.md) | by default | [store](store.md), [session](session.md) | Keeps what a session's model was sent: the responses it made, the payload of its last request, and the exact body of the final request field by field, so that a restart, a change of the rendering code and a change of the adapter's serialization keep the prompt cache; a body that changed with no recorded reset is refused before it is sent. |
 | [resilience](resilience.md) | by default | [session](session.md), [agent](agent.md), [tools](tools.md) | Carry on sessions a stopped harness cut short, tell the parent and the user when a sub-agent waits for them, answer its unanswered prompts by default, and report stalled turns. |
 | [retry](retry.md) | by default | [session](session.md), [agent](agent.md) | Try a step again after a transient network or rate-limit failure, within the bounds one place sets. |
 | [sandbox](sandbox.md) | by default | [config](config.md) | Kernel sandbox (bwrap / systemd-run / MXC on macOS, or NVIDIA OpenShell on request) for spawned tool processes. |
@@ -188,6 +199,7 @@ them out, so that supervisor loads only when it is named.
 | [tool-slots-load](tool-slots-load.md) |  | [tool-slots](tool-slots.md) | Fewer tool slots while this machine is loaded. |
 | [tools](tools.md) | by default |  | Tool registry, permission-gated execution and context-bomb guard. |
 | [tools-agent](tools-agent.md) | by default | [tools](tools.md), [session](session.md), [agent](agent.md) | The Sub-agent tool (spawn_agent), and the Planning section of the system prompt. |
+| [tools-board](tools-board.md) |  | [board-store](board-store.md), [tools](tools.md) | The board tools an agent works with: scene.read, grammar.describe, scene.edit, patch.preview, patch.commit, history.undo, board.pin and board.discuss. |
 | [tools-compact](tools-compact.md) |  | [tools](tools.md), [compaction](compaction.md) | The compact tool: an agent compacts its own conversation, on a running turn by queueing it or interrupting it. |
 | [tools-computers](tools-computers.md) | by default | [computers](computers.md), [tools](tools.md) | The tools that use a computer: computer_list, computer_view, computer_windows, computer_pointer, computer_keyboard, computer_clipboard, computer_tools, computer_call and computer_use. Each names the computer it acts on, or leaves it to the session's preference, and the fixed vocabulary is what a computer's MCP server answers. |
 | [tools-emacs](tools-emacs.md) | by default | [tools](tools.md) | Bounded tools into the user's Emacs without evaluation: buffers, windows, text, symbols, traces and messages, plus harness_views and harness_open for discovering and opening harness pages. |
@@ -222,6 +234,7 @@ them out, so that supervisor loads only when it is named.
 | [ui](ui.md) | by default | [acp](acp.md) | UI foundation: ACP connection, faces, positions, keymap and menu. |
 | [ui-access](ui-access.md) | by default | [ui](ui.md), [ui-chat](ui-chat.md), [ui-pending](ui-pending.md) | The jail and permissions view of a session, in five pages: settings and directories, tools, rules, judgements and secret protection. |
 | [ui-acp-remote](ui-acp-remote.md) |  | [ui](ui.md) | Remote control page: serve phones and other devices, approve and see them. |
+| [ui-board](ui-board.md) |  | [ui](ui.md), [ui-linking](ui-linking.md) | The freeform board pages (harness-boards, J in the harness map): the boards of the project, the rendered snapshot of one, its diagram's breadcrumb, the last commit and every object with its words, its role and the precise links it carries. |
 | [ui-btw](ui-btw.md) |  | [ui](ui.md) | BTW side conversations over the current session or view. |
 | [ui-cache](ui-cache.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | Warns above a session's compose box once its prompt cache has expired or been dropped, offering to compact. |
 | [ui-cache-warm](ui-cache-warm.md) |  | [ui](ui.md), [ui-chat](ui-chat.md) | A session's prompt cache kept warm, in the UI: a flame and a countdown in the chat header, the user's activity reported, and /warm, K and the flame to set a period by hand. |
@@ -294,6 +307,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/activity-changed` | [agent](agent.md) | [agent](agent.md) | [acp](acp.md), [cache-warm](cache-warm.md), [resilience](resilience.md), [tools](tools.md), [usage](usage.md) |  |
 | `agent/call-usage` | [agent](agent.md) | [agent](agent.md) | [usage](usage.md) |  |
 | `agent/cancelling` | [agent](agent.md) | [agent](agent.md) | [compaction](compaction.md), [cowboy](cowboy.md), [resilience](resilience.md) |  |
+| `agent/images-pruned` | [agent](agent.md) | [agent](agent.md) | [replay](replay.md) |  |
 | `agent/quota` | [agent](agent.md) | [agent](agent.md) |  | yes |
 | `agent/spawned` | [tools-agent](tools-agent.md) | [tools-agent](tools-agent.md) |  |  |
 | `agent/steered` | [agent](agent.md) | [agent](agent.md) | [resilience](resilience.md) |  |
@@ -304,11 +318,17 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/tool-result` | [agent](agent.md) | [agent](agent.md) | [perms](perms.md), [recap](recap.md), [resilience](resilience.md), [tools](tools.md) |  |
 | `agent/turn-ended` | [agent](agent.md) | [agent](agent.md) | [compaction](compaction.md), [cowboy](cowboy.md), [handoff](handoff.md), [merge](merge.md), [otel](otel.md), [perms](perms.md), [pet](pet.md), [recap](recap.md), [redact](redact.md), [resilience](resilience.md), [retry](retry.md), [session](session.md), [supervisor](supervisor.md), [tasks](tasks.md), [thread-reply](thread-reply.md), [todo-sync](todo-sync.md), [tools](tools.md), [tools-agent](tools-agent.md), [tools-events](tools-events.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-usage](ui-usage.md), [ui-usage-history](ui-usage-history.md), [ui-workspace](ui-workspace.md), [usage](usage.md), [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md) | yes |
 | `agent/turn-started` | [agent](agent.md) | [agent](agent.md) | [merge](merge.md), [naming](naming.md), [otel](otel.md), [perms](perms.md), [recap](recap.md), [resilience](resilience.md), [retry](retry.md), [supervisor](supervisor.md), [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md), [ui-chat](ui-chat.md), [ui-children](ui-children.md), [ui-pet](ui-pet.md), [ui-workspace](ui-workspace.md), [usage](usage.md), [workspace](workspace.md) | yes |
+| `agent/voice-control` | [agent](agent.md) | [agent](agent.md) |  |  |
+| `board/changed` | [board-store](board-store.md) | [board-store](board-store.md) | [ui-board](ui-board.md) | yes |
+| `board/created` | [board-store](board-store.md) | [board-store](board-store.md) | [ui-board](ui-board.md) | yes |
+| `board/deleted` | [board-store](board-store.md) | [board-store](board-store.md) | [ui-board](ui-board.md) | yes |
+| `board/focused` | [board-store](board-store.md) | [board-store](board-store.md) | [ui-board](ui-board.md) | yes |
+| `board/pinned` | [board-store](board-store.md) | [board-store](board-store.md) |  |  |
 | `cache/compacted` | [cache-compact](cache-compact.md) | [cache-compact](cache-compact.md) |  |  |
 | `cache/poor-hit` | [cache](cache.md) | [cache](cache.md) |  |  |
 | `cache/pre-expire` | [cache](cache.md) | [cache](cache.md) | [cache-compact](cache-compact.md), [cache-warm](cache-warm.md) |  |
 | `cache/presence-changed` | [cache](cache.md) | [cache](cache.md) | [cache-warm](cache-warm.md) |  |
-| `cache/reuse` | [cache](cache.md) | [session](session.md) | [cache](cache.md) |  |
+| `cache/reuse` | [cache](cache.md) | [session](session.md) | [cache](cache.md), [replay](replay.md) |  |
 | `cache/warm-changed` | [cache-warm](cache-warm.md) | [cache-warm](cache-warm.md) | [ui-cache-warm](ui-cache-warm.md) | yes |
 | `chatgpt-plan/accounts-changed` | [chatgpt-plan](chatgpt-plan.md) | [chatgpt-plan](chatgpt-plan.md) | [provider-responses](provider-responses.md), [ui-chatgpt-plan](ui-chatgpt-plan.md) | yes |
 | `compaction/asked` | [compaction](compaction.md) | [compaction](compaction.md) |  |  |
@@ -337,13 +357,16 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `naming/failed` | [naming](naming.md) | [naming](naming.md) |  |  |
 | `notification/sent` | [notifications](notifications.md) | [notifications](notifications.md) |  |  |
 | `openrouter/catalogue-degraded` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
+| `openrouter/catalogue-recovered` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) | [tasks](tasks.md) |  |
 | `openrouter/catalogue-revalidating` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
 | `openrouter/catalogue-unread` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
+| `openrouter/catalogue-waiting` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
 | `openrouter/response-mismatch` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
 | `openrouter/route-paused` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
 | `openrouter/route-selected` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
 | `patch-review/changed` | [patch-review](patch-review.md) | [patch-review](patch-review.md) | [ui-patch-review](ui-patch-review.md) | yes |
 | `patch-review/last-close` | [patch-review](patch-review.md) | [patch-review](patch-review.md) | [ui-patch-review](ui-patch-review.md) | yes |
+| `patch-review/last-reviewed` | [patch-review](patch-review.md) | [patch-review](patch-review.md) | [ui-patch-review](ui-patch-review.md) | yes |
 | `permission/decided` | [tools](tools.md) | [tools](tools.md) | [access](access.md), [agent](agent.md), [insights](insights.md), [perms](perms.md) |  |
 | `permission/dir-allowed` | [perms](perms.md) | [access](access.md), [perms](perms.md) |  | yes |
 | `permission/dir-revoked` | [perms](perms.md) | [access](access.md), [perms](perms.md) | [sandbox-session](sandbox-session.md), [tools-jobs](tools-jobs.md) | yes |
@@ -357,12 +380,14 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `provider/pricing-warning` | [provider-deepseek](provider-deepseek.md) | [provider-deepseek](provider-deepseek.md) |  | yes |
 | `provider/quota-updated` | [provider](provider.md) | [provider](provider.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md) | [fallback](fallback.md), [usage](usage.md) | yes |
 | `provider/request-started` | [provider](provider.md) | [provider](provider.md) | [provider-deepseek](provider-deepseek.md) |  |
+| `provider/system-one-decided` | [provider-system-one](provider-system-one.md) | [provider-system-one](provider-system-one.md) |  |  |
 | `question/answered` | [tools-question](tools-question.md) | [tools-question](tools-question.md) | [cache](cache.md) | yes |
 | `question/asked` | [tools-question](tools-question.md) | [tools-question](tools-question.md) | [acp](acp.md) |  |
 | `recap/done` | [recap](recap.md) | [recap](recap.md) | [pet](pet.md), [tools](tools.md) |  |
 | `recap/failed` | [recap](recap.md) | [recap](recap.md) |  |  |
 | `recap/session-done` | [recap](recap.md) | [recap](recap.md) | [pet](pet.md), [tools](tools.md) |  |
 | `recap/session-failed` | [recap](recap.md) | [recap](recap.md) |  |  |
+| `replay/prefix` | [replay](replay.md) | [replay](replay.md) | [replay](replay.md) |  |
 | `resilience/prompt-timed-out` | [resilience](resilience.md) | [resilience](resilience.md) |  |  |
 | `resilience/recovered` | [resilience](resilience.md) | [resilience](resilience.md) |  |  |
 | `resilience/stalled` | [resilience](resilience.md) | [resilience](resilience.md) |  |  |
@@ -386,13 +411,13 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `session/pending-updated` | [session](session.md) | [session](session.md) | [ui-pending](ui-pending.md) | yes |
 | `session/plan` | [session](session.md) | [session](session.md) |  |  |
 | `session/provider-state-changed` | [session](session.md) | [session](session.md) | [provider-claude](provider-claude.md) |  |
-| `session/queue-changed` | [session](session.md) | [session](session.md) |  | yes |
+| `session/queue-changed` | [session](session.md) | [session](session.md) | [workspace](workspace.md) | yes |
 | `session/redacted` | [session](session.md) | [redact](redact.md) | [ui-secrets](ui-secrets.md), [ui-voice](ui-voice.md) | yes |
 | `session/resumed` | [session](session.md) | [session](session.md) |  |  |
 | `session/status` | [session](session.md) | [session](session.md) | [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md), [ui-workspace](ui-workspace.md) | yes |
-| `session/steering-changed` | [session](session.md) | [session](session.md) |  | yes |
+| `session/steering-changed` | [session](session.md) | [session](session.md) | [workspace](workspace.md) | yes |
 | `session/todos` | [session](session.md) | [session](session.md) | [acp](acp.md), [todo-sync](todo-sync.md) |  |
-| `session/updated` | [session](session.md) | [session](session.md) | [access](access.md), [acp](acp.md), [cache-warm](cache-warm.md), [fallback](fallback.md), [perms](perms.md), [pet](pet.md) |  |
+| `session/updated` | [session](session.md) | [session](session.md) | [access](access.md), [acp](acp.md), [cache-warm](cache-warm.md), [fallback](fallback.md), [perms](perms.md), [pet](pet.md), [replay](replay.md) |  |
 | `session/usage` | [session](session.md) | [session](session.md) | [cache-warm](cache-warm.md), [tools](tools.md), [usage](usage.md) |  |
 | `speech/changed` | [speech](speech.md) | [speech](speech.md) |  | yes |
 | `supervisor/changed` | [supervisor](supervisor.md) | [supervisor](supervisor.md) |  | yes |
@@ -408,7 +433,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `tool-slots/changed` | [tool-slots-load](tool-slots-load.md) | [tool-slots-load](tool-slots-load.md) | [ui-slots](ui-slots.md), [ui-tool-slots-load](ui-tool-slots-load.md) | yes |
 | `tool-slots/holders-changed` | [tool-slots](tool-slots.md) | [tool-slots](tool-slots.md) | [tool-slots-load](tool-slots-load.md) |  |
 | `tools/file-written` | [tools](tools.md) | [tools-fs](tools-fs.md) |  | yes |
-| `tools/finished` | [tools](tools.md) | [tools](tools.md) | [otel](otel.md), [perms](perms.md), [supervisor](supervisor.md) |  |
+| `tools/finished` | [tools](tools.md) | [tools](tools.md) | [agent](agent.md), [otel](otel.md), [perms](perms.md), [supervisor](supervisor.md), [tools-shell](tools-shell.md) |  |
 | `tools/note` | [tools](tools.md) | [tools](tools.md) | [agent](agent.md) |  |
 | `tools/progress` | [tools](tools.md) | [tools](tools.md) | [agent](agent.md), [resilience](resilience.md) |  |
 | `tools/started` | [tools](tools.md) | [tools](tools.md) | [otel](otel.md) |  |
@@ -426,7 +451,9 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `workspace/deleted` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md), [workspace-box](workspace-box.md), [workspace-speech](workspace-speech.md) | yes |
 | `workspace/dream-finished` | [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md) | [workspace-knowledge](workspace-knowledge.md) |  | yes |
 | `workspace/episode-changed` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md), [ui-workspace-speech](ui-workspace-speech.md) | yes |
+| `workspace/inbox-changed` | [workspace](workspace.md) | [workspace](workspace.md) |  | yes |
 | `workspace/knowledge-changed` | [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md) | [workspace-knowledge](workspace-knowledge.md) | [ui-workspace](ui-workspace.md) | yes |
+| `workspace/reassigned` | [workspace](workspace.md) | [workspace](workspace.md) |  | yes |
 | `workspace/speech-changed` | [workspace-speech](workspace-speech.md) | [workspace-speech](workspace-speech.md) | [ui-workspace-speech](ui-workspace-speech.md) | yes |
 | `workspace/thread-changed` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md), [ui-workspace-speech](ui-workspace-speech.md), [workspace-speech](workspace-speech.md) | yes |
 | `workspace/timeline-appended` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md) | yes |
@@ -450,7 +477,8 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/stop` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tasks](tasks.md) (50), [thread-reply](thread-reply.md) (60) |
 | `agent/stop-outstanding` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tools-agent](tools-agent.md) (50), [tools-jobs](tools-jobs.md) (60) |
 | `agent/system-prompt` | [agent](agent.md) | [linking](linking.md) (45), [memory](memory.md) (55), [skills](skills.md) (60), [supervisor](supervisor.md) (900), [tasks](tasks.md) (60), [tools-agent](tools-agent.md) (40), [tools-computers](tools-computers.md) (60), [workspace](workspace.md) (50) |
-| `agent/tools` | [tools](tools.md) | [access](access.md) (85), [readonly](readonly.md) (90), [supervisor](supervisor.md) (90), [tasks](tasks.md) (50), [tools-handin](tools-handin.md) (50), [workspace-knowledge](workspace-knowledge.md) (40) |
+| `agent/tool-canceller` | [agent](agent.md) | [tools-shell](tools-shell.md) (50) |
+| `agent/tools` | [tools](tools.md) | [access](access.md) (85), [readonly](readonly.md) (90), [supervisor](supervisor.md) (90), [tasks](tasks.md) (50), [tools-handin](tools-handin.md) (50), [workspace](workspace.md) (40), [workspace-knowledge](workspace-knowledge.md) (40) |
 | `naming/auto-p` | [naming](naming.md) | [tasks](tasks.md) (50) |
 | `naming/system-prompt` | [naming](naming.md) | [tasks](tasks.md) (60) |
 | `notification/before-send` | [notifications](notifications.md) |  |
@@ -471,7 +499,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | Hook | Defined by | Added to by |
 |---|---|---|
 | `after-change-functions` |  | [ui-compose](ui-compose.md) |
-| `after-load-functions` |  | [ui-quick-search](ui-quick-search.md) |
+| `after-load-functions` |  | [ui-quick-search](ui-quick-search.md), `harness-latency.el` |
 | `before-change-functions` |  | [ui-compose](ui-compose.md) |
 | `change-review-changed-functions` | `change-review.el` | [patch-review](patch-review.md), [ui-patch-review](ui-patch-review.md), `change-review-ui.el` |
 | `completion-at-point-functions` |  | [ui-compose](ui-compose.md) |
@@ -490,7 +518,8 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-acp-initialized-functions` | [acp](acp.md) | [acp](acp.md), [computers](computers.md) |
 | `harness-acp-received-hook` | [acp](acp.md) | [ui-chat](ui-chat.md) |
 | `harness-admission-pool-functions` | [admission](admission.md) |  |
-| `harness-chat-hand-in-fold-functions` | [ui-chat](ui-chat.md) | [ui-review](ui-review.md) |
+| `harness-board--commit-hook` | [board-edit](board-edit.md) |  |
+| `harness-chat-hand-in-open-functions` | [ui-chat](ui-chat.md) | [ui-review](ui-review.md) |
 | `harness-chat-header-end-functions` | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md) | [ui-cache-warm](ui-cache-warm.md), [ui-version](ui-version.md) |
 | `harness-chat-header-functions` | [ui-btw](ui-btw.md), [ui-chat](ui-chat.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) | [ui-btw](ui-btw.md), [ui-priority](ui-priority.md), [ui-supervisor](ui-supervisor.md) |
 | `harness-chat-mode-hook` | [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-watches](ui-watches.md) | [ui-cache](ui-cache.md), [ui-cache-warm](ui-cache-warm.md), [ui-children](ui-children.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-review](ui-review.md), [ui-sticky-compose](ui-sticky-compose.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-watches](ui-watches.md) |
@@ -518,9 +547,9 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-ui-cache-warm-functions` | [ui-cache-warm](ui-cache-warm.md) |  |
 | `harness-ui-config-load-hooks` |  | [ui-chatgpt-plan](ui-chatgpt-plan.md) |
 | `harness-ui-config-sections-functions` | [ui-config](ui-config.md) | [ui-chatgpt-plan](ui-chatgpt-plan.md) |
-| `harness-ui-connected-hook` | [ui](ui.md) | [ui-access](ui-access.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-computers](ui-computers.md), [ui-decisions](ui-decisions.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-server](ui-server.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md), [ui-workspace](ui-workspace.md), [ui-workspace-speech](ui-workspace-speech.md) |
+| `harness-ui-connected-hook` | [ui](ui.md) | [ui-access](ui-access.md), [ui-board](ui-board.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-computers](ui-computers.md), [ui-decisions](ui-decisions.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-server](ui-server.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-version](ui-version.md), [ui-workspace](ui-workspace.md), [ui-workspace-speech](ui-workspace-speech.md) |
 | `harness-ui-decision-functions` | [ui-chat](ui-chat.md), [ui-decisions](ui-decisions.md) | [ui-chat](ui-chat.md) |
-| `harness-ui-event-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-priority](ui-priority.md), [ui-watches](ui-watches.md) | [ui-access](ui-access.md), [ui-acp-remote](ui-acp-remote.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-chatgpt-plan](ui-chatgpt-plan.md), [ui-children](ui-children.md), [ui-computers](ui-computers.md), [ui-config](ui-config.md), [ui-decisions](ui-decisions.md), [ui-memory](ui-memory.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-priority](ui-priority.md), [ui-provider-check](ui-provider-check.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-secrets](ui-secrets.md), [ui-server](ui-server.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-usage-history](ui-usage-history.md), [ui-version](ui-version.md), [ui-voice](ui-voice.md), [ui-watches](ui-watches.md), [ui-workspace](ui-workspace.md), [ui-workspace-speech](ui-workspace-speech.md), [ui-worktree](ui-worktree.md) |
+| `harness-ui-event-functions` | [ui](ui.md), [ui-children](ui-children.md), [ui-priority](ui-priority.md), [ui-watches](ui-watches.md) | [ui-access](ui-access.md), [ui-acp-remote](ui-acp-remote.md), [ui-board](ui-board.md), [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-chatgpt-plan](ui-chatgpt-plan.md), [ui-children](ui-children.md), [ui-computers](ui-computers.md), [ui-config](ui-config.md), [ui-decisions](ui-decisions.md), [ui-memory](ui-memory.md), [ui-merge](ui-merge.md), [ui-patch-review](ui-patch-review.md), [ui-pending](ui-pending.md), [ui-pet](ui-pet.md), [ui-priority](ui-priority.md), [ui-provider-check](ui-provider-check.md), [ui-report](ui-report.md), [ui-review](ui-review.md), [ui-secrets](ui-secrets.md), [ui-server](ui-server.md), [ui-sessions](ui-sessions.md), [ui-slots](ui-slots.md), [ui-tasks](ui-tasks.md), [ui-tool-slots-load](ui-tool-slots-load.md), [ui-tree](ui-tree.md), [ui-usage](ui-usage.md), [ui-usage-history](ui-usage-history.md), [ui-version](ui-version.md), [ui-voice](ui-voice.md), [ui-watches](ui-watches.md), [ui-workspace](ui-workspace.md), [ui-workspace-speech](ui-workspace-speech.md), [ui-worktree](ui-worktree.md) |
 | `harness-ui-linking-context-functions` | [ui-linking](ui-linking.md), [ui-patch-review](ui-patch-review.md) | [ui-linking](ui-linking.md), [ui-patch-review](ui-patch-review.md) |
 | `harness-ui-live-functions` | [ui](ui.md) | [ui-chat](ui-chat.md), [ui-sessions](ui-sessions.md) |
 | `harness-ui-media-recording-blocked-p-functions` | [ui-media](ui-media.md) | [ui-voice](ui-voice.md) |
@@ -559,11 +588,12 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `harness-update-hook` | [ui-version](ui-version.md), `harness.el` | [ui-version](ui-version.md) |
 | `harness-websearch-ready-functions` | [tools-web](tools-web.md) |  |
 | `kill-buffer-hook` |  | [ui-cache](ui-cache.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-config](ui-config.md), [ui-pet](ui-pet.md), [ui-popout](ui-popout.md), [ui-provider-check](ui-provider-check.md), [ui-server](ui-server.md), [ui-voice](ui-voice.md), [ui-workspace](ui-workspace.md) |
-| `kill-emacs-hook` |  | [agent](agent.md), [mcp](mcp.md), [pet](pet.md), [provider-demo](provider-demo.md), [sandbox-session](sandbox-session.md), [session](session.md), [speech](speech.md), [tasks](tasks.md), [tools-jobs](tools-jobs.md), [ui](ui.md), [ui-voice](ui-voice.md), [ui-workspace-speech](ui-workspace-speech.md) |
+| `kill-emacs-hook` |  | [agent](agent.md), [mcp](mcp.md), [pet](pet.md), [provider-demo](provider-demo.md), [sandbox-session](sandbox-session.md), [session](session.md), [speech](speech.md), [tasks](tasks.md), [tools-jobs](tools-jobs.md), [ui](ui.md), [ui-voice](ui-voice.md), [ui-workspace-speech](ui-workspace-speech.md), `harness-latency.el` |
 | `message-sent-hook` | `change-review-mail.el` | `change-review-mail.el` |
 | `post-command-hook` |  | [ui-cache-warm](ui-cache-warm.md), [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-patch-review](ui-patch-review.md), [ui-sticky-compose](ui-sticky-compose.md), `compose-quote.el`, `change-review-ui.el` |
+| `post-gc-hook` |  | `harness-latency.el` |
 | `pre-command-hook` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md) |
-| `pre-redisplay-functions` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-popout](ui-popout.md), [ui-sticky-compose](ui-sticky-compose.md), `change-review-ui.el` |
+| `pre-redisplay-functions` |  | [ui-chat](ui-chat.md), [ui-compose](ui-compose.md), [ui-popout](ui-popout.md), [ui-sticky-compose](ui-sticky-compose.md), `harness-latency.el`, `change-review-ui.el` |
 | `project-find-functions` |  | `worktree-assume.el` |
 | `string-edit-mode-hook` | `change-review-ui.el` |  |
 | `tabulated-list-revert-hook` |  | [ui-sessions](ui-sessions.md), [ui-worktree](ui-worktree.md) |
