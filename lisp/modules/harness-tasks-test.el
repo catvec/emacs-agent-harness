@@ -5575,7 +5575,12 @@ by hand, the report it handed in is still the one reviewed."
           ;; worked through with them until they are satisfied.
           (should (string-match-p "not a check to get past" prompt))
           (should (string-match-p "until they are satisfied" prompt))
-          (should (string-match-p "never in a batch" prompt)))))))
+          (should (string-match-p "never in a batch" prompt))
+          ;; Nor does it ask for a design document, a demo or the
+          ;; walkthrough that narrated one: the ordinary hand-in only.
+          (dolist (word '("design document" "demo" "narration" "walkthrough"
+                          "presenter"))
+            (should-not (string-match-p word prompt))))))))
 
 (ert-deftest harness-tasks-hand-in-waits-for-review ()
   "A task session handing its work in ends the turn and waits for the user.
