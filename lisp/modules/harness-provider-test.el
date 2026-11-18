@@ -1002,6 +1002,31 @@ selection and price ranking all see the same set."
     (should-not (gethash "test-narrow:cheap" harness-provider--model-index))
     (should (gethash "test-narrow:middle" harness-provider--model-index))))
 
+(ert-deftest harness-provider-allow-models-takes-one-pattern-and-drops-junk ()
+  "A single string is a list of one, and a stray entry narrows nothing away.
+An endpoint written by hand may say `:allow-models \"openrouter:qwen*\"'
+rather than a list, and a nil or a blank pattern among real ones must not
+be read as a pattern that matches no model."
+  (harness-provider-test-with (test-single test-junk test-blank)
+    (harness-provider-test-narrow 'test-single "test-single:middle")
+    (should (equal '("test-single:middle")
+                   (harness-provider-allow-models (harness-provider-get 'test-single))))
+    (should (equal '("test-single:middle")
+                   (harness-provider-test-catalogue-ids)))
+    (harness-provider-test-narrow 'test-junk (list "  " nil 42 "test-junk:cheap"))
+    (should (equal '("test-junk:cheap")
+                   (harness-provider-allow-models (harness-provider-get 'test-junk))))
+    (should (equal '("test-junk:cheap" "test-single:middle")
+                   (harness-provider-test-catalogue-ids)))
+    ;; Nothing left of the list is no narrowing at all, not a provider
+    ;; that offers nothing.
+    (harness-provider-test-narrow 'test-blank '("" "  "))
+    (should-not (harness-provider-allow-models (harness-provider-get 'test-blank)))
+    (should (equal '("test-blank:cheap" "test-blank:dear" "test-blank:middle")
+                   (sort (seq-filter (lambda (id) (string-prefix-p "test-blank:" id))
+                                     (harness-provider-test-catalogue-ids))
+                         #'string<)))))
+
 ;;;; Internal calls
 
 (defvar harness-sessions)

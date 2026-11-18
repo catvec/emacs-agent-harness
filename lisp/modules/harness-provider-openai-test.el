@@ -1788,5 +1788,26 @@ server that answers out of order must not make the quota go backwards."
                                  '((:id "named-by-a-string" :api-key "sk-x" :weird 3
                                     :models ("a" (:name "b" :context-window 4096 :pricing (:input 1)))))))))
 
+(ert-deftest harness-openai-allow-models-widget-is-copy-in-nouns ()
+  "The endpoint editor shows the new key in nouns, as the copy rule asks.
+The key's label is `Allowed models' and a pattern's is `Provider, model or
+pattern', the words the global option's entry uses; its description is a
+setting description, the one place prose belongs."
+  (let* ((options (plist-get (cdr harness-openai--endpoint-type) :options))
+         (allow (car (seq-filter (lambda (o) (eq :allow-models (car o))) options)))
+         (props (harness-test--widget-properties (car (cdr allow)))))
+    (should (equal "Allowed models" (plist-get props :tag)))
+    (should (equal "Provider, model or pattern"
+                   (plist-get (harness-test--widget-properties
+                               (nth 5 (car (cdr allow))))
+                              :tag)))
+    ;; A pattern is labelled as the global option labels one.
+    (let ((global (get 'harness-allowed-models 'custom-type)))
+      (should (equal (plist-get (harness-test--widget-properties
+                                 (nth 5 (car (cdr allow))))
+                                :tag)
+                     (plist-get (harness-test--widget-properties (car (cdr global))) :tag))))
+    (should (plist-get props :doc))))
+
 (provide 'harness-provider-openai-test)
 ;;; harness-provider-openai-test.el ends here

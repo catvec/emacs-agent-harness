@@ -291,6 +291,23 @@ A provider that names no patterns offers every model it lists."
                         models)
     models))
 
+(defun harness-provider--allow-patterns (patterns)
+  "Return PATTERNS, a provider's `:allow-models', as a list of globs or nil.
+A single string stands for a list of one.  An entry that is not a
+non-blank string is dropped rather than kept as a pattern that matches
+nothing, so a stray nil in a hand-written list does not narrow the
+provider away; nil -- what is left of an empty list -- offers every
+model the provider lists."
+  (let ((list (cond ((null patterns) nil)
+                    ((stringp patterns) (list patterns))
+                    ((listp patterns) patterns)
+                    (t nil))))
+    (delq nil (mapcar (lambda (pattern)
+                        (and (stringp pattern)
+                             (not (string-blank-p pattern))
+                             (string-trim pattern)))
+                      list))))
+
 (defun harness-provider-model-refusal (model-id)
   "Return why the harness may not use MODEL-ID, or nil when it may.
 Both allowlists are checked: the harness-wide `harness-allowed-models',
@@ -591,8 +608,10 @@ list of glob patterns of model ids (the same ones
 `harness-allowed-models' takes) naming the models this provider offers:
 only those are listed, offered and chosen for a tier, and a request for
 any other is refused before the provider sees it.  Nil, the default,
-offers every model the provider lists.  It narrows this provider only
-and never widens `harness-allowed-models'; both apply.  WARM, when
+offers every model the provider lists, and so does an entry that is not
+a non-blank string: a stray nil in a hand-written list narrows nothing
+away.  It narrows this provider only and never widens
+`harness-allowed-models'; both apply.  WARM, when
 given, takes a request plist without messages and prepares what such a
 request will need, a process say, so it answers sooner
 \(`provider/warm'); CLOSE takes a session id and frees what the
@@ -610,7 +629,7 @@ again when needed; other providers' models stay cached."
                                      :models-fn models :complete-fn complete
                                      :fork-fn fork :quota-fn quota
                                      :capabilities capabilities :tiers tiers
-                                     :allow-models allow-models)
+                                     :allow-models (harness-provider--allow-patterns allow-models))
            harness-providers)
   (puthash id (list :warm warm :close close :resolve resolve :embed embed) harness-provider--lifecycle)
   (harness-provider--forget id)

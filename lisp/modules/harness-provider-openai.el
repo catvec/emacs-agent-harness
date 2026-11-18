@@ -34,9 +34,9 @@
 ;;
 ;; An endpoint that lists far more than anyone wants to pick from --
 ;; OpenRouter's several hundred -- narrows itself with `:allow-models',
-;; the same glob patterns `harness-allowed-models' takes.  The
-;; provider module filters, where a provider's models are settled, so
-;; the catalogue, tier selection and every picker see one narrowed set
+;; the same glob patterns `harness-allowed-models' takes.  The core
+;; filters where a provider's models are settled, so the catalogue, the
+;; model index, tier selection and every picker see one narrowed set,
 ;; and a request for a model left out is refused before it is sent.
 ;;
 ;; A hosted service with no credential offers no models, however
@@ -134,7 +134,8 @@ of model ids: * for any run of characters, ? for one, and a pattern
 with a colon matches the whole ID:MODEL id while one without names
 providers.  Empty offers every model the endpoint lists.  It narrows
 this endpoint only; `harness-allowed-models' still applies."
-                            (string :tag "Model or pattern")))
+                            (string :tag "Provider, model or pattern"
+                                    :names (provider model))))
      (:default-context (integer :tag "Default context" :value 128000
                                 :doc "Context window of the models the server does not size.  Without
 it such a model's window is estimated: the same model's at another
