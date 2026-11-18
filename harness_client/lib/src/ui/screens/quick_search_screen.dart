@@ -330,6 +330,7 @@ class _Place extends StatelessWidget {
             ? 'From a conversation'
             : 'From the conversation “$title”',
       SearchOrigin.tasks => 'From the task board',
+      SearchOrigin.boards => 'From the boards',
       SearchOrigin.sessions => 'From the list of sessions',
       SearchOrigin.usage => 'From usage',
       SearchOrigin.server => 'From the server page',

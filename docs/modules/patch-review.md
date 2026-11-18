@@ -196,6 +196,7 @@ to say.
 
 - `patch-review/apply` (task-id op) — Perform OP, an operation of change-review, on the review of task TASK-ID.
 - `patch-review/assume-viewed` (task-id &optional revision) — Take every file of task TASK-ID's review as viewed, but those changed lately.
+- `patch-review/board-thread` (task-id body &rest opts) — Start or answer a thread of task TASK-ID's review about a place on a board.
 - `patch-review/changes` (task-id &optional version) — Return the files task TASK-ID's review changes at VERSION, as plain data.
 - `patch-review/comment` (task-id body &rest opts) — Add the agent's comment BODY to the review of task TASK-ID.
 - `patch-review/diff` (task-id path &optional version) — Return the diff of PATH in task TASK-ID's review at VERSION.

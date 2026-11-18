@@ -7925,10 +7925,11 @@ as in the chat; the one in code is not."
   "No other file of the harness names the review of a task's changes but its
 halves, the reply form's, the review tools and the ACP lists of what a UI
 may call and hear: what knows no harness is the library, whose own test
-checks that."
+checks that.  A board's discussion is a thread of that same review
+(harness-board-store.el), so it is one of the halves too."
   (let ((default-directory harness-test-root)
         (known '("harness-ui-patch-review.el" "harness-patch-review.el"
-                 "harness-thread-reply.el"
+                 "harness-thread-reply.el" "harness-board-store.el"
                  "harness-tools-review.el" "harness-emacs-endpoint.el" "harness-acp.el")))
     (dolist (file (cl-remove-if (lambda (f) (string-match-p "-test\\.el\\'" f))
                                 (append (list "harness.el")

@@ -3332,5 +3332,41 @@ replies\", and the model takes a step more to correct it."
     (should (= 9 (change-review-location-end-line location)))
     (should (equal "It reads nested quotes." (change-review-location-excerpt location)))))
 
+;;;; A thread about a place on a board
+
+(ert-deftest harness-patch-review-a-board-thread-keeps-its-place-and-revision ()
+  "A board discussion is the review's own thread, anchored where it was made."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (sid (plist-get (harness-call 'task/get id) :session))
+           (made (harness-call 'patch-review/board-thread id "is this the api?"
+                               :board "b-fieldnotes" :diagram "d-overview"
+                               :object "n-api" :revision 12 :name "api"
+                               :session sid)))
+      (should (stringp (plist-get made :thread)))
+      (should (equal "open" (plist-get made :status)))
+      (should (equal "b-fieldnotes" (plist-get (plist-get made :meta) :board)))
+      (should (equal "d-overview" (plist-get (plist-get made :meta) :diagram)))
+      (should (equal "n-api" (plist-get (plist-get made :meta) :object)))
+      (should (= 12 (plist-get (plist-get made :meta) :revision)))
+      ;; It is the review's thread, so the review reads it.
+      (let ((data (harness-call 'patch-review/get id)))
+        (should (cl-find (plist-get made :thread)
+                         (append (plist-get data :threads) nil)
+                         :key (lambda (thread) (plist-get thread :id))
+                         :test #'equal)))
+      ;; Answering it keeps the same anchor: a discussion is one thread.
+      (let ((answered (harness-call 'patch-review/board-thread id "yes, since tuesday"
+                                    :board "b-fieldnotes" :diagram "d-overview"
+                                    :object "n-api" :revision 12
+                                    :thread (plist-get made :thread) :session sid)))
+        (should (equal (plist-get made :thread) (plist-get answered :thread))))
+      ;; Resolving it is the review's own action, and approving code is not
+      ;; part of it.
+      (let ((closed (harness-call 'patch-review/comment id "" :thread (plist-get made :thread)
+                                  :status "closed" :session sid)))
+        (should (equal "closed" (plist-get closed :status))))
+      (should-not (harness-method-exists-p 'board/approve)))))
+
 (provide 'harness-patch-review-test)
 ;;; harness-patch-review-test.el ends here

@@ -8,6 +8,7 @@ Following the links agents write: a click on a harness: link opens the session, 
 - **Source:** [lisp/ui/harness-ui-linking.el](../../lisp/ui/harness-ui-linking.el)
 - **Loaded:** by default
 - **Requires:** [ui](ui.md), [ui-chat](ui-chat.md)
+- **Required by:** [ui-board](ui-board.md)
 - **Brings along:** [linking](linking.md) (the rest of it)
 
 ## About

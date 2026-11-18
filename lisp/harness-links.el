@@ -25,6 +25,13 @@
 ;;   harness:task/TASK                    a task
 ;;   harness:task/TASK/thread/THREAD      a thread of the review of that task
 ;;   harness:computer/REF                 a computer's screen share, by id or name
+;;   harness:board/BOARD                  a board
+;;   harness:board/BOARD/diagram/DIAGRAM  a diagram of a board
+;;   harness:board/BOARD/diagram/DIAGRAM/object/OBJECT
+;;                                        a place on a diagram
+;;   harness:board/BOARD/diagram/DIAGRAM/object/OBJECT/call/CALL
+;;                                        a place, and the call that drew it
+;;   harness:board/BOARD/revision/N       a board as it was at revision N
 ;;
 ;; The kinds also go by `msg' and `node' (a message), and `tool-call',
 ;; `tool_call' and `tool' (a call).  A REF is written as the harness names
@@ -60,7 +67,8 @@
     ("call" . call) ("tool-call" . call) ("tool_call" . call) ("toolcall" . call) ("tool" . call)
     ("thread" . thread)
     ("task" . task)
-    ("computer" . computer) ("screen" . computer) ("vnc" . computer))
+    ("computer" . computer) ("screen" . computer) ("vnc" . computer)
+    ("board" . board))
   "The names a pair of a link path may start with, and the kind each means.")
 
 (defun harness-links-p (string)
@@ -88,23 +96,70 @@ That is only about how it starts, `harness:': it may still name nothing
 (defun harness-links-parse (url)
   "Return the plist URL reads as, or nil when it is no valid harness link.
 The plist has `:kind', one of `session', `message', `call', `thread',
-`task' and `computer', and what it names: `:session', `:message',
-`:call', `:task', `:thread' and `:computer', each the REF as written
-(decoded), the ones the link does not name left out.  A message or call of the session the text is in has no
-`:session'; so has a thread with no task or session.  `:message' is the
-node's id, or a handle; so is `:call', and it may be the call's own id."
+`task', `computer' and `board', and what it names: `:session',
+`:message', `:call', `:task', `:thread', `:computer' and `:board', each
+the REF as written (decoded), the ones the link does not name left out.
+A message or call of the session the text is in has no `:session'; so
+has a thread with no task or session.  `:message' is the node's id, or
+a handle; so is `:call', and it may be the call's own id.  A board link
+may also name `:board-diagram', `:board-object', `:board-revision' and
+`:board-call': where on the board the text points."
   (let ((case-fold-search t)
         (trimmed (and (stringp url) (string-trim url))))
     (when (and trimmed (string-match "\\`harness:/*\\(.*?\\)/*\\'" trimmed))
       (let* ((path (match-string 1 trimmed))
              (segments (and (not (string-empty-p path)) (split-string path "/"))))
-        (when (and segments (cl-evenp (length segments))
-                   (cl-notany #'string-empty-p segments))
-          (let ((pairs (cl-loop for (name ref) on segments by #'cddr
-                                collect (cons (harness-links--kind name)
-                                              (harness-links--decode ref)))))
-            (when (cl-every #'car pairs)
-              (harness-links--shape pairs))))))))
+        (when (and segments (cl-notany #'string-empty-p segments))
+          (if (equal (downcase (car segments)) "board")
+              ;; A board link names its board and, at most, one diagram,
+              ;; object and revision or call: its own shape, whose inner
+              ;; names are not kinds.
+              (harness-links--parse-board segments)
+            (when (cl-evenp (length segments))
+              (let ((pairs (cl-loop for (name ref) on segments by #'cddr
+                                    collect (cons (harness-links--kind name)
+                                                  (harness-links--decode ref)))))
+                (when (cl-every #'car pairs)
+                  (harness-links--shape pairs))))))))))
+
+(defun harness-links--parse-board (segments)
+  "Return the board link SEGMENTS name, or nil when they name no place.
+SEGMENTS is `board', the board's ref, then at most one of
+`diagram/REF', `object/REF', `revision/REF' and `call/REF', in the
+order a place is written: an object is on a diagram, a call is one that
+touched the object, and a revision is the whole board or the object as it
+was then."
+  (let ((ref (nth 1 segments))
+        (rest (cddr segments))
+        (plist (list :kind 'board))
+        (ok t))
+    (setq plist (append plist (list :board (harness-links--decode (or ref "")))))
+    (while (and ok rest)
+      (let ((name (downcase (car rest)))
+            (value (and (cadr rest) (harness-links--decode (cadr rest)))))
+        (cond
+         ((or (null value) (string-empty-p value)) (setq ok nil))
+         ((equal name "diagram")
+          (if (plist-member plist :board-diagram) (setq ok nil)
+            (setq plist (plist-put plist :board-diagram value))))
+         ((equal name "object")
+          (if (or (plist-member plist :board-object)
+                  (not (plist-member plist :board-diagram))) (setq ok nil)
+            (setq plist (plist-put plist :board-object value))))
+         ((equal name "revision")
+          (if (plist-member plist :board-revision) (setq ok nil)
+            (setq plist (plist-put plist :board-revision value))))
+         ((equal name "call")
+          (if (or (plist-member plist :board-call)
+                  (not (plist-member plist :board-object))) (setq ok nil)
+            (setq plist (plist-put plist :board-call value))))
+         (t (setq ok nil))))
+      (setq rest (cddr rest)))
+    (and ok
+         (not (and (plist-member plist :board-call)
+                   (plist-member plist :board-revision)))
+         (not (string-empty-p (plist-get plist :board)))
+         plist)))
 
 (defun harness-links--shape (pairs)
   "Return the link plist for PAIRS, the (KIND . REF) of a path, or nil.\nNil when they are none of the shapes a link has."
@@ -154,6 +209,26 @@ slash that parts a path, is written %XX."
      (mapconcat (lambda (byte) (format "%%%02X" byte)) (encode-coding-string char 'utf-8) ""))
    (format "%s" ref) t t))
 
+(defun harness-links--board-path (_link enc)
+  "Return the path of a board link, its refs encoded by ENC.
+A board link names the board and, at most, one diagram, one object on
+that diagram and one revision or call: the shapes `harness-links-parse'
+reads, and no deeper place.  A revision is the whole board, or the
+diagram, or the object as it was then, so it is written after whichever
+of them the link names.  LINK is read by ENC, which is its own reader,
+so the link itself is not needed here."
+  (when-let* ((board (funcall enc :board)))
+    (let ((diagram (funcall enc :board-diagram))
+          (object (funcall enc :board-object))
+          (revision (funcall enc :board-revision))
+          (call (funcall enc :board-call)))
+      (concat "board/" board
+              (when diagram (concat "/diagram/" diagram))
+              (when (and diagram object) (concat "/object/" object))
+              (if (and diagram object call)
+                  (concat "/call/" call)
+                (when revision (concat "/revision/" revision)))))))
+
 (defun harness-links-url (link)
   "Return the URL of LINK, a plist as `harness-links-parse' returns one.
 A thread with a task is written under the task, else under its session
@@ -178,7 +253,8 @@ when it has one, else alone.  Return nil when LINK names too little."
                                          (session (concat "session/" session "/thread/" thread))
                                          (t (concat "thread/" thread)))))
                         ('computer (when-let* ((computer (funcall enc :computer)))
-                                     (concat "computer/" computer))))))
+                                     (concat "computer/" computer)))
+                        ('board (harness-links--board-path link enc)))))
       (concat harness-links-scheme ":" path))))
 
 (defun harness-links-session-url (session)
@@ -205,6 +281,18 @@ when it has one, else alone.  Return nil when LINK names too little."
   "Return the URL of the computer COMPUTER, by its id or name."
   (harness-links-url (list :kind 'computer :computer computer)))
 
+(cl-defun harness-links-board-url (board &optional diagram object &key revision call)
+  "Return the URL of a place on BOARD.
+DIAGRAM names one of its diagrams, OBJECT a view on that diagram,
+REVISION the revision the place was seen at and CALL the tool call that
+drew it.  With none of them, the board itself.  REVISION may be a
+number: a revision a client read is one, and a URL is text."
+  (harness-links-url (list :kind 'board :board board
+                           :board-diagram diagram
+                           :board-object object
+                           :board-revision (and revision (format "%s" revision))
+                           :board-call call)))
+
 (defun harness-links-markdown (label url)
   "Return the Markdown link to URL that reads LABEL.
 Brackets in LABEL would end it early; they become parentheses."
@@ -226,13 +314,18 @@ session's name, for a session link and the message or call in it."
       ('thread (format "thread %s" (funcall shorten (plist-get link :thread))))
       ('task (or name (format "task %s" (funcall shorten (plist-get link :task)))))
       ('computer (or name (format "computer %s" (funcall shorten (plist-get link :computer)))))
+      ('board (or name (format "board %s%s"
+                               (funcall shorten (plist-get link :board))
+                               (if-let* ((object (plist-get link :board-object)))
+                                   (format ", %s" (funcall shorten object))
+                                 ""))))
       (_ "link"))))
 
 ;;;; Finding links in text
 
 (defconst harness-links-bare-regexp
   (concat "harness:"
-          "\\(?:session\\|message\\|msg\\|node\\|call\\|tool-call\\|tool_call\\|toolcall\\|tool\\|thread\\|task\\|computer\\|screen\\|vnc\\)"
+          "\\(?:session\\|message\\|msg\\|node\\|call\\|tool-call\\|tool_call\\|toolcall\\|tool\\|thread\\|task\\|computer\\|screen\\|vnc\\|board\\)"
           "/[A-Za-z0-9_~%#=&+@:/.-]+")
   "Regexp for a bare link: a URL that starts with a kind and has no blank in it.
 It may take a full stop or a colon that closes a sentence with it, which

@@ -1776,6 +1776,65 @@ added, the comments given their quote, the threads made."
           :edited (length (cl-remove-if-not (lambda (op) (eq (plist-get op :op) 'edit-comment)) done))
           :threads (mapcar (lambda (op) (plist-get op :thread)) added))))
 
+(defun harness-patch-review--board-meta (opts)
+  "Return the board place OPTS names as a thread's meta, or nil.
+The keys are the place's own: a nil one is left out, so a thread about a
+diagram as a whole has no object."
+  (let (meta)
+    (dolist (key '(:board :diagram :object :revision :name))
+      (let ((value (plist-get opts key)))
+        (when (and value (not (and (stringp value) (string-blank-p value))))
+          (setq meta (plist-put meta key value)))))
+    meta))
+
+(harness-defmethod patch-review/board-thread (task-id body &rest opts)
+  "Start or answer a thread of task TASK-ID's review about a place on a board.
+BODY is the comment.  OPTS `:board', `:diagram', `:object', `:revision'
+and `:name' are the place it is about, kept as the thread's meta so the
+anchor is the object's identity and the revision the one discussed; a
+`:thread' answers that thread instead of starting one.  `:session' and
+`:call-id' say which session and call wrote it.
+
+This is the review's own thread, with the review's own resolve, not a
+comment store beside it.  Return (:thread ID :status STATUS :comment
+DATA :meta META)."
+  (let* ((task (harness-patch-review--task task-id))
+         (set (harness-patch-review--set-for task-id t))
+         (named (plist-get opts :thread))
+         (thread (and named
+                      (or (change-review-find-thread set named)
+                          (signal 'harness-error
+                                  (list (format "No thread %s in this review" named))))))
+         (meta (harness-patch-review--board-meta opts))
+         (author (harness-patch-review--agent (plist-get opts :session)
+                                              (plist-get opts :call-id)))
+         (id (or (and thread (change-review-thread-id thread))
+                 (change-review-new-thread-id set)))
+         (comment (change-review-make-comment
+                   :id (change-review-new-id "c")
+                   :thread id
+                   :author author
+                   :body (string-trim body)
+                   :time (float-time)
+                   :sent (float-time)
+                   :revision (or (plist-get opts :revision)
+                                 (when-let* ((version (change-review-latest-version set)))
+                                   (change-review-version-id version)))
+                   :meta meta)))
+    (when (harness-string-blank-p body)
+      (signal 'harness-error (list "A board discussion needs words")))
+    (change-review-dispatch
+     set (list :op 'add-comment :thread id
+               :thread-meta (and (not thread) meta)
+               :comment (change-review-comment-to-data comment)))
+    (harness-patch-review--last-close-here task-id)
+    (let ((made (or thread (change-review-find-thread set id))))
+      (list :thread id
+            :status (and made (symbol-name (change-review-thread-status made)))
+            :comment (change-review-comment-to-data comment)
+            :meta (and made (change-review-thread-meta made))
+            :task (plist-get task :id)))))
+
 (harness-defmethod patch-review/viewed (task-id)
   "Return the files viewed, and approved, in task TASK-ID's review.
 \(:seen FILES :approved FILES :assumed WHY).  FILES are (:path PATH :blob

@@ -20,6 +20,7 @@ import 'quick_search_screen.dart';
 import 'session_screen.dart';
 import 'sessions_screen.dart';
 import 'settings_screen.dart';
+import 'boards_screen.dart';
 import 'tasks_screen.dart';
 import 'usage_screen.dart';
 import 'workspace_screen.dart';
@@ -132,6 +133,13 @@ class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
         Icons.checklist_rtl_rounded,
         CupertinoIcons.checkmark_circle,
       ),
+    if (app.hasBoards)
+      const _Tab(
+        'boards',
+        'Boards',
+        Icons.grid_on_rounded,
+        CupertinoIcons.rectangle_on_rectangle,
+      ),
     if (app.hasUsage)
       const _Tab(
         'usage',
@@ -240,6 +248,7 @@ class _HomeShellState extends State<HomeShell> implements QuickSearchHost {
     return switch (id) {
       'workspace' => WorkspaceScreen(app: app, onOpenSession: _openSession),
       'tasks' => TasksScreen(app: app, onOpenSession: _openSession),
+      'boards' => BoardsScreen(app: app),
       'usage' => UsageScreen(app: app, onOpenSession: _openSession),
       'server' => ServerScreen(app: app),
       'settings' => SettingsScreen(app: app),

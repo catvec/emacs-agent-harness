@@ -97,6 +97,7 @@ class FakeHarness {
     this.toolCatalogue = true,
     this.sessionPictures = true,
     this.workspace = false,
+    this.boards = false,
     this.reviews = false,
     this.resources = false,
     this.computers = false,
@@ -173,6 +174,20 @@ class FakeHarness {
             'workspace/wallet/authorization/revoke',
             'workspace/wallet/purchase/decide',
           ],
+        ],
+        if (boards) ...[
+          'board/list',
+          'board/get',
+          'board/create',
+          'board/grammar',
+          'board/patch',
+          'board/preview',
+          'board/commit',
+          'board/undo',
+          'board/pins',
+          'board/discuss',
+          'board/discussions',
+          'board/focus',
         ],
         'task/list',
         'task/get',
@@ -338,6 +353,10 @@ class FakeHarness {
   /// A harness whose workspace modules are loaded: the workspace tab is
   /// offered and its four methods answer a small scripted workspace.
   final bool workspace;
+
+  /// A harness whose boards module is loaded: the boards page is offered, and
+  /// `board/list', `board/get' and `board/focus' answer the board fixture.
+  final bool boards;
 
   /// Whether the harness keeps a task's change review: the threads, the
   /// files at a revision, their diffs and the marks a reviewer makes.  The
@@ -547,6 +566,26 @@ class FakeHarness {
   Duration authenticateDelay = Duration.zero;
   Duration answerDelay = Duration.zero;
   final methods = <String>{};
+
+  /// The focus requests the client sent, newest last.
+  final boardFocuses = <Map<String, Object?>>[];
+
+  /// The operation batches the client sent to `board/patch`,
+  /// `board/preview` and `board/commit`, in the order they came: what a
+  /// person's tap, drag or sheet actually asked the harness for.
+  final boardBatches = <List<Map<String, Object?>>>[];
+
+  /// The discussions the client started: the board, the object and the words.
+  final boardDiscussions = <Map<String, Object?>>[];
+
+  /// The boards the client asked for, with the id and name it gave each.
+  final boardCreations = <Map<String, Object?>>[];
+
+  /// The tasks the client submitted: the directory and the prompt.
+  final taskSubmissions = <Map<String, Object?>>[];
+
+  /// The pins the client asked for: the board, the task and the title.
+  final boardPins = <Map<String, Object?>>[];
   final events = <String>{};
   bool authenticated = false;
   bool authFailed = false;
@@ -2324,6 +2363,173 @@ class FakeHarness {
         _respond(id, _computerFixture().first);
         return;
       }
+      if (method == '_harness/board/create') {
+        boardCreations.add(Map<String, Object?>.of(params));
+        final created = _boardFixture();
+        created['id'] = asStringOr(params['id'], 'b-new');
+        created['name'] = asStringOr(params['name'], 'board');
+        created['revision'] = 0;
+        _respond(id, created);
+        return;
+      }
+      if (method == '_harness/board/list') {
+        _respond(id, [
+          {
+            'id': 'b-fieldnotes',
+            'name': 'atlas / fieldnotes',
+            'project': '/Users/noah/Code/emacs-agent-harness',
+            'theme': 'electric-commons',
+            'revision': 12,
+            'updated': 1762700900,
+            'diagrams': 2,
+            'objects': 13,
+            'markers': 1,
+          },
+        ]);
+        return;
+      }
+      if (method == '_harness/board/get') {
+        _respond(id, _boardFixture());
+        return;
+      }
+      if (method == '_harness/board/commit') {
+        // The engine's own argument names are what a client has to send, so
+        // the fake refuses a batch that does not: a key the harness would
+        // not read is a key this must not accept either.
+        final missing = [
+          for (final key in ['id', 'patch-id', 'hash', 'expected', 'opts'])
+            if (!params.containsKey(key)) key,
+        ];
+        if (missing.isNotEmpty) {
+          _respondError(id, -32602, 'Invalid params: missing parameter ${missing.first}');
+          return;
+        }
+        // A commit names the patch the preview made, and the batch it was
+        // made from: the same operations under the same scope.  The engine
+        // refuses a patch that does not match, so the fake does too.
+        final opts = asMap(params['opts']);
+        final ops = [
+          for (final item in asList(opts['ops'])) asMap(item),
+        ];
+        final scope = [
+          for (final item in asList(opts['scope'])) asStringOr(item, ''),
+        ];
+        final expectedScope = [
+          for (final op in ops)
+            if (op['id'] is String) op['id']! as String,
+        ];
+        if (ops.isNotEmpty && !_sameList(scope, expectedScope)) {
+          _respondError(
+            id,
+            -32603,
+            'patch ${params['patch-id']} is not the one these operations make',
+          );
+          return;
+        }
+      }
+      if (method == '_harness/board/patch' ||
+          method == '_harness/board/preview' ||
+          method == '_harness/board/commit' ||
+          method == '_harness/board/undo') {
+        final ops = [
+          for (final item in asList(params['ops'])) asMap(item),
+        ];
+        if (ops.isNotEmpty) boardBatches.add(ops);
+        final opts = asMap(params['opts']);
+        final batch = [
+          for (final item in asList(opts['ops'])) asMap(item),
+        ];
+        if (batch.isNotEmpty) boardBatches.add(batch);
+        final created = [
+          for (final op in [...ops, ...batch])
+            if (asString(op['op']) == 'create')
+              asStringOr(op['id'], 'n-created-${boardBatches.length}'),
+        ];
+        _respond(id, {
+          'patch': 'p-${boardBatches.length}',
+          'hash': 'h-${boardBatches.length}',
+          'board': 'b-fieldnotes',
+          'revision': 12,
+          'base': 12,
+          'ops': ops,
+          'created': created,
+          'changed': <Object?>[],
+          'preimages': <Object?>[],
+          'diagnostics': <Object?>[],
+          'preview': method == '_harness/board/preview',
+          'committed': method == '_harness/board/commit',
+          'document': _boardFixture(created: created, ops: [...ops, ...batch]),
+        });
+        return;
+      }
+      if (method == '_harness/board/discuss') {
+        boardDiscussions.add(Map<String, Object?>.of(params));
+        _respond(id, {
+          'thread': 't-board-1',
+          'status': 'open',
+          'board': 'b-fieldnotes',
+          'object': asString(params['object']),
+          'revision': 12,
+        });
+        return;
+      }
+      if (method == '_harness/board/pin') {
+        boardPins.add(Map<String, Object?>.of(params));
+        _respond(id, {
+          'id': 'pin-1',
+          'board': 'b-fieldnotes',
+          'task': asString(asMap(params['opts'])['task']),
+          'title': asStringOr(asMap(params['opts'])['title'], 'atlas / fieldnotes'),
+          'revision': 12,
+          'diagram': 'd-overview',
+          'objects': 4,
+          'target': 'harness:board/b-fieldnotes/diagram/d-overview/revision/12',
+          'current': 'harness:board/b-fieldnotes/diagram/d-overview',
+        });
+        return;
+      }
+      if (method == '_harness/board/pins') {
+        final wanted = asString(asMap(params['opts'])['pin']);
+        if ((wanted ?? '').isNotEmpty) {
+          // One pin as it was: the document it kept, drawn by the harness.
+          _respond(id, {
+            'pin': {
+              'id': wanted,
+              'board': 'b-fieldnotes',
+              'title': 'atlas / fieldnotes',
+              'revision': 11,
+              'diagram': 'd-overview',
+              'objects': 4,
+            },
+            'document': _boardFixture(),
+            'image': '<svg xmlns="http://www.w3.org/2000/svg"/>',
+          });
+          return;
+        }
+        _respond(id, [
+          {
+            'id': 'pin-1',
+            'board': 'b-fieldnotes',
+            'task': 't-board-fixture',
+            'title': 'atlas / fieldnotes',
+            'revision': 11,
+            'diagram': 'd-overview',
+            'objects': 4,
+            'target': 'harness:board/b-fieldnotes/diagram/d-overview/revision/11',
+            'current': 'harness:board/b-fieldnotes/diagram/d-overview',
+          },
+        ]);
+        return;
+      }
+      if (method == '_harness/board/focus') {
+        boardFocuses.add(Map<String, Object?>.of(params));
+        _respond(id, {
+          'board': asString(params['id']),
+          'client': 'fake-client',
+          'time': 1762700900,
+        });
+        return;
+      }
       if (method.startsWith('_harness/workspace/speech') &&
           _answerWorkspaceSpeech(id, method, params)) {
         return;
@@ -2677,6 +2883,7 @@ class FakeHarness {
         return;
       }
       if (method == '_harness/task/submit') {
+        taskSubmissions.add(Map<String, Object?>.of(params));
         final taskId = 'task-${tasks.length + 1}';
         final opts = asMap(params['opts']);
         // The harness keeps each picture sent as data as a file of the
@@ -3900,6 +4107,213 @@ class FakeHarness {
         }
       }
     }
+  }
+
+  /// A board as `board/get' answers it: the drawing the fixture board
+  /// holds, two diagrams and the links its objects carry.
+  Map<String, Object?> _boardFixture({
+    List<String> created = const [],
+    List<Map<String, Object?>> ops = const [],
+  }) {
+    final document = <String, Object?>{
+    'schema': 1,
+    'id': 'b-fieldnotes',
+    'name': 'atlas / fieldnotes',
+    'project': '/Users/noah/Code/emacs-agent-harness',
+    'theme': 'electric-commons',
+    'revision': 12,
+    'created': 1762700000,
+    'updated': 1762700900,
+    'diagram': {
+      'id': 'd-overview',
+      'name': 'overview',
+      'parent': null,
+      'viewport': {'x': 0, 'y': 0, 'zoom': 1},
+      'selection': <String>[],
+      'portals': <Object?>[],
+    },
+    'diagrams': [
+      {
+        'id': 'd-overview',
+        'name': 'overview',
+        'parent': null,
+        'viewport': {'x': 0, 'y': 0, 'zoom': 1},
+        'selection': <String>[],
+        'portals': <Object?>[],
+      },
+      {
+        'id': 'd-queue',
+        'name': 'queue detail',
+        'parent': 'd-overview',
+        'viewport': {'x': 40, 'y': 12, 'zoom': 1.5},
+        'selection': ['n-handler'],
+        'portals': <Object?>[],
+      },
+    ],
+    'objects': [
+      {
+        'id': 'f-system',
+        'kind': 'frame',
+        'name': 'the system',
+        'role': 'declared',
+        'diagram': 'd-overview',
+        'shape': {'kind': 'rect', 'w': 618, 'h': 380},
+        'transform': [1, 0, 0, 1, 34, 155],
+        'style': {'fill': 'frame', 'stroke': 'edge', 'cap': 'accent'},
+        'z': 0,
+        'box': [34, 155, 618, 380],
+        'resources': <Object?>[],
+      },
+      {
+        'id': 'n-questions',
+        'kind': 'note',
+        'name': 'questions',
+        'text': 'what happens after a timeout?',
+        'role': 'unknown',
+        'diagram': 'd-overview',
+        'shape': {'kind': 'rect', 'w': 246, 'h': 122},
+        'transform': [1, 0, 0, 1, 60, 190],
+        'style': {'fill': 'note', 'stroke': 'none'},
+        'z': 2,
+        'box': [60, 190, 246, 122],
+        'resources': <Object?>[],
+      },
+      {
+        'id': 'n-api',
+        'kind': 'component',
+        'name': 'api',
+        'text': 'accepts jobs',
+        'role': 'declared',
+        'diagram': 'd-overview',
+        'shape': {'kind': 'rect', 'w': 164, 'h': 91},
+        'transform': [1, 0, 0, 1, 330, 214],
+        'style': {'fill': 'card', 'stroke': 'edge', 'cap': 'accent'},
+        'z': 3,
+        'box': [330, 214, 164, 91],
+        'resources': [
+          {
+            'kind': 'task',
+            'ref': 't-board-fixture',
+            'label': 'task · api',
+            'state': 'resolved',
+            'target': 'harness:task/t-board-fixture',
+          },
+        ],
+      },
+      {
+        'id': 'n-marker',
+        'kind': 'marker',
+        'name': 'review marker',
+        'text': 'review · 2',
+        'role': 'declared',
+        'diagram': 'd-overview',
+        'shape': {'kind': 'rect', 'w': 13, 'h': 13},
+        'transform': [1, 0, 0, 1, 336, 318],
+        'style': {'fill': 'danger', 'stroke': 'none'},
+        'z': 5,
+        'box': [336, 318, 13, 13],
+        'resources': <Object?>[],
+        'source-status': {'status': 'active', 'label': 'working · t-board-fixture'},
+      },
+      // What the last batch created is on the board: a page that made
+      // something sees it, as the harness's own answer would show it.
+      for (final op in ops)
+        if (asString(op['op']) == 'create' &&
+            created.contains(asString(op['id'])))
+          {
+            'id': asString(op['id']),
+            'kind': asStringOr(op['kind'], 'note'),
+            'name': asStringOr(op['name'], ''),
+            'text': asStringOr(op['text'], ''),
+            'role': asStringOr(op['role'], 'declared'),
+            'diagram': 'd-overview',
+            'shape': asMap(op['shape']).isEmpty
+                ? {'kind': 'rect', 'w': 180, 'h': 96}
+                : op['shape'],
+            'transform': [
+              1,
+              0,
+              0,
+              1,
+              asDouble(op['x']) ?? 0,
+              asDouble(op['y']) ?? 0,
+            ],
+            'style': asMap(op['style']),
+            'z': 3,
+            'box': [
+              asDouble(op['x']) ?? 0,
+              asDouble(op['y']) ?? 0,
+              180,
+              96,
+            ],
+            'resources': <Object?>[],
+          },
+    ],
+    'relationships': [
+      {
+        'id': 'e-jobs',
+        'kind': 'flow',
+        'diagram': 'd-overview',
+        'label': 'jobs',
+        'from': {'object': 'n-api', 'anchor': 'right'},
+        'to': {'object': 'n-questions', 'anchor': 'left'},
+        'role': 'declared',
+      },
+    ],
+    'undo-depth': 2,
+    'writers': <Object?>[],
+    'view': <String, Object?>{},
+    };
+    // Grouping is membership, not geometry: a batch that groups objects
+    // answers with them in a group, and an ungroup leaves them on their own.
+    final groups = <String, String>{};
+    final names = <String, String>{};
+    for (final op in ops) {
+      final kind = asString(op['op']);
+      if (kind == 'group') {
+        final id = asStringOr(op['id'], 'g-1');
+        names[id] = asStringOr(op['name'], '');
+        for (final member in asList(op['members'])) {
+          groups[asStringOr(member, '')] = id;
+        }
+      } else if (kind == 'ungroup') {
+        final id = asStringOr(op['id'], '');
+        groups.removeWhere((_, value) => value == id);
+      }
+    }
+    final objects = document['objects']! as List<Object?>;
+    for (final object in objects) {
+      final one = asMap(object);
+      final group = groups[asString(one['id'])];
+      if (group != null) one['group'] = group;
+    }
+    for (final entry in groups.entries) {
+      if (!groups.containsKey(entry.value)) {
+        objects.add({
+          'id': entry.value,
+          'kind': 'group',
+          'name': names[entry.value] ?? '',
+          'role': 'declared',
+          'diagram': 'd-overview',
+          'shape': <String, Object?>{},
+          'transform': [1, 0, 0, 1, 0, 0],
+          'style': <String, Object?>{},
+          'z': 0,
+          'box': [0, 0, 0, 0],
+          'resources': <Object?>[],
+        });
+      }
+    }
+    return document;
+  }
+
+  /// Whether two lists hold the same strings in the same order.
+  static bool _sameList(List<String> one, List<String> other) {
+    if (one.length != other.length) return false;
+    for (var index = 0; index < one.length; index++) {
+      if (one[index] != other[index]) return false;
+    }
+    return true;
   }
 
   Map<String, Object?> _initializeResult({bool rotate = false}) => {

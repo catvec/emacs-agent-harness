@@ -28,6 +28,7 @@ typedef QuickSearchChoice = Future<void> Function(QuickSearchHost host);
 enum SearchOrigin {
   sessions('Sessions'),
   tasks('Tasks'),
+  boards('Boards'),
   usage('Usage'),
   server('Server'),
   settings('Settings'),
@@ -212,6 +213,15 @@ List<QuickCommand> quickCommands(AppController app, {String? project}) {
         'Open the task board',
         'Tasks by column: needs you, working, review, queued, backlog, '
             'done; narrow it to one project.',
+      ),
+    if (app.hasBoards)
+      screen(
+        'open-boards',
+        'boards',
+        'Boards tab',
+        'Open the boards',
+        'Freeform boards: notes, ink, frames, connectors and links, the '
+            'same drawing the agents work on.',
       ),
     if (app.hasUsage)
       screen(

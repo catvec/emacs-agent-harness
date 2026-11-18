@@ -474,6 +474,11 @@ class AppController extends ChangeNotifier implements WorkspaceBuddyHost {
 
   bool get hasTasks => capabilities?.tasks == true && tasks != null;
 
+  /// The freeform boards this harness keeps: its list and one board are
+  /// there, so the shell offers the surface.  A board on a harness without
+  /// them is not invented.
+  bool get hasBoards => capabilities?.boards == true;
+
   bool get hasWorkspace => capabilities?.workspace == true && workspace != null;
   bool get hasUsage => capabilities?.usage == true && usage != null;
 
