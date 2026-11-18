@@ -41,9 +41,8 @@ Three things followed from that, and each is a defect of its own:
 
 3. **The reason was not recorded.**  The same branch set `:outcome` and
    nothing else: the error text lived in the session's transcript hint
-   and nowhere the board or `task/retry` could show.  Four tasks stranded
-   the night before could not be diagnosed afterwards for exactly this
-   reason.
+   and nowhere the board or `task/retry` could show.  A task stranded
+   that way cannot be diagnosed afterwards for exactly this reason.
 
 ## What this decides
 
