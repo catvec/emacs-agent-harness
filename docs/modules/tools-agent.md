@@ -34,7 +34,12 @@ its own the child works at its parent's (`harness-priority-session`).
 A child in a worktree of its own is a worktree its parent may read
 without asking, from the moment it exists until the child's branch
 merges (`harness-tools-agent--grant-worktree`; the access module keeps
-the grant, read-only: see there).
+the grant, read-only: see there).  That worktree starts from the
+commit the parent session's own directory has out, so the child
+builds on its parent's work and not on whatever the main checkout
+happens to have checked out (`harness-tools-agent--worktree-base`);
+it lives in the project's `.worktrees`, beside the parent's when the
+parent works in one (`harness-tools-agent--worktree-root`).
 
 The module also adds a Planning section to the system prompt that
 explains sub-agents, worktrees and the merge queue, so plans can use
@@ -48,7 +53,7 @@ Nothing here waits: every long operation returns a promise.
 
 ### Tools
 
-- `spawn_agent` — Run a sub-agent on a prompt and return at once, naming the child session: it runs in the background and its answer arrives later in a message of its own when it is done, so the call never blocks this conversation -- never wait or poll for a sub-agent. Start several at once, in several calls in the same step or one after another, and carry on; each reports back on its own. The child starts fresh, with only the prompt: a sub-agent never forks this session. worktree=true gives the child its own git worktree and branch so it can change files in parallel; merge its branch back afterwards through the merge queue. priority is the child session's own priority (low, medium or high), which orders the queues its work waits in: without it the child works at what it inherits from this session. thinking chooses the child's thinking level, one the child's model offers (after any model override); without it the child thinks at this session's level, and a level the model does not offer fails the call.
+- `spawn_agent` — Run a sub-agent on a prompt and return at once, naming the child session: it runs in the background and its answer arrives later in a message of its own when it is done, so the call never blocks this conversation -- never wait or poll for a sub-agent. Start several at once, in several calls in the same step or one after another, and carry on; each reports back on its own. The child starts fresh, with only the prompt: a sub-agent never forks this session. worktree=true gives the child its own git worktree and branch, started at this session's HEAD so it has your committed work, and it changes files there in parallel; merge its branch back afterwards through the merge queue. priority is the child session's own priority (low, medium or high), which orders the queues its work waits in: without it the child works at what it inherits from this session. thinking chooses the child's thinking level, one the child's model offers (after any model override); without it the child thinks at this session's level, and a level the model does not offer fails the call.
 
 ### Events
 
@@ -79,6 +84,7 @@ Nothing here waits: every long operation returns a promise.
 - `session/set-ext` ([session](session.md))
 - `session/update-node` ([session](session.md))
 - `worktree/create` ([worktree](worktree.md)), when it is loaded
+- `worktree/head` ([worktree](worktree.md)), when it is loaded
 
 ### Events it handles
 

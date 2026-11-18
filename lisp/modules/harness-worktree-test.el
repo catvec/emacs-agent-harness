@@ -119,6 +119,30 @@
         (should (equal "feature/x" (plist-get wt :branch)))
         (should (file-exists-p (expand-file-name "new.txt" path)))))))
 
+(ert-deftest harness-worktree-head-is-the-commit-of-the-directory ()
+  "`worktree/head' is the commit HEAD names where the path is.
+A linked worktree's own branch is what comes back, not the branch the
+main checkout has out, and a directory below either answers for it."
+  (harness-worktree-test-with-repo
+    (let* ((path (expand-file-name "wt-head" base))
+           (main-head (string-trim (harness-worktree-test--git root "rev-parse" "HEAD"))))
+      (harness-worktree-test--git root "worktree" "add" "-q" "-b" "head-branch" path)
+      (with-temp-file (expand-file-name "work.txt" path) (insert "work\n"))
+      (harness-worktree-test--git path "add" "work.txt")
+      (harness-worktree-test--git path "commit" "-q" "-m" "work")
+      (let ((wt-head (string-trim (harness-worktree-test--git path "rev-parse" "HEAD"))))
+        (should-not (equal main-head wt-head))
+        ;; The worktree's own commit, not the main checkout's.
+        (should (equal wt-head (harness-test-await (harness-call 'worktree/head path))))
+        (should (equal main-head (harness-test-await (harness-call 'worktree/head root))))
+        ;; A directory below either answers for the checkout it is in.
+        (make-directory (expand-file-name "sub" path) t)
+        (should (equal wt-head (harness-test-await (harness-call 'worktree/head
+                                                                 (expand-file-name "sub" path))))))
+      ;; No repository, no commit to name.
+      (should-error (harness-test-await (harness-call 'worktree/head (harness-test-temp-dir)))
+                    :type 'harness-error))))
+
 (ert-deftest harness-worktree-create-defaults-and-base ()
   (harness-worktree-test-with-repo
     ;; Default branch and path come from the prefix and the directory function.

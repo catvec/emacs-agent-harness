@@ -1075,7 +1075,151 @@ grants nothing, and a grant that fails fails nothing."
               (should (harness-tools-agent-test-spawn sid '(:prompt "hi" :name "alone" :worktree t)))))
         (ignore-errors (delete-directory base t))))))
 
-;;;; A sub-agent that registers a wait
+;;;; A child in a worktree starts from its parent's work
+
+(defun harness-tools-agent-test--worktree-of (root name)
+  "Make ROOT/NAME a linked worktree of ROOT, commit work in it, return it.
+The worktree is on a branch of its own, with a commit ROOT's HEAD does
+not have: a child made from it has the work, one made from ROOT's HEAD
+does not."
+  (let* ((path (file-name-as-directory (expand-file-name (concat "../" name) root)))
+         (branch (concat "task/" name)))
+    (harness-tools-agent-test--git root "worktree" "add" "-q" "-b" branch path "HEAD")
+    (with-temp-file (expand-file-name (concat name ".txt") path) (insert "parent work\n"))
+    (harness-tools-agent-test--git path "add" (concat name ".txt"))
+    (harness-tools-agent-test--git path "commit" "-q" "-m" (concat name " work"))
+    path))
+
+(ert-deftest harness-tools-agent-spawn-worktree-starts-from-its-parents-head ()
+  "A child's worktree starts at its parent session's HEAD, not the main checkout's.
+The parent is a task's session, made in the main checkout and moved
+into the task's worktree as the tasks module moves it: its project
+stays the main checkout while its directory is the worktree, whose
+branch has a commit the main checkout does not have.  The child's
+branch is made from that commit, so the child reads its parent's work,
+and its worktree lives in the project's .worktrees beside the task's,
+not nested in the parent's."
+  (harness-tools-agent-test-with
+    (harness-test-load-module 'worktree)
+    (let* ((base (harness-test-temp-dir))
+           (root (file-name-as-directory (expand-file-name "repo" base))))
+      (unwind-protect
+          (progn
+            (make-directory root t)
+            (harness-tools-agent-test--git root "init" "-q" "-b" "main")
+            (harness-tools-agent-test--git root "config" "user.name" "Harness Test")
+            (harness-tools-agent-test--git root "config" "user.email" "test@example.invalid")
+            (harness-tools-agent-test--git root "config" "commit.gpgsign" "false")
+            (with-temp-file (expand-file-name "README" root) (insert "hello\n"))
+            (harness-tools-agent-test--git root "add" "README")
+            (harness-tools-agent-test--git root "commit" "-q" "-m" "initial")
+            (let* ((task-wt (harness-tools-agent-test--worktree-of root "task"))
+                   (main-head (string-trim (harness-tools-agent-test--git root "rev-parse" "HEAD")))
+                   (task-head (string-trim (harness-tools-agent-test--git task-wt "rev-parse" "HEAD")))
+                   ;; A task's session: made in the project, then moved
+                   ;; into the task's worktree, its project unchanged.
+                   (sid (plist-get (harness-call 'session/create :cwd root :model "demo:scripted"
+                                                            :name "a task")
+                                   :id)))
+              (harness-call 'session/update sid :silent t :cwd task-wt :worktree task-wt)
+              (should (equal root (plist-get (harness-call 'session/get sid) :project)))
+              (should (equal task-wt (plist-get (harness-call 'session/get sid) :cwd)))
+              (let* ((cid (harness-tools-agent-test-spawn sid '(:prompt "hi" :name "kid" :worktree t)))
+                     (worktree (plist-get (harness-call 'session/get cid) :worktree)))
+                (should-not (equal main-head task-head))
+                ;; The child's worktree is the project's, beside the task's.
+                (should (equal (file-name-as-directory (expand-file-name ".worktrees" root))
+                               (file-name-directory (directory-file-name worktree))))
+                (should-not (file-in-directory-p worktree task-wt))
+                ;; Its branch starts at the parent's HEAD: the parent's
+                ;; commit is in its history, and it is not the main
+                ;; checkout's, which is what it used to start from.
+                (should (equal task-head
+                               (string-trim (harness-tools-agent-test--git worktree "rev-parse" "HEAD"))))
+                (should (equal task-head
+                               (string-trim (harness-tools-agent-test--git worktree "merge-base" "HEAD" task-head))))
+                (should (file-exists-p (expand-file-name "task.txt" worktree))))
+              ;; And a parent in the main checkout gets a child at its own HEAD.
+              (let* ((msid (plist-get (harness-call 'session/create :cwd root :model "demo:scripted") :id))
+                     (mcid (harness-tools-agent-test-spawn msid '(:prompt "hi" :name "main-kid" :worktree t)))
+                     (mwt (plist-get (harness-call 'session/get mcid) :worktree)))
+                (should (equal main-head
+                               (string-trim (harness-tools-agent-test--git mwt "rev-parse" "HEAD")))))))
+        (ignore-errors (delete-directory base t))))))
+
+(ert-deftest harness-tools-agent-spawn-worktree-root-follows-the-session ()
+  "The child's worktree is made in the project of the session's directory.
+A session working beside the repository, its project the repository,
+gets its worktree in the repository's .worktrees: the work is the
+project's.  A directory that is no checkout and names no project gets
+its worktree itself, as before."
+  (harness-tools-agent-test-with
+    (harness-test-load-module 'worktree)
+    (let* ((base (harness-test-temp-dir))
+           (root (file-name-as-directory (expand-file-name "repo" base)))
+           (work (file-name-as-directory (expand-file-name "work" base))))
+      (unwind-protect
+          (progn
+            (make-directory root t)
+            (make-directory work t)
+            (harness-tools-agent-test--git root "init" "-q" "-b" "main")
+            (harness-tools-agent-test--git root "config" "user.name" "Harness Test")
+            (harness-tools-agent-test--git root "config" "user.email" "test@example.invalid")
+            (harness-tools-agent-test--git root "config" "commit.gpgsign" "false")
+            (with-temp-file (expand-file-name "README" root) (insert "hello\n"))
+            (harness-tools-agent-test--git root "add" "README")
+            (harness-tools-agent-test--git root "commit" "-q" "-m" "initial")
+            ;; A directory that is no checkout: the session's project.
+            (should (equal root (harness-tools-agent--worktree-root
+                                 (list :cwd work :project root))))
+            ;; Its own checkout is the one it belongs to, whatever :project says.
+            (should (equal root (harness-tools-agent--worktree-root
+                                 (list :cwd root :project work))))
+            ;; Neither: where the child would have worked.
+            (should (equal work (harness-tools-agent--worktree-root
+                                 (list :cwd work :project work))))
+            (let* ((sid (plist-get (harness-call 'session/create :cwd work :project root
+                                                             :model "demo:scripted")
+                                   :id))
+                   (cid (harness-tools-agent-test-spawn sid '(:prompt "hi" :name "kid" :worktree t)))
+                   (worktree (plist-get (harness-call 'session/get cid) :worktree)))
+              (should (equal (file-name-as-directory (expand-file-name ".worktrees" root))
+                             (file-name-directory (directory-file-name worktree))))))
+        (ignore-errors (delete-directory base t))))))
+
+(ert-deftest harness-tools-agent-spawn-worktree-base-tells-what-it-started-from ()
+  "The spawn result says the commit the child's worktree started from.
+The worktree-base of the call's meta is the parent's HEAD, and the
+result's text names it, so the parent can tell what the child has."
+  (harness-tools-agent-test-with
+    (harness-test-load-module 'worktree)
+    (let* ((base (harness-test-temp-dir))
+           (root (file-name-as-directory (expand-file-name "repo" base))))
+      (unwind-protect
+          (progn
+            (make-directory root t)
+            (harness-tools-agent-test--git root "init" "-q" "-b" "main")
+            (harness-tools-agent-test--git root "config" "user.name" "Harness Test")
+            (harness-tools-agent-test--git root "config" "user.email" "test@example.invalid")
+            (harness-tools-agent-test--git root "config" "commit.gpgsign" "false")
+            (with-temp-file (expand-file-name "README" root) (insert "hello\n"))
+            (harness-tools-agent-test--git root "add" "README")
+            (harness-tools-agent-test--git root "commit" "-q" "-m" "initial")
+            (let* ((head (string-trim (harness-tools-agent-test--git root "rev-parse" "HEAD")))
+                   (sid (plist-get (harness-call 'session/create :cwd root :model "demo:scripted") :id))
+                   (result (harness-test-await
+                            (harness-tools-agent-test-run
+                             sid "spawn_agent" '(:prompt "hi" :name "kid" :worktree t))))
+                   (meta (plist-get result :meta)))
+              (should-not (plist-get result :is-error))
+              (should (equal head (plist-get meta :worktree-base)))
+              (should (string-match-p (regexp-quote (format "from %s" (substring head 0 8)))
+                                      (plist-get result :content)))
+              ;; A child without a worktree names no base.
+              (let ((plain (harness-test-await
+                            (harness-tools-agent-test-run sid "spawn_agent" '(:prompt "hi" :name "plain")))))
+                (should-not (plist-member (plist-get plain :meta) :worktree-base)))))
+        (ignore-errors (delete-directory base t))))))
 
 (defvar harness-tools-agent-test--target nil
   "The session a sub-agent of the waiting-spawn test waits for.")

@@ -7372,7 +7372,7 @@ loads on its own.
   `worktree/prune-merged ROOT &optional DRY-RUN`,
   `worktree/lock ROOT PATH &optional REASON`,
   `worktree/unlock ROOT PATH &optional ANY`, `worktree/lock-existing ROOT`,
-  `worktree/root-of PATH`, `worktree/branch PATH`,
+  `worktree/root-of PATH`, `worktree/branch PATH`, `worktree/head PATH`,
   `worktree/status PATH` → `(:dirty :ahead :behind :branch)`.  All return promises.
 - Sessions created with `:worktree PATH` get `:cwd` = PATH.
 - `worktree/list` gives `(:path :branch :head :bare :detached :locked

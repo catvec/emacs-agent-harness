@@ -477,6 +477,16 @@ PATH may be inside any worktree of the repository (or a file in it)."
   (harness-then (harness-worktree--git-trimmed path "branch" "--show-current")
                 (lambda (name) (unless (string-empty-p name) name))))
 
+(harness-defmethod worktree/head (path)
+  "Return a promise of the commit HEAD names at PATH.
+PATH may be a worktree's directory, the main checkout, or a directory
+below either: git resolves HEAD where PATH is, so a linked worktree's
+own branch is what comes back, not the one the main checkout has out.
+This is what a branch made from a session's work starts from.  The
+promise rejects when PATH is no git repository, or its HEAD names no
+commit yet (a repository whose first commit is still to come)."
+  (harness-worktree--git-trimmed path "rev-parse" "--verify" "HEAD^{commit}"))
+
 (harness-defmethod worktree/status (path)
   "Return a promise of (:dirty BOOL :ahead N :behind N :branch NAME) for PATH.
 Ahead and behind count commits relative to the upstream, 0 without one."
