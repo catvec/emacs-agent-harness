@@ -2768,7 +2768,9 @@ then starts it as it starts any queued task."
             :reason (or (plist-get task :stall) "a transient failure ended its turn")
             :until at
             :guess t
-            :items (list (list :key (format "try %s" (or (plist-get task :retry-attempts) 1))))))))
+            :items (list (list :key (format "try %d of %d"
+                                            (or (plist-get task :retry-attempts) 1)
+                                            (or (harness-tasks--stall-bound task) 0))))))))
 
 (defun harness-tasks--stall-delay (attempts)
   "Return the seconds to wait before try ATTEMPTS of a stalled task.
