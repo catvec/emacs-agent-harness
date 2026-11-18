@@ -3831,4 +3831,170 @@ long that takes, within the transport's own bounds."
           (should (eq 'end-turn (plist-get (harness-openrouter-test--newest-done events)
                                            :stop-reason))))))))
 
+;;;; A one-off call rides its session's pin when the catalogue cannot be read
+;;
+;; The reported failure: a 600 s request timeout stalled the catalogue, and
+;; the permission judge -- a one-off call with a budget of its own -- was
+;; refused for it, which non-interactive mode read as "no verdict" and
+;; denied every tool call of the session.  A judge decides a call the
+;; session it is made for is about to send, on the endpoint that session is
+;; already pinned to, so its own answer may go to the same place.  These
+;; tests are that fallback: it is taken only when there is no reading, and
+;; every check the pin's own record can answer is still made.
+
+(defun harness-openrouter-test--judge-request (parent judge)
+  "Return a one-off request for JUDGE, made for PARENT, as a judge's is.
+The session is the judge's own, and `:pin-from' names the session it
+decides a call for -- which is what the fallback rides."
+  (plist-put (plist-put (harness-openrouter-test--request judge)
+                        :ephemeral t)
+             :pin-from (plist-get parent :id)))
+
+(defmacro harness-openrouter-test-with-pinned-parent (parent &rest body)
+  "Run BODY with PARENT's pin answering `session/get' for the fallback.
+The judge's own session is not a record, as `:ephemeral' says: a request
+for it is answered by the real bus, and PARENT's by this stub.  Hints are
+collected as `harness-openrouter-test-with-session' collects them."
+  (declare (indent 1))
+  `(let ((harness-openrouter-test--stored nil)
+         (harness-openrouter-test--hints nil)
+         (real (symbol-function 'harness-call)))
+     (cl-letf (((symbol-function 'harness-call)
+                (lambda (method &rest args)
+                  (pcase method
+                    ('session/get
+                     (if (equal (nth 0 args) (plist-get ,parent :id))
+                         ,parent
+                       (apply real method args)))
+                    ('session/exists-p
+                     (if (equal (nth 0 args) (plist-get ,parent :id))
+                         t
+                       (apply real method args)))
+                    ('session/hint
+                     (push (nth 1 args) harness-openrouter-test--hints)
+                     args)
+                    (_ (apply real method args))))))
+       ,@body)))
+
+(ert-deftest harness-provider-openrouter-a-judge-rides-its-sessions-pin-when-the-catalogue-stalls ()
+  "A judge whose catalogue cannot be read is answered on its session's pin.
+The reported denial was \"the auto-mode judge gave no verdict\", because a
+bookkeeping read stalled; the call it was deciding was on a pinned session
+whose endpoint was already known.  So the one-off call goes to that same
+endpoint, inside the ephemeral wait, and the verdict can be given.  It is
+marked for what it is -- no reading was made -- and nothing is stored: a
+one-off call pins nothing."
+  (let* ((policy (harness-openrouter-test-policy))
+         (parent (harness-openrouter-test--session
+                  "s-parent" (list :openrouter-route (harness-openrouter-test--route))))
+         (judge (harness-openrouter-test--session "s-parent-perms"))
+         (events nil)
+         (started (float-time)))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-pinned-parent parent
+          (setq harness-openrouter-test--hold-catalogue t)
+          (harness-call 'provider/complete
+                        (plist-put (harness-openrouter-test--judge-request parent judge)
+                                   :on-event (lambda (e) (push e events))))
+          ;; Nothing is read to completion: the catalogue stalls, as it did.
+          (should (= 1 (length harness-openrouter-test--held-catalogues)))
+          (harness-test-wait
+           (lambda () (harness-openrouter-test--done-events events))
+           (+ harness-openrouter-catalogue-ephemeral-wait 5)
+           "the judge's answer")
+          (should (< (- (float-time) started)
+                     (+ harness-openrouter-catalogue-ephemeral-wait 5)))
+          (let ((done (car (harness-openrouter-test--done-events events))))
+            (should (eq 'end-turn (plist-get done :stop-reason)))
+            (should-not (plist-get done :error)))
+          ;; Sent to the endpoint the session is pinned to, and nothing was
+          ;; pinned for the one-off call itself.
+          (should (= 1 (length (harness-openrouter-test--sent-completions))))
+          (should-not harness-openrouter-test--stored)
+          ;; The session says the price was not re-read for that call.
+          (should (cl-find-if (lambda (h) (string-match-p "catalogue unread" h))
+                              harness-openrouter-test--hints)))))))
+
+(ert-deftest harness-provider-openrouter-a-judge-with-no-pin-still-refuses ()
+  "A one-off call made for a session with no pin is refused, as it was.
+There is nothing to send it on: the catalogue is the only way to choose an
+endpoint, and choosing one for a call that is not a step of a turn is
+exactly what the policy reserves for a session's own selection."
+  (let* ((policy (harness-openrouter-test-policy))
+         (parent (harness-openrouter-test--session "s-parent"))
+         (judge (harness-openrouter-test--session "s-parent-perms"))
+         (events nil))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-pinned-parent parent
+          (setq harness-openrouter-test--hold-catalogue t)
+          (harness-call 'provider/complete
+                        (plist-put (harness-openrouter-test--judge-request parent judge)
+                                   :on-event (lambda (e) (push e events))))
+          (harness-test-wait
+           (lambda () (harness-openrouter-test--done-events events))
+           (+ harness-openrouter-catalogue-ephemeral-wait 5)
+           "the refusal")
+          (let ((done (car (last events))))
+            (should (eq 'error (plist-get done :stop-reason)))
+            (should (eq 'catalogue-unavailable (plist-get done :error-kind))))
+          (should-not (harness-openrouter-test--sent-completions)))))))
+
+(ert-deftest harness-provider-openrouter-a-judge-does-not-ride-a-pin-the-policy-refuses ()
+  "The fallback is not a way around the policy.
+A pin whose provider the policy no longer allows, or whose recorded price
+is over the limit, refuses the one-off call exactly as a dispatch of that
+pin refuses a step: the age of a reading is the one check that cannot be
+made without one, and it is the only one that is not made."
+  (let* ((policy (harness-openrouter-test-policy))
+         (parent (harness-openrouter-test--session
+                  "s-parent"
+                  (list :openrouter-route
+                        (harness-openrouter-test--route '(:provider "Someone Else")))))
+         (judge (harness-openrouter-test--session "s-parent-perms"))
+         (events nil))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-fake
+          (list (harness-openrouter-test--completion-response))
+        (harness-openrouter-test-with-pinned-parent parent
+          (setq harness-openrouter-test--hold-catalogue t)
+          (harness-call 'provider/complete
+                        (plist-put (harness-openrouter-test--judge-request parent judge)
+                                   :on-event (lambda (e) (push e events))))
+          (harness-test-wait
+           (lambda () (harness-openrouter-test--done-events events))
+           (+ harness-openrouter-catalogue-ephemeral-wait 5)
+           "the refusal")
+          (let ((done (car (last events))))
+            (should (eq 'error (plist-get done :stop-reason)))
+            (should (eq 'pin-not-vetted (plist-get done :error-kind))))
+          (should-not (harness-openrouter-test--sent-completions)))))
+    ;; A pin whose recorded price is over the limit now: a maximum lowered
+    ;; under a pin stops the one-off call too, as it stops a step.
+    (let* ((policy (harness-openrouter-test-policy :max-price '(:prompt 0.01 :completion 0.01
+                                                               :cache-read 0.0001)))
+           (parent (harness-openrouter-test--session
+                    "s-parent" (list :openrouter-route (harness-openrouter-test--route))))
+           (judge (harness-openrouter-test--session "s-parent-perms"))
+           (events nil))
+      (harness-openrouter-test-with-policy policy
+        (harness-openrouter-test-with-fake
+            (list (harness-openrouter-test--completion-response))
+          (harness-openrouter-test-with-pinned-parent parent
+            (setq harness-openrouter-test--hold-catalogue t)
+            (harness-call 'provider/complete
+                          (plist-put (harness-openrouter-test--judge-request parent judge)
+                                     :on-event (lambda (e) (push e events))))
+            (harness-test-wait
+             (lambda () (harness-openrouter-test--done-events events))
+             (+ harness-openrouter-catalogue-ephemeral-wait 5)
+             "the refusal")
+            (let ((done (car (last events))))
+              (should (eq 'error (plist-get done :stop-reason)))
+              (should (eq 'over-max-price (plist-get done :error-kind))))
+            (should-not (harness-openrouter-test--sent-completions))))))))
+
 (provide 'harness-provider-openrouter-test)

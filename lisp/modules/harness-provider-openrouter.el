@@ -362,6 +362,8 @@ it.  Nothing a handler does meanwhile can change what it carries.")
                        "(SESSION-ID READING DETAIL) when a dispatch uses a reading whose refresh failed.")
 (harness-declare-event 'openrouter/catalogue-revalidating
                        "(SESSION-ID READING DETAIL) when a dispatch uses a reading a fresh one is being read beside.")
+(harness-declare-event 'openrouter/catalogue-unread
+                       "(SESSION-ID PARENT ROUTE) when a one-off call is sent on PARENT's pin because no catalogue could be read.")
 
 ;;;; Prices, exactly
 ;;
@@ -2218,7 +2220,7 @@ still fresh stops the pin instead of sending at the old price."
                 over))))
     (nreverse over)))
 
-(defun harness-openrouter--pin-refusal (policy route &optional reading)
+(defun harness-openrouter--pin-refusal (policy route &optional reading unread)
   "Return (REASON . DETAIL) when POLICY may not send ROUTE now, or nil.
 Everything a dispatch depends on is checked here, every time: that the
 policy is still complete, that the pin's provider is still allowed and
@@ -2229,6 +2231,14 @@ catalogue reading, `:endpoints' and `:at' -- is given it must be fresh,
 must list the pin exactly once as its provider's single standard
 endpoint, at a price under the maximum and with no component the limits
 do not cover.
+
+UNREAD says the catalogue could not be read at all, which is what a
+one-off call's pin fallback has
+\(`harness-openrouter--complete-unread'): every check above is made from
+the pin's own record, and the one thing that cannot be is how old that
+record's reading is.  So the age of `:catalogue-at' is not read as a
+refusal, and is not read as evidence either: the dispatch that sends on
+it says the catalogue was not read.  Nothing else is skipped.
 
 A READING that is nil, empty or unreadable is a refusal, never `no
 refresh': `harness-openrouter--choose-now' rejects a failed fetch, so
@@ -2248,8 +2258,13 @@ at all, which is not evidence that the pin still exists."
       (cons 'over-max-price
             (format "the pin's price is over the maximum price now: %s"
                     (string-join (harness-openrouter--recorded-over limits route) ", "))))
+     ((and unread (not (numberp (plist-get route :catalogue-at))))
+      ;; A pin whose price came from no reading is no price this module
+      ;; can vouch for, and a catalogue it cannot read does not make it one.
+      (cons 'catalogue-stale "the pin records no catalogue reading at all"))
      ((null reading)
-      (unless (harness-openrouter--fresh-p policy (plist-get route :catalogue-at))
+      (unless (or unread
+                  (harness-openrouter--fresh-p policy (plist-get route :catalogue-at)))
         (cons 'catalogue-stale
               (format "the pin's catalogue reading is %d s old; the policy allows %s s"
                       (round (- (float-time) (or (plist-get route :catalogue-at) 0)))
@@ -2369,7 +2384,8 @@ layer (`harness-provider-max-output-tokens'), not to a routing policy."
                       (harness-openrouter--policy-changed-refusal
                        (plist-get snapshot :policy) in-force)
                       (harness-openrouter--pin-refusal
-                       in-force route (plist-get snapshot :reading))))
+                       in-force route (plist-get snapshot :reading)
+                       (plist-get snapshot :catalogue-unread))))
          ;; The shared layer reads the bounds as they are now, so a retry
          ;; that waited through an edit is measured by them, and only a
          ;; request every other check allowed takes a send from the count.
@@ -2538,7 +2554,16 @@ request that worked."
                       request on-event)))))))
          (lambda (err)
            (unless (harness-openrouter--cancelled-p state)
-             (harness-openrouter--catalogue-failure session-id on-event err)))))))
+             ;; A one-off call whose session has a pin is answered from it
+             ;; rather than refused: the judge's verdict must not become "no"
+             ;; because a bookkeeping read was slow.  Everything the pin's
+             ;; record can answer is checked; the one thing it cannot is how
+             ;; old its reading is, and the dispatch says the catalogue was
+             ;; not read (`harness-openrouter--complete-unread').
+             (unless (and (harness-openrouter--pin-from request)
+                          (harness-openrouter--complete-unread
+                           policy session-id request on-event))
+               (harness-openrouter--catalogue-failure session-id on-event err))))))))
     (harness-openrouter--cancel-handle state)))
 
 (defun harness-openrouter--catalogue-failure (session-id on-event err)
@@ -2554,6 +2579,81 @@ rejection's shape (see `harness-error-message')."
     (funcall on-event (list :type 'done :stop-reason 'error
                             :error-kind 'catalogue-unavailable
                             :error (format "OpenRouter routing paused: %s" detail)))))
+
+;;;; A one-off call rides its session's pin when the catalogue cannot be read
+;;
+;; The permission judge is a one-off call (`:ephemeral'), and a stalled
+;; catalogue read must not turn its verdict into "no".  A judge is not a
+;; step of a turn: it decides one tool call and has a budget of its own,
+;; so it cannot wait the read out (`harness-openrouter--reading-for'), and
+;; a refusal is a call with no verdict, which non-interactive mode denies.
+;; The reported failure was exactly that: a 600 s request timeout stalled
+;; the catalogue, and every tool call of the session was then denied with
+;; "the auto-mode judge gave no verdict".
+;;
+;; A judge asks about a call the session it judges is about to make, on
+;; the endpoint that session is pinned to, so its own answer may go to the
+;; same place.  A request that names `:pin-from' -- the session it is made
+;; for -- is therefore answered from that session's pin when the catalogue
+;; cannot be read at all.  Nothing is widened by it: the pin is the
+;; endpoint the session itself is sending on, the policy still has to
+;; allow its provider and still has to cover the price it recorded, and
+;; the one check that cannot be made without a reading -- how old that
+;; reading is -- is not made, and the dispatch says so.  A pin the policy
+;; no longer allows, a price over the limit, or no pin at all is refused
+;; as it was: the judge then has no verdict, which is what it had before.
+
+(defun harness-openrouter--pin-from (request)
+  "Return the session whose pin may answer one-off REQUEST, or nil.
+That is the session the call is made for, named by `:pin-from'.  Only a
+one-off call has one: a step of a turn sends on its own session's pin
+already, and a request that names none is answered by the catalogue."
+  (and (plist-get request :ephemeral)
+       (let ((id (plist-get request :pin-from)))
+         (and (stringp id) (not (string-empty-p id)) id))))
+
+(defun harness-openrouter--complete-unread (policy session-id request on-event)
+  "Send one-off REQUEST on the pin of the session it names, without a reading.
+POLICY is the one in force; SESSION-ID is the call's own session, which no
+record holds.  The pin's provider must still be allowed by POLICY and the
+price it recorded must still be inside POLICY's limits
+\(`harness-openrouter--pin-refusal' with UNREAD): every check the pin's own
+record can answer is made, and the age of the reading it came from is the
+one thing that is not, because there is no reading to measure.  Return
+non-nil when the request was sent or refused, nil when there is no pin to
+send it on -- the caller then reports the catalogue failure, which is the
+truth.
+
+Nothing is stored: the call is a one-off one, and its route is announced
+and not pinned (`harness-openrouter--store-route').  The model's canonical
+slug is taken from what is already known and never fetched: a request to
+read it would stall on the same network the catalogue stalled on, and a pin
+with no slug is audited strictly, as it is for any dispatch
+\(`harness-openrouter--same-model-p')."
+  (let* ((parent (harness-openrouter--pin-from request))
+         (session (and parent (ignore-errors (harness-call 'session/get parent))))
+         (route (and session (harness-openrouter--route-of session))))
+    (when route
+      (let* ((route (harness-openrouter--with-canonical
+                     route (harness-openrouter--canonical-slug (plist-get policy :model))))
+             (refusal (harness-openrouter--pin-refusal policy route nil t)))
+        (if refusal
+            (progn (harness-openrouter--refuse session-id on-event refusal) t)
+          (harness-log 'warn "openrouter: %s: no catalogue reading; sending the one-off call on %s's pin (%s)"
+                       session-id parent (plist-get route :slug))
+          (harness-emit 'openrouter/catalogue-unread session-id parent route)
+          ;; The session says the price was not re-read for this call, as a
+          ;; dispatch on an older reading does (`harness-openrouter--degraded').
+          (harness-openrouter--hint
+           parent
+           (format "OpenRouter catalogue unread: the one-off call went to the pinned endpoint %s"
+                   (plist-get route :slug)))
+          (let ((state (list nil nil)))
+            (harness-openrouter--start-pinned
+             state (list :policy policy :route route :catalogue-unread t)
+             request on-event)
+            (harness-openrouter--cancel-handle state)
+            t))))))
 
 (defun harness-openrouter--complete-new (policy session-id request on-event)
   "Complete REQUEST in a new SESSION-ID: choose an endpoint, then send it.
@@ -2617,7 +2717,16 @@ Nothing is sent until the pin exists."
                                             (harness-error-message err))))))))
      (lambda (err)
        (unless (harness-openrouter--cancelled-p state)
-         (harness-openrouter--catalogue-failure session-id on-event err))))
+         ;; A one-off call made for a session that has a pin is answered
+         ;; from it rather than refused: the judge's verdict must not become
+         ;; "no" because a bookkeeping read was slow.  Everything the pin's
+         ;; record can answer is checked; the one thing it cannot is how old
+         ;; its reading is, and the dispatch says the catalogue was not read
+         ;; (`harness-openrouter--complete-unread').
+         (unless (and (harness-openrouter--pin-from request)
+                      (harness-openrouter--complete-unread
+                       policy session-id request on-event))
+           (harness-openrouter--catalogue-failure session-id on-event err)))))
     (harness-openrouter--cancel-handle state)))
 
 (defun harness-openrouter--refuse (session-id on-event refusal)

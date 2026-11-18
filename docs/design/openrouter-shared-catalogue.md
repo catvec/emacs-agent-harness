@@ -94,6 +94,32 @@ design, and it leaves a catalogue that was unreachable for an hour broken
 for the rest of the process.  Bounding the *rate* rather than the total
 is what makes a permanent retry safe.
 
+### A judge rides its session's pin when the catalogue cannot be read
+
+A one-off call waits at most `harness-openrouter-catalogue-ephemeral-wait`
+for a reading it does not have, and a refusal is a call with no verdict --
+which a non-interactive session denies.  That is how one stalled
+catalogue read denied every tool call of a session.
+
+The judge decides a call the session it is made for is about to send, on
+the endpoint that session is already pinned to, so it may be answered
+from that pin when the catalogue cannot be read at all.  A request names
+the session in `:pin-from`, and `harness-openrouter--complete-unread`
+sends it there when every check the pin's own record can answer passes:
+the policy still allows the provider, still covers the recorded price, and
+the pin is of this policy's model.  The age of the reading is the one
+check a missing reading cannot make, so it is not made -- and the dispatch
+says so, with `openrouter/catalogue-unread` and a hint on the session.
+Nothing is stored, and a pin the policy refuses still refuses: the judge
+then has no verdict, exactly as it had before.
+
+**Alternatives considered.**  Waiting longer for the reading was rejected:
+the judge's whole budget is 30 s and the read's own watchdog fires at 25 s,
+so waiting spends the budget on bookkeeping.  Answering the judge's call
+without the catalogue at all -- with no pin -- was rejected: choosing an
+endpoint is the policy's decision for a session, and a one-off call has no
+session of its own to pin.
+
 ### Explicit invalidation is a separate API
 
 `harness-openrouter-catalogue-invalidate` drops the reading, bumps a
@@ -123,8 +149,10 @@ and a per-call price guarantee cannot both hold.
   invalidation table and command; `harness-openrouter--reading-for`'s
   four-way decision; `--revalidate`; `--reading-due-p`; the retry
   scheduler's burst and heartbeat; `--degraded` for both `:stale` and
-  `:revalidating`; the `openrouter/catalogue-revalidating` event; and
-  `harness-openrouter-catalogue-status`'s `:state`, `:ttl` and
+  `:revalidating`; the `openrouter/catalogue-revalidating` event; the
+  one-off pin fallback (`--pin-from`, `--complete-unread`, and the
+  `openrouter/catalogue-unread` event, with `--pin-refusal`'s UNREAD);
+  and `harness-openrouter-catalogue-status`'s `:state`, `:ttl` and
   `:reading`.
 - `lisp/modules/harness-provider-openrouter-test.el`: the repaired tests
   and the new coverage -- one read for five sessions and three judges, a

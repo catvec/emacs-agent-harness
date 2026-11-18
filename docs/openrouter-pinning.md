@@ -417,13 +417,33 @@ read became a denied tool call.
 So a request that carries `:ephemeral' (which `harness-small-ask' keeps
 as the caller wrote it) waits at most
 `harness-openrouter-catalogue-ephemeral-wait' (5 s) for a reading it
-does not already have, and starts no background read of its own.  Past
-that it ends with `catalogue-unavailable' and "the endpoint catalogue was
+does not already have, and starts no background read of its own.
+
+**A one-off call made for a pinned session rides that pin.**  The judge
+decides a call the session it is made for is about to send, on the
+endpoint that session is already pinned to, so its own answer may go to
+the same place.  A request that names `:pin-from` -- the session it is
+made for, which `harness-perms--judge-request` sets -- is therefore
+answered from that session's pin when the catalogue cannot be read at
+all, rather than refused.  Every check the pin's own record can answer is
+still made: the policy still has to allow its provider, still has to
+cover the price the pin recorded, and the pin has to be of this policy's
+model.  The one check that cannot be made without a reading is how old
+that reading is; it is not made, and the dispatch says so -- an
+`openrouter/catalogue-unread` event and a hint on the session naming the
+endpoint the call went to.  Nothing is stored: a one-off call pins
+nothing.
+
+Without a pin -- a session that has not been pinned yet -- the call is
+refused as it was: `catalogue-unavailable` and "the endpoint catalogue was
 still being read", the read carries on for the next caller, and the
 permission chain treats the refusal as it treats any judge that could not
 answer: the call stays undecided, and is asked of the user -- or denied
-when nobody is there.  Nothing is allowed by the timeout.  A step of a
-turn is not `:ephemeral' and waits for its reading as it always did.
+when nobody is there.  Nothing is allowed by the timeout, and nothing is
+allowed by the fallback either: a pin the policy no longer allows, or one
+whose price is over a limit lowered under it, refuses the one-off call
+exactly as it refuses a step.  A step of a turn is not `:ephemeral` and
+waits for its reading as it always did.
 
 **The watchdog's wording is not an HTTP rejection.**  A request that
 prints `request timed out after 20s` was ended by the harness's own

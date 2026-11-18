@@ -468,6 +468,9 @@ here logs, emits or returns one.
 - `harness-tasks-require-verification` — When non-nil, finished work waits for the user to review it.
 - `harness-tasks-resume-interrupted` — When non-nil, tasks a stopped harness interrupted carry on by themselves.
 - `harness-tasks-slot-wait-days` — Days back the slot page's queue wait figures look.
+- `harness-tasks-stall-retries` — When non-nil, a task whose turn a transient stall ended is tried again.
+- `harness-tasks-stall-retry-delay` — Seconds before a task whose turn stalled is started again.
+- `harness-tasks-stall-retry-max-delay` — Longest wait before a task whose turn stalled is started again, in seconds.
 - `harness-tasks-store-in-repository` — When non-nil, a git project keeps its tasks inside its repository.
 - `harness-tasks-thinking` — Thinking level of task sessions, or nil for the configured default.
 - `harness-tasks-working-phase` — Non-nil when a task works before it hands its work in.

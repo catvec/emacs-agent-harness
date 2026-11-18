@@ -2768,6 +2768,13 @@ not given."
         (harness-agent--flush-steering turn))
       (when (harness-call 'session/exists-p sid)
         (harness-call 'session/usage-add sid (list :turns 1))
+        ;; How the turn ended, kept on the session for whatever follows it:
+        ;; a subscriber sees `agent/turn-ended' with the reason and nothing
+        ;; else, and the error a turn stopped on is what makes the next
+        ;; incident answerable from the session alone.
+        (harness-agent--try (format "recording how the turn of %s ended" sid)
+          (harness-call 'session/runtime sid :last-turn
+                        (list :reason reason :error error :kind kind :at (float-time))))
         ;; With the turn over, a session that stops waiting for the user
         ;; goes back to idle, not to the running it was blocked in.
         (harness-call 'session/runtime sid :status-before-block 'idle)

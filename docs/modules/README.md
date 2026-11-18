@@ -336,6 +336,9 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `naming/done` | [naming](naming.md) | [naming](naming.md) |  |  |
 | `naming/failed` | [naming](naming.md) | [naming](naming.md) |  |  |
 | `notification/sent` | [notifications](notifications.md) | [notifications](notifications.md) |  |  |
+| `openrouter/catalogue-degraded` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
+| `openrouter/catalogue-revalidating` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
+| `openrouter/catalogue-unread` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
 | `openrouter/response-mismatch` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
 | `openrouter/route-paused` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
 | `openrouter/route-selected` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |

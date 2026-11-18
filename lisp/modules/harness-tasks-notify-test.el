@@ -189,7 +189,10 @@ first.  Finished tasks are done at once unless BODY turns
           (should (= 1 (length (got))))
           (let ((n (car (got))))
             (should (equal "Task needs you: will fail too" (plist-get n :title)))
-            (should (equal (concat project ": stopped: error") (plist-get n :body)))
+            ;; The task records what ended its turn now, and the
+            ;; notification says it (`harness-tasks--turn-end-reason').
+            (should (equal (concat project ": stopped: error, the model is overloaded")
+                           (plist-get n :body)))
             (should (equal "task-needs-input" (plist-get n :kind)))
             (should (equal id (plist-get n :task)))))))))
 

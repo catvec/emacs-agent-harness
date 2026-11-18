@@ -177,7 +177,9 @@ the plan: the tasks to show, best first, and the actions it proposes."
           (should (string-match-p (format "^%s | done: completed | Add a question button to the chat$"
                                           (regexp-quote a))
                                   text))
-          (should (string-match-p (format "^%s | needs input: stopped (error) | fail now: fix the flaky parser test$"
+          ;; The task records what ended its turn now, and the search shows
+          ;; it: a stopped task says why (`--status').
+          (should (string-match-p (format "^%s | needs input: stopped (error) -- boom | fail now: fix the flaky parser test$"
                                           (regexp-quote c))
                                   text))
           (should (< (string-search c text) (string-search b text) (string-search a text)))

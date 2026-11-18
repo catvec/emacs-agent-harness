@@ -4702,6 +4702,10 @@ the wire gives them, symbols as strings."
                      (harness-ui-tasks--returned-why '(:returned t :return-reason "reclaimed"))))
       (should (equal "sent back from review"
                      (harness-ui-tasks--returned-why '(:returned t :return-reason "sent-back"))))
+      ;; A task a transient failure stopped says so; the hold on its card
+      ;; says when the next try is (`harness-ui-tasks--hold-text').
+      (should (equal "stalled"
+                     (harness-ui-tasks--returned-why '(:returned t :return-reason "stalled"))))
       (dolist (task '((:returned t :return-reason "returned") (:returned t)))
         (should (equal "paused" (harness-ui-tasks--returned-why task)))))
     (should (equal "Sent back" (harness-ui-tasks--sent-back-message '(:state "active"))))
@@ -6879,6 +6883,14 @@ and the short form leaves the names out."
                      (harness-ui-tasks--hold-text quota)))
       (should (equal (format "quota · resets %s" (harness-ui-tasks-test--hh-mm soon))
                      (harness-ui-tasks--hold-text quota t))))
+    ;; A stalled turn's next try is a retry, and its card says when.
+    (let ((stalled (list :kind "stalled" :until soon :guess t
+                         :reason "request timed out after 600s"
+                         :items (list (list :key "try 1 of 3")))))
+      (should (equal (format "stalled · try 1 of 3 · retry %s" (harness-ui-tasks-test--hh-mm soon))
+                     (harness-ui-tasks--hold-text stalled)))
+      (should (equal (format "stalled · retry %s" (harness-ui-tasks-test--hh-mm soon))
+                     (harness-ui-tasks--hold-text stalled t))))
     ;; The harness's guess is a retry, not a reset.
     (should (equal (format "quota · DeepSeek · retry %s" (harness-ui-tasks-test--hh-mm soon))
                    (harness-ui-tasks--hold-text
