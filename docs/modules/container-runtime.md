@@ -58,6 +58,7 @@ backend needs, so adding a backend changes no stack.
 ### Options
 
 - `harness-container-runtime` — The container runtime the stacks run on.
+- `harness-container-runtime-program-directories` — Directories a container CLI is looked for in, after `exec-path`.
 
 ## Uses
 

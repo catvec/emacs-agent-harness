@@ -336,7 +336,7 @@ in whichever buffer the command was typed in."
       (should (equal "out\nerr\n" (cdr reply))))))
 
 (ert-deftest harness-container-runtime-page-copy ()
-  "The page shows the automatic choice, each backend and the socket."
+  "The page shows the automatic choice, each backend, its program and the socket."
   (harness-container-runtime-test--runtimes
     (harness-define-container-runtime 'docker
       :label "Docker" :command '("docker") :compose '("docker" "compose")
@@ -350,6 +350,9 @@ in whichever buffer the command was typed in."
               ((symbol-function 'harness-container-runtime-need-reason)
                (lambda (&optional id)
                  (and (eq id 'podman) "Executable unavailable · podman")))
+              ((symbol-function 'harness-container-runtime-program)
+               (lambda (&optional id)
+                 (if (eq id 'podman) "/opt/homebrew/bin/podman" "/usr/bin/docker")))
               ((symbol-function 'harness-container-runtime-socket-usable-p)
                (lambda (&optional _id) t)))
       (with-temp-buffer
@@ -359,6 +362,7 @@ in whichever buffer the command was typed in."
                                "  ● Automatic  Docker  [Selected]\n"
                                "  ○ Docker  ready  [Select]\n"
                                "  ○ Podman  Executable unavailable · podman  [Select]\n"
+                               "  Program  /usr/bin/docker\n"
                                "  Socket  ● /var/run/docker.sock  [Request]\n")
                        (buffer-substring-no-properties (point-min) (point-max)))))
       (setq harness-container-runtime 'podman)
@@ -369,6 +373,7 @@ in whichever buffer the command was typed in."
                                "  ○ Automatic  first available  [Select]\n"
                                "  ○ Docker  ready  [Select]\n"
                                "  ● Podman  Executable unavailable · podman  [Selected]\n"
+                               "  Program  /opt/homebrew/bin/podman\n"
                                "\n")
                        (buffer-substring-no-properties (point-min) (point-max)))))
       (let ((harness-container-runtimes (make-hash-table :test 'eq)))
@@ -451,6 +456,153 @@ must not break the runtimes page."
   (harness-container-runtime-test--runtimes
     (cl-letf (((symbol-function 'harness-method-exists-p) (lambda (&rest _) nil)))
       (should-not (harness-container-runtime-sandbox-probe)))))
+
+;;;; An engine that is off `exec-path'
+
+(ert-deftest harness-container-runtime-program-off-exec-path ()
+  "A CLI only in a program directory is found, run by its path, and on PATH.
+That is the macOS case: Emacs started from the Dock has none of
+Homebrew's directories on `exec-path', so a Podman installed there is
+not found by name, and `podman compose' would not find its provider
+either."
+  (harness-container-runtime-test--runtimes
+    (let* ((directory (make-temp-file "harness-runtime-bin" t))
+           (program (expand-file-name "podman" directory))
+           (harness-container-runtime-program-directories (list directory))
+           (exec-path nil))
+      (unwind-protect
+          (progn
+            (with-temp-file program (insert "#!/bin/sh\n") )
+            (set-file-modes program #o755)
+            (harness-define-container-runtime 'podman
+              :label "Podman" :command '("podman") :compose '("podman" "compose")
+              :needs '((executable "podman")))
+            ;; Found, though it is on no `exec-path'.
+            (should (equal program (harness-container-runtime-program 'podman)))
+            (should (harness-container-runtime-installed-p 'podman))
+            ;; The need is met, so nothing says the executable is missing.
+            (should-not (harness-container-runtime-need-reason 'podman))
+            ;; Its commands get the directory on PATH, once, and run the
+            ;; program by its absolute path.
+            (let ((path (harness-container-runtime--path-env 'podman)))
+              (should (= 1 (length path)))
+              (should (string-prefix-p (concat "PATH=" directory path-separator)
+                                       (car path))))
+            (should (equal (cons program '("compose" "version"))
+                           (harness-container-runtime--resolved-argv
+                            '("podman" "compose" "version"))))
+            ;; A program that is not installed is left by the name asked for.
+            (should (equal '("harness-no-such-program" "x")
+                           (harness-container-runtime--resolved-argv
+                            '("harness-no-such-program" "x"))))
+            ;; Nothing is added twice: a directory already on PATH stays
+            ;; where it is, once.
+            (let ((process-environment
+                   (cons (concat "PATH=" directory path-separator
+                                 (getenv "PATH"))
+                         process-environment)))
+              (should-not (harness-container-runtime--path-env 'podman))))
+        (delete-directory directory t)))))
+
+(ert-deftest harness-container-runtime-auto-prefers-an-installed-engine ()
+  "`auto' names the engine that is installed when none answers.
+A machine whose Podman is installed but whose Docker is not is told
+about the Podman it has, not the Docker it never installed."
+  (harness-container-runtime-test--runtimes
+    (dolist (spec '((docker "Docker") (podman "Podman")))
+      (harness-define-container-runtime (car spec) :label (cadr spec)
+        :command (list (symbol-name (car spec)))
+        :compose (list (symbol-name (car spec)) "compose")))
+    (cl-letf (((symbol-function 'harness-container-runtime-available-p)
+               (lambda (&optional _id) nil))
+              ((symbol-function 'harness-container-runtime-installed-p)
+               (lambda (&optional id) (eq id 'podman))))
+      (should (eq 'podman (harness-container-runtime-resolve)))
+      ;; The engine the sandbox shows is that same backend.
+      (let ((engine (harness-container-runtime-engine)))
+        (should (eq 'podman (plist-get engine :id)))
+        (should (equal "Podman" (plist-get engine :label)))
+        (should-not (plist-get engine :socket))))
+    ;; With nothing installed either, the order decides, as before.
+    (cl-letf (((symbol-function 'harness-container-runtime-available-p)
+               (lambda (&optional _id) nil))
+              ((symbol-function 'harness-container-runtime-installed-p)
+               (lambda (&optional _id) nil)))
+      (should (eq 'docker (harness-container-runtime-resolve))))))
+
+(ert-deftest harness-container-runtime-engine-names-the-stacks-engine ()
+  "The engine answer holds the backend, its CLI and its socket, and runs nothing.
+The sandbox reads it to show a container command the engine the stacks
+use, so it must not ask any backend whether it answers: that question
+is the sandbox's own probe."
+  (harness-container-runtime-test--runtimes
+    (harness-define-container-runtime 'docker
+      :label "Docker" :command '("docker") :compose '("docker" "compose")
+      :socket "/var/run/docker.sock")
+    (harness-define-container-runtime 'podman
+      :label "Podman" :command '("podman") :compose '("podman" "compose"))
+    (cl-letf (((symbol-function 'harness-container-runtime-program)
+               (lambda (&optional id) (if (eq id 'podman) "/opt/homebrew/bin/podman")))
+              ((symbol-function 'harness-container-runtime-available-p)
+               (lambda (&optional _id) (error "the engine answer asked availability")))
+              ((symbol-function 'harness-container-runtime-socket-path)
+               (lambda (&optional _id) (error "the engine answer looked for a socket"))))
+      (let ((engine (harness-container-runtime-engine 'podman)))
+        (should (eq 'podman (plist-get engine :id)))
+        (should (equal "Podman" (plist-get engine :label)))
+        (should (equal "/opt/homebrew/bin/podman" (plist-get engine :program)))
+        (should-not (plist-get engine :socket))
+        (should (equal "/opt/homebrew/bin/podman"
+                       (harness-container-runtime-container-program 'podman))))
+      ;; A backend with no record is no engine at all, not an empty one.
+      (should-not (harness-container-runtime-engine 'no-such-runtime)))))
+
+(ert-deftest harness-container-runtime-engine-for-scope ()
+  "A scope's engine is the machine's CLI, no socket, and the scope back.
+The scope is opaque: this module hands it back rather than reading it.
+The answer runs nothing and asks no backend whether it answers, so the
+sandbox probe may call it.  `:socket' is nil for a scope on purpose --
+the machine's socket is shared, and a per-sandbox boundary must not
+reach it -- and a caller must not take `harness-container-runtime-engine'
+instead when it needs scopes apart."
+  (harness-container-runtime-test--runtimes
+    (harness-define-container-runtime 'docker
+      :label "Docker" :command '("docker") :compose '("docker" "compose")
+      :socket "/var/run/docker.sock")
+    (cl-letf (((symbol-function 'harness-container-runtime-program)
+               (lambda (&optional _id) "/usr/bin/docker"))
+              ((symbol-function 'harness-container-runtime-available-p)
+               (lambda (&optional _id) (error "the scope answer asked availability")))
+              ((symbol-function 'harness-container-runtime--exec)
+               (lambda (&rest _) (error "the scope answer ran a command"))))
+      (let ((engine (harness-container-runtime-engine-for-scope "session-7" 'docker)))
+        (should (eq 'docker (plist-get engine :id)))
+        (should (equal "Docker" (plist-get engine :label)))
+        (should (equal "/usr/bin/docker" (plist-get engine :program)))
+        ;; No socket for a scope, even though this backend declares one.
+        (should (null (plist-get engine :socket)))
+        ;; The scope comes back as it was given, whatever shape it has.
+        (should (equal "session-7" (plist-get engine :scope))))
+      (dolist (scope '((:sandbox . 12) "a string" 42))
+        (should (equal scope
+                       (plist-get (harness-container-runtime-engine-for-scope
+                                   scope 'docker)
+                                  :scope))))
+      ;; Stable across calls while the backend in use is the same: the
+      ;; scope is the only thing that differs between two of them.
+      (should (equal (harness-container-runtime-engine-for-scope "one" 'docker)
+                     (harness-container-runtime-engine-for-scope "one" 'docker)))
+      (should (equal (cl-loop for (key value)
+                              on (harness-container-runtime-engine-for-scope "one" 'docker)
+                              by #'cddr unless (eq key :scope) collect (cons key value))
+                     (cl-loop for (key value)
+                              on (harness-container-runtime-engine-for-scope "two" 'docker)
+                              by #'cddr unless (eq key :scope) collect (cons key value))))
+      ;; Two scopes never get the same socket, because neither gets one.
+      (should-not (plist-get (harness-container-runtime-engine-for-scope "one" 'docker) :socket))
+      (should-not (plist-get (harness-container-runtime-engine-for-scope "two" 'docker) :socket))
+      ;; A backend with no record is no engine at all.
+      (should-not (harness-container-runtime-engine-for-scope "one" 'no-such-runtime)))))
 
 (provide 'harness-container-runtime-test)
 ;;; harness-container-runtime-test.el ends here

@@ -63,6 +63,18 @@
   '("/var/run/docker.sock" "/run/docker.sock")
   "The socket paths a Docker daemon is found at, in order.")
 
+(defcustom harness-container-runtime-program-directories
+  '("/opt/homebrew/bin" "/usr/local/bin" "/opt/local/bin" "/run/current-system/sw/bin")
+  "Directories a container CLI is looked for in, after the variable `exec-path'.
+An Emacs started from a desktop icon on macOS has only the system's
+directories in the variable `exec-path', so a Podman or Docker installed by
+Homebrew or MacPorts is not found there and the runtime reads as
+unavailable.
+The directory a backend's CLI is found in is put on the PATH of its
+commands, so the compose provider it delegates to is found beside it."
+  :type '(repeat directory)
+  :group 'harness-container-runtime)
+
 ;;;; Registry
 
 (cl-defun harness-define-container-runtime (id &key label doc command compose socket needs)
@@ -122,13 +134,33 @@ needs, so the choice stays the one that was made."
             (cl-remove-if-not (lambda (id) (eq id 'podman)) ids)
             (cl-remove-if (lambda (id) (memq id '(docker podman))) ids))))
 
+(defun harness-container-runtime--resolve-installed ()
+  "Return the backend id to use, without asking any backend whether it answers.
+`auto' takes the first backend whose CLI is installed, and failing that
+the first of the order.  Nothing is run, so a caller that is itself
+part of the availability question -- the sandbox's container probe,
+which the version command's reason asks -- can resolve without
+recursion."
+  (let ((chosen harness-container-runtime))
+    (cond
+     ((and chosen (not (eq chosen 'auto))) chosen)
+     ((cl-find-if #'harness-container-runtime-installed-p
+                  (harness-container-runtime--order)))
+     (t (car (harness-container-runtime--order))))))
+
 (defun harness-container-runtime-resolve ()
-  "Return the backend id to use, or nil when none is available."
+  "Return the backend id to use, or nil when none is available.
+`auto' takes the first backend that answers, and failing that the first
+whose CLI is installed: a machine whose engine is installed but not
+running is told so about the engine it has, rather than about one it
+never installed.  An explicit choice is returned as it is."
   (let ((chosen harness-container-runtime))
     (cond
      ((and chosen (not (eq chosen 'auto)))
       chosen)
      ((cl-find-if #'harness-container-runtime-available-p
+                  (harness-container-runtime--order)))
+     ((cl-find-if #'harness-container-runtime-installed-p
                   (harness-container-runtime--order)))
      (t (car (harness-container-runtime--order))))))
 
@@ -156,13 +188,58 @@ needs, so the choice stays the one that was made."
 
 ;;;; What a backend needs
 
-(defun harness-container-runtime-socket-path (&optional id)
-  "Return the socket path of backend ID, or nil when it has none.
-DOCKER_HOST wins over the declared path when it names a Unix socket;
-when the declared path is missing, a socket at one of the known paths
-is used instead, as a sandbox often shows /run/docker.sock.  A backend
-that declares no socket -- Podman, say -- has none whatever the
-environment says."
+(defun harness-container-runtime--find-program (name)
+  "Return the absolute path of program NAME, or nil when it is not installed.
+NAME is looked for in the variable `exec-path' and then in
+`harness-container-runtime-program-directories'; an absolute name is
+taken as it is, as `executable-find' takes it."
+  (when (and (stringp name) (not (string-empty-p name)))
+    (or (executable-find name)
+        (and (not (file-name-absolute-p name))
+             (cl-some (lambda (directory)
+                        (let ((file (expand-file-name name directory)))
+                          (and (file-executable-p file)
+                               (not (file-directory-p file))
+                               file)))
+                      harness-container-runtime-program-directories)))))
+
+(defun harness-container-runtime-program (&optional id)
+  "Return the absolute CLI of backend ID, or nil when it is not installed.
+The CLI is looked for in the variable `exec-path' and then in
+`harness-container-runtime-program-directories', so a Homebrew or
+MacPorts install is found by an Emacs that was started from a desktop
+icon and has none of those directories in the variable `exec-path'."
+  (harness-container-runtime--find-program
+   (car (plist-get (harness-container-runtime-get (or id (harness-container-runtime-resolve)))
+                   :command))))
+
+(defun harness-container-runtime-installed-p (&optional id)
+  "Non-nil when the CLI of backend ID is installed, wherever it is.
+That is a file to run, not an engine that answers: it says which
+backend a machine has, which `auto' falls back to when none answers."
+  (and (harness-container-runtime-program id) t))
+
+(defun harness-container-runtime--path-env (&optional id)
+  "Return a PATH entry for backend ID's commands, or nil.
+The entry is there when the backend's CLI is only in one of
+`harness-container-runtime-program-directories': its commands run by
+name, so that directory has to be on their PATH, and so does the
+compose provider the CLI delegates to."
+  (let* ((program (harness-container-runtime-program id))
+         (directory (and program (directory-file-name (file-name-directory program))))
+         (path (getenv "PATH")))
+    (when (and directory
+               (not (member directory (split-string (or path "") path-separator t))))
+      (list (format "PATH=%s%s%s"
+                    directory path-separator
+                    (or path "/usr/local/bin:/usr/bin:/bin"))))))
+
+(defun harness-container-runtime--declared-socket (&optional id)
+  "Return the socket path backend ID declares, or nil.
+That is the record's own `:socket', with DOCKER_HOST winning when it
+names a Unix socket.  Nothing is run and no other engine is looked
+for, so a backend whose CLI is missing still says which socket it
+would have."
   (let* ((record (harness-container-runtime-get (or id (harness-container-runtime-resolve))))
          (declared (plist-get record :socket))
          (host (getenv "DOCKER_HOST")))
@@ -170,9 +247,19 @@ environment says."
      ((null declared) nil)
      ((and host (string-prefix-p "unix://" host))
       (string-remove-prefix "unix://" host))
-     ((file-exists-p declared) declared)
-     ((harness-container-runtime--found-socket))
      (t declared))))
+
+(defun harness-container-runtime-socket-path (&optional id)
+  "Return the socket path of backend ID, or nil when it has none.
+DOCKER_HOST wins over the declared path when it names a Unix socket;
+when the declared path is missing, a socket at one of the known paths
+is used instead, as a sandbox often shows /run/docker.sock.  A backend
+that declares no socket -- Podman, say -- has none whatever the
+environment says."
+  (let ((declared (harness-container-runtime--declared-socket id)))
+    (if (and declared (not (file-exists-p declared)))
+        (or (harness-container-runtime--found-socket) declared)
+      declared)))
 
 (defun harness-container-runtime--found-socket ()
   "Return a usable Docker socket path, or nil."
@@ -187,7 +274,7 @@ environment says."
   (cond
    ((functionp need) (funcall need))
    ((and (consp need) (eq (car need) 'executable))
-    (unless (executable-find (cadr need))
+    (unless (harness-container-runtime--find-program (cadr need))
       (format "Executable unavailable · %s" (cadr need))))
    ((and (consp need) (eq (car need) 'socket))
     (unless (file-exists-p (cadr need))
@@ -241,17 +328,22 @@ The reason is one line, for a status column, never a sentence."
 
 (defun harness-container-runtime--env (&optional id)
   "Return the environment backend ID needs for its commands.
-A backend that talks over a socket gets DOCKER_HOST when the socket
-was found somewhere other than its declared path."
+A backend whose CLI is only in `harness-container-runtime-program-directories'
+gets that directory on PATH, so the CLI and the compose provider it
+delegates to are found; one that talks over a socket gets DOCKER_HOST
+when the socket was found somewhere other than its declared path."
   (let* ((id (or id (harness-container-runtime-resolve)))
          (record (harness-container-runtime-get id))
-         (declared (plist-get record :socket)))
-    (when declared
-      (let ((host (getenv "DOCKER_HOST")))
-        (unless host
-          (let ((socket (harness-container-runtime--found-socket)))
-            (when (and socket (not (equal socket declared)))
-              (list (format "DOCKER_HOST=unix://%s" socket)))))))))
+         (declared (plist-get record :socket))
+         (path (harness-container-runtime--path-env id)))
+    (append
+     path
+     (when declared
+       (let ((host (getenv "DOCKER_HOST")))
+         (unless host
+           (let ((socket (harness-container-runtime--found-socket)))
+             (when (and socket (not (equal socket declared)))
+               (list (format "DOCKER_HOST=unix://%s" socket))))))))))
 
 (defun harness-container-runtime--version-argv (record)
   "Return the argv that asks RECORD's CLI for its version."
@@ -287,27 +379,42 @@ was found somewhere other than its declared path."
 
 ;;;; Running commands
 
+(defun harness-container-runtime--resolved-argv (argv)
+  "Return ARGV with its program at the absolute path it is installed at.
+A program that is not installed is left as it is, so a caller reports
+it by the name it asked for.  Nothing else in the list is looked at:
+an argument is never a program."
+  (let ((program (and (consp argv)
+                      (harness-container-runtime--find-program (car argv)))))
+    (if program (cons program (cdr argv)) argv)))
+
 (defun harness-container-runtime--exec (argv &optional env directory)
   "Run ARGV with ENV in DIRECTORY, returning (EXIT-CODE . OUTPUT).
 The program is never run through a shell; a missing program is exit
-127 with a one-line reason rather than a signal.  Standard output and
-standard error are captured together, as the provider wrote them: the
-reason a compose command failed is the provider's own line, before the
-runtime's wrapper around it."
-  (if (not (executable-find (car argv)))
-      (cons 127 (format "%s: not found" (car argv)))
-    (with-temp-buffer
-      (let* ((process-environment (append env process-environment))
-             (default-directory (or directory default-directory))
-             (status (condition-case err
-                         (apply #'call-process (car argv) nil t nil (cdr argv))
-                       (file-missing
-                        (insert (error-message-string err))
-                        127)
-                       (error
-                        (insert (error-message-string err))
-                        1))))
-        (cons status (buffer-string))))))
+127 with a one-line reason rather than a signal.  A program that is
+only in `harness-container-runtime-program-directories' is run by its
+absolute path.  Standard output and standard error are captured
+together, as the provider wrote them: the reason a compose command
+failed is the provider's own line, before the runtime's wrapper around
+it.  ENV is the whole environment here: the PATH entry that finds the
+compose provider is `harness-container-runtime--env''s, which a caller
+that needs it passes in, so a caller that is asking whether the
+runtime answers is not asked again."
+  (let ((argv (harness-container-runtime--resolved-argv argv)))
+    (if (not (file-executable-p (car argv)))
+        (cons 127 (format "%s: not found" (car argv)))
+      (with-temp-buffer
+        (let* ((process-environment (append env process-environment))
+               (default-directory (or directory default-directory))
+               (status (condition-case err
+                           (apply #'call-process (car argv) nil t nil (cdr argv))
+                         (file-missing
+                          (insert (error-message-string err))
+                          127)
+                         (error
+                          (insert (error-message-string err))
+                          1))))
+          (cons status (buffer-string)))))))
 
 (defun harness-container-runtime-exec (argv &optional env directory)
   "Run ARGV on the selected runtime, with ENV, in DIRECTORY.
@@ -320,8 +427,11 @@ Return (EXIT . OUTPUT)."
 The command can pull images for minutes, so it never blocks Emacs.  It
 gets pipes rather than the pseudo-terminal Emacs would otherwise give
 it (see the commentary), and both streams reach the output in the order
-the command wrote them."
-  (let* ((buffer (generate-new-buffer " *harness-container-runtime*"))
+the command wrote them.  A program that is only in
+`harness-container-runtime-program-directories' is run by its absolute
+path, as `harness-container-runtime--exec' runs it."
+  (let* ((argv (harness-container-runtime--resolved-argv argv))
+         (buffer (generate-new-buffer " *harness-container-runtime*"))
          (stderr-buffer (generate-new-buffer " *harness-container-runtime-stderr*"))
          (default-directory (or directory default-directory))
          (process-environment (append env (harness-container-runtime--env)
@@ -389,6 +499,74 @@ stops with the rest of the stack."
   (harness-container-runtime-exec
    (append (harness-container-runtime-command id)
            (list "network" "connect" network container))))
+
+;;;; The engine, for anything that runs a container command
+
+;; A compose stack is not the only thing that runs a container CLI: a
+;; sandboxed `bash' command may too, and it must reach the same engine
+;; the stacks use.  This answer runs nothing and asks no backend
+;; whether it answers, so a caller that is itself part of that question
+;; -- the sandbox's container probe, which the version command's reason
+;; asks -- can use it without recursion.
+
+(defun harness-container-runtime-engine (&optional id)
+  "Return the container engine the harness uses, as a plist, or nil.
+ID names the backend, and is the one in use when it is nil.  The plist
+holds `:id' and `:label' of the backend, `:program', the
+absolute path of its CLI (nil when it is not installed), and `:socket',
+the socket it talks to (nil for a backend that has none).  `:socket' is
+the path the backend declares: this is a description of the engine, so
+it does not go looking for another one, and a caller that needs a
+socket that answers looks at that path itself."
+  (let* ((id (or id (harness-container-runtime--resolve-installed)))
+         (record (harness-container-runtime-get id)))
+    (and record
+         (list :id id
+               :label (harness-container-runtime-label id)
+               :program (harness-container-runtime-program id)
+               :socket (harness-container-runtime--declared-socket id)))))
+
+(defun harness-container-runtime-engine-for-scope (scope &optional id)
+  "Return the engine SCOPE runs containers on, as a plist, or nil.
+SCOPE is opaque to this module -- a string, a plist, whatever the
+caller threads down -- and comes back as `:scope' unchanged: this
+module owns which engine a machine has, not which scope a container
+belongs to.  ID names the backend, and is the one in use when it is
+nil.
+
+Nothing is run and no backend is asked whether it answers, so a
+caller that is part of the availability question -- the sandbox's
+container probe -- may call it, as it may call
+`harness-container-runtime-engine'.
+
+`:program' is the CLI to run.  It is the same for every scope on a
+machine: a scope gets no installation of its own.  `:socket' is always
+nil, and that is an answer, not a gap.  This module can give a scope no
+socket of its own, and the machine's socket is shared by every scope
+that reaches it -- which is the one thing a per-sandbox boundary must
+not do.  A caller that needs one scope's containers apart from
+another's therefore partitions at the storage and network layer and
+shows no socket; it must not fall back to the machine's socket from
+`harness-container-runtime-engine'.
+
+The answer is stable for as long as the backend in use is: the
+selection is a user setting, and changing it changes the CLI."
+  (let* ((id (or id (harness-container-runtime--resolve-installed)))
+         (record (harness-container-runtime-get id)))
+    (and record
+         (list :id id
+               :label (harness-container-runtime-label id)
+               :program (harness-container-runtime-program id)
+               :socket nil
+               :scope scope))))
+
+(defun harness-container-runtime-container-program (&optional id)
+  "Return the CLI a sandboxed command runs, or nil.
+That is the CLI of the engine of backend ID, or of the one in use when
+ID is nil, by absolute path, so a command inside a sandbox reaches the
+same engine the stacks use.  Nil when that backend is not installed; a
+caller then looks for a CLI itself."
+  (plist-get (harness-container-runtime-engine id) :program))
 
 ;;;; The socket
 
@@ -491,9 +669,16 @@ socket at all."
                             'help-echo (format "Container runtime · %s" id))
         (insert "\n")))
     (let* ((record (harness-container-runtime-get chosen))
+           (program (and chosen (plist-get (harness-container-runtime-engine chosen) :program)))
            (socket (and record (or (harness-container-runtime-socket-path chosen)
                                    (plist-get record :socket))))
            (usable (and socket (harness-container-runtime-socket-usable-p chosen))))
+      (when program
+        (insert "  "
+                (propertize "Program" 'face 'bold)
+                "  "
+                (propertize program 'face 'default)
+                "\n"))
       (when socket
         (insert "  "
                 (propertize "Socket" 'face 'bold)

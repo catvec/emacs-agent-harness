@@ -268,6 +268,52 @@ it ran and the exit status, so a client can show what actually failed."
         (should (equal "stopped" (plist-get status :state)))
         (should (equal "Local voice pipeline · stopped" (plist-get status :reason)))))))
 
+;;;; The engine it runs on
+
+(ert-deftest harness-speech-runs-on-the-engine-the-machine-has ()
+  "Voice mode starts through the Podman a Mac has, with no engine of its own.
+That is the macOS case the module exists for: Emacs started from the
+Dock has no Homebrew on `exec-path', and the machine has Podman where
+Docker never was.  The pipeline asks the stacks, which ask the
+container runtime: nothing in the voice path names an engine, and the
+command it runs is the Podman that is installed."
+  (harness-speech-test-with-stack
+    (let* ((directory (make-temp-file "harness-speech-bin" t))
+           (podman (expand-file-name "podman" directory))
+           (harness-container-runtime-program-directories (list directory))
+           (exec-path nil)
+           (harness-container-runtime 'auto)
+           argv)
+      (unwind-protect
+          (progn
+            (with-temp-file podman (insert "#!/bin/sh\nexit 0\n"))
+            (set-file-modes podman #o755)
+            ;; Docker is nowhere, and Podman is not on `exec-path'.
+            (cl-letf (((symbol-function 'harness-container-runtime--exec)
+                       (lambda (command &optional _env _directory)
+                         (setq argv command)
+                         (cons 0 "podman version 5.2.0\n")))
+                      ((symbol-function 'harness-container-runtime--found-socket)
+                       (lambda () nil))
+                      ((symbol-function 'harness-container-runtime--sandbox-need)
+                       (lambda () nil)))
+              (harness-container-runtime-forget-availability)
+              ;; The engine is Podman, named by what is installed.
+              (should (eq 'podman (harness-container-runtime-resolve)))
+              (should (equal "Podman" (harness-container-runtime-label)))
+              ;; The pipeline's start command is Podman's compose command.
+              (let* ((stack (harness-compose-stack-get harness-speech-local-stack))
+                     (command (harness-compose-stack--argv stack "up" "-d")))
+                (should (equal '("podman" "compose")
+                               (seq-take command 2)))
+                ;; Running it starts Podman, not Docker.
+                (setq argv nil)
+                (should (eql 0 (car (harness-container-runtime-exec command))))
+                (should (equal "podman" (car argv))))
+              ;; Nothing in the voice path configures an engine.
+              (should (eq 'auto harness-container-runtime))))
+        (delete-directory directory t)))))
+
 ;;;; The commands it runs
 
 (ert-deftest harness-speech-starts-the-commands-as-children ()

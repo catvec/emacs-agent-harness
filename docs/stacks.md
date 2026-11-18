@@ -179,8 +179,12 @@ README for the CPU and GPU cases and for a service of your own.
 The stack belongs to the server: `harness-speech` requires
 `harness-stacks`, registers the stack and calls it the local voice pipeline.
 A client shows its state over ACP (`speech/status`) and needs no container
-runtime of its own; when the harness's runtime is unavailable, the pipeline
-line says what it still needs, such as `Socket unavailable ·
+runtime of its own: voice mode names no engine, so it never asks whether to use
+Podman or Docker, and the pipeline starts on whatever the container runtime
+module chose (see [container-runtime](container-runtime.md#choosing-a-runtime)).
+That is what makes a Mac with Podman work: Docker is never the answer just
+because it was tried first. When the harness's runtime is unavailable, the
+pipeline line says what it still needs, such as `Socket unavailable ·
 /var/run/docker.sock` or `Executable unavailable · podman`.
 
 ## What is verified

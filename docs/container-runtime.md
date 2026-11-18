@@ -31,8 +31,48 @@ does the same from the keyboard. The stacks page shows the selected runtime and
 `[Change]` opens this page.
 
 `auto` asks Docker first and Podman second, followed by any backend a plugin
-declared, and picks the first whose CLI and compose provider answer. Availability
-is cached for thirty seconds and asked again on a refresh.
+declared, and picks the first whose CLI and compose provider answer. When none
+answers, it names the first whose CLI is *installed*: a machine with Podman and
+no Docker is told about its Podman, not about the Docker it never installed.
+Availability is cached for thirty seconds and asked again on a refresh.
+
+## Where the CLI is looked for
+
+A CLI is looked for on `exec-path` first, then in
+`harness-container-runtime-program-directories`:
+
+```elisp
+(setq harness-container-runtime-program-directories
+      '("/opt/homebrew/bin" "/usr/local/bin" "/opt/local/bin"))
+```
+
+That list is what makes voice mode work on macOS. An Emacs started from the
+Dock has only the system's directories on `exec-path`, so a Homebrew Podman is
+invisible to it, and before this the runtime reported `Executable unavailable ·
+docker` on a Mac that had Podman all along. The directory a CLI is found in is
+put at the front of the PATH of its commands, so the compose provider it
+delegates to (`podman compose` runs an external `podman-compose`) is found
+beside it, and the CLI itself is run by its absolute path.
+
+The runtimes page shows the program it resolved, as `Program  /path/to/cli`,
+next to the socket.
+
+## The engine the sandbox shows
+
+`harness-container-runtime-engine` answers, without running anything, which
+backend, CLI and socket the harness uses:
+
+```elisp
+(harness-container-runtime-engine)  ; (:id podman :label "Podman" :program "…" :socket nil)
+```
+
+The sandbox reads it for `sandbox/containers` and for `:containers` on
+`sandbox/wrap`, so a container command inside a sandbox reaches the same engine
+the stacks use: a machine whose stacks run on Podman is shown no Docker socket
+it never had. It runs nothing and asks no backend whether it answers, because
+that question is the sandbox's own probe; asking it there would be a circle.
+When the container runtime module is not loaded, the sandbox falls back to the
+first socket at a known path and the first of `docker` and `podman` installed.
 
 ## The Docker socket
 
@@ -60,7 +100,7 @@ the runtimes page shows instead of a generic socket line:
 
 | Stage | Reason | What to do |
 | --- | --- | --- |
-| `binary` | `Container CLI missing · docker, podman` | install the CLI in the sandbox's image, or use a backend that has it |
+| `binary` | `Container CLI missing · LABEL` (the engine's, or `docker, podman` with no runtime module) | install the CLI in the sandbox's image, or use a backend that has it |
 | `sysfs` | `Sysfs unavailable · /sys` | the sandbox must show `/sys` read-only (an older harness build did not) |
 | `cgroup` | `Cgroup filesystem absent · /sys/fs/cgroup` | the host must delegate the cgroup file system; a jail with a private `/` cannot make one |
 | `socket` | `Engine socket unavailable · PATH` | start the daemon, or tell the harness where its socket is with `DOCKER_HOST` |
@@ -127,9 +167,13 @@ compose plugin is reported as plainly as a missing daemon.
 ## What is verified
 
 `lisp/modules/harness-container-runtime-test.el` covers the registry, the automatic
-order, the explicit choice that never falls back, availability caching, socket
-discovery, `DOCKER_HOST`, the compose and network argv, the process runners and
-the exact copy of the runtimes page, all without a daemon. A real Docker daemon
+order, the explicit choice that never falls back, the `auto` fallback to an
+installed CLI, availability caching, socket discovery, `DOCKER_HOST`, the
+compose and network argv, a CLI that is only off `exec-path`, the engine
+answer, the process runners and the exact copy of the runtimes page, all
+without a daemon. `lisp/modules/harness-speech-test.el` holds the macOS case:
+Docker absent, Podman only in a program directory, and the voice pipeline
+starts through Podman with no engine setting of its own. A real Docker daemon
 with its socket at `/run/docker.sock` was used by hand through this module to
 start a compose stack on its own network, publish a random loopback port and
 reach a service by name from another container; the bundled voice stack's
