@@ -693,6 +693,52 @@ after it, whether the file was deleted or just not there any more."
                                      :text (format "[Image returned by tool call %s is not available]" id))))))
                    (plist-get block :images)))))
 
+(defconst harness-openai--tool-alias-prefix "harness_tool_"
+  "Reserved namespace for wire-only tool aliases.
+Original names in this namespace are aliased too, so they cannot
+impersonate the alias of a different tool.")
+
+(defun harness-openai--tool-wire-name (name)
+  "Return the stable OpenAI-compatible wire name of tool NAME.
+Ordinary names stay unchanged.  Names outside [A-Za-z0-9_-], longer
+than 64 characters, or in the alias namespace get a name-derived
+alias.  No catalogue order or other request's names influence it, so
+history and retries use the same spelling as the tool declaration.
+`harness-openai--tool-names' detects collisions before dispatch."
+  (unless (stringp name) (error "Tool name is not a string: %S" name))
+  (let ((case-fold-search nil))
+   (if (and (<= (length name) 64)
+           (string-match-p "\\`[A-Za-z0-9_-]+\\'" name)
+           (not (string-prefix-p harness-openai--tool-alias-prefix name)))
+      name
+    (concat harness-openai--tool-alias-prefix
+            (substring (secure-hash 'sha256 (encode-coding-string name 'utf-8))
+                       0 (- 64 (length harness-openai--tool-alias-prefix)))))))
+
+(defun harness-openai--tool-names (request)
+  "Return REQUEST's wire-to-original tool-name map.
+Include historical calls even if a tool is no longer advertised.  A
+hash collision refuses the request instead of dispatching a call to
+the wrong tool.  The map belongs to this request, not a global table."
+  (let ((names (mapcar (lambda (spec) (plist-get spec :name))
+                       (plist-get request :tools)))
+        (seen (make-hash-table :test 'equal))
+        out)
+    (dolist (message (plist-get request :messages))
+      (dolist (block (harness-openai--message-blocks message))
+        (when (and (consp block)
+                   (equal (harness-openai--block-type block) "tool_use"))
+          (push (plist-get block :name) names))))
+    (dolist (name names)
+      (let* ((wire (harness-openai--tool-wire-name name))
+             (prior (gethash wire seen)))
+        (when (and prior (not (equal prior name)))
+          (error "Tool wire-name collision: %S and %S" prior name))
+        (unless prior
+          (puthash wire name seen)
+          (push (cons (copy-sequence wire) (copy-sequence name)) out))))
+    out))
+
 (defun harness-openai--assistant-message (blocks &optional reasoning)
   "Map assistant content BLOCKS to one assistant message.
 Thinking is dropped unless REASONING is non-nil: DeepSeek's thinking
@@ -708,7 +754,7 @@ DeepSeek rejects a tool-using history whose assistant messages omit it."
         ("tool_use"
          (push (list :id (plist-get b :id)
                      :type "function"
-                     :function (list :name (plist-get b :name)
+                     :function (list :name (harness-openai--tool-wire-name (plist-get b :name))
                                      ;; A string inside the body's JSON: text, not bytes.
                                      :arguments (if (plist-get b :input)
                                                     (harness-json-encode-text (plist-get b :input))
@@ -773,7 +819,7 @@ message that made the calls, so nothing may be put between them."
   "Map tool SPECS to the OpenAI tools array, or nil."
   (mapcar (lambda (spec)
             (list :type "function"
-                  :function (list :name (plist-get spec :name)
+                  :function (list :name (harness-openai--tool-wire-name (plist-get spec :name))
                                   :description (or (plist-get spec :description) "")
                                   :parameters (or (plist-get spec :schema)
                                                   '(:type "object" :properties :empty)))))
@@ -875,6 +921,8 @@ A request that names `:response-schema' has the answer constrained to
 it where the route takes a schema (`harness-openai--response-format');
 elsewhere no such field is sent, and the caller's prompt and reading
 alone keep the shape."
+  ;; Validate the whole name domain before producing any wire body.
+  (harness-openai--tool-names request)
   (let* ((dialect (harness-openai--dialect endpoint))
          (deepseek (harness-openai--deepseek-p endpoint))
          (level (if (plist-get request :no-thinking) "none" (plist-get request :thinking)))
@@ -1030,7 +1078,14 @@ any of its fields.  An endpoint without a dialect adds nothing."
   status                 ; HTTP status of the response, once headers arrived
   error-kind             ; transport failure the HTTP layer reported
   retry-after            ; seconds a rate limit asked the caller to wait
-  dialect-state)         ; what a dialect's `:chunk' hook keeps of the response
+  dialect-state          ; what a dialect's `:chunk' hook keeps of the response
+  tool-names)            ; request-owned wire-to-original tool-name map
+
+(defun harness-openai--stream-tool-name (stream name)
+  "Translate wire NAME in STREAM back to the harness tool name.
+Unknown names stay unknown: never guess by replacing underscores or
+by decoding a name with another request's table."
+  (or (cdr (assoc name (harness-openai--stream-tool-names stream))) name))
 
 (defun harness-openai--stream-tool-call (stream index call)
   "Merge fragment CALL at INDEX into STREAM's accumulated tool calls."
@@ -1043,7 +1098,9 @@ any of its fields.  An endpoint without a dialect adds nothing."
     (when-let* ((id (plist-get call :id)))
       (unless (string-empty-p id) (setcdr slot (plist-put (cdr slot) :id id))))
     (when-let* ((name (plist-get fn :name)))
-      (unless (string-empty-p name) (setcdr slot (plist-put (cdr slot) :name name))))
+      (unless (string-empty-p name)
+        (setcdr slot (plist-put (cdr slot) :name
+                               (concat (plist-get (cdr slot) :name) name)))))
     (when-let* ((args (plist-get fn :arguments)))
       (setcdr slot (plist-put (cdr slot) :arguments
                               (concat (plist-get (cdr slot) :arguments) args))))
@@ -1061,7 +1118,7 @@ shows a model writing a large input.  At most one report every
                  (or (null sent) (>= (- now sent) harness-openai--progress-interval))))
       (setcdr slot (plist-put call :sent-at now))
       (funcall (harness-openai--stream-on-event stream)
-               (list :type 'activity :phase 'tool-input :tool (plist-get call :name)
+               (list :type 'activity :phase 'tool-input :tool (harness-openai--stream-tool-name stream (plist-get call :name))
                      :chars (length (plist-get call :arguments)))))))
 
 (defun harness-openai--stream-chunk (stream data)
@@ -1320,7 +1377,7 @@ reply from an endpoint it did not choose."
           (let ((call (cdr slot)))
             (funcall on-event (list :type 'tool-call
                                     :id (or (plist-get call :id) (concat "call_" (harness-short-id)))
-                                    :name (plist-get call :name)
+                                    :name (harness-openai--stream-tool-name stream (plist-get call :name))
                                     :input (harness-openai--parse-arguments (plist-get call :arguments))
                                     :respond nil)))))
       (funcall on-event (if error
@@ -1367,6 +1424,7 @@ An ordinary request carries none, and its events are unchanged."
                              caller)))
                (stream (make-harness-openai--stream
                         :on-event on-event :endpoint endpoint
+                        :tool-names (harness-openai--tool-names request)
                         :dialect-state (harness-openai--stream-state endpoint request)))
                (key (harness-openai--api-key endpoint))
                (url (concat (harness-openai--base-url endpoint) "/chat/completions"))

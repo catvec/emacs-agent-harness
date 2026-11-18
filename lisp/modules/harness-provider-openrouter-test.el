@@ -681,7 +681,9 @@ the call.  Without routing there is no pin, and no schema."
                                 (list :id "s" :ext (list :openrouter-route
                                                          (harness-openrouter-test--route
                                                           '(:structured-outputs t))))))
-             (format (plist-get (harness-openai--body (harness-openrouter--endpoint) "m" pinned)
+             (format (plist-get (harness-openrouter-test--routed-body
+                                policy (plist-get (plist-get (plist-get pinned :session) :ext)
+                                                  :openrouter-route) pinned)
                                 :response_format)))
         (should (equal "json_schema" (plist-get format :type)))
         (should (equal "verdict" (plist-get (plist-get format :json_schema) :name)))
@@ -690,7 +692,9 @@ the call.  Without routing there is no pin, and no schema."
       (let ((unlisted (plist-put (copy-sequence request) :session
                                  (list :id "s" :ext (list :openrouter-route
                                                           (harness-openrouter-test--route))))))
-        (should-not (plist-get (harness-openai--body (harness-openrouter--endpoint) "m" unlisted)
+        (should-not (plist-get (harness-openrouter-test--routed-body
+                               policy (plist-get (plist-get (plist-get unlisted :session) :ext)
+                                                 :openrouter-route) unlisted)
                                :response_format)))
       ;; A session with no pin yet is not sent one either: nothing has
       ;; said the endpoint it will be pinned to takes one.
@@ -759,9 +763,10 @@ of the effort and the output limit."
       ;; The routed body is the one the dispatch builds: `x:y' would never
       ;; reach a dispatch, so this only asks the dialect what it adds.
       (let* ((harness-openrouter--sending policy)
-             (routed (plist-put (copy-sequence request)
-                                :openrouter-route (plist-get (plist-get session :ext)
-                                                             :openrouter-route)))
+             (routed (plist-put
+                      (plist-put (copy-sequence request) :openrouter-policy policy)
+                      :openrouter-route (plist-get (plist-get session :ext)
+                                                   :openrouter-route)))
              (openrouter (harness-openai--body (harness-openrouter--endpoint) "m" routed))
              (plain (harness-openai--body
                      '(:id plain :base-url "https://api.openai.example/v1") "m" request))
@@ -2880,6 +2885,100 @@ and the request is refused rather than sent with its restrictions."
           (should (eq 'error (plist-get (harness-openrouter-test--newest-done events) :stop-reason)))
           (should (eq 'disabled (harness-openrouter-test--paused-kind events)))
           (should-not (harness-openrouter-test--sent-completions)))))))
+
+(ert-deftest harness-provider-openrouter-authority-snapshot-owns-its-strings ()
+  "Destructive source edits cannot change a dispatched authority snapshot."
+  (let* ((source (list :policy (list :providers (list (copy-sequence "DeepInfra")))
+                       :route (list :slug (copy-sequence "deepinfra/fp8"))))
+         (snapshot (harness-openrouter--copy-authority source)))
+    (aset (car (plist-get (plist-get source :policy) :providers)) 0 ?X)
+    (aset (plist-get (plist-get source :route) :slug) 0 ?X)
+    (should (equal (car (plist-get (plist-get snapshot :policy) :providers)) "DeepInfra"))
+    (should (equal (plist-get (plist-get snapshot :route) :slug) "deepinfra/fp8"))))
+
+(ert-deftest harness-provider-openrouter-overlapping-uncounted-sends-own-their-request ()
+  "A reused uncounted request cannot overwrite an earlier send's snapshot."
+  (let* ((policy (harness-openrouter-test-policy))
+         (route (harness-openrouter-test--route))
+         (request (append (harness-openrouter-test--request)
+                          (list :openrouter-route nil :openrouter-policy nil)))
+         (sent nil))
+    (harness-openrouter-test-with-policy policy
+      (cl-letf (((symbol-function 'harness-retry-send)
+                 (lambda (req) (list :request req)))
+                ((symbol-function 'harness-retry-authorise)
+                 (lambda (req _authority) req))
+                ((symbol-function 'harness-openai--complete)
+                 (lambda (_endpoint req) (push req sent) nil)))
+        (harness-openrouter--dispatch (list :policy policy :route route) request #'ignore)
+        (setq harness-openrouter-routing (copy-tree policy))
+        (setf (plist-get (plist-get harness-openrouter-routing :max-price) :prompt) 0.25)
+        (harness-openrouter--dispatch (list :policy harness-openrouter-routing :route route)
+                                      request #'ignore)
+        (should (= 2 (length sent)))
+        (should-not (eq (car sent) (cadr sent)))
+        (should-not (plist-get request :openrouter-policy))
+        (should (= 0.15 (plist-get (plist-get (plist-get (cadr sent) :openrouter-policy)
+                                               :max-price) :prompt)))
+        (should (= 0.25 (plist-get (plist-get (plist-get (car sent) :openrouter-policy)
+                                               :max-price) :prompt)))))))
+
+(ert-deftest harness-provider-openrouter-delayed-headers-keep-the-sent-policy ()
+  "Delayed response headers retain the sent policy and expose HTTP errors.
+Rebuilding the replay body after dispatch must not depend on a dynamic
+binding which has ended, or a policy or pin edited since the send."
+  (dolist (status '(200 400 429))
+    (let* ((policy (harness-openrouter-test-policy))
+           (route (plist-put (harness-openrouter-test--route) :structured-outputs t))
+           (session (harness-openrouter-test--session
+                     "s-delayed-headers" (list :openrouter-route route)))
+           (events nil)
+           (kept nil))
+      (harness-openrouter-test-with-policy policy
+        (harness-openrouter-test-with-session session
+          (harness-openrouter-test-with-fake nil
+            (setq harness-openrouter-test--hold '("chat/completions"))
+            ;; Install the replay seam's keep hook: without replay loaded
+            ;; production skips frozen-keep, which hid this bug in tests.
+            (cl-letf (((symbol-function 'harness-replay-route)
+                       (lambda (_request _endpoint) "test-route"))
+                      ((symbol-function 'harness-replay-seam-keep)
+                       (lambda (_request _model _route body) (setq kept body))))
+              (harness-call 'provider/complete
+                            (plist-put (plist-put (harness-openrouter-test--request session)
+                                                  :response-schema '(:type "object"))
+                                       :on-event (lambda (e) (push e events))))
+              (harness-test-wait #'harness-openrouter-test--sent-completions 5 "dispatch")
+              (let* ((sent (car (harness-openrouter-test--sent-completions)))
+                     (args (plist-get sent :args)))
+                (should sent)
+                (should-not harness-openrouter--sending)
+                ;; Destructive edits must not change the snapshot either.
+                (setf (plist-get (plist-get policy :max-price) :prompt) 99)
+                (setf (plist-get route :slug) "other/provider")
+                (setq harness-openrouter-routing nil)
+                (funcall (plist-get args :on-headers) status nil)
+                (should (plist-get kept :response_format))
+                (should (equal (harness-json-encode kept) (plist-get sent :body)))
+                (should (equal (plist-get kept :service_tier) "default"))
+                (should (equal (plist-get kept :session_id) "s-delayed-headers"))
+                (if (>= status 400)
+                    (progn
+                      (funcall (plist-get args :on-chunk)
+                               "{\"error\":{\"message\":\"upstream quota exhausted\"}}")
+                      (funcall (plist-get args :callback) status nil "" nil)
+                      (let ((done (harness-openrouter-test--newest-done events)))
+                        (should (eq (plist-get done :stop-reason) 'error))
+                        (should (string-match-p (format "HTTP %s: upstream quota exhausted" status)
+                                                (plist-get done :error)))))
+                  (funcall (plist-get args :on-chunk)
+                           (harness-openrouter-test--sse
+                            `(:model ,harness-openrouter-test-model :provider "DeepInfra"
+                              :choices ((:index 0 :delta (:content "ok") :finish_reason "stop")))))
+                  (funcall (plist-get args :callback) 200 nil "" nil)
+                  (should (eq 'end-turn
+                              (plist-get (harness-openrouter-test--newest-done events)
+                                         :stop-reason))))))))))))
 
 ;;;; P2: one catalogue reading, shared by concurrent callers
 

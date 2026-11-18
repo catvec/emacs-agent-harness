@@ -939,6 +939,97 @@ stays a reading, the miss it is."
                      (nth 4 events)))
       (should (equal '(:type done :stop-reason end-turn) (car (last events)))))))
 
+(ert-deftest harness-provider-openai-wire-tool-aliases-cover-schema-and-history ()
+  "Illegal tool names are aliased consistently without changing the transcript."
+  (let* ((names '("board.discuss" "board_discuss" "board-dis cuss" "scene.read"
+                  "grammar.describe" "history.undo" "patch.commit" "patch.preview"
+                  "board.pin" "scene.edit" "工具" "K"))
+         (names (append names (list (make-string 80 ?a))))
+         (tools (mapcar (lambda (name) (list :name name)) names))
+         (request (list :model "testrouter:m" :tools tools
+                        :messages '((:role assistant :content
+                                     ((:type "tool_use" :id "old" :name "scene.read" :input (:x 1))
+                                      (:type "tool_use" :id "retired" :name "old.tool" :input nil)))
+                                    (:role user :content
+                                     ((:type "tool_result" :tool_use_id "old" :content "ok")
+                                      (:type "tool_result" :tool_use_id "retired" :content "ok"))))))
+         (before (copy-tree request))
+         (body (harness-openai--body harness-openai-test-endpoint "m" request))
+         (wire (mapcar (lambda (spec) (plist-get (plist-get spec :function) :name))
+                       (plist-get body :tools))))
+    (dolist (name wire)
+      (should (string-match-p "\\`[A-Za-z0-9_-]+\\'" name))
+      (should (<= (length name) 64)))
+    (should (= (length names) (length (delete-dups (copy-sequence wire)))))
+    (should (equal "board_discuss" (nth 1 wire)))
+    (let* ((calls (plist-get (car (plist-get body :messages)) :tool_calls))
+           (history-name (plist-get (plist-get (car calls) :function) :name)))
+      (should (equal (nth 3 wire) history-name))
+      (should (equal (harness-openai--tool-wire-name "old.tool")
+                     (plist-get (plist-get (cadr calls) :function) :name)))
+      (should (equal "old" (plist-get (cadr (plist-get body :messages)) :tool_call_id))))
+    (should (equal request before))
+    ;; Retrying or extending a history must not rename earlier tools.
+    (should (equal body (harness-openai--body harness-openai-test-endpoint "m" request)))
+    (let* ((alias (car wire))
+           (extra (list :tools (append (reverse tools) (list (list :name alias)))))
+           (map (harness-openai--tool-names extra)))
+      ;; A tool literally named like an alias lives at another wire name.
+      (should (equal "board.discuss" (cdr (assoc alias map))))
+      (should (equal alias (cdr (assoc (harness-openai--tool-wire-name alias) map))))
+      (should-not (equal alias (harness-openai--tool-wire-name alias))))))
+
+(ert-deftest harness-provider-openai-wire-tool-alias-collision-refuses-before-send ()
+  "Even a hash collision cannot cause dispatch to the wrong tool."
+  (harness-openai-test-with-fake nil
+    (cl-letf (((symbol-function 'secure-hash) (lambda (&rest _) (make-string 64 ?a))))
+      (should-error
+       (harness-openai--complete
+        harness-openai-test-endpoint
+        '(:model "testrouter:m" :tools ((:name "a.b") (:name "a b"))))
+       :type 'error)
+      (should-not harness-openai-test--requests))))
+
+(ert-deftest harness-provider-openai-wire-tool-alias-streams-back-to-original ()
+  "Fragmented function names and inputs are mapped back for tool dispatch."
+  (let ((wire (harness-openai--tool-wire-name "scene.edit")))
+    (harness-openai-test-with-fake
+        `(("chat/completions"
+           . (:chunks
+              (,(harness-openai-test--sse
+                 `(:choices ((:index 0 :delta (:tool_calls
+                                              ((:index 0 :id "call_alias" :type "function"
+                                                :function (:name ,(substring wire 0 20)
+                                                           :arguments "{\"x\":"))))
+                              :finish_reason nil)))
+                 `(:choices ((:index 0 :delta (:tool_calls
+                                              ((:index 0 :function (:name ,(substring wire 20)
+                                                                   :arguments "1}"))
+                                               (:index 1 :id "call_plain" :type "function"
+                                                :function (:name "scene_edit" :arguments "{}"))))
+                              :finish_reason "tool_calls")))
+                 "[DONE]")))))
+      (let* ((events (car (harness-openai-test--complete
+                          harness-openai-test-endpoint
+                          '(:model "testrouter:m" :tools ((:name "scene.edit") (:name "scene_edit"))
+                            :messages ((:role user :content "go"))))))
+             (calls (cl-remove-if-not (lambda (e) (eq (plist-get e :type) 'tool-call)) events)))
+        (should (equal '("scene.edit" "scene_edit") (mapcar (lambda (e) (plist-get e :name)) calls)))
+        (should (equal '(:x 1) (plist-get (car calls) :input)))
+        (should (equal "call_alias" (plist-get (car calls) :id)))
+        (should (eq 'tool-use (plist-get (car (last events)) :stop-reason)))))))
+
+(ert-deftest harness-provider-openai-wire-tool-alias-map-is-request-local ()
+  "Another request's map cannot reinterpret an unknown wire function."
+  (let* ((wire (harness-openai--tool-wire-name "scene.edit"))
+         (one (make-harness-openai--stream
+               :tool-names (harness-openai--tool-names '(:tools ((:name "scene.edit"))))))
+         (two (make-harness-openai--stream
+               :tool-names (harness-openai--tool-names '(:tools ((:name "scene.read")))))))
+    (should (equal "scene.edit" (harness-openai--stream-tool-name one wire)))
+    (should (equal wire (harness-openai--stream-tool-name two wire)))
+    (should (equal "unknown" (harness-openai--stream-tool-name one "unknown")))))
+
 (ert-deftest harness-provider-openai-tool-call-assembled-from-fragments ()
   (harness-openai-test-with-fake
       `(("chat/completions"

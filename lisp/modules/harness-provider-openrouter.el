@@ -51,7 +51,7 @@
 ;; The catalogue read is asynchronous, so the policy is read again
 ;; immediately before the body is built, and that reading -- not the one
 ;; the dispatch began with -- is the only one the request's fields come
-;; from (`harness-openrouter--sending').  A policy disabled, removed or
+;; from (the request's `:openrouter-policy').  A policy disabled, removed or
 ;; otherwise changed while a request was in flight refuses it with
 ;; `policy-changed'; the next request is prepared afresh under the policy
 ;; then in force.  Sending the old request would send under a policy the
@@ -384,9 +384,9 @@ bookkeeping for longer than `harness-openrouter-catalogue-ephemeral-wait'
 (defvar harness-openrouter--sending nil
   "The checked routing policy of the request being built, or nil.
 Bound around the transport call by `harness-openrouter--dispatch', after
-the policy was checked and its route put on the request, so the headers
-and the body of that one request describe the policy that authorised
-it.  Nothing a handler does meanwhile can change what it carries.")
+the policy was checked and snapshotted on the request.  Only the
+synchronous header builder reads this binding; asynchronous body and
+replay bookkeeping read the request-local snapshot instead.")
 
 (harness-declare-event 'openrouter/route-selected
                        "(SESSION-ID ROUTE) when a session is pinned to an endpoint.")
@@ -1924,15 +1924,27 @@ the dialect is this module's whatever that entry says."
         ;; account's own.  Read from the failure's fields, never assumed.
         :limit-scope #'harness-openrouter--limit-scope))
 
+(defun harness-openrouter--copy-authority (value)
+  "Copy policy or pin VALUE for one send, including mutable strings.
+The request treats the result as immutable: later configuration edits
+must not change what asynchronous replay and audit callbacks describe."
+  (cond ((consp value)
+         (cons (harness-openrouter--copy-authority (car value))
+               (harness-openrouter--copy-authority (cdr value))))
+        ((stringp value) (copy-sequence value))
+        ((vectorp value) (vconcat (mapcar #'harness-openrouter--copy-authority value)))
+        (t value)))
+
 (defun harness-openrouter--authorising-policy (request)
   "Return the policy a routed REQUEST was authorised with, or nil.
-That is the policy `harness-openrouter--dispatch' checked and bound in
-`harness-openrouter--sending', never the configured variable: the body
-and headers of a request must describe the policy that permitted it,
-even if the variable is edited afterwards.  A request the dispatch did
-not mark with a route is not routed, and has no authorising policy."
+That is the request-local snapshot `harness-openrouter--dispatch'
+checked, never the configured variable or its short-lived dynamic
+binding.  Replay bookkeeping rebuilds the body when response headers
+arrive, after dispatch returned.  It must describe the policy that
+permitted the send even if configuration changed meanwhile.  A request
+the dispatch did not mark with a route has no authorising policy."
   (and (plist-get request :openrouter-route)
-       harness-openrouter--sending))
+       (plist-get request :openrouter-policy)))
 
 (defun harness-openrouter--headers (_endpoint _key)
   "Return the OpenRouter-specific headers of a request.
@@ -1984,9 +1996,8 @@ pin records what the pinned endpoint said when it was chosen
 with no pin, and an endpoint that said nothing, send no schema: a field
 the endpoint refuses would fail the call the schema was for.  Without a
 policy there is no pin to ask, and none is sent either."
-  (when (and (harness-openrouter-routing-enabled-p harness-openrouter-routing)
-             (let ((route (or (plist-get request :openrouter-route)
-                              (harness-openrouter--route-of (plist-get request :session)))))
+  (when (and (harness-openrouter--authorising-policy request)
+             (let ((route (plist-get request :openrouter-route)))
                (and (listp route)
                     (harness-json-true-p (plist-get route :structured-outputs)))))
     (list :type "json_schema"
@@ -2003,7 +2014,7 @@ pinned route is never sent (`harness-openrouter--complete'); this
 function only describes one that is.
 
 The policy read here is the one `harness-openrouter--dispatch' checked
-and bound in `harness-openrouter--sending', not the configured one: the
+and saved as `:openrouter-policy', not the configured one: the
 body of a request must describe the policy that authorised it, even if
 the variable is edited between the check and the body being built.  A
 routed request -- one the dispatch marked with `:openrouter-route' --
@@ -2722,8 +2733,9 @@ before the body is built.  So a policy disabled, removed, made invalid
 or pointed at another model while the catalogue was in flight refuses
 the request instead of sending it under a weakened one.  The checked
 policy is the only one the body, its restriction fields and its
-headers are built from: `harness-openrouter--sending' carries it, and
-`harness-openrouter--body-extra' reads that, never the variable.
+headers are built from: a request-local snapshot carries it for the
+body and later replay bookkeeping; `harness-openrouter--sending' binds
+that snapshot only while the synchronous headers are built.
 
 The send is counted here, where it happens, and only after every check
 passed: the shared retry layer counts what this policy authorised, so
@@ -2743,7 +2755,7 @@ new one prepared under whatever policy is in force by then.
 What a request asks a model to write is not decided here: its own
 `:max-tokens' is its own, and a ceiling on it belongs to the request
 layer (`harness-provider-max-output-tokens'), not to a routing policy."
-  (let* ((route (plist-get snapshot :route))
+  (let* ((route (harness-openrouter--copy-authority (plist-get snapshot :route)))
          (session (plist-get request :session))
          (session-id (plist-get session :id))
          (in-force harness-openrouter-routing)
@@ -2757,7 +2769,9 @@ layer (`harness-provider-max-output-tokens'), not to a routing policy."
          ;; request every other check allowed takes a send from the count.
          (sent (harness-retry-send request))
          (refusal (or earlier (plist-get sent :refusal)))
-         (policy in-force))
+         ;; This attempt owns its policy and pin.  Neither a later config
+         ;; edit nor another attempt may rewrite what its callbacks keep.
+         (policy (harness-openrouter--copy-authority in-force)))
     (if refusal
         (progn
           (harness-openrouter--refuse session-id on-event refusal)
@@ -2772,7 +2786,8 @@ layer (`harness-provider-max-output-tokens'), not to a routing policy."
                        counted (list :policy policy :route route))))
         (harness-openai--complete
          (harness-openrouter--endpoint)
-         (plist-put counted :openrouter-route route))))))
+         (plist-put (plist-put (copy-sequence counted) :openrouter-route route)
+                    :openrouter-policy policy))))))
 
 (defun harness-openrouter--complete (request)
   "Send REQUEST to the session's pinned endpoint, or refuse to send it.

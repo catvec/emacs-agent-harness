@@ -521,12 +521,13 @@ live API produced on 2026-11-12."
 (defun harness-openrouter-test--routed-body (policy route request)
   "Return REQUEST's wire body as `harness-openrouter--dispatch' would send it.
 POLICY is the checked policy and ROUTE the pinned one; both are what the
-dispatch binds around the transport, so the body is built exactly as it
+dispatch snapshots on the request, so the body is built exactly as it
 is for a request that left the dispatch."
   (let ((harness-openrouter--sending policy))
     (harness-openai--body
      (harness-openrouter--endpoint) harness-openrouter-test-model
-     (plist-put (copy-sequence request) :openrouter-route route))))
+     (plist-put (plist-put (copy-sequence request) :openrouter-route route)
+                :openrouter-policy (copy-tree policy)))))
 
 (defun harness-openrouter-test--request (&optional session)
   "Return a request for the policy's model in SESSION."
