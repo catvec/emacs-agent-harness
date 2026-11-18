@@ -234,8 +234,16 @@ Future<void> main() async {
 
     if (shots != null) {
       await _write(tester, fromTask.top, path('report-from-task'));
-      await _write(tester, fromTask.evidence, path('report-from-task-evidence'));
-      await _write(tester, fromTask.more, path('report-from-task-evidence-more'));
+      await _write(
+        tester,
+        fromTask.evidence,
+        path('report-from-task-evidence'),
+      );
+      await _write(
+        tester,
+        fromTask.more,
+        path('report-from-task-evidence-more'),
+      );
       await _write(tester, fromTask.end, path('report-from-task-end'));
       await _write(tester, session.top, path('report-from-session'));
       await _write(
@@ -251,8 +259,7 @@ Future<void> main() async {
       await _write(tester, session.end, path('report-from-session-end'));
       await _write(tester, card, path('report-session-card'));
       const taskWay = 'Tasks > the task > View report';
-      const sessionWay =
-          'Sessions > the task\'s session > hand-in > Full view';
+      const sessionWay = 'Sessions > the task\'s session > hand-in > Full view';
       Future<void> both(String name, ui.Image left, ui.Image right) async {
         await _write(
           tester,
@@ -299,6 +306,27 @@ Future<void> main() async {
         tester,
         await _picture(tester, frame),
         path('report-screenshot-gone'),
+      );
+    }
+  });
+
+  testWidgets('draws the report kept from before the design and the demo went', (
+    tester,
+  ) async {
+    // The record keeps its design, its walkthrough and its demo item; the page
+    // draws the problem, the summary and the evidence, and none of them.
+    final frame = await open(tester, seed: seedOldReportTask);
+    await viewReport(tester, oldReportTaskName);
+    await settle(tester, 6);
+    expectWhole(tester);
+    expect(find.text('DESIGN'), findsNothing);
+    expect(find.text('NARRATION'), findsNothing);
+    expect(find.text('Walkthrough'), findsNothing);
+    if (shots != null) {
+      await _write(
+        tester,
+        await _picture(tester, frame),
+        path('report-old-record'),
       );
     }
   });
