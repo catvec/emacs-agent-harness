@@ -170,7 +170,7 @@ The `(harness-enable-modules ...)` function helps enable and load modules of you
 
 See [`docs/modules/README.md`](./docs/modules/README.md) for a full list of modules by category.
 
-You can set the `harness-enabled-modules` variable to `t` in order to load all modules distributed with the harness, except the modules off by default: `demo`, which runs a hand-in's demo and opens the walkthrough presenter, `supervisor`, and `otel`, which exports turns, model requests and tool calls to an OpenTelemetry collector. They load when `harness-enable-modules` names them, or when you take them off `harness-off-by-default-modules`.
+You can set the `harness-enabled-modules` variable to `t` in order to load all modules distributed with the harness, except the modules off by default: `supervisor` and `otel`, which exports turns, model requests and tool calls to an OpenTelemetry collector. They load when `harness-enable-modules` names them, or when you take them off `harness-off-by-default-modules`.
 
 A non-comprehensive list of all the different functionality offered by modules shipped with the harness:
 

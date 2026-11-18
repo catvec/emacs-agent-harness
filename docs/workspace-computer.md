@@ -3,8 +3,8 @@
 Design note, November 2026.  The workspace's computer is no longer a
 drawn preview: it is a private X display and a real RFB server on this
 machine, with its own home, browser profile and window manager.  A
-command in it changes the pixels a screenshot returns, `present_demo`
-can click and type on it, and the Flutter client draws the same RFB
+command in it changes the pixels a screenshot returns, the computer
+tools can click and type on it, and the Flutter client draws the same RFB
 stream a browser's noVNC page does.  When the tools are missing, the
 computer says `Computer off` and names what is missing; it never draws
 a desk that cannot be touched.

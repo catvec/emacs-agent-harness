@@ -4,7 +4,6 @@ import '../acp/acp_client.dart';
 import '../acp/acp_message.dart';
 import '../acp/capabilities.dart';
 import '../models/computer.dart';
-import '../models/demo_session.dart';
 import '../models/memory.dart';
 import '../models/workspace_graph.dart';
 import '../models/picture.dart';
@@ -819,42 +818,6 @@ class HarnessApi {
           HarnessModule.fromWire(item),
     ];
   }
-
-  /// Start the demo [demo] of [session]'s report, and hear what became of it:
-  /// a run that is [DemoSession.isRunning] may be watched on its screen.
-  ///
-  /// [placement] asks for a workspace checkout on the harness's machine, or
-  /// for the machine itself; [workspace] names the workspace when more than
-  /// one is open.
-  Future<DemoSession> startDemo({
-    required String session,
-    required String demo,
-    String? placement,
-    String? workspace,
-  }) async => DemoSession.fromWire(
-    await extension('demo/start', {
-      'session': session,
-      'demo': demo,
-      if (placement != null) 'placement': placement,
-      if (workspace != null) 'workspace': workspace,
-    }),
-  );
-
-  /// What became of the run [run], as the harness knows it now.
-  Future<DemoSession> demoStatus(String run) async =>
-      DemoSession.fromWire(await extension('demo/status', {'run': run}));
-
-  /// Stop the run [run].  It is idempotent: a run that is already stopped is
-  /// stopped again.
-  Future<DemoSession> stopDemo(String run) async =>
-      DemoSession.fromWire(await extension('demo/stop', {'run': run}));
-
-  /// Give the run [run] to `user` or to `agent`, and hear what its screen
-  /// says now.
-  Future<DemoSession> demoControl(String run, String control) async =>
-      DemoSession.fromWire(
-        await extension('demo/control', {'run': run, 'control': control}),
-      );
 
   Future<JsonMap> configDescribe(String cwd) =>
       extension('config/describe', {'cwd': cwd});

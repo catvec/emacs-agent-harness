@@ -101,7 +101,6 @@ class FakeHarness {
     this.resources = false,
     this.computers = false,
     this.resourcesCredentialsOnly = false,
-    this.demo = true,
     List<Map<String, Object?>>? availableModes,
     this.failSetMode = false,
     Set<String>? knownSecrets,
@@ -232,7 +231,6 @@ class FakeHarness {
         'harness/modules',
         'config/describe',
         if (toolCatalogue) 'tools/list',
-        if (demo) ...['demo/start', 'demo/status', 'demo/stop', 'demo/control'],
       });
       events.addAll({
         'session/created',
@@ -369,78 +367,12 @@ class FakeHarness {
   /// not: the credentials are real metadata, the other sections are empty.
   final bool resourcesCredentialsOnly;
 
-  /// Whether the harness runs the demos a report hands in (`demo/start`,
-  /// `demo/status`, `demo/stop`, `demo/control`).  An older harness does not,
-  /// and a report page then offers no *Start demo*.
-  final bool demo;
-
   /// The modes `session/new`, `session/load` and `session/set_mode` speak.
   /// A plain agent may offer other ones ([_defaultModes] otherwise).
   final List<Map<String, Object?>> availableModes;
 
   /// Refuse `session/set_mode` as an agent that does not take the mode does.
   final bool failSetMode;
-
-  /// The answers `demo/start` gives, in order: each is one start's answer,
-  /// and the last repeats.  A test sets the state, the screen and the
-  /// presenter it needs the run to have.  A start that names no run is
-  /// `run-1`, `run-2`, ...
-  List<Map<String, Object?>> demoAnswers = [
-    {
-      'state': 'running',
-      'task': 'task-handed-in',
-      'demo': 'demo-1',
-      'title': 'A spinning top',
-      'placement': 'workspace',
-      'workspace': 'w-kitchen',
-      'workspace-name': 'Kitchen',
-      'commit': 'abc1234',
-      'commit-verified': true,
-      'artifact': {
-        'name': 'demo/index.html',
-        'cwd': 'demo',
-        'command': ['python3', 'serve.py'],
-      },
-      'launch': {
-        'command': ['python3', 'serve.py'],
-        'cwd': 'demo',
-        'box-cwd': '/home/box/work/demo',
-      },
-      'vnc': {
-        'url': 'http://127.0.0.1:6080/vnc.html',
-        'socket': 'ws://127.0.0.1:5901/websockify',
-        'state': 'agent',
-        'available': true,
-        'reason': null,
-      },
-      'control': 'agent',
-      'presenter': {'session': 's-demo', 'name': 'demo: A spinning top'},
-    },
-  ];
-
-  /// What `demo/status` adds to a run's answer; null for an unchanged run.
-  Map<String, Object?>? demoStatusAnswer;
-
-  /// Whether the run `demo/status` is asked about is gone: stopped, with no
-  /// screen.
-  bool demoGone = false;
-
-  /// Make one of the demo methods fail, with these words.
-  String? failDemoStart;
-  String? failDemoStop;
-  String? failDemoControl;
-
-  /// The runs the harness started, by id, as the last thing it said of each.
-  final Map<String, Map<String, Object?>> demoRuns = {};
-  int _demoStarts = 0;
-
-  /// A start waits for this before it answers, as a harness that is slow to
-  /// start the computer does: a second tap can be made while it waits.
-  Future<void>? demoStartGate;
-
-  /// A stop waits for this before it answers, as a harness that is slow to
-  /// stop the computer does.
-  Future<void>? demoStopGate;
 
   /// The picture files of the harness's machine it can read, by path.  A
   /// path that is not here is a file that is gone, as a finished task's
@@ -2183,95 +2115,6 @@ class FakeHarness {
           'mime': 'image/svg+xml',
           'data': base64Encode(utf8.encode(_sampleSvg)),
         });
-        return;
-      }
-      if (method == '_harness/demo/start') {
-        if (failDemoStart != null) {
-          _respondError(id, -32603, failDemoStart!);
-          return;
-        }
-        if (demoStartGate != null) await demoStartGate;
-        final template = demoAnswers.isEmpty
-            ? <String, Object?>{'state': 'running'}
-            : (demoAnswers.length > 1
-                  ? demoAnswers.removeAt(0)
-                  : demoAnswers.first);
-        final run = asString(template['run']) ?? 'run-${++_demoStarts}';
-        final answer = <String, Object?>{
-          ...template,
-          'run': run,
-          'demo': asString(params['demo']) ?? template['demo'] ?? 'demo-1',
-          'state': asString(template['state']) ?? 'running',
-        };
-        demoRuns[run] = answer;
-        _respond(id, answer);
-        return;
-      }
-      if (method == '_harness/demo/status') {
-        final run = asString(params['run']);
-        final base = demoRuns[run];
-        if (base == null) {
-          _respond(id, {
-            'state': 'missing',
-            'reason': {'code': 'no-demo', 'text': 'no such demo run'},
-            'run': run,
-            'stopped': true,
-          });
-          return;
-        }
-        if (demoGone) {
-          final gone = <String, Object?>{
-            ...base,
-            ...?demoStatusAnswer,
-            'state': 'stopped',
-            'stopped': true,
-            'vnc': null,
-          };
-          if (run != null) demoRuns[run] = gone;
-          _respond(id, gone);
-          return;
-        }
-        final answer = <String, Object?>{...base, ...?demoStatusAnswer};
-        if (run != null) demoRuns[run] = answer;
-        _respond(id, answer);
-        return;
-      }
-      if (method == '_harness/demo/stop') {
-        if (failDemoStop != null) {
-          _respondError(id, -32603, failDemoStop!);
-          return;
-        }
-        if (demoStopGate != null) await demoStopGate;
-        final run = asString(params['run']);
-        final stopped = <String, Object?>{
-          ...?demoRuns[run],
-          'run': run,
-          'state': 'stopped',
-          'stopped': true,
-          'vnc': null,
-          'control': 'agent',
-        };
-        if (run != null) demoRuns[run] = stopped;
-        _respond(id, stopped);
-        return;
-      }
-      if (method == '_harness/demo/control') {
-        if (failDemoControl != null) {
-          _respondError(id, -32603, failDemoControl!);
-          return;
-        }
-        final run = asString(params['run']);
-        final control = asString(params['control']) ?? 'agent';
-        final base = demoRuns[run];
-        final answer = <String, Object?>{
-          'run': run,
-          'control': control,
-          'state': base?['state'] ?? 'running',
-          'vnc': base?['vnc'],
-          'reason': null,
-        };
-        if (run != null) demoRuns[run] = {...?base, ...answer};
-        _respond(id, answer);
         return;
       }
       if (method == '_harness/computer/list') {

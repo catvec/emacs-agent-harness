@@ -31,7 +31,7 @@
 ;;    :tools web)
 ;;
 ;; (`harness-enabled-modules' t loads every module but the off-by-default
-;; ones, `harness-off-by-default-modules': demo and supervisor.  A name
+;; ones, `harness-off-by-default-modules': supervisor and otel.  A name
 ;; in `harness-enabled-modules' loads one of those all the same.)  A
 ;; module brings the modules it requires along, and its other half:
 ;; ui-tasks, the task board, with tasks.  M-x harness-enable-module
@@ -175,15 +175,15 @@ each task's worktree back with merge, leaves it to be enabled too.
 `harness-enable-modules' sets this from a list grouped as in Doom
 Emacs's init.el, and \\[harness-enable-module] enables one module now.
 nil, the default, loads only the core; t loads every module except the
-off-by-default ones (`harness-off-by-default-modules': demo and
-supervisor out of the box), which a list naming them loads all the
+off-by-default ones (`harness-off-by-default-modules': supervisor and
+otel out of the box), which a list naming them loads all the
 same.  The harness process reads this when it starts, so after changing
 it run \\[harness-restart]."
   :type '(choice (const :tag "Every module but the off-by-default ones" t)
                  (repeat :tag "These, besides the core" symbol))
   :group 'harness)
 
-(defcustom harness-off-by-default-modules '(demo supervisor otel)
+(defcustom harness-off-by-default-modules '(supervisor otel)
   "Modules `harness-enabled-modules' t leaves out: they load only when named.
 A module here does not load merely because every module is asked for.
 It loads when `harness-enabled-modules' names it, when a module that
@@ -192,10 +192,8 @@ loads requires it or is its other half, and when
 `harness-enabled-modules' is explicit and loads an off-by-default
 module it names.
 
-The `demo' module runs a hand-in's demo on its workspace computer and
-opens the presenter that walks the reviewer through it, and
-`supervisor' makes sessions plan and delegate.  Neither is what a
-harness should do unasked, so both ship here.  `otel' exports what
+`supervisor' makes sessions plan and delegate, which is not what a
+harness should do unasked, so it ships here.  `otel' exports what
 sessions do to an OpenTelemetry collector of the user's; it is off
 unless its own switch and endpoint both say otherwise, but loading it
 at all is something to ask for, so it ships here too.  Set this to nil

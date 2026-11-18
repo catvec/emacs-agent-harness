@@ -1547,9 +1547,9 @@ with its UI half, and taking its two modules out leaves readonly in."
          (harness-module-directories '("lisp/modules" "lisp/ui"))
          (files (harness--module-files)))
     (should-not harness-disabled-modules)
-    (should (equal '(demo supervisor otel) harness-off-by-default-modules))
-    (dolist (file '("lisp/modules/harness-demo.el"
-                    "lisp/modules/harness-supervisor.el" "lisp/ui/harness-ui-supervisor.el"))
+    (should (equal '(supervisor otel) harness-off-by-default-modules))
+    (dolist (file '("lisp/modules/harness-supervisor.el"
+                    "lisp/ui/harness-ui-supervisor.el"))
       (should-not (member (harness--path file) files)))
     (dolist (file '("lisp/modules/harness-readonly.el" "lisp/modules/harness-tasks.el"))
       (should (member (harness--path file) files)))
@@ -1557,9 +1557,6 @@ with its UI half, and taking its two modules out leaves readonly in."
       (let ((files (harness--module-files)))
         (should (member (harness--path "lisp/modules/harness-supervisor.el") files))
         (should (member (harness--path "lisp/ui/harness-ui-supervisor.el") files))))
-    (let ((harness-enabled-modules '(demo)))
-      (let ((files (harness--module-files)))
-        (should (member (harness--path "lisp/modules/harness-demo.el") files))))
     (let ((harness-disabled-modules '(supervisor ui-supervisor)))
       (let ((files (harness--module-files)))
         (should-not (member (harness--path "lisp/modules/harness-supervisor.el") files))
@@ -2050,23 +2047,19 @@ every module; one `t' loads already is still refused."
     (should-error (harness-enable-module 'feat) :type 'user-error)
     (harness-stop)))
 
-(ert-deftest harness-loader-ships-demo-and-supervisor-off-by-default ()
-  "The demo and walkthrough module and supervisor mode load only when named.
+(ert-deftest harness-loader-ships-supervisor-off-by-default ()
+  "Supervisor mode loads only when named.
 `harness-enabled-modules' t, the setting that asks for every module,
-leaves both out, with the UI half of supervisor; a list naming one
-loads it, with what it requires and its UI half."
+leaves it out, with its UI half; a list naming one loads it, with what
+it requires and its UI half."
   (let* ((sources (harness--module-sources))
          (harness-enabled-modules t)
          (harness-disabled-modules nil))
-    (should (equal '(demo supervisor otel) harness-off-by-default-modules))
-    (should (harness-module-off-by-default-p 'demo))
+    (should (equal '(supervisor otel) harness-off-by-default-modules))
     (should (harness-module-off-by-default-p 'supervisor))
     (should (harness-module-off-by-default-p 'ui-supervisor))
-    (should-not (memq 'demo (harness--selected-modules sources)))
     (should-not (memq 'supervisor (harness--selected-modules sources)))
     (should-not (memq 'ui-supervisor (harness--selected-modules sources)))
-    (let ((harness-enabled-modules '(demo)))
-      (should (memq 'demo (harness--selected-modules sources))))
     (let ((harness-enabled-modules '(supervisor)))
       (should (memq 'supervisor (harness--selected-modules sources)))
       (should (memq 'ui-supervisor (harness--selected-modules sources))))
@@ -2074,7 +2067,6 @@ loads it, with what it requires and its UI half."
       (should (memq 'supervisor (harness--selected-modules sources))))
     ;; Setting the list to nil makes t load everything again.
     (let ((harness-off-by-default-modules nil))
-      (should (memq 'demo (harness--selected-modules sources)))
       (should (memq 'supervisor (harness--selected-modules sources))))))
 
 ;;;; Vendored libraries
