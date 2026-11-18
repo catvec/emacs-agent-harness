@@ -11263,6 +11263,40 @@ recaps (`harness-recap--on-turn-started'), so a chat never shows them
 above the new turn's line; a task's are kept, as its card keeps its
 recap.
 
+What a recap says is the work since the previous one, not the
+assignment.  The request (`harness-recap--prompt') puts the assignment
+first, labelled as context the recap must not restate, then the recap
+in hand (`Previous recap: ...`), then the counts since it was made
+(`Since the previous recap: 2 turns, 9 tool calls`), the todos, the
+item in hand and what the session waits on (`The work waits on the
+engineer: permission for Bash`), and then the work itself: the
+transcript from the node the recap in hand was made at, as lines of what
+the agent wrote, asked and got back (`harness-recap--entry'), each tool
+result cut to `harness-recap--result-chars', the newest that fit
+`harness-tasks-recap-context` with a first line saying how many were
+left out (`harness-recap--work`).  The task record keeps that node as
+`:recap-node` beside `:recap-turns` and `:recap-tools`
+(`task/set-recap`), and the per-session record keeps it too.  With no
+recap in hand there is no node to start from, so the request carries the
+newest work and the counts of the session so far (`Work so far: ...`).
+
+That makes a recap concrete and keeps it from repeating itself.  The
+registry's `recap-system` says so in words -- report what happened
+since the previous recap, name the file, function, test, command and
+result, do not restate the task, the plan or the previous recap, do not
+claim work the transcript does not show, and answer `UNCHANGED` when
+nothing has changed -- and the module holds to it in code.  A task whose
+transcript has not grown since its recap is not asked again whatever
+the thresholds say (`harness-recap--idle-p`), though a forced one -- a
+turn that ended blocked or on an error -- still is, since the blocker is
+news.  An answer of `UNCHANGED`, or a line that only says again the
+task's first line or the recap in hand
+(`harness-recap--repeats-p`), leaves the recap in hand in place: the
+counters and `:recap-node` move on, no `recap/done` is said, and no
+duplicate goes into the history.  A recap that does move the work on is
+stored and said as it always was, and the next request starts where it
+left off.
+
 A `bash' command still running notes itself under the call from the
 start and then at most every `harness-tools-shell--note-interval'
 (0.25 s) as its output arrives: "still running · 12 lines so far", and

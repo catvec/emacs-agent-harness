@@ -3,22 +3,39 @@
 ;;; Commentary:
 
 ;; A task's card shows a recap under its title: a short sentence, from a
-;; model call, saying what the task is doing or has done so far (the
-;; card's subtitle; see `harness-ui-tasks').  The board keeps it folded
-;; away except where it matters most, on a task that needs your input.
+;; model call, saying what the work is doing (the card's subtitle; see
+;; `harness-ui-tasks').  The board keeps it folded away except where it
+;; matters most, on a task that needs your input.
+;;
+;; A recap reports the work since the previous one, not the assignment:
+;; a line that restates the task is what you can already read in its
+;; title.  The request labels the assignment for context, carries the
+;; recap in hand and the counts since it was made, and carries the
+;; transcript from the node that recap was made at (`:recap-node'), so
+;; the model reads what changed -- what the agent did, found, decided,
+;; what a check showed, what blocks the work now -- and nothing it has
+;; already told of.  Its system prompt says so, and asks for UNCHANGED
+;; when nothing has happened; a line that only repeats the task or the
+;; recap in hand is read the same way.  Either way the recap in hand
+;; stays, with the counters and the anchor moved on: no accomplishment
+;; is made up, and no duplicate goes into the history.
 ;;
 ;; The recap is refreshed when the task has moved on enough: after
 ;; `harness-tasks-recap-turns' turns, `harness-tasks-recap-seconds'
 ;; seconds or `harness-tasks-recap-tool-calls' tool calls since the last
-;; one, whichever comes first, like a warranty's months or miles.  The
-;; counters and the time it was made are kept on the task record
-;; (`:recap', `:recap-at', `:recap-turns', `:recap-tools'), so a reload
-;; needs no history and the board shows the recap after a restart.
+;; one, whichever comes first, like a warranty's months or miles.  A
+;; task whose transcript has not grown since its recap is not asked
+;; again, whatever the thresholds say; a turn that stopped for the user
+;; still is, since the blocker is news.  The counters, the time it was
+;; made and the node it was made at are kept on the task record
+;; (`:recap', `:recap-at', `:recap-turns', `:recap-tools', `:recap-node'),
+;; so a reload needs no history and the board shows the recap after a
+;; restart.
 ;;
 ;; Unlike naming (`harness-naming'), the request is self-contained: the
-;; task, its plan and todos, and the tail of its transcript, not the
-;; whole conversation.  That keeps it short, and it lets the request go
-;; to the provider's simple tier (`harness-tasks-recap-model' `auto'),
+;; assignment, the todos, the recap in hand and the work since it, not
+;; the whole conversation.  That keeps it short, and it lets the request
+;; go to the provider's simple tier (`harness-tasks-recap-model' `auto'),
 ;; which a fork of the session's own provider state could not.
 ;;
 ;; Checks run when a turn ends, after a tool result, and every
@@ -163,87 +180,179 @@ since the task's last recap, or since it started when it has none."
 
 (defconst harness-recap--result-chars 400
   "Most characters of one tool result a recap reads.
-A result can be a whole file or a test log, and the tail the request
-carries is cut to `harness-tasks-recap-context': cut first, a result
-takes a tenth of that budget rather than all of it, and the messages
-and calls around it -- which say what the work is doing -- fit in the
-rest.")
+A result can be a whole file or a test log, and the work a request
+carries is cut to `harness-tasks-recap-context': a result takes a tenth
+of that budget rather than all of it, so the calls and messages around
+it -- which say what the work is doing -- fit in the rest.")
 
-(defun harness-recap--compact (text)
-  "Return TEXT with each tool result cut to `harness-recap--result-chars'.
-A result begins with \"[result] \" and runs to the next line that starts
-an entry; its own lines are cut to that budget in all.  Everything else
-is kept as it is."
-  (let ((in-result nil) (kept 0) (out nil))
-    (dolist (line (split-string text "\n"))
+(defun harness-recap--clip (text max)
+  "Return TEXT on one line, cut to MAX characters."
+  (harness-truncate-end
+   (string-trim (replace-regexp-in-string "[ \t\r\n]+" " " (or text "")))
+   max))
+
+(defun harness-recap--entry (node)
+  "Return NODE of a transcript as a line of what happened, or nil.
+Thinking, hints and calls the harness recorded for the session show
+nothing: a recap is of the work, not of the harness's own bookkeeping."
+  (unless (harness-outside-node-p node)
+    (pcase (format "%s" (plist-get node :kind))
+      ("user" (unless (harness-node-handoff node)
+                (when-let* ((text (plist-get node :content)))
+                  (unless (harness-string-blank-p text)
+                    (format "[%s] %s"
+                            (if (harness-node-sender node) "message" "engineer")
+                            (harness-recap--clip text 600))))))
+      ("assistant" (when-let* ((text (plist-get node :content)))
+                     (unless (harness-string-blank-p text)
+                       (format "[agent] %s" (harness-recap--clip text 700)))))
+      ;; The reasoning behind a decision is not the work, and it is long.
+      ("thinking" nil)
+      ("tool-call" (format "[tool %s] %s" (plist-get node :tool)
+                           (harness-recap--clip (or (plist-get node :title) "") 160)))
+      ("tool-result" (harness-truncate-end
+                      (format "[%s] %s" (if (plist-get node :is-error) "failed" "result")
+                              (harness-recap--clip (plist-get node :output)
+                                                   harness-recap--result-chars))
+                      harness-recap--result-chars))
+      ("plan" (format "[plan] %s" (harness-recap--clip (plist-get node :content) 400)))
+      ("compaction" (format "[work before, summarised] %s"
+                            (harness-recap--clip (plist-get node :content) 700))))))
+
+(defun harness-recap--work (nodes anchor)
+  "Return what happened in NODES after ANCHOR, as lines, oldest first.
+NODES is a session's transcript, oldest first.  Without ANCHOR, or when
+it is not there, it is all of it.  Only what fits
+`harness-tasks-recap-context' is kept, the newest; a first line says how
+many entries were left out before it.  The anchor is the node the last
+recap was made at, so a recap reads what happened since, not the work
+the previous one already told of."
+  (let* ((from (and anchor
+                    (cl-member anchor nodes :key (lambda (n) (plist-get n :id))
+                               :test #'equal)))
+         ;; An anchor that is the last node leaves nothing after it.
+         (tail (if from (cdr from) nodes))
+         (entries (delq nil (mapcar #'harness-recap--entry tail)))
+         (limit (or harness-tasks-recap-context 3000))
+         (kept nil) (size 0) (left 0))
+    (dolist (entry (reverse entries))
       (cond
-       ((string-match-p "\\`\\[[a-z]" line)
-        (setq in-result (string-prefix-p "[result] " line) kept 0)
-        (let ((cut (if in-result
-                       (harness-truncate-end line harness-recap--result-chars)
-                     line)))
-          (when in-result (cl-incf kept (length cut)))
-          (push cut out)))
-       (in-result
-        (let ((room (- harness-recap--result-chars kept)))
-          (when (> room 0)
-            (let ((cut (harness-truncate-end line room)))
-              (push cut out)
-              (cl-incf kept (length cut))))))
-       (t (push line out))))
-    (mapconcat #'identity (nreverse out) "\n")))
+       ((null kept)
+        (push entry kept)
+        (cl-incf size (length entry)))
+       ((or (<= limit 0) (<= (+ size 1 (length entry)) limit))
+        (push entry kept)
+        (cl-incf size (1+ (length entry))))
+       (t (cl-incf left))))
+    (concat (if (> left 0) (format "[%d earlier entries left out]\n" left) "")
+            (string-join kept "\n"))))
 
-(defun harness-recap--tail (session-id)
-  "Return the tail of SESSION-ID's transcript, as long as a recap may carry.
-Each tool result is cut short first (`harness-recap--compact'), so the
-budget holds the messages and calls that say what the work is doing,
-and the cut starts at a line boundary when one is within a result's
-worth of characters (`harness-recap--result-chars')."
-  (let* ((text (harness-recap--compact
-                (or (ignore-errors (harness-call 'session/transcript-text session-id)) "")))
-         (limit (or harness-tasks-recap-context 3000)))
-    (if (or (<= limit 0) (<= (length text) limit))
-        text
-      (let* ((tail (substring text (- (length text) limit)))
-             (newline (string-match "\n" tail)))
-        (concat "…" (if (and newline (< newline harness-recap--result-chars))
-                        (substring tail (1+ newline))
-                      tail))))))
+(defun harness-recap--previous (task)
+  "Return the recap TASK carries, the line in hand, or nil."
+  (let ((text (plist-get task :recap)))
+    (and (stringp text) (not (harness-string-blank-p text)) text)))
+
+(defun harness-recap--words (text)
+  "Return TEXT as its words, lower case, punctuation and spacing aside."
+  (downcase (string-trim (replace-regexp-in-string "[^[:alnum:]]+" " " (or text "")))))
+
+(defun harness-recap--repeats-p (text task)
+  "Non-nil when TEXT, a recap, says what TASK already says.
+That is the recap in hand, word for word, or the first line of the
+assignment: a recap that only restates the task is no progress, and
+storing it would make one out of nothing."
+  (let ((words (harness-recap--words text)))
+    (and (not (string-empty-p words))
+         (or (equal words (harness-recap--words (plist-get task :recap)))
+             (equal words (harness-recap--words
+                           (harness-first-line (or (plist-get task :prompt) ""))))))))
+
+(defun harness-recap--read (text)
+  "Return what the model's answer TEXT says: a recap line, `unchanged', or nil.
+`unchanged' is the word UNCHANGED alone, which the system prompt asks for
+when nothing has happened since the previous recap."
+  (if (equal "unchanged" (harness-recap--words (harness-first-line (or text ""))))
+      'unchanged
+    (harness-recap-sanitise text)))
+
+(defun harness-recap--waiting (session)
+  "Return the line saying what SESSION waits on, or nil.
+A turn that stopped for the user is the blocker a recap reports."
+  (when-let* ((pending (plist-get session :pending)))
+    (concat "The work waits on the engineer: "
+            (mapconcat
+             (lambda (p)
+               (let ((payload (plist-get p :payload)))
+                 (pcase (intern (format "%s" (plist-get p :kind)))
+                   ('question
+                    (format "question: %s"
+                            (harness-recap--clip (or (plist-get payload :question) "") 200)))
+                   ('permission
+                    (format "permission for %s"
+                            (harness-recap--clip (or (plist-get payload :tool)
+                                                     (plist-get payload :title) "a tool")
+                                                 120)))
+                   (kind (format "%s" kind)))))
+             (append pending nil)
+             "; "))))
 
 (defun harness-recap--progress (task session)
   "Return the progress line of a recap request for TASK and SESSION.
 TASK may carry its own, `:progress': a chat's, which says how long the
 turn it recaps has run, not how many turns and tool calls the whole
-session holds."
+session holds.  When TASK carries a recap, the counts are those since it
+was made: what the recap reports is the work after it."
   (or (plist-get task :progress)
       (let* ((counts (harness-recap--counts session))
              (turns (car counts))
-             (tools (cadr counts)))
-        (format "Progress: %d turns, %d %s" turns tools
-                (if (= tools 1) "tool call" "tool calls")))))
+             (tools (cadr counts))
+             (previous (harness-recap--previous task)))
+        (if previous
+            (let ((since-turns (max 0 (- turns (or (plist-get task :recap-turns) 0))))
+                  (since-tools (max 0 (- tools (or (plist-get task :recap-tools) 0)))))
+              (format "Since the previous recap: %d %s, %d %s"
+                      since-turns (if (= since-turns 1) "turn" "turns")
+                      since-tools (if (= since-tools 1) "tool call" "tool calls")))
+          (format "Work so far: %d %s, %d %s"
+                  turns (if (= turns 1) "turn" "turns")
+                  tools (if (= tools 1) "tool call" "tool calls"))))))
 
 (defun harness-recap--prompt (task session &optional model)
   "Return the user text of a recap request for TASK and SESSION.
-MODEL, when given, is the model the recap is asked of; its override of
-the registry's `recap-ask' is used."
+TASK's `:prompt' is the assignment, which the recap must not restate;
+`:recap' and `:recap-node' are the line in hand and where in the
+transcript it was made, so the work the request carries is what came
+after it.  MODEL, when given, is the model the recap is asked of; its
+override of the registry's `recap-ask' is used."
   (let* ((prompt (string-trim (or (plist-get task :prompt) "")))
-         (prompt (if (> (length prompt) 600) (concat (substring prompt 0 600) "…") prompt))
+         (prompt (if (> (length prompt) 500) (concat (substring prompt 0 500) "…") prompt))
          (todos (plist-get session :todos))
          (done (cl-count "done" todos :key (lambda (todo) (plist-get todo :status)) :test #'equal))
          (now (cl-find "in-progress" todos :key (lambda (todo) (plist-get todo :status)) :test #'equal))
-         (plan (plist-get session :plan)))
+         (previous (harness-recap--previous task))
+         (anchor (plist-get task :recap-node))
+         (nodes (or (ignore-errors (harness-call 'session/nodes (plist-get session :id))) nil))
+         (work (harness-recap--work nodes anchor)))
     (string-join
      (delq nil
-           (list (concat "Task: " prompt)
+           (list (concat "Task (the assignment; do not restate it): " prompt)
+                 (and previous (concat "Previous recap: " previous))
                  (harness-recap--progress task session)
-                 (and (stringp plan) (not (string-blank-p plan))
-                      (concat "Plan: " (harness-truncate-end (string-trim plan) 400)))
+                 ;; The blocker comes before the work: a recap that leaves it
+                 ;; out is of no use to the engineer who has to answer it.
+                 (harness-recap--waiting session)
                  (and todos (format "Todos: %d/%d done" done (length todos)))
-                 (and now (concat "Now: " (plist-get now :text)))
-                 (let ((tail (harness-recap--tail (plist-get session :id))))
-                   (and (not (string-blank-p tail))
-                        (concat "Recent transcript (oldest first, newest last):\n" tail)))
-                 (harness-prompt-effective 'recap-ask harness-recap--ask model)))
+                 (and now (concat "In hand: " (plist-get now :text)))
+                 (and (not (string-blank-p work))
+                      (concat (if (and previous anchor)
+                                  "What happened since the previous recap (oldest first, newest last):"
+                                "Recent transcript (oldest first, newest last):")
+                              "\n" work))
+                 ;; A waiting turn is asked for by name: a recap that leaves
+                 ;; the blocker out does not say why the work stopped.
+                 (concat (harness-prompt-effective 'recap-ask harness-recap--ask model)
+                         (if (harness-recap--waiting session)
+                             "  Say what it waits for." ""))))
      "\n\n")))
 
 (defun harness-recap-sanitise (text)
@@ -323,25 +432,57 @@ the new turn's line."
 
 ;;;; Making one
 
-(defun harness-recap--finish (sid id counts good reason error)
-  "Store the recap GOOD of task ID, or back off after a failure.
-SID names the session, REASON and ERROR say why a failure failed.
-COUNTS is the (TURNS TOOLS) the recap was made at.  Return GOOD, or
-signal when it could not be stored."
+(defun harness-recap--anchor (session-id)
+  "Return the id of the newest node of SESSION-ID's transcript, or nil.
+It is where a recap made now stands: the next one reads what came after."
+  (let ((nodes (ignore-errors (harness-call 'session/nodes session-id))))
+    (plist-get (car (last nodes)) :id)))
+
+(defun harness-recap--idle-p (task session-id)
+  "Non-nil when TASK's session SESSION-ID has nothing new to recap.
+That is a recap in hand made at the transcript's newest node: the work
+since has not moved, so asking again would only invent an accomplishment."
+  (and (harness-recap--previous task)
+       (plist-get task :recap-node)
+       (equal (plist-get task :recap-node) (harness-recap--anchor session-id))))
+
+(defun harness-recap--finish (sid task counts anchor answer reason error)
+  "Store the recap ANSWER of TASK, or back off after a failure.
+SID names its session, COUNTS the (TURNS TOOLS) it was made at and
+ANCHOR the transcript's newest node then.  ANSWER is a recap line,
+`unchanged' when the model found nothing new since the previous recap,
+or nil when it wrote none.  REASON and ERROR say why a failure failed.
+`harness-recap--ask' reads an answer that only restates the task or the
+previous recap as `unchanged' (`harness-recap--repeats-p'): the line in
+hand stays, the counters move on, and no accomplishment is made up.
+Return the recap in hand after this, or nil."
   (remhash sid harness-recap--running)
-  (if good
-      (progn
-        (harness-call 'task/set-recap id
-                      :recap good :recap-at (float-time)
-                      :recap-turns (car counts) :recap-tools (cadr counts))
-        (harness-recap--remember sid good)
-        (harness-emit 'recap/done sid good)
-        good)
-    (when (numberp harness-tasks-recap-retry)
-      (puthash sid (+ (float-time) harness-tasks-recap-retry) harness-recap--failed))
-    (harness-log 'warn "recap of %s failed: %s" id (or error reason))
-    (harness-emit 'recap/failed sid (or error reason))
-    nil))
+  (let* ((id (plist-get task :id))
+         (previous (harness-recap--previous task))
+         (unchanged (eq answer 'unchanged)))
+    (cond
+     (unchanged
+      ;; Nothing new: the line in hand is the truth.  The counters and the
+      ;; anchor move on, so the same quiet stretch is not asked about again.
+      (harness-call 'task/set-recap id
+                    :recap previous :recap-at (float-time)
+                    :recap-turns (car counts) :recap-tools (cadr counts)
+                    :recap-node anchor)
+      previous)
+     (answer
+      (harness-call 'task/set-recap id
+                    :recap answer :recap-at (float-time)
+                    :recap-turns (car counts) :recap-tools (cadr counts)
+                    :recap-node anchor)
+      (harness-recap--remember sid answer)
+      (harness-emit 'recap/done sid answer)
+      answer)
+     (t
+      (when (numberp harness-tasks-recap-retry)
+        (puthash sid (+ (float-time) harness-tasks-recap-retry) harness-recap--failed))
+      (harness-log 'warn "recap of %s failed: %s" id (or reason error))
+      (harness-emit 'recap/failed sid (or reason error))
+      nil))))
 
 (defun harness-recap--request (session task model)
   "Return the recap request for SESSION about TASK, asked of MODEL.
@@ -376,24 +517,39 @@ and what `harness-recap--prompt' makes of TASK and SESSION, at most
 `harness-tasks-recap-thinking'.  A recap is one short line, so a nil
 level asks for no thinking (`:no-thinking'): a model whose thinking is
 on by default would spend the whole budget on the reasoning and stop at
-`max-tokens' with no line.  ON-DONE is called once, with RECAP (the
-text the model wrote and `harness-recap-sanitise' accepted, nil when it
-wrote none or failed), the provider's REASON for stopping and its ERROR
-when it failed.  Return the promise of the call, which resolves to
-RECAP, or rejects with why there is none."
+`max-tokens' with no line.  ON-DONE is called once, with ANSWER (what
+`harness-recap--read' makes of the text: a recap line, `unchanged', or
+nil when it wrote none or failed), the provider's REASON for stopping
+and its ERROR when it failed.  Return the promise of the call, which
+resolves to the recap to show -- ANSWER, or the line in hand when it is
+`unchanged' -- or rejects with why there is none."
   (let* ((text "")
          (settled nil)
          (promise (harness-make-promise))
          (finish (lambda (reason error)
                    (unless settled
                      (setq settled t)
-                     (let ((recap (and (not (memq reason '(error cancelled)))
-                                       (harness-recap-sanitise text))))
-                       (if recap
-                           (harness-resolve promise recap)
+                     (let* ((answer (and (not (memq reason '(error cancelled)))
+                                         (harness-recap--read text)))
+                            ;; A line that only says again what the task or
+                            ;; the recap in hand says is no progress: it is
+                            ;; read as `unchanged', not stored as an
+                            ;; accomplishment.
+                            (answer (if (and (stringp answer)
+                                             (harness-recap--repeats-p answer task))
+                                        'unchanged
+                                      answer))
+                            ;; What the caller has to show: the line the model
+                            ;; wrote, or the one in hand when it found nothing
+                            ;; new.
+                            (value (if (eq answer 'unchanged)
+                                       (harness-recap--previous task)
+                                     answer)))
+                       (if (or (eq answer 'unchanged) value)
+                           (harness-resolve promise value)
                          (harness-reject promise (or error (format "the model stopped: %s" reason))))
                        (condition-case err
-                           (funcall on-done recap reason error)
+                           (funcall on-done answer reason error)
                          (error (harness-log 'warn "recap of session %s could not be stored: %S"
                                              (plist-get session :id) err)))))))
          (model (harness-recap--model session))
@@ -417,18 +573,22 @@ RECAP, or rejects with why there is none."
 (defun harness-recap--start (task session)
   "Ask the model for a recap of TASK's session SESSION; return the promise."
   (let* ((sid (plist-get session :id))
-         (id (plist-get task :id))
          (counts (harness-recap--counts session))
+         (anchor (harness-recap--anchor sid))
          (promise (harness-recap--ask
                    session task
-                   (lambda (recap reason error)
-                     (harness-recap--finish sid id counts recap reason error)))))
+                   (lambda (answer reason error)
+                     (harness-recap--finish sid task counts anchor answer reason error)))))
     (puthash sid promise harness-recap--running)
     promise))
 
 (defun harness-recap--task-maybe (task session-id force)
   "Recap TASK, the task of SESSION-ID, when one is due; FORCE skips the thresholds.
-Return the promise of a recap request just started, or nil."
+A task that has not moved since its last recap is not asked again: there
+is nothing new to report, and a line written anyway would be made up.
+FORCE still asks, as a turn that stopped for the user does, since the
+blocker is news the transcript does not hold.  Return the promise of a
+recap request just started, or nil."
   (unless (gethash session-id harness-recap--running)
     (let ((retry (gethash session-id harness-recap--failed)))
       (when (or (null retry) (>= (float-time) retry))
@@ -436,7 +596,8 @@ Return the promise of a recap request just started, or nil."
                     ((harness-recap--eligible-p task session))
                     (counts (harness-recap--counts session))
                     ((or force
-                         (harness-recap--due-p task (car counts) (cadr counts) (float-time)))))
+                         (harness-recap--due-p task (car counts) (cadr counts) (float-time))))
+                    ((or force (not (harness-recap--idle-p task session-id)))))
           (harness-recap--start task session))))))
 
 (defun harness-recap--maybe (session-id &optional force)
@@ -488,25 +649,46 @@ transcript is looked through, once per recap."
         text
       (or (plist-get (car users) :content) ""))))
 
-(defun harness-recap--finish-session (sid counts good reason error)
-  "Keep the session recap GOOD of SID, or back off after a failure.
-COUNTS is the (TURNS TOOLS) it was made at; REASON and ERROR say why a
-failure failed.  Return GOOD, or nil."
+(defun harness-recap--finish-session (sid counts anchor answer reason error)
+  "Keep the session recap ANSWER of SID, or back off after a failure.
+COUNTS is the (TURNS TOOLS) it was made at and ANCHOR the transcript's
+newest node then.  ANSWER is a recap line, `unchanged' when the model
+found nothing new since the previous recap, or nil when it wrote none.
+REASON and ERROR say why a failure failed.  An answer that only restates
+the previous one leaves it in place, with the counters and the anchor
+moved on and no new entry in the session's history.  Return the recap in
+hand after this, or nil."
   (remhash sid harness-recap--session-running)
-  (if good
-      (let ((old (gethash sid harness-recap--sessions)))
-        (puthash sid (list :recap good :recap-at (float-time)
-                           :recap-turns (car counts) :recap-tools (cadr counts)
-                           :started (or (plist-get old :started) (float-time)))
-                 harness-recap--sessions)
-        (harness-recap--remember sid good)
-        (harness-emit 'recap/session-done sid good)
-        good)
-    (when (numberp harness-tasks-recap-retry)
-      (puthash sid (+ (float-time) harness-tasks-recap-retry) harness-recap--session-failed))
-    (harness-log 'warn "recap of session %s failed: %s" sid (or error reason))
-    (harness-emit 'recap/session-failed sid (or error reason))
-    nil))
+  (let* ((old (gethash sid harness-recap--sessions))
+         (previous (plist-get old :recap))
+         (previous (and (stringp previous) (not (harness-string-blank-p previous)) previous))
+         (unchanged (or (eq answer 'unchanged)
+                        (and (stringp answer)
+                             (equal (harness-recap--words answer)
+                                    (harness-recap--words previous))))))
+    (cond
+     (unchanged
+      (puthash sid (list :recap previous :recap-at (float-time)
+                         :recap-turns (car counts) :recap-tools (cadr counts)
+                         :recap-node anchor
+                         :started (or (plist-get old :started) (float-time)))
+               harness-recap--sessions)
+      previous)
+     (answer
+      (puthash sid (list :recap answer :recap-at (float-time)
+                         :recap-turns (car counts) :recap-tools (cadr counts)
+                         :recap-node anchor
+                         :started (or (plist-get old :started) (float-time)))
+               harness-recap--sessions)
+      (harness-recap--remember sid answer)
+      (harness-emit 'recap/session-done sid answer)
+      answer)
+     (t
+      (when (numberp harness-tasks-recap-retry)
+        (puthash sid (+ (float-time) harness-tasks-recap-retry) harness-recap--session-failed))
+      (harness-log 'warn "recap of session %s failed: %s" sid (or error reason))
+      (harness-emit 'recap/session-failed sid (or error reason))
+      nil))))
 
 (defun harness-recap--restart-count (session-id)
   "Count the thresholds of SESSION-ID's running turn from now, if it is counted.
@@ -520,18 +702,34 @@ tool calls that come after it."
 (defun harness-recap--start-session (session &optional progress)
   "Ask the model for a recap of SESSION and keep it per session.
 PROGRESS, a line, replaces the one that counts the session's turns and
-tool calls (`harness-recap--progress').  Return the promise (see
-`harness-recap-session')."
+tool calls (`harness-recap--progress').  The request reads the work after
+the node the recap in hand was made at, and carries that recap, so the
+new one tells what changed rather than the work it already told of.
+Return the promise (see `harness-recap-session')."
   (let* ((sid (plist-get session :id))
          (counts (harness-recap--counts session))
+         (old (gethash sid harness-recap--sessions))
+         (anchor (harness-recap--anchor sid))
          (promise (harness-recap--ask
                    session (list :prompt (harness-recap--session-prompt sid session)
-                                 :progress progress)
-                   (lambda (recap reason error)
-                     (harness-recap--finish-session sid counts recap reason error)))))
+                                 :progress progress
+                                 :recap (plist-get old :recap)
+                                 :recap-turns (plist-get old :recap-turns)
+                                 :recap-tools (plist-get old :recap-tools)
+                                 :recap-node (plist-get old :recap-node))
+                   (lambda (answer reason error)
+                     (harness-recap--finish-session sid counts anchor answer reason error)))))
     (puthash sid promise harness-recap--session-running)
     (harness-recap--restart-count sid)
     promise))
+
+(defun harness-recap--session-idle-p (session-id)
+  "Non-nil when SESSION-ID's recap in hand was made at its newest node.
+Then nothing has happened since, and asking again would make a line up."
+  (let ((record (gethash session-id harness-recap--sessions)))
+    (and (plist-get record :recap)
+         (plist-get record :recap-node)
+         (equal (plist-get record :recap-node) (harness-recap--anchor session-id)))))
 
 (defun harness-recap--session-due-p (session-id session now)
   "Non-nil when a session recap of SESSION-ID is due.
@@ -553,7 +751,8 @@ or nil."
              (or force (harness-recap--session-own-p session)))
     (let ((retry (gethash session-id harness-recap--session-failed)))
       (when (and (or (null retry) (>= (float-time) retry))
-                 (or force (harness-recap--session-due-p session-id session (float-time))))
+                 (or force (harness-recap--session-due-p session-id session (float-time)))
+                 (or force (not (harness-recap--session-idle-p session-id))))
         (harness-recap--start-session session)))))
 
 (defun harness-recap-session (session-id &optional force)

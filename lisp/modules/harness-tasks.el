@@ -701,13 +701,15 @@ which needs a larger budget to fit."
 
 (defcustom harness-tasks-recap-context 3000
   "Characters of transcript a recap request may carry.
-The tail of the transcript, so the request stays short on a long task.
-A recap is one line about what the work is doing, and most of a long
-tail is tool output -- a file's contents, a test log -- so a few
-thousand characters carry what it needs; the task, its plan and its
-todos come with the request already.  The call is one the harness makes
-for itself, on the cheap tier (`harness-tasks-recap-model'), and how
-much it reads is what it costs."
+The newest entries of the work since the last recap, so the request
+stays short on a long task.  A recap is one line about what the work is
+doing, and most of a long stretch is tool output -- a file's contents, a
+test log -- so a few thousand characters carry what it needs; each
+result is cut shorter first (`harness-recap--result-chars'), and the
+assignment, the recap in hand and the todos come with the request
+already.  The call is one the harness makes for itself, on the cheap
+tier (`harness-tasks-recap-model'), and how much it reads is what it
+costs."
   :type 'integer :group 'harness)
 
 (defcustom harness-tasks-recap-interval 30
@@ -4227,6 +4229,7 @@ through.  Return the task's view."
                         :phase harness-tasks-phase-working :cannot-continue nil :no-merge nil
                         :verified nil :verified-at nil :merge-attempts 0
                         :recap nil :recap-at nil :recap-turns nil :recap-tools nil
+                        :recap-node nil
                         :sent-back (float-time)
                         :feedback (harness-tasks--feedback-round task feedback))))
 
@@ -4529,6 +4532,7 @@ Return the task's view."
            :merge-status nil :merge-attempts 0
            :verified nil :verified-at nil
            :recap nil :recap-at nil :recap-turns nil :recap-tools nil
+           :recap-node nil
            plist)))
 
 (defun harness-tasks--stop-turn (id)
@@ -6627,7 +6631,8 @@ follows the start's own carry-on."
           (harness-call 'session/resume sid))
         (when (plist-get task :archived) (harness-tasks--set id :archived nil))
         (harness-tasks--set id :merge-attempts 0
-                            :recap nil :recap-at nil :recap-turns nil :recap-tools nil)
+                            :recap nil :recap-at nil :recap-turns nil :recap-tools nil
+                            :recap-node nil)
         (if (harness-tasks--refinement-p task)
             (progn
               ;; A message the board sends a backlog task is feedback on
@@ -6825,8 +6830,10 @@ exactly one."
 (harness-defmethod task/set-recap (id &rest plist)
   "Store recap fields PLIST on task ID; return its view.
 The recap module writes a card's subtitle with it: `:recap' the line
-shown, `:recap-at' when it was made, and `:recap-turns' plus
-`:recap-tools' the counters it was made at.  A nil `:recap' clears it."
+shown, `:recap-at' when it was made, `:recap-turns' plus `:recap-tools'
+the counters it was made at, and `:recap-node' the transcript's newest
+node then, which the next recap reads the work after.  A nil `:recap'
+clears it."
   (apply #'harness-tasks--set id plist))
 
 (harness-defmethod task/hand-in (id report)
