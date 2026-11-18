@@ -1189,6 +1189,95 @@ were, and only what it adds is new."
         (should (string-match-p "messages\\[0\\]\\.content"
                                 (cdr (harness-replay-seam request "m" "route" changed))))))))
 
+(defmacro harness-replay-test-with-system-transition (&rest body)
+  "Run BODY with a frozen chat and a changed real system-prompt filter."
+  (declare (indent 0))
+  `(harness-replay-test-with-agent
+     (let* ((id (harness-replay-test-session))
+            (old "Instructions → café 日本語")
+            (current (concat old "\nMemory: known new index line 🐈"))
+            (request (list :session (list :id id)))
+            (wire (list :model "m" :messages
+                        (vector (list :role "system" :content old)
+                                (list :role "user" :content "history → unchanged"))
+                        :tools [(:type "function" :function (:name "read"))])))
+       (harness-add-filter 'agent/system-prompt (lambda (_prompt _session) current) 999)
+       (harness-replay-seam-keep request "m" "route" wire)
+       (let* ((before (harness-replay--frozen-read id))
+              (status (harness-call 'session/system-transition-status id))
+              (generation (plist-get status :generation))
+              (old-hash (plist-get status :old-sha256))
+              (new-hash (plist-get status :new-sha256)))
+         ,@body))))
+
+(ert-deftest harness-replay-system-transition-preserves-other-frozen-components ()
+  (harness-replay-test-with-system-transition
+    (should (equal old-hash (secure-hash 'sha256 (encode-coding-string old 'utf-8-unix))))
+    (should (equal new-hash (secure-hash 'sha256 (encode-coding-string current 'utf-8-unix))))
+    (should (= 6 (length status)))
+    (let* ((result (harness-call 'session/transition-system id generation old-hash new-hash))
+           (after (harness-replay--frozen-read id))
+           (expected (copy-tree before t)))
+      (setf (plist-get (harness-replay--system-piece expected) :bytes)
+            (harness-json-encode-text current))
+      (should (equal (plist-get after :body) (plist-get expected :body)))
+      (should (= (plist-get result :generation) (1+ generation)))
+      (should (equal (plist-get after :reset) "system"))
+      (should (equal (plist-get after :at) (plist-get before :at)))
+      (should (equal (plist-get (plist-get after :transition) :kind)
+                     "system-transition-approved"))
+      (setf (plist-get (aref (plist-get wire :messages) 0) :content) current)
+      (let ((seam (harness-replay-seam request "m" "route" wire)))
+        (should-not (cdr seam))
+        (should (equal (encode-coding-string (car seam) 'utf-8-unix)
+                       (harness-json-encode wire))))
+      (harness-replay-seam-keep request "m" "route" wire)
+      (should (equal (plist-get (harness-replay--frozen-read id) :transition)
+                     (plist-get after :transition)))
+      ;; Approval of system text cannot approve any unrelated divergence.
+      (dolist (field '(history tools model system))
+        (let ((changed (copy-tree wire t)))
+          (pcase field
+            ('history (setf (plist-get (aref (plist-get changed :messages) 1) :content) "CHANGED"))
+            ('tools (setq changed (plist-put changed :tools [])))
+            ('model (setq changed (plist-put changed :model "other")))
+            ('system (setf (plist-get (aref (plist-get changed :messages) 0) :content) "unapproved")))
+          (should (cdr (harness-replay-seam request "m" "route" changed)))))
+      (should (cdr (harness-replay-seam request "other-model" "other-route"
+                                       (plist-put (copy-tree wire t) :model "other")))))))
+
+(ert-deftest harness-replay-system-transition-refuses-stale-or-unapproved-state ()
+  (harness-replay-test-with-system-transition
+    (dolist (args (list (list (1+ generation) old-hash new-hash)
+                       (list generation "wrong" new-hash)
+                       (list generation old-hash "wrong")))
+      (should-error (apply #'harness-call 'session/transition-system id args))
+      (should (equal before (harness-replay--frozen-read id))))
+    (puthash id t harness-agent--turns)
+    (should-error (harness-call 'session/transition-system id generation old-hash new-hash))
+    (remhash id harness-agent--turns)
+    (should (equal before (harness-replay--frozen-read id)))
+    (setq current (concat current " unexpected extra change"))
+    (should-error (harness-call 'session/transition-system id generation old-hash new-hash))
+    (should (equal before (harness-replay--frozen-read id)))))
+
+(ert-deftest harness-replay-system-transition-rechecks-after-prompt-generation ()
+  (harness-replay-test-with-system-transition
+    (harness-add-filter 'agent/system-prompt
+                        (lambda (prompt _session) (puthash id t harness-agent--turns) prompt) 1000)
+    (should-error (harness-call 'session/transition-system id generation old-hash new-hash))
+    (should (equal before (harness-replay--frozen-read id)))))
+
+(ert-deftest harness-replay-system-transition-refuses-unsupported-and-failed-write ()
+  (harness-replay-test-with-system-transition
+    (cl-letf (((symbol-function 'harness-replay--frozen-write) (lambda (&rest _) nil)))
+      (should-error (harness-call 'session/transition-system id generation old-hash new-hash)))
+    (should (equal before (harness-replay--frozen-read id)))
+    (setf (plist-get (aref (plist-get wire :messages) 0) :role) "user")
+    (harness-replay-seam-keep request "m" "route" wire)
+    (should-error (harness-call 'session/system-transition-status id))
+    (should-error (harness-call 'session/transition-system id generation old-hash new-hash))))
+
 ;;; What may become the prefix the session continues
 
 (ert-deftest harness-replay-a-one-off-call-is-not-the-conversations-prefix ()

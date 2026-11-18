@@ -5102,6 +5102,27 @@ and waits for review again without being sent back."
         (harness-tasks-test-wait-state id 'done)
         (should (equal (list (list id 'merged t)) done))))))
 
+(ert-deftest harness-tasks-merged-late-turn-never-reopens-completion ()
+  "An error after a merge belongs to the session, not a second task run."
+  (harness-tasks-test-with
+    (dolist (state '(done review))
+      (dolist (reason '(error blocked cancelled end-turn))
+        (let* ((sid (plist-get (harness-call 'session/create :cwd default-directory) :id))
+               (id (format "t-merged-%s-%s" state reason))
+               (report '(:summary "Already merged"))
+               (task (list :id id :project default-directory :cwd default-directory
+                           :prompt "Finished" :session sid :state state :phase 'done
+                           :merged t :verified t :verified-at 10 :finished 9
+                           :outcome 'merged :report report :created 1)))
+          (harness-tasks--put task)
+          (setq task (copy-tree (harness-tasks-test-task id)))
+          (cl-letf (((symbol-function 'harness-tasks--enqueue-merge)
+                     (lambda (&rest _) (ert-fail "A completed merge was queued again"))))
+            (harness-tasks--on-turn-ended sid reason))
+          (let ((after (harness-tasks-test-task id)))
+            (dolist (key '(:state :phase :merged :verified :verified-at :finished :outcome :report))
+              (should (equal (plist-get after key) (plist-get task key))))))))))
+
 (ert-deftest harness-tasks-git-merge-queue-column ()
   "A task whose branch is in the merge queue shows in a column of its own.
 The task record keeps when the branch joined the queue; done only once

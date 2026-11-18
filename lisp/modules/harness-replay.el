@@ -528,6 +528,96 @@ Nothing in it is a prompt's text."
                        (string-bytes (harness-replay--piece-text body))
                      0)))))
 
+(defun harness-replay--system-piece (record)
+  "Return the system scalar of a chat-completions frozen RECORD.
+Refuse other shapes rather than guessing where an adapter put instructions."
+  (let* ((body (plist-get record :body))
+         (field (cl-find "messages" (harness-replay--piece-fields body)
+                         :key #'harness-replay--field-name :test #'equal))
+         (messages (and field (harness-replay--field-piece field)))
+         (first (car (harness-replay--piece-items messages)))
+         (fields (harness-replay--piece-fields first))
+         (role (harness-replay--field-piece
+                (cl-find "role" fields :key #'harness-replay--field-name :test #'equal)))
+         (content (harness-replay--field-piece
+                   (cl-find "content" fields :key #'harness-replay--field-name :test #'equal))))
+    (unless (and (equal (plist-get messages :kind) "array")
+                 (equal (plist-get first :kind) "object")
+                 (equal (plist-get role :kind) "scalar")
+                 (equal (harness-json-parse (plist-get role :bytes)) "system")
+                 (equal (plist-get content :kind) "scalar")
+                 (stringp (harness-json-parse (plist-get content :bytes))))
+      (signal 'harness-error '("Unsupported frozen system shape")))
+    content))
+
+(defun harness-replay--system-hash (text)
+  "Return the SHA-256 of TEXT's exact UTF-8 bytes."
+  (secure-hash 'sha256 (encode-coding-string text 'utf-8-unix t)))
+
+(defun harness-replay--system-transition-state (id)
+  "Read ID's frozen and actual current system, without changing either."
+  (unless (and (fboundp 'harness-agent--system-prompt)
+               (harness-call 'session/exists-p id))
+    (signal 'harness-error '("System transition unavailable")))
+  (let* ((record (harness-replay--frozen-read id))
+         (piece (harness-replay--system-piece record))
+         (old (harness-json-parse (plist-get piece :bytes)))
+         (current (harness-agent--system-prompt (harness-call 'session/get id))))
+    (unless (and (integerp (plist-get record :generation))
+                 (equal (plist-get record :version) harness-replay-frozen-version)
+                 (stringp current))
+      (signal 'harness-error '("System transition record unavailable")))
+    (list :record record :current current
+          :generation (plist-get record :generation)
+          :old-sha256 (harness-replay--system-hash old)
+          :new-sha256 (harness-replay--system-hash current))))
+
+(harness-defmethod session/system-transition-status (id)
+  "Return ID's frozen generation and old/current system SHA-256 hashes.
+No prompt text is returned; this is an inspection, not an approval."
+  (let ((state (harness-replay--system-transition-state id)))
+    (list :generation (plist-get state :generation)
+          :old-sha256 (plist-get state :old-sha256)
+          :new-sha256 (plist-get state :new-sha256))))
+
+(harness-defmethod session/transition-system (id generation old-sha256 new-sha256)
+  "Explicitly approve only ID's current system text at GENERATION.
+Both hashes must match the frozen and currently generated system exactly.
+The session must be inactive.  Only the frozen system scalar is replaced;
+all other fields and historical bytes remain protected by the normal
+transport guard.  This records approval, not a claim that a request was sent."
+  (when (or (not (fboundp 'harness-agent-running-p))
+            (harness-agent-running-p id))
+    (signal 'harness-error '("System transition requires an inactive session")))
+  (let* ((state (harness-replay--system-transition-state id))
+         (record (copy-tree (plist-get state :record) t)))
+    (unless (and (integerp generation)
+                 (= generation (plist-get state :generation))
+                 (stringp old-sha256) (stringp new-sha256)
+                 (equal old-sha256 (plist-get state :old-sha256))
+                 (equal new-sha256 (plist-get state :new-sha256))
+                 (not (equal old-sha256 new-sha256)))
+      (signal 'harness-error '("System transition expectation mismatch")))
+    ;; Prompt filters may consult services and yield.  Recheck after they
+    ;; return, before committing approval to the same frozen generation.
+    (when (or (harness-agent-running-p id)
+              (not (equal (plist-get state :record) (harness-replay--frozen-read id))))
+      (signal 'harness-error '("System transition changed during validation")))
+    (setf (plist-get (harness-replay--system-piece record) :bytes)
+          (harness-json-encode-text (plist-get state :current)))
+    (let ((next (1+ generation))
+          (audit (list :kind "system-transition-approved" :at (float-time)
+                       :from-generation generation :old-sha256 old-sha256
+                       :new-sha256 new-sha256)))
+      (setq record (plist-put record :generation next))
+      (setq record (plist-put record :reset "system"))
+      (setq record (plist-put record :transition audit))
+      (unless (harness-replay--frozen-write id record)
+        (signal 'harness-error '("System transition could not be persisted")))
+      (harness-log 'info "replay: %s approved system transition %s -> %s"
+                   id generation next)
+      (list :generation next :reason "system" :transition audit))))
+
 (harness-defmethod replay/frozen-record (id body &optional model route)
   "Keep BODY, the body of session ID's request, as what that request sent.
 BODY is the body as the harness holds it, a plist of the fields the adapter
@@ -556,6 +646,9 @@ another.  A body over `harness-replay-frozen-max-bytes' is not kept and a
                         :generation generation :at (float-time)
                         :model (harness-replay--frozen-tag model)
                         :route (harness-replay--frozen-tag route)
+                        ;; Keep the latest explicit approval after the accepted
+                        ;; request is actually sent, without retaining text.
+                        :transition (plist-get old :transition)
                         :body prompt))
           generation)))))
 (harness-defmethod replay/frozen-splice (id model route body)

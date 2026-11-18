@@ -5306,6 +5306,10 @@ starts again when the hold ends (`harness-tasks--refresh-holds')."
         (setq skip t))
        ((harness-tasks--queued-p task)
         (setq skip (harness-tasks--returned-p task)))
+       ;; A turn may finish after its merge.  Errors and cancellation are
+       ;; still recorded in the session, but cannot reopen completed work.
+       ((and (memq (plist-get task :state) '(done review))
+             (harness-tasks--merged-p task)) nil)
        ;; Every provider out of quota, or a hard budget spent: no failure
        ;; of the task's, which waits in the queue for it to end.
        ((and (memq reason '(error blocked))
@@ -5318,8 +5322,6 @@ starts again when the hold ends (`harness-tasks--refresh-holds')."
         (unless (plist-get task :merge-status)
           (harness-tasks--set id :state 'active :outcome reason)))
        ((plist-get task :merge-status) nil) ; a conflict turn; merge/finished decides
-       ;; Merged mid-turn: done, or in review when that merge needs one.
-       ((and (memq (plist-get task :state) '(done review)) (harness-tasks--merged-p task)) nil)
        ((setq waiting (harness-tasks--outstanding task))
         (harness-tasks--set id :state 'active :waiting waiting))
        ;; The working phase: a turn that did not hand its work in was the
