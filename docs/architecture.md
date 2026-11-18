@@ -4758,6 +4758,91 @@ alternatives and the parts staged for later are in
   capabilities and its window.  `access/describe` carries the same
   `computer/access` plist as `:computers`.
 
+### provider-system-one
+
+A *System One* model answers with decisions rather than text: it is given
+a `state` -- the content to judge, once -- and named, typed questions
+about it, and it answers each with a typed value (a probability, one
+option of a closed set, a position on ordered levels, a box in an
+image).  That is a capability of the provider interface, as embedding
+text is, and not a second interface: `harness-define-provider` takes
+`:system-one`, `provider/system-one-p` says which models have it, and
+`provider/system-one` asks for a decision.  A model that also completes,
+or embeds, declares that too -- the day one model does both, it is one
+provider with two capabilities, not two kinds of provider.  Its design
+note is [the provider-system-one page](provider-system-one.md).
+
+```elisp
+(harness-define-provider 'ID
+  :models FN            ; () → (MODEL…), a model whose :capabilities say
+                        ; (:noul t :choice t :score t …)
+  :system-one FN)       ; (NAME REQUEST) → promise, or (:promise P :cancel FN)
+```
+
+- The capability's own keys in a model's `:capabilities` are `:noul`,
+  `:choice`, `:score`, `:box`, `:images`, `:long-context`,
+  `:confidence`, `:calibrated`, `:abstain`, `:stream`, `:audio`,
+  `:embeddings`, `:carried-state` and `:schema`, beside `:vision` and
+  `:thinking`.  A question of a type the model does not answer, and a
+  request for an image, a larger context, audio, embeddings,
+  carried-over state, a response schema or partial results on a model
+  that does not declare the capability that promises it, are refused
+  before the provider is called.
+- A REQUEST is `(:model PROVIDER:NAME :state STATE :questions QUESTIONS
+  :schema-version N)` and optionally `:deadline`, `:assets`,
+  `:long-context`, `:audio`, `:embeddings`, `:carried-state`,
+  `:response-schema` and `:on-partial`.  STATE is the content every
+  question is judged against, sent once: text, a plist (a JSON object)
+  or a list (a JSON array).  QUESTIONS maps a name the caller chose to
+  a question `(:type "noul"|"choice"|"score"|"box" :instructions …
+  :criteria …)`.
+- A RESULT carries `:answers`, one per question keyed by the same name
+  and of the type that question asked for, or `:abstained t` with a
+  `:reason` instead.  Every answer is checked against the question that
+  asked it -- a choice among the options offered, a score on its
+  levels, a legend that names them, probabilities in 0..1 -- before a
+  caller reads it, so no consumer re-decides what malformed means.
+- `provider/system-one MODEL-ID REQUEST` → a handle
+  `(:promise :cancel)`; `harness-provider-system-one-decide REQUEST` →
+  the full handle `(:call :provider :model :promise :cancel :deadline)`,
+  which bounds the call by `:deadline` (or
+  `harness-provider-system-one-timeout`, 10 s), cancels it
+  (`harness-provider-system-one-cancel`, which the handle's `:cancel`
+  does too) and settles it once: an answer, a failure or a partial
+  result that arrives after the call was cancelled, timed out or
+  answered is dropped.  A model `harness-allowed-models` does not allow
+  is never asked.
+- A confidence is the model's own number about how peaked its answer
+  was.  It reads as a probability of being right only when the model
+  declares `:calibrated` *and* its artifact records how the calibration
+  was fitted (`:method`, and a `:source` for where that is documented).
+  No threshold is read here: the caller owns its policy.
+- ARTIFACT is what a model was trained and evaluated on:
+  `(:schema-version N :artifact (:id :version) :model (:id :version)
+  :questions QUESTIONS :dataset (:name :version :provenance
+  :splits ((:name :count)…)) :evaluation (:split :metrics
+  ((:name :value)…) :calibration (:method :source)) :runtime (:kind
+  local|remote :requires (…))).  `harness-provider-system-one-artifact-problems`
+  validates it, and `harness-provider-system-one-artifact-agrees-p
+  ARTIFACT REQUEST` says what in the request is not the shape the
+  artifact was made for: another question, another type, another option
+  set, another number of levels.  The fixture in
+  `test/fixtures/system-one/` is that agreement made concrete.
+- `harness-provider-system-one-register-jev ID :model … :base-url …`
+  registers a provider whose System One model is TypeSafe's Jev at
+  `POST /v1/systemone`: `model`, `state` and `questions` (and `assets`
+  for images), the key in `Authorization`, the danger-zone headers only
+  when the request needs them, and the answer's `answers`, `model` and
+  `usage` read back.  The model the answer names is kept, because an
+  alias resolves to a version.
+  `harness-provider-system-one-jev-refresh-models ID` reads
+  `GET /v1/models` on request.
+- `harness-provider-system-one-register-fixture ID DIRECTORY` registers a
+  provider that answers from `artifact.json` and `cases.jsonl` with no
+  model call.
+- Event `provider/system-one-decided REQUEST RESULT`, after the result
+  was validated.
+
 ### decisions
 
 Lasting decisions: answers that hold beyond their moment, kept with

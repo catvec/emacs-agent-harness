@@ -588,7 +588,7 @@ need no slots they lack.")
 
 (cl-defun harness-define-provider (id &key label doc models complete fork quota
                                       capabilities tiers allow-models
-                                      warm close resolve embed)
+                                      warm close resolve embed system-one)
   "Register provider ID.
 LABEL and DOC describe it.  MODELS is a function returning a promise of
 model plists; one that takes an argument is passed non-nil when a
@@ -622,7 +622,10 @@ returns a model plist for it or nil (see `provider/model').  EMBED, when
 given, takes a model NAME, a list of TEXTS and an OPTS plist
 \(`:dimensions'), and returns a promise of (:vectors VECTORS :usage
 \(:input N)), one vector, a list of numbers, per text in order: the
-provider's models embed text (`provider/embed').  Defining ID again
+provider's models embed text (`provider/embed').  SYSTEM-ONE, when
+given, takes a model NAME and a request plist and answers it with
+System One decisions (`provider/system-one'): the provider's models
+decide what a completion model cannot.  Defining ID again
 replaces it and forgets the models it listed, which it is asked for
 again when needed; other providers' models stay cached."
   (puthash id (make-harness-provider :id id :label (or label (symbol-name id)) :doc doc
@@ -631,13 +634,15 @@ again when needed; other providers' models stay cached."
                                      :capabilities capabilities :tiers tiers
                                      :allow-models (harness-provider--allow-patterns allow-models))
            harness-providers)
-  (puthash id (list :warm warm :close close :resolve resolve :embed embed) harness-provider--lifecycle)
+  (puthash id (list :warm warm :close close :resolve resolve :embed embed
+                    :system-one system-one)
+           harness-provider--lifecycle)
   (harness-provider--forget id)
   id)
 
 (defun harness-provider--hook (id key)
   "Return provider ID's hook KEY, or nil.
-KEY is `:warm', `:close', `:resolve' or `:embed'."
+KEY is `:warm', `:close', `:resolve', `:embed' or `:system-one'."
   (plist-get (gethash id harness-provider--lifecycle) key))
 
 (defun harness-provider-get (id)
@@ -1557,6 +1562,81 @@ warmed."
   "Non-nil when MODEL-ID's provider embeds text (see `provider/embed')."
   (pcase-let ((`(,pid . ,_) (harness-provider-parse-model model-id)))
     (and pid (harness-provider-get pid) (harness-provider--hook pid :embed) t)))
+
+(defvar harness-provider-system-one)
+;; The module that owns the System One contract sets this, and defines
+;; `provider/system-one-validate', so a request is checked against the
+;; model before its provider is called.  It is declared here for the same
+;; reason `harness-admission' is: `provider/system-one' is the funnel, and
+;; a harness without that module asks a provider exactly what it always
+;; asked.
+(defun harness-provider--system-one-problems (model-id request)
+  "Return what is wrong with REQUEST for MODEL-ID, as strings.
+The contract that says what a request is belongs to the module that owns
+it (harness-provider-system-one.el), which answers through
+`provider/system-one-validate'; a harness without that module has no
+contract to check against, and asks what it is asked."
+  (if (and (bound-and-true-p harness-provider-system-one)
+           (harness-method-exists-p 'provider/system-one-validate))
+      (condition-case err
+          (harness-call 'provider/system-one-validate model-id request)
+        (error (list (harness-error-message err))))
+    nil))
+
+(harness-defmethod provider/system-one-p (model-id)
+  "Non-nil when MODEL-ID's provider answers System One decisions.
+A System One model is asked a state and typed questions about it, and
+answers each with a typed value rather than prose (see
+`provider/system-one').  It is a capability of the provider, not a kind
+of provider: a model that also completes, or embeds, declares this too."
+  (pcase-let ((`(,pid . ,_) (harness-provider-parse-model model-id)))
+    (and pid (harness-provider-get pid) (harness-provider--hook pid :system-one) t)))
+
+(harness-defmethod provider/system-one (model-id request)
+  "Ask MODEL-ID, a System One model, for the decisions REQUEST asks.
+REQUEST is `(:state STATE :questions QUESTIONS)' and whatever else the
+contract adds (see harness-provider-system-one.el): STATE is the content
+to judge, sent once, and QUESTIONS maps a name the caller chose to a
+typed question about it.  Return a handle plist with `:cancel' whose
+`:promise' resolves with one typed answer per question, or rejects when
+there is none.  It rejects when `harness-allowed-models' does not allow
+MODEL-ID, which no provider is then asked for, when the provider of
+MODEL-ID does not answer System One decisions, and when the request is
+not one the model's contract allows."
+  (pcase-let* ((`(,pid . ,name) (harness-provider-parse-model model-id))
+               (p (and pid (harness-provider-get pid)))
+               (hook (and p (harness-provider--hook pid :system-one)))
+               (refusal (harness-provider-model-refusal model-id))
+               (refuse (lambda (message)
+                         (list :call nil :provider pid :model model-id :cancel #'ignore
+                               :promise (harness-rejected (list 'harness-error message))))))
+    (cond
+     (refusal (funcall refuse refusal))
+     ((null pid) (funcall refuse (format "No provider in model %s: give it as PROVIDER:NAME" model-id)))
+     ((null p) (funcall refuse (format "No provider for model %s" model-id)))
+     ((null hook) (funcall refuse (format "The provider of %s does not answer System One decisions" model-id)))
+     (t
+      (let ((problems (harness-provider--system-one-problems model-id request)))
+        (if problems
+            (progn
+              (harness-log 'warn "provider/system-one: %s" (string-join problems "; "))
+              (funcall refuse (string-join problems "; ")))
+          (condition-case err
+              (let ((answer (if (and (bound-and-true-p harness-provider-system-one)
+                                     (harness-method-exists-p 'provider/system-one-dispatch))
+                                ;; The module that owns the contract owns the
+                                ;; deadline, the cancellation and the
+                                ;; settle-once guard, so it builds the handle.
+                                (harness-call 'provider/system-one-dispatch model-id request)
+                              (funcall hook name request))))
+                (cond
+                 ;; A provider may answer with the promise itself, and then
+                 ;; there is nothing to cancel: the call has already begun.
+                 ((harness-promise-p answer) (list :promise answer :cancel #'ignore))
+                 ((and (listp answer) (harness-promise-p (plist-get answer :promise))) answer)
+                 (t (funcall refuse (format "The provider of %s returned no promise of a decision"
+                                            model-id)))))
+            (error (list :cancel #'ignore :promise (harness-rejected err))))))))))
 
 (harness-defmethod provider/embed (model-id texts &optional opts)
   "Return a promise of the embeddings of TEXTS, strings, by MODEL-ID.

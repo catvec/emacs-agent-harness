@@ -8,7 +8,7 @@ Provider contract, registry and model catalogue.
 - **Source:** [lisp/modules/harness-provider.el](../../lisp/modules/harness-provider.el)
 - **Loaded:** by default
 - **Requires:** nothing
-- **Required by:** [admission](admission.md), [agent](agent.md), [cache-warm](cache-warm.md), [compaction](compaction.md), [cost-compare](cost-compare.md), [fallback](fallback.md), [handoff](handoff.md), [model-complexity](model-complexity.md), [naming](naming.md), [pet](pet.md), [provider-bedrock](provider-bedrock.md), [provider-check](provider-check.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md), [provider-deepseek](provider-deepseek.md), [provider-demo](provider-demo.md), [provider-gremlin](provider-gremlin.md), [provider-openai](provider-openai.md), [provider-openrouter](provider-openrouter.md), [provider-responses](provider-responses.md), [recap](recap.md), [tasks-search](tasks-search.md), [todo-sync](todo-sync.md), [usage](usage.md), [usage-history](usage-history.md)
+- **Required by:** [admission](admission.md), [agent](agent.md), [cache-warm](cache-warm.md), [compaction](compaction.md), [cost-compare](cost-compare.md), [fallback](fallback.md), [handoff](handoff.md), [model-complexity](model-complexity.md), [naming](naming.md), [pet](pet.md), [provider-bedrock](provider-bedrock.md), [provider-check](provider-check.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md), [provider-deepseek](provider-deepseek.md), [provider-demo](provider-demo.md), [provider-gremlin](provider-gremlin.md), [provider-openai](provider-openai.md), [provider-openrouter](provider-openrouter.md), [provider-responses](provider-responses.md), [provider-system-one](provider-system-one.md), [recap](recap.md), [tasks-search](tasks-search.md), [todo-sync](todo-sync.md), [usage](usage.md), [usage-history](usage-history.md)
 
 ## About
 
@@ -76,6 +76,8 @@ the provider is asked, naming the setting and its patterns.
 - `provider/model-tier` (model-id) — Return the tier of MODEL-ID within its provider.
 - `provider/models` (&optional refresh) — Return a promise of every model from every provider.
 - `provider/quota` (provider-id &optional refresh) — Return a promise of PROVIDER-ID's billing and quota information, or of nil.
+- `provider/system-one` (model-id request) — Ask MODEL-ID, a System One model, for the decisions REQUEST asks.
+- `provider/system-one-p` (model-id) — Non-nil when MODEL-ID's provider answers System One decisions.
 - `provider/tier-model` (model-id &optional tier) — Return the id of the TIER model of MODEL-ID's provider, or nil.
 - `provider/tier-model-async` (model-id &optional tier) — Return a promise of (MODEL . REASON) for the TIER model, waiting if need be.
 - `provider/tier-model-info` (model-id &optional tier) — Return (MODEL . REASON) for the TIER model of MODEL-ID's provider.
@@ -101,6 +103,8 @@ the provider is asked, naming the setting and its patterns.
 ### Methods it calls
 
 - `provider/admit` ([admission](admission.md)), when it is loaded
+- `provider/system-one-dispatch` ([provider-system-one](provider-system-one.md)), when it is loaded
+- `provider/system-one-validate` ([provider-system-one](provider-system-one.md)), when it is loaded
 - `session/internal-finish` ([session](session.md))
 - `session/internal-start` ([session](session.md)), when it is loaded
 - `session/usage-add` ([session](session.md))

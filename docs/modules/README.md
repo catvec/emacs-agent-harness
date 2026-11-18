@@ -78,6 +78,7 @@ and supervisor load only when they are named.
  ;;openai             ; OpenAI-compatible chat completions provider (OpenAI, local servers,…
  ;;openrouter         ; OpenRouter provider: request fields, price-aware endpoint pinning,…
  ;;responses          ; OpenAI Responses API paid for by a ChatGPT plan (Sign in with ChatGPT).
+ ;;system-one         ; System One decision models: typed questions and answers, as a…
  :tools
  ;;compact            ; The compact tool: an agent compacts its own conversation, on a running…
  ;;events             ; watch_events and unwatch_events: a session watches harness events, and…
@@ -164,6 +165,7 @@ and supervisor load only when they are named.
 | [provider-openai](provider-openai.md) |  | [provider](provider.md) | OpenAI-compatible chat completions provider (OpenAI, local servers, custom endpoints). |
 | [provider-openrouter](provider-openrouter.md) |  | [provider](provider.md), [provider-openai](provider-openai.md), [retry](retry.md) | OpenRouter provider: request fields, price-aware endpoint pinning, error detail. |
 | [provider-responses](provider-responses.md) |  | [provider](provider.md), [chatgpt-plan](chatgpt-plan.md) | OpenAI Responses API paid for by a ChatGPT plan (Sign in with ChatGPT). |
+| [provider-system-one](provider-system-one.md) |  | [provider](provider.md) | System One decision models: typed questions and answers, as a capability of the provider interface. |
 | [readonly](readonly.md) | by default | [session](session.md), [tools](tools.md) | Read-only sessions: the sessions a module's policy names (a supervisor, a task's write-up or plan) get only reading tools and read-only, offline bash, enforced by the harness. |
 | [recap](recap.md) |  | [session](session.md), [provider](provider.md), [agent](agent.md), [tasks](tasks.md) | Write the recaps task cards and running chats show, with a short model call. |
 | [redact](redact.md) |  | [secrets](secrets.md), [session](session.md), [store](store.md) | Takes a secret out of the transcripts and every other copy the harness keeps. |
@@ -360,6 +362,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `provider/pricing-warning` | [provider-deepseek](provider-deepseek.md) | [provider-deepseek](provider-deepseek.md) |  | yes |
 | `provider/quota-updated` | [provider](provider.md) | [provider](provider.md), [provider-claude](provider-claude.md), [provider-copilot](provider-copilot.md) | [fallback](fallback.md), [usage](usage.md) | yes |
 | `provider/request-started` | [provider](provider.md) | [provider](provider.md) | [provider-deepseek](provider-deepseek.md) |  |
+| `provider/system-one-decided` | [provider-system-one](provider-system-one.md) | [provider-system-one](provider-system-one.md) |  |  |
 | `question/answered` | [tools-question](tools-question.md) | [tools-question](tools-question.md) | [cache](cache.md) | yes |
 | `question/asked` | [tools-question](tools-question.md) | [tools-question](tools-question.md) | [acp](acp.md) |  |
 | `recap/done` | [recap](recap.md) | [recap](recap.md) | [pet](pet.md), [tools](tools.md) |  |
