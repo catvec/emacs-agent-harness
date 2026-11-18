@@ -160,6 +160,7 @@ is never used for any other failure.")
   '("session/" "agent/" "provider/" "tools/list" "usage/" "fallback/" "worktree/" "merge/"
     "config/" "skills/" "permission/" "compaction/" "handoff/" "naming/" "sandbox/status"
     "sandbox/detect" "sandbox/check" "sandbox/jobs" "sandbox/job-stop"
+    "sandbox/job-evidence"
     "harness/api" "harness/modules" "harness/version" "harness/reload"
     "question/" "project/" "task/" "plugins/" "search/"
     "notification/" "acp/remote-" "pet/" "version/" "insights/" "supervisor/" "priority/"

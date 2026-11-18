@@ -1024,12 +1024,16 @@ The state is a temporary directory, DIR, which is also BODY's
 (defvar harness-provider-test-requests nil
   "The requests the `test-job' provider was sent, newest first.")
 
-(defun harness-provider-test-job-provider ()
+(defun harness-provider-test-job-provider (&optional on-cancel)
   "Define the provider `test-job', which keeps its requests and answers nothing.
-A test answers through the `:on-event' of the request the provider got."
+A test answers through the `:on-event' of the request the provider got.
+ON-CANCEL, when given, is what the handle's own cancel calls, so a test
+can see whether a cancel reached the provider and what it did there."
   (setq harness-provider-test-requests nil)
   (harness-define-provider 'test-job
-    :complete (lambda (request) (push request harness-provider-test-requests) (list :cancel #'ignore))
+    :complete (lambda (request)
+                (push request harness-provider-test-requests)
+                (list :cancel (or on-cancel #'ignore)))
     :models (lambda () (harness-resolved (list (list :name "judge" :pricing '(:input 1.0 :output 5.0)))))))
 
 (defun harness-provider-test-answer (&rest events)
@@ -1229,6 +1233,175 @@ recorded, and a record that cannot start keeps no event from the caller."
       (harness-provider-test-answer (list :type 'done :stop-reason 'end-turn))
       (should (equal (list (list :type 'done :stop-reason 'end-turn)) got))
       (should (= 1 (length (harness-provider-test-internal)))))))
+
+;;;; A recorded call ends when its caller cancels it
+
+(defun harness-provider-test-record (model &optional parent)
+  "Ask MODEL for a recorded call and return (:handle :events) for it.
+PARENT, when given, is the session the call is made for.  The internal
+session the call is recorded as is the handle's `:session'; `:events' is
+a function returning what the caller heard, oldest first."
+  (let ((got nil) handle)
+    (setq handle (harness-call 'provider/complete
+                               (list :model model :job "Permission judge" :job-parent parent
+                                     :messages (list (list :role 'user :content "is it safe?"))
+                                     :on-event (lambda (e) (push e got)))))
+    (list :handle handle :events (lambda () (reverse got)))))
+
+(defun harness-provider-test-cancelled-p (id)
+  "Non-nil when internal session ID reads as a cancelled call.
+That is: idle, and its last node the hint that says the call was
+cancelled."
+  (let ((session (harness-call 'session/get id)))
+    (and (eq 'idle (plist-get session :status))
+         (equal "The call was cancelled." (harness-provider-test-last-node id)))))
+
+(ert-deftest harness-provider-cancel-ends-a-record-the-provider-leaves-running ()
+  "A cancel that emits no `done' ends the call's record, once, as cancelled.
+This is the call that hung the harness: a permission judge asked, its
+deadline passed, the handle was cancelled -- and the provider, which
+emits nothing for a cancel, left the internal session `running' for
+good.  The caller's events are still its own, and the provider's cancel
+is still reached."
+  (harness-provider-test-with-sessions (test-job)
+    (let* ((cancels (list 0))
+           (call (progn (harness-provider-test-job-provider (lambda () (cl-incf (car cancels))))
+                        (harness-provider-test-record "test-job:judge")))
+           (handle (plist-get call :handle))
+           (id (plist-get handle :session)))
+      (harness-provider-test-answer (list :type 'text :delta "Allow: zebra.el is in the project."))
+      (should (eq 'running (plist-get (harness-call 'session/get id) :status)))
+      ;; The caller cancels, as the judge's deadline does.
+      (should-not (funcall (plist-get handle :cancel)))
+      (should (= 1 (car cancels)))
+      (should (harness-provider-test-cancelled-p id))
+      ;; The text the model had written is kept with the record, and the
+      ;; caller heard every event it was sent: the cancel adds none.
+      (should (equal '("Allow: zebra.el is in the project." "The call was cancelled.")
+                     (mapcar (lambda (n) (plist-get n :content))
+                             (cdr (harness-call 'session/nodes id)))))
+      (should (equal (list (list :type 'text :delta "Allow: zebra.el is in the project."))
+                     (funcall (plist-get call :events))))
+      ;; Nothing a cancel emitted may be taken for a decision: the record
+      ;; says the call was cancelled, and no node of it says what to do.
+      (should-not (string-search "Allow" (harness-provider-test-last-node id))))))
+
+(ert-deftest harness-provider-cancel-after-a-done-records-nothing-more ()
+  "A cancel after the call ended leaves the record as the `done' left it.
+The provider is still asked to stop what it holds, and the record keeps
+the reply and the reason the call ended with."
+  (harness-provider-test-with-sessions (test-job)
+    (let* ((cancels (list 0))
+           (call (progn (harness-provider-test-job-provider (lambda () (cl-incf (car cancels))))
+                        (harness-provider-test-record "test-job:judge")))
+           (handle (plist-get call :handle))
+           (id (plist-get handle :session)))
+      (harness-provider-test-answer (list :type 'text :delta "Allow")
+                                    (list :type 'usage :input 7 :output 1)
+                                    (list :type 'done :stop-reason 'end-turn))
+      (let ((nodes (harness-call 'session/nodes id)))
+        (funcall (plist-get handle :cancel))
+        (should (= 1 (car cancels)))
+        (should (equal nodes (harness-call 'session/nodes id)))
+        (should (eq 'idle (plist-get (harness-call 'session/get id) :status)))
+        (should (= 7 (plist-get (plist-get (harness-call 'session/get id) :usage) :input)))
+        (should (equal "Allow" (harness-provider-test-last-node id)))))))
+
+(ert-deftest harness-provider-a-repeated-cancel-stops-once ()
+  "A second cancel reaches nothing and records nothing: one end, one hint."
+  (harness-provider-test-with-sessions (test-job)
+    (let* ((cancels (list 0))
+           (call (progn (harness-provider-test-job-provider (lambda () (cl-incf (car cancels))))
+                        (harness-provider-test-record "test-job:judge")))
+           (handle (plist-get call :handle))
+           (id (plist-get handle :session)))
+      (funcall (plist-get handle :cancel))
+      (funcall (plist-get handle :cancel))
+      (funcall (plist-get handle :cancel))
+      (should (= 1 (car cancels)))
+      (should (harness-provider-test-cancelled-p id))
+      (should (equal '(user hint) (mapcar (lambda (n) (plist-get n :kind))
+                                          (harness-call 'session/nodes id)))))))
+
+(ert-deftest harness-provider-a-late-done-after-a-cancel-records-nothing ()
+  "A `done' that arrives after the caller cancelled is late: nothing more.
+The caller still hears it -- the provider said it, and the caller's
+events are the provider's -- but the record keeps the cancel."
+  (harness-provider-test-with-sessions (test-job)
+    (let* ((call (progn (harness-provider-test-job-provider)
+                        (harness-provider-test-record "test-job:judge")))
+           (handle (plist-get call :handle))
+           (id (plist-get handle :session)))
+      (funcall (plist-get handle :cancel))
+      (harness-provider-test-answer (list :type 'text :delta " late")
+                                    (list :type 'usage :input 9)
+                                    (list :type 'done :stop-reason 'end-turn))
+      (should (harness-provider-test-cancelled-p id))
+      (should (equal '(user hint) (mapcar (lambda (n) (plist-get n :kind))
+                                          (harness-call 'session/nodes id))))
+      (should (= 0 (plist-get (plist-get (harness-call 'session/get id) :usage) :input)))
+      ;; The caller heard what the provider said, late or not.
+      (should (= 3 (length (funcall (plist-get call :events))))))))
+
+(ert-deftest harness-provider-a-cancel-from-the-callers-handler-ends-the-record-once ()
+  "A caller that cancels from its own handler, and a provider that emits a
+`done' from inside its cancel, both leave one end: the first one wins."
+  (harness-provider-test-with-sessions (test-job)
+    ;; A caller that cancels as soon as it sees the call start: the record
+    ;; is ended as cancelled, and the events after it are the caller's.
+    (let* ((handle nil)
+           (got nil)
+           (cancel-in-handler (lambda (e)
+                                (push e got)
+                                (when (eq (plist-get e :type) 'start)
+                                  (funcall (plist-get handle :cancel))))))
+      (harness-provider-test-job-provider)
+      (setq handle (harness-call 'provider/complete
+                                 (list :model "test-job:judge" :job "Permission judge"
+                                       :messages (list (list :role 'user :content "is it safe?"))
+                                       :on-event cancel-in-handler)))
+      (let ((id (plist-get handle :session)))
+        (harness-provider-test-answer (list :type 'start))
+        (should (harness-provider-test-cancelled-p id))
+        ;; A `done' after it is late, and the caller still hears it.
+        (harness-provider-test-answer (list :type 'done :stop-reason 'end-turn))
+        (should (harness-provider-test-cancelled-p id))
+        (should (= 2 (length got)))))
+    ;; A provider whose cancel emits its own `done': the cancel still ends
+    ;; the record, once, and says what the provider said.
+    (let* ((cancels (list 0))
+           (answer nil))
+      (harness-provider-test-job-provider
+       (lambda ()
+         (cl-incf (car cancels))
+         (funcall answer (list :type 'done :stop-reason 'cancelled))))
+      (let* ((call (harness-provider-test-record "test-job:judge"))
+             (handle (plist-get call :handle))
+             (id (plist-get handle :session)))
+        (setq answer (plist-get (car harness-provider-test-requests) :on-event))
+        (harness-provider-test-answer (list :type 'text :delta "Al"))
+        (funcall (plist-get handle :cancel))
+        (should (= 1 (car cancels)))
+        (should (harness-provider-test-cancelled-p id))
+        (should (equal '("Al" "The call was cancelled.")
+                       (mapcar (lambda (n) (plist-get n :content))
+                               (cdr (harness-call 'session/nodes id)))))))))
+
+(ert-deftest harness-provider-a-call-that-is-not-recorded-has-a-plain-cancel ()
+  "A request naming no job gets the provider's own handle, as it always did.
+Nothing is recorded, and the handle is the provider's, cancel and all."
+  (harness-provider-test-with-sessions (test-job)
+    (let ((cancels (list 0)) (got nil))
+      (harness-provider-test-job-provider (lambda () (cl-incf (car cancels))))
+      (let ((handle (harness-call 'provider/complete
+                                  (list :model "test-job:judge"
+                                        :messages (list (list :role 'user :content "hi"))
+                                        :on-event (lambda (e) (push e got))))))
+        (should-not (plist-member handle :session))
+        (funcall (plist-get handle :cancel))
+        (should (= 1 (car cancels)))
+        (should-not (harness-call 'session/list))
+        (should-not got)))))
 
 ;;;; Plan quota
 

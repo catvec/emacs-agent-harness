@@ -1837,6 +1837,78 @@ must work, must not send the completion, and must not emit a done event."
           (should-not (cl-find-if (lambda (e) (eq (plist-get e :type) 'done)) events))
           (should-not harness-openrouter-test--stored))))))
 
+(ert-deftest harness-provider-openrouter-a-cancelled-judge-call-leaves-no-running-record ()
+  "The cancel that leaves no `done' still ends the internal session of the call.
+This is the hang the harness had: the permission judge asks OpenRouter,
+its deadline cancels the handle, and the provider -- which emits nothing
+for a cancel -- used to leave the internal session `running' for good.
+Through the real provider path, the record is finished once, as
+cancelled, and the provider's own cancel still reaches the transport.
+The record's own methods are stubs, so what is checked is the provider's
+obligation to end the call, not the session store's."
+  (let* ((policy (harness-openrouter-test-policy))
+         (session (harness-openrouter-test--session "s-new"))
+         (events nil)
+         (handle nil)
+         (finished nil)
+         (started nil))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-session session
+        (unwind-protect
+            (progn
+              (harness-register-method 'session/internal-start
+                                       (lambda (&rest plist)
+                                         (setq started plist) "s-internal-1"))
+              (harness-register-method 'session/usage-add (lambda (&rest _) nil))
+              (harness-register-method 'session/internal-finish
+                                       (lambda (id &rest plist)
+                                         (push (cons id plist) finished) id))
+              (harness-openrouter-test-with-fake
+                  (list (harness-openrouter-test--catalogue-response)
+                        (harness-openrouter-test--completion-response))
+                (setq harness-openrouter-test--hold '("chat/completions"))
+                (setq handle (harness-call 'provider/complete
+                                           (plist-put
+                                            (plist-put (harness-openrouter-test--request session)
+                                                       :job "Permission judge")
+                                            :on-event (lambda (e) (push e events)))))
+                ;; The call is recorded, and the handle names its record.
+                (should started)
+                (should (equal "Permission judge" (plist-get started :job)))
+                (should (equal "s-internal-1" (plist-get handle :session)))
+                (harness-test-wait
+                 (lambda () (cl-find-if (lambda (r) (string-match-p "chat/completions"
+                                                                    (plist-get r :url)))
+                                        harness-openrouter-test--requests))
+                 5 "the completion to be sent")
+                (let* ((request (cl-find-if (lambda (r) (string-match-p "chat/completions"
+                                                                        (plist-get r :url)))
+                                            harness-openrouter-test--requests))
+                       (chunk (plist-get (plist-get request :args) :on-chunk)))
+                  ;; The model had written something before the cancel came.
+                  (when chunk (funcall chunk (harness-openrouter-test--sse
+                                              '(:choices ((:index 0 :delta (:content "Allow")))))))
+                  (funcall (plist-get handle :cancel))
+                  ;; The record is ended once, as cancelled, with what the
+                  ;; model had written kept as the reply.
+                  (should (= 1 (length finished)))
+                  (should (equal "s-internal-1" (caar finished)))
+                  (should (eq 'cancelled (plist-get (cdar finished) :stop-reason)))
+                  (should (equal "Allow" (plist-get (cdar finished) :reply)))
+                  ;; A repeated cancel records nothing more, and a late
+                  ;; answer from the transport does not either.
+                  (funcall (plist-get handle :cancel))
+                  (when chunk (funcall chunk (harness-openrouter-test--sse
+                                              '(:choices ((:index 0 :delta (:content " more")))))))
+                  (should (= 1 (length finished)))
+                  (should (equal "Allow" (plist-get (cdar finished) :reply)))
+                  ;; The cancel reached the transport: one done, as cancelled.
+                  (should (= 1 (length (cl-remove-if-not
+                                        (lambda (e) (eq (plist-get e :type) 'done)) events)))))))
+          (harness-unregister-method 'session/internal-start)
+          (harness-unregister-method 'session/usage-add)
+          (harness-unregister-method 'session/internal-finish))))))
+
 (ert-deftest harness-provider-openrouter-cancel-during-the-transport-cleans-up ()
   "Cancelling while a pinned request is in flight cancels the transport.
 The catalogue has answered and the completion has reached the fake HTTP

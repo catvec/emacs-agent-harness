@@ -909,6 +909,41 @@ and a client that still calls it is not let through."
       (should (equal (list sid ":supervisor" t)
                      (plist-get (cadr (funcall heard "session/ext-changed")) :args))))))
 
+(ert-deftest harness-acp-reaches-a-jobs-lifecycle-evidence ()
+  "A client reads how its own jobs ended as `_harness/sandbox/job-evidence'.
+The evidence is the record a job leaves behind (`sandbox/job-evidence'),
+so it is useless if only Lisp can ask for it: the method is reachable
+over ACP, and it answers the records of the session the client names."
+  (harness-acp-test-with
+    (should (harness-acp--extension-allowed-p "sandbox/job-evidence"))
+    ;; A neighbouring name is not let through by it: the prefixes are
+    ;; prefixes, so what is checked is that it names its method and not
+    ;; every name that starts like it.
+    (should-not (harness-acp--extension-allowed-p "sandbox/job-ev"))
+    (harness-register-method 'sandbox/job-evidence
+                             (lambda (session-id &optional id)
+                               (list (list :event "end" :job (or id "job-1")
+                                           :session session-id :exit 143
+                                           :signal "TERM" :teardown "unexplained"))))
+    (unwind-protect
+        (let* ((conn (harness-acp-test-connect))
+               (sid (harness-acp-test-new-session conn))
+               (listed (plist-get (plist-get (harness-test-await (harness-acp-initialize conn))
+                                             :_harness)
+                                  :methods)))
+          (should (member "sandbox/job-evidence" listed))
+          (let ((records (harness-acp-test-request conn "_harness/sandbox/job-evidence"
+                                                   (list :session-id sid))))
+            (should (= 1 (length records)))
+            (should (equal sid (plist-get (car records) :session)))
+            (should (equal "unexplained" (plist-get (car records) :teardown))))
+          (should (equal "job-2"
+                         (plist-get (car (harness-acp-test-request
+                                          conn "_harness/sandbox/job-evidence"
+                                          (list :session-id sid :id "job-2")))
+                                    :job))))
+      (harness-unregister-method 'sandbox/job-evidence))))
+
 (defun harness-acp-test-events (event)
   "Return the args of each `_harness/event' EVENT the primary connection got, oldest first."
   (let (out)

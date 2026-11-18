@@ -1351,29 +1351,89 @@ is logged: the request then goes on unrecorded."
                             job (harness-error-message err))
                nil)))))
 
-(defun harness-provider--job-events (id on-event)
+(defun harness-provider--job-recorder (id on-event)
   "Wrap ON-EVENT so that internal session ID records the call's events.
-Every event reaches ON-EVENT unchanged, and is recorded after it: the
-text the model writes is gathered for the reply, its usage is added to
-the session's (`session/usage-add'), and `done', whatever its stop
-reason, finishes the session (`session/internal-finish').  An error of
-the recording is logged, never passed on; one of ON-EVENT still is,
-to `harness-provider--guard-events', which wraps this."
-  (let ((reply nil))
-    (lambda (event)
-      (unwind-protect
-          (funcall on-event event)
-        (condition-case err
-            (pcase (plist-get event :type)
-              ('text (when (stringp (plist-get event :delta))
-                       (push (plist-get event :delta) reply)))
-              ('usage (harness-call 'session/usage-add id (harness-plist-remove event :type)))
-              ('done (harness-call 'session/internal-finish id
-                                   :reply (apply #'concat (reverse reply))
-                                   :stop-reason (plist-get event :stop-reason)
-                                   :error (plist-get event :error))))
-          (error (harness-log 'warn "provider: recording %S in internal session %s failed: %s"
-                              (plist-get event :type) id (harness-error-message err))))))))
+Return a plist of `:on-event', the wrapper, and `:finish', the function
+that ends the record once.
+
+Every event reaches ON-EVENT unchanged, and is recorded before it, so a
+caller that cancels or fails from its own handler cannot rewrite what
+the call has already done: the text the model writes is gathered for
+the reply, its usage is added to the session's (`session/usage-add'),
+and `done', whatever its stop reason, finishes the session
+\(`session/internal-finish').
+
+A call is ended once.  The first of a `done' and `:finish' called as
+`cancelled' is its end; everything after that is late and recorded no
+further -- a repeated cancel, a `done' that arrives after the caller
+stopped the call, and one a provider emits from inside its own cancel
+alike.  `session/internal-finish' is not terminal-idempotent: it
+appends the reply and the hint again, so this is the one place that
+keeps a call's record from being ended twice.  An error of the
+recording is logged, never passed on; one of ON-EVENT still is, to
+`harness-provider--guard-events', which wraps this."
+  (let ((reply nil) (ended nil))
+    (cl-labels
+        ((finish (stop-reason error)
+           (unless ended
+             (setq ended t)
+             (condition-case err
+                 (harness-call 'session/internal-finish id
+                               :reply (apply #'concat (reverse reply))
+                               :stop-reason stop-reason
+                               :error error)
+               (error (harness-log 'warn "provider: finishing internal session %s failed: %s"
+                                   id (harness-error-message err))))))
+         (record (event)
+           (unless ended
+             (condition-case err
+                 (pcase (plist-get event :type)
+                   ('text (when (stringp (plist-get event :delta))
+                            (push (plist-get event :delta) reply)))
+                   ('usage (harness-call 'session/usage-add id (harness-plist-remove event :type)))
+                   ('done (finish (plist-get event :stop-reason) (plist-get event :error))))
+               (error (harness-log 'warn "provider: recording %S in internal session %s failed: %s"
+                                   (plist-get event :type) id (harness-error-message err)))))))
+      (list :on-event (lambda (event) (record event) (funcall on-event event))
+            :finish #'finish))))
+
+(defun harness-provider--job-handle (handle finish)
+  "Return HANDLE, whose `:cancel' ends a recorded call once.
+FINISH ends the record of the call (`harness-provider--job-recorder').
+The provider's own cancel still runs first, so a call is stopped
+exactly as it was: whatever the provider does -- nothing, a `done' it
+emits from inside its cancel, or an error -- the record is then
+finished once, as cancelled where the provider ended nothing itself,
+and a repeated cancel neither reaches the provider again nor records
+anything more.  A handle with nothing to cancel is given one all the
+same: the record of a call that never reached a transport has no other
+end."
+  (let* ((inner (plist-get handle :cancel))
+         (handle (copy-sequence handle))
+         (cancelled nil))
+    (plist-put handle :cancel
+               (lambda ()
+                 (unless cancelled
+                   (setq cancelled t)
+                   (unwind-protect
+                       (when (functionp inner) (funcall inner))
+                     (funcall finish 'cancelled nil)))
+                 nil))
+    handle))
+
+(defun harness-provider--job-recorded-handle (handle recorder job-id)
+  "Return HANDLE of a call recorded as internal session JOB-ID.
+RECORDER is that call's record, whose `:finish' ends it; the handle's
+`:cancel' ends it once, as cancelled, after the provider's own cancel
+\(see `harness-provider--job-handle').  The session is named as
+`:session', for a caller that shows what the call asked and answered.
+With no JOB-ID nothing is recorded and HANDLE is returned as it is."
+  (if (null job-id)
+      handle
+    (let ((handle (plist-put (copy-sequence handle) :session job-id)))
+      (if recorder
+          (harness-provider--job-handle handle (plist-get recorder :finish))
+        handle))))
 
 (harness-defmethod provider/complete (request)
   "Start a completion for REQUEST; return a handle plist with `:cancel'.
@@ -1385,9 +1445,12 @@ what a call the harness makes on its own is for, such as \"Permission
 judge\", is recorded as an internal session (`session/internal-start'),
 made for the session `:job-parent' names, in the project `:job-project'
 names; it is finished when the request is done, refused or failed
-alike.  The provider never sees those keys, and the handle then carries
-the internal session's id as `:session', for a caller that shows what
-the call asked and answered."
+alike, and when the caller cancels it -- the handle's `:cancel' stops
+the call as the provider's does and ends the record once, as
+cancelled, for a provider whose cancel emits no `done'.  The provider
+never sees those keys, and the handle then carries the internal
+session's id as `:session', for a caller that shows what the call
+asked and answered."
   (pcase-let* ((job-id (harness-provider--job-start request))
                (request (if (or (plist-member request :job) (plist-member request :job-parent)
                                 (plist-member request :job-project))
@@ -1395,11 +1458,13 @@ the call asked and answered."
                           request))
                (`(,pid . ,_) (harness-provider-parse-model (plist-get request :model)))
                (provider (and pid (harness-provider-get pid)))
+               (recorder (and job-id (harness-provider--job-recorder
+                                      job-id (or (plist-get request :on-event) #'ignore))))
                (on-event (let ((caller (or (plist-get request :on-event) #'ignore)))
                            ;; Inside the guard, so the recording too sees
                            ;; `done' once.
                            (harness-provider--guard-events
-                            (if job-id (harness-provider--job-events job-id caller) caller))))
+                            (if recorder (plist-get recorder :on-event) caller))))
                ;; One place bounds what a completion may ask a model to
                ;; write, and it does nothing unless the user set a ceiling
                ;; (`harness-provider-max-output-tokens'): an ordinary
@@ -1411,29 +1476,22 @@ the call asked and answered."
      (refusal
       (harness-log 'warn "provider/complete: %s" refusal)
       (funcall on-event (list :type 'done :stop-reason 'error :error refusal))
-      (if job-id
-          (list :cancel #'ignore :session job-id)
-        (list :cancel #'ignore)))
+      (harness-provider--job-recorded-handle (list :cancel #'ignore) recorder job-id))
      ((null provider)
       (funcall on-event (list :type 'done :stop-reason 'error
                               :error (format "No provider for model %s" (plist-get request :model))))
-      (if job-id
-          (list :cancel #'ignore :session job-id)
-        (list :cancel #'ignore)))
+      (harness-provider--job-recorded-handle (list :cancel #'ignore) recorder job-id))
      (t
       (condition-case err
           (let ((handle (or (harness-provider--send provider pid request)
                             (list :cancel #'ignore))))
             ;; A recorded call says which internal session holds it, so a
-            ;; caller can show the prompt, the reply and any error.
-            (if job-id
-                (plist-put (copy-sequence handle) :session job-id)
-              handle))
+            ;; caller can show the prompt, the reply and any error; its
+            ;; cancel ends that record when the provider's emits nothing.
+            (harness-provider--job-recorded-handle handle recorder job-id))
         (error
          (funcall on-event (list :type 'done :stop-reason 'error :error (harness-error-message err)))
-         (if job-id
-             (list :cancel #'ignore :session job-id)
-           (list :cancel #'ignore))))))))
+         (harness-provider--job-recorded-handle (list :cancel #'ignore) recorder job-id)))))))
 
 
 (defun harness-provider--send (provider pid request)

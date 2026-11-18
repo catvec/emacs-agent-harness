@@ -112,6 +112,7 @@ call, which is what the jail exists to prevent.
 
 ### Methods
 
+- `sandbox/job-evidence` (session-id &optional id) — Return how the jobs of SESSION-ID started, were stopped and ended.
 - `sandbox/job-stop` (session-id id) — Stop job ID of SESSION-ID, for the user; return its entry.
 - `sandbox/jobs` (session-id) — Return the jobs of SESSION-ID, oldest first, as the access view draws them.
 
@@ -121,6 +122,7 @@ call, which is what the jail exists to prevent.
 
 ### Options
 
+- `harness-tools-jobs-evidence-limit` — Most bytes of job lifecycle evidence kept, across every session.
 - `harness-tools-jobs-max-per-session` — Most jobs one session may have running at once.
 - `harness-tools-jobs-max-restarts` — Most times one job is started again after its sandbox changed.
 - `harness-tools-jobs-output-limit` — Most output, in bytes, a job keeps in memory and in its log.
