@@ -390,11 +390,11 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `session/pending-updated` | [session](session.md) | [session](session.md) | [ui-pending](ui-pending.md) | yes |
 | `session/plan` | [session](session.md) | [session](session.md) |  |  |
 | `session/provider-state-changed` | [session](session.md) | [session](session.md) | [provider-claude](provider-claude.md) |  |
-| `session/queue-changed` | [session](session.md) | [session](session.md) |  | yes |
+| `session/queue-changed` | [session](session.md) | [session](session.md) | [workspace](workspace.md) | yes |
 | `session/redacted` | [session](session.md) | [redact](redact.md) | [ui-secrets](ui-secrets.md), [ui-voice](ui-voice.md) | yes |
 | `session/resumed` | [session](session.md) | [session](session.md) |  |  |
 | `session/status` | [session](session.md) | [session](session.md) | [tasks](tasks.md), [tools](tools.md), [tools-sessions](tools-sessions.md), [ui-workspace](ui-workspace.md) | yes |
-| `session/steering-changed` | [session](session.md) | [session](session.md) |  | yes |
+| `session/steering-changed` | [session](session.md) | [session](session.md) | [workspace](workspace.md) | yes |
 | `session/todos` | [session](session.md) | [session](session.md) | [acp](acp.md), [todo-sync](todo-sync.md) |  |
 | `session/updated` | [session](session.md) | [session](session.md) | [access](access.md), [acp](acp.md), [cache-warm](cache-warm.md), [fallback](fallback.md), [perms](perms.md), [pet](pet.md), [replay](replay.md) |  |
 | `session/usage` | [session](session.md) | [session](session.md) | [cache-warm](cache-warm.md), [tools](tools.md), [usage](usage.md) |  |
@@ -430,7 +430,9 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `workspace/deleted` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md), [workspace-box](workspace-box.md), [workspace-speech](workspace-speech.md) | yes |
 | `workspace/dream-finished` | [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md) | [workspace-knowledge](workspace-knowledge.md) |  | yes |
 | `workspace/episode-changed` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md), [ui-workspace-speech](ui-workspace-speech.md) | yes |
+| `workspace/inbox-changed` | [workspace](workspace.md) | [workspace](workspace.md) |  | yes |
 | `workspace/knowledge-changed` | [workspace](workspace.md), [workspace-knowledge](workspace-knowledge.md) | [workspace-knowledge](workspace-knowledge.md) | [ui-workspace](ui-workspace.md) | yes |
+| `workspace/reassigned` | [workspace](workspace.md) | [workspace](workspace.md) |  | yes |
 | `workspace/speech-changed` | [workspace-speech](workspace-speech.md) | [workspace-speech](workspace-speech.md) | [ui-workspace-speech](ui-workspace-speech.md) | yes |
 | `workspace/thread-changed` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md), [ui-workspace-speech](ui-workspace-speech.md), [workspace-speech](workspace-speech.md) | yes |
 | `workspace/timeline-appended` | [workspace](workspace.md) | [workspace](workspace.md) | [ui-workspace](ui-workspace.md) | yes |
@@ -455,7 +457,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `agent/stop-outstanding` | [agent](agent.md) | [supervisor](supervisor.md) (50), [tools-agent](tools-agent.md) (50), [tools-jobs](tools-jobs.md) (60) |
 | `agent/system-prompt` | [agent](agent.md) | [linking](linking.md) (45), [memory](memory.md) (55), [skills](skills.md) (60), [supervisor](supervisor.md) (900), [tasks](tasks.md) (60), [tools-agent](tools-agent.md) (40), [tools-computers](tools-computers.md) (60), [workspace](workspace.md) (50) |
 | `agent/tool-canceller` | [agent](agent.md) | [tools-shell](tools-shell.md) (50) |
-| `agent/tools` | [tools](tools.md) | [access](access.md) (85), [readonly](readonly.md) (90), [supervisor](supervisor.md) (90), [tasks](tasks.md) (50), [tools-handin](tools-handin.md) (50), [workspace-knowledge](workspace-knowledge.md) (40) |
+| `agent/tools` | [tools](tools.md) | [access](access.md) (85), [readonly](readonly.md) (90), [supervisor](supervisor.md) (90), [tasks](tasks.md) (50), [tools-handin](tools-handin.md) (50), [workspace](workspace.md) (40), [workspace-knowledge](workspace-knowledge.md) (40) |
 | `naming/auto-p` | [naming](naming.md) | [tasks](tasks.md) (50) |
 | `naming/system-prompt` | [naming](naming.md) | [tasks](tasks.md) (60) |
 | `notification/before-send` | [notifications](notifications.md) |  |

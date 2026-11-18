@@ -1132,6 +1132,58 @@ class HarnessApi {
     });
   }
 
+  /// The messages that wait to be sent in [id], read where they
+  /// stand: each session's own queue and the messages its running turn
+  /// has not taken.  [scope] is `workspace', `thread', `session' or
+  /// `all'; [thread] names the thread a `thread' scope reads.
+  Future<WorkspaceInbox> workspaceInbox(
+    String id, {
+    String scope = 'workspace',
+    String? thread,
+    String? session,
+  }) async {
+    return WorkspaceInbox.fromWire(
+      await extension('workspace/inbox', {
+        'id': id,
+        'opts': {
+          'scope': scope,
+          if (thread != null && thread.isNotEmpty) 'thread': thread,
+          if (session != null && session.isNotEmpty) 'session': session,
+        },
+      }),
+    );
+  }
+
+  /// Move the message [message] names to thread [to] in workspace [id].
+  /// [message] names the message by `node' or `queue', or is the string
+  /// `last'; words are the last resort, so a message is never guessed
+  /// from text when its node is known.
+  Future<WorkspaceReassignment> reassignWorkspaceMessage(
+    String id, {
+    String? node,
+    String? queue,
+    String? last,
+    required String to,
+    String? by,
+  }) async {
+    return WorkspaceReassignment.fromWire(
+      await extension('workspace/reassign', {
+        'id': id,
+        // `last' is the word the harness reads as "the last user
+        // message the workspace shows"; a node or a queue id names one
+        // message exactly, and words are the last resort.
+        'message': (last != null && last.isNotEmpty)
+            ? 'last'
+            : {
+                if (node != null && node.isNotEmpty) 'node': node,
+                if (queue != null && queue.isNotEmpty) 'queue': queue,
+              },
+        'to': to,
+        if (by != null && by.isNotEmpty) 'opts': {'by': by},
+      }),
+    );
+  }
+
   Future<WorkspaceThread> createWorkspaceThread(String id, String title) async {
     return WorkspaceThread.fromWire(
       await extension('workspace/thread/create', {'id': id, 'title': title}),

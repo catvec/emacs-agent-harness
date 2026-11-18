@@ -5144,6 +5144,8 @@ from a callback (`harness-ui--call-with-display-override')."
 (declare-function harness-settings "harness-ui-config" (&optional directory scope))
 (declare-function harness-server "harness-ui-server" ())
 (declare-function harness-slots "harness-ui-slots" (&optional dir))
+(declare-function harness-ui-workspace-tool-open "harness-ui-workspace"
+                  (root &optional thread workspace))
 
 (defconst harness-ui-tool--views
   '((:view "sessions" :label "Sessions" :requires "project"
@@ -5169,7 +5171,10 @@ from a callback (`harness-ui--call-with-display-override')."
     (:view "usage" :label "Usage" :requires nil
      :modules (ui-usage) :function harness-usage :mode harness-ui-usage-mode)
     (:view "slots" :label "Task slots" :requires "project"
-     :modules (ui-slots) :function harness-slots :mode harness-ui-slots-mode))
+     :modules (ui-slots) :function harness-slots :mode harness-ui-slots-mode)
+    (:view "workspace" :label "Workspace" :requires "project"
+     :modules (ui-workspace) :function harness-ui-workspace-tool-open
+     :mode harness-ui-workspace-mode))
   "The fixed vocabulary of views a tool may open.
 No entry takes a command, code, a module to load or an interactive
 argument.  The modules must be running in this Emacs; a function left
@@ -5286,7 +5291,11 @@ The report returns a promise of that plist, after fetching its task."
                       ("settings" (harness-settings target))
                       ("server" (harness-server))
                       ("usage" (harness-usage))
-                      ("slots" (harness-slots target)))))
+                      ("slots" (harness-slots target))
+                      ("workspace"
+                       (harness-ui-workspace-tool-open target
+                                                       (plist-get params :thread)
+                                                       (plist-get params :workspace))))))
         (if (harness-promise-p value)
             (harness-then value (lambda (answer)
                                   (if (listp answer) answer

@@ -1202,6 +1202,7 @@ turn running across a reload may still hold."
       (append (list :id (plist-get entry :node) :text (plist-get entry :text)
                     :ts (plist-get entry :ts))
               (and (plist-get entry :from) (list :from (plist-get entry :from)))
+              (and (plist-get entry :meta) (list :meta (plist-get entry :meta)))
               (and blocks (not (harness-agent--only-text-p blocks))
                    (list :blocks (mapcar #'harness-agent--display-block blocks)))))))
 
@@ -1236,7 +1237,7 @@ the messages that wait must not stop the turn from delivering them."
                               (delq nil (mapcar #'harness-agent--steering-item
                                                 (harness-agent-turn-steering turn)))))))))
 
-(defun harness-agent--message-entry (blocks from)
+(defun harness-agent--message-entry (blocks from &optional meta)
   "Return the entry of BLOCKS, a message from FROM that waits for the model.
 It is what the turn keeps of a message it has not recorded: `:node', the
 id the message will have as a node of the transcript, `:text', `:blocks'
@@ -1245,15 +1246,18 @@ and `:ts', when it was sent, with `:from' when FROM, who sent it (see
 which a hosted loop is handed with the tool result that delivers it
 \(`harness-agent--with-steering').  A message held for a gate
 \(`harness-agent--held') is kept as a message that steers is
-\(`harness-agent--record-steering'), so a UI draws both alike."
+\(`harness-agent--record-steering'), so a UI draws both alike.  META,
+when non-nil, is extra metadata for the node the message becomes, beside
+the sender FROM: a caller's own facts about where the message came from."
   (let ((images (harness-agent--message-images blocks)))
     (append (list :node (concat "n-" (harness-short-id 10))
                   :text (harness-agent--blocks-text blocks)
                   :blocks blocks :ts (float-time))
             (and from (list :from from))
+            (and meta (list :meta meta))
             (and images (list :images images)))))
 
-(defun harness-agent--record-steering (turn blocks from)
+(defun harness-agent--record-steering (turn blocks from &optional meta)
   "Hold BLOCKS, a message from FROM, for the next step of the running TURN.
 The message is no node yet: it waits as a pending entry, shown to the
 user with the messages that wait (`harness-agent--publish-steering'),
@@ -1262,8 +1266,8 @@ and the next step boundary delivers it once
 `:steering' (and `:from', when FROM is who sent it: see `agent/prompt').
 The entry (`harness-agent--message-entry') keeps the id that node will
 have, the message's text and blocks, who sent it, when, and its images.
-Return the entry."
-  (let ((entry (harness-agent--message-entry blocks from)))
+META is extra metadata for the node the message becomes.  Return the entry."
+  (let ((entry (harness-agent--message-entry blocks from meta)))
     (setf (harness-agent-turn-steering turn)
           (append (harness-agent-turn-steering turn) (list entry)))
     (harness-agent--publish-steering turn)
@@ -1276,13 +1280,15 @@ It is marked `:steering' beside its sender and the time it was sent
 got it after, when that is given: the mark is how a UI tells a message the
 model has from one it never got (`harness-agent--flush-steering')."
   (let* ((blocks (plist-get entry :blocks))
-         (from (plist-get entry :from)))
+         (from (plist-get entry :from))
+         (extra (plist-get entry :meta)))
     (list :id (plist-get entry :node) :kind 'user :content (plist-get entry :text)
           :blocks (unless (harness-agent--only-text-p blocks) blocks)
           :meta (append (list :steering t)
                         (and from (list :from from))
                         (and delivered-after (list :delivered-after delivered-after))
-                        (and (plist-get entry :ts) (list :sent-at (plist-get entry :ts)))))))
+                        (and (plist-get entry :ts) (list :sent-at (plist-get entry :ts)))
+                        extra))))
 
 ;;;; Messages held with a turn
 
@@ -1338,7 +1344,7 @@ the count comes first.  Nil when none waits."
           ((= n 1) (if quoted (format "1 message waits: “%s”" quoted) "1 message waits"))
           (t (format "%d messages wait" n)))))
 
-(defun harness-agent--hold-message (turn blocks from hold)
+(defun harness-agent--hold-message (turn blocks from hold &optional meta)
   "Keep BLOCKS, a message from FROM sent to TURN, until its gate lets it go on.
 HOLD is what holds the turn (`harness-agent--holding').  The message is
 recorded by `harness-agent--flush-held'.  Meanwhile the turn shows what
@@ -1347,10 +1353,10 @@ opened the turn too, while its gate holds it -- and its session reads
 running, as it does while a gate holds its first message.  The messages
 the gate holds are listed on the session, for a UI to draw as queued
 \(`harness-agent--publish-steering'), HOLD's words saying what they wait
-for."
+for.  META is extra metadata for the node the message becomes."
   (let* ((sid (harness-agent-turn-session-id turn))
          (held (append (gethash turn harness-agent--held)
-                       (list (harness-agent--message-entry blocks from))))
+                       (list (harness-agent--message-entry blocks from meta))))
          (opening (gethash turn harness-agent--opening)))
     (puthash turn held harness-agent--held)
     (puthash turn (plist-get hold :text) harness-agent--shown)
@@ -1374,13 +1380,18 @@ for."
 ENTRY is as `harness-agent--message-entry' makes it: the node has the id
 the message was listed under while it waited, so a UI that drew it
 waiting finds it in the transcript.  A message of text alone is its
-text; any other keeps its blocks."
+text; any other keeps its blocks.  The sender and the caller's own
+metadata (`:meta' of the entry) go in the node's `:meta', so a client
+reads where the message came from in the transcript itself."
   (let ((blocks (plist-get entry :blocks))
-        (from (plist-get entry :from)))
+        (from (plist-get entry :from))
+        (meta (plist-get entry :meta)))
     (append (list :id (plist-get entry :node)
                   :kind 'user :content (harness-agent--blocks-text blocks)
                   :blocks (unless (harness-agent--only-text-p blocks) blocks))
-            (and from (list :meta (list :from from))))))
+            (and (or from meta)
+                 (list :meta (append (and from (list :from from))
+                                     meta))))))
 
 (defun harness-agent--flush-held (turn)
   "Record the messages held for TURN, oldest first, as ordinary user messages.
@@ -1461,6 +1472,10 @@ model gets the message as a user message all the same.
 OPTS `:queued' says the message is the session's queue going out
 \(`agent/send-queue'), not one written now: the `agent/message' filters
 get it as `:queued', so a module can treat it as what the queue kept.
+OPTS `:meta' is extra metadata for the node the message becomes, beside
+the sender: a module's own facts about the message, such as the thread
+and profile a workspace message came from.  It is kept on the node's
+`:meta' and never shown to the model.
 An inactive session is resumed first: sending to it brings it back.
 Blank text blocks are dropped; a message left empty signals an error,
 so no turn, steering message or queued item is ever empty.
@@ -1480,6 +1495,8 @@ call the harness made and cannot be continued."
          (attachments (and queue (plist-get opts :attachments)))
          (from (let ((f (plist-get opts :from))) (and (harness-sender-kind f) f)))
          (queued (plist-get opts :queued))
+         (meta (let ((m (plist-get opts :meta)))
+                 (and (consp m) m)))
          (turn (gethash session-id harness-agent--turns))
          (hold (and turn (not queue) (gethash turn harness-agent--gated)
                     (harness-agent--holding session-id))))
@@ -1490,16 +1507,17 @@ call the harness made and cannot be continued."
       (setq blocks (harness-agent--message session-id blocks from (and turn t) queued)))
     (cond
      (queue
-      (harness-call 'session/queue session-id (harness-agent--blocks-text blocks) attachments from)
+      (harness-call 'session/queue session-id (harness-agent--blocks-text blocks)
+                    attachments from)
       (harness-resolved (list :queued t)))
      (hold
-      (harness-agent--hold-message turn blocks from hold)
+      (harness-agent--hold-message turn blocks from hold meta)
       (harness-agent-turn-promise turn))
      (turn
-      (harness-agent--record-steering turn blocks from)
+      (harness-agent--record-steering turn blocks from meta)
       (harness-emit 'agent/steered session-id)
       (harness-agent-turn-promise turn))
-     (t (harness-agent--start session-id blocks from)))))
+     (t (harness-agent--start session-id blocks from meta)))))
 
 (defun harness-agent--follow-head (session-id)
   "Make the provider conversation of SESSION-ID the transcript up to its head.
@@ -1539,14 +1557,15 @@ head.  See `session/provider-continuation'."
     (error (harness-log 'warn "agent: following the head of %s failed: %S" session-id err)
            (harness-resolved nil))))
 
-(defun harness-agent--start (session-id blocks &optional from)
+(defun harness-agent--start (session-id blocks &optional from meta)
   "Start a turn of SESSION-ID with the message BLOCKS; return its promise.
-FROM, when non-nil, is who sent the message (see `agent/prompt')."
+FROM, when non-nil, is who sent the message (see `agent/prompt'), and
+META extra metadata for the node the message becomes."
   (let* ((session (harness-call 'session/get session-id))
          (harness-error-report-session session-id)
          (promise (harness-make-promise))
          (turn (make-harness-agent-turn :session-id session-id :promise promise :started (float-time)))
-         (entry (harness-agent--message-entry blocks from))
+         (entry (harness-agent--message-entry blocks from meta))
          (node (harness-agent--opening-node entry)))
     (puthash session-id turn harness-agent--turns)
     (harness-agent--control-turn turn)

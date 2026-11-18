@@ -319,6 +319,101 @@ class WorkspaceController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// What waits to be sent in this workspace, as the harness reads
+  /// it where the messages stand.  Nothing is copied into a client queue:
+  /// a message sent, withdrawn or answered elsewhere is seen here at once.
+  WorkspaceInbox? inbox;
+
+  /// The scope the inbox reads: `workspace', `thread', `session' or `all'.
+  String inboxScope = 'workspace';
+
+  /// Why the inbox could not be read, or nil.  A failed read is not an
+  /// empty inbox, and the view says which it is.
+  String? inboxError;
+
+  bool inboxLoading = false;
+
+  /// Read the inbox in [scope], and for the thread or session it
+  /// names.
+  Future<void> loadInbox({String scope = 'workspace'}) async {
+    final workspace = current;
+    if (workspace == null) return;
+    inboxScope = scope;
+    if (_preview) {
+      inbox ??= const WorkspaceInbox();
+      notifyListeners();
+      return;
+    }
+    inboxLoading = true;
+    inboxError = null;
+    notifyListeners();
+    try {
+      inbox = await _api!.workspaceInbox(
+        workspace.id,
+        scope: scope,
+        thread: scope == 'thread' ? activeThread?.id : null,
+        session: scope == 'session' ? activeThread?.live : null,
+      );
+    } on AcpException catch (failure) {
+      inboxError = failure.message;
+    } catch (failure) {
+      inboxError = '$failure';
+    } finally {
+      inboxLoading = false;
+      notifyListeners();
+    }
+  }
+
+  /// Move a message of this workspace to thread [to], named by its
+  /// [node] or its [queue] id.  The answer says what became of it: a
+  /// message nothing has read yet moves, one the transcript already holds
+  /// is forwarded, and a repeat of the same request answers as it did.
+  Future<WorkspaceReassignment?> reassign(
+    String to, {
+    String? node,
+    String? queue,
+    String? by,
+  }) async {
+    final workspace = current;
+    if (workspace == null) return null;
+    if (_preview) {
+      final done = WorkspaceReassignment(
+        status: 'queued',
+        thread: to,
+        delivery: 'queued',
+      );
+      notifyListeners();
+      return done;
+    }
+    try {
+      final done = await _api!.reassignWorkspaceMessage(
+        workspace.id,
+        to: to,
+        node: node,
+        queue: queue,
+        by: by,
+      );
+      await load(showSpinner: false);
+      return done;
+    } on AcpException catch (failure) {
+      error = failure.message;
+      notifyListeners();
+      return null;
+    } catch (failure) {
+      error = '$failure';
+      notifyListeners();
+      return null;
+    }
+  }
+
+  /// The words naming thread [id] as the person reads it, for a label.
+  String threadTitle(String id) {
+    for (final thread in threads) {
+      if (thread.id == id) return thread.title;
+    }
+    return id;
+  }
+
   Future<void> cancel() async {
     final workspace = current;
     if (workspace == null || _preview) return;
@@ -574,6 +669,11 @@ class WorkspaceController extends ChangeNotifier {
       _learnEpisode(asString(args[1]), asString(args[2]));
     } else if (event == 'workspace/thread-changed' && args.length > 1) {
       _learnThread(WorkspaceThread.fromWire(asMap(args[1])));
+    } else if (event == 'workspace/inbox-changed') {
+      // What waits to be sent changed where it stands: a message sent,
+      // withdrawn or answered elsewhere.  A view showing the inbox reads it
+      // again, and one that is not showing it does nothing.
+      if (inbox != null) unawaited(loadInbox(scope: inboxScope));
     }
     _reloadTimer?.cancel();
     _reloadTimer = Timer(const Duration(milliseconds: 140), () {

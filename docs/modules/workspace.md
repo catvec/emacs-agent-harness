@@ -9,7 +9,7 @@ Persistent workspace chat: one timeline over topic threads and episodes.
 - **Loaded:** when enabled (see `harness-enable-modules`)
 - **Requires:** [store](store.md), [session](session.md), [agent](agent.md), [project](project.md), [workspace-knowledge](workspace-knowledge.md)
 - **Required by:** [workspace-speech](workspace-speech.md)
-- **Brings along:** [ui-workspace](ui-workspace.md) (its UI), [small](small.md) (its file requires it)
+- **Brings along:** [ui-workspace](ui-workspace.md) (its UI), [small](small.md) (its file requires it), [tools](tools.md) (its file requires it)
 
 ## About
 
@@ -51,9 +51,11 @@ No model is asked to place a message.
 - `workspace/delete` (id &optional delete-sessions delete-graph) — Delete workspace ID.  With DELETE-SESSIONS close its episodes too.
 - `workspace/episode` (id thread &optional episode) — Return the session and state of THREAD's episode in workspace ID.
 - `workspace/get` (id) — Return workspace ID with its threads.
+- `workspace/inbox` (id &optional opts) — Return the messages that wait to be sent in workspace ID.
 - `workspace/list` (&optional filter) — List workspaces, newest last.  FILTER may name a root.
-- `workspace/open` (id) — Return workspace ID and its last thread, creating no episode.
+- `workspace/open` (id &optional thread) — Return workspace ID and the thread a client should show, creating no episode.
 - `workspace/prompt` (id text &optional opts) — Send TEXT to workspace ID and return the turn's promise.
+- `workspace/reassign` (id message to &optional opts) — Reassign MESSAGE to thread TO in workspace ID; return what happened.
 - `workspace/resources/status` (id) — Return workspace ID's browser, wallet, access and credential resources.
 - `workspace/status` (id) — Return what the workspace ID knows about its state.
 - `workspace/thread` (id thread) — Return THREAD of workspace ID with its episodes.
@@ -70,6 +72,11 @@ No model is asked to place a message.
 - `workspace/wallet/authorization/revoke` (id authorization) — Revoke purchase AUTHORIZATION in workspace ID and return the resources.
 - `workspace/wallet/purchase/decide` (id purchase decision) — Decide a proposed PURCHASE in workspace ID: allow or deny it.
 
+### Tools
+
+- `workspace_open_thread` — Show one existing workspace thread in the user's Emacs, for a request such as "open the kitchen thread". Name it by id or by words of its title. Opening is navigation only: it starts no episode, sends no message, copies no state and transfers nothing. An ordinary routed message never needs it, because the workspace conversation already shows which thread handles each exchange.
+- `workspace_reassign` — Move one user message of this workspace to the thread that should handle it, when the user says it went to the wrong one ("that was for the kitchen thread"). Name the thread by id or by words of its title; name the message by its node id, or leave it out for the last user message the workspace shows. A message nothing has read yet leaves its queue and is queued in the target's; one the transcript already holds is forwarded as corrected context that names the thread it came from, because a delivered message cannot be retracted. The answer says which happened. This moves one message: it does not pin later messages to the target, open a chat, undo work or transfer a task. Ask the user which message and which thread when either is unclear rather than calling this on a guess.
+
 ### Events
 
 - `workspace/changed` — (ID WORKSPACE) when a workspace record changed.
@@ -77,7 +84,9 @@ No model is asked to place a message.
 - `workspace/deleted` — (ID) when a workspace was deleted.
 - `workspace/dream-finished` — (WORKSPACE RESULT) when a dream changed the workspace's Logseq graph.
 - `workspace/episode-changed` — (ID THREAD SESSION DIVIDER) when an episode started or ended.
+- `workspace/inbox-changed` — (ID) when what waits to be sent in a workspace changed.
 - `workspace/knowledge-changed` — (WORKSPACE OP) when a block was written to the workspace's Logseq graph.
+- `workspace/reassigned` — (ID THREAD RESULT) when a message was moved to another thread.
 - `workspace/thread-changed` — (ID THREAD) when a thread changed.
 - `workspace/timeline-appended` — (ID ENTRY) when a timeline entry was appended.
 
@@ -91,6 +100,7 @@ No model is asked to place a message.
 - `harness-workspace-max-message-chars` — Most characters of one message the timeline keeps.
 - `harness-workspace-model` — Model a workspace episode runs on, or nil for the configured model.
 - `harness-workspace-non-interactive` — Whether a workspace episode starts non-interactive.
+- `harness-workspace-notification-cutoff` — Seconds a reply waits for its neighbours before one notification goes.
 - `harness-workspace-notify` — Whether the workspace sends a notification when a reply is ready.
 - `harness-workspace-permission-mode` — Permission mode of a workspace episode.
 - `harness-workspace-recall` — Knowledge blocks a brief recalls from the Logseq graph.
@@ -109,6 +119,8 @@ No model is asked to place a message.
 - `agent/cancel` ([agent](agent.md))
 - `agent/prompt` ([agent](agent.md))
 - `agent/running` ([agent](agent.md))
+- `agent/withdraw` ([agent](agent.md))
+- `emacs/request` ([acp](acp.md)), when it is loaded
 - `knowledge/index` ([workspace-knowledge](workspace-knowledge.md))
 - `knowledge/nearest` ([workspace-knowledge](workspace-knowledge.md))
 - `knowledge/recall` ([workspace-knowledge](workspace-knowledge.md))
@@ -116,6 +128,7 @@ No model is asked to place a message.
 - `knowledge/thread-page` ([workspace-knowledge](workspace-knowledge.md))
 - `knowledge/thread-touch` ([workspace-knowledge](workspace-knowledge.md))
 - `logseq/root` ([logseq](logseq.md)), when it is loaded
+- `notification/send` ([notifications](notifications.md)), when it is loaded
 - `secret-sandbox/secrets` ([secret-sandbox](secret-sandbox.md)), when it is loaded
 - `secret-sandbox/status` ([secret-sandbox](secret-sandbox.md)), when it is loaded
 - `session/append` ([session](session.md))
@@ -123,6 +136,8 @@ No model is asked to place a message.
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))
 - `session/node` ([session](session.md))
+- `session/queue` ([session](session.md))
+- `session/queue-remove` ([session](session.md))
 - `store/append` ([store](store.md))
 - `store/delete` ([store](store.md))
 - `store/list` ([store](store.md))
@@ -140,16 +155,21 @@ No model is asked to place a message.
 - `session/deleted` → `harness-workspace--on-session-deleted`
 - `session/node-added` → `harness-workspace--on-node-added`
 - `session/node-updated` → `harness-workspace--on-node-updated`
+- `session/queue-changed` → `harness-workspace--on-session-queue-changed`
+- `session/steering-changed` → `harness-workspace--on-session-queue-changed`
 
 ### Events it emits
 
 - `workspace/changed`
 - `workspace/deleted`
 - `workspace/episode-changed`
+- `workspace/inbox-changed`
+- `workspace/reassigned`
 - `workspace/thread-changed`
 - `workspace/timeline-appended`
 
 ### Filter chains it joins
 
 - `agent/system-prompt` → `harness-workspace--system-prompt`
+- `agent/tools` at 40 → `harness-workspace--tools`
 

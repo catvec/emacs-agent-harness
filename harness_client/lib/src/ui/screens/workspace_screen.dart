@@ -321,6 +321,56 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
     );
   }
 
+  /// Show what waits to be sent, read where the messages stand.
+  Future<void> _showInbox() async {
+    final controller = _controller;
+    if (controller == null) return;
+    await controller.loadInbox(scope: controller.inboxScope);
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) => _InboxSheet(
+        controller: controller,
+        onScope: (scope) => controller.loadInbox(scope: scope),
+        onRefresh: () => controller.loadInbox(scope: controller.inboxScope),
+      ),
+    );
+  }
+
+  /// Move the message under [entry] to a thread the person picks.
+  Future<void> _reassign(WorkspaceEntry entry) async {
+    final controller = _controller;
+    if (controller == null) return;
+    final thread = await showModalBottomSheet<WorkspaceThread>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => _ThreadsSheet(
+        controller: controller,
+        onPick: (picked) => Navigator.of(context).pop(picked),
+        onNew: () => Navigator.of(context).pop(),
+      ),
+    );
+    if (thread == null || !mounted) return;
+    if (thread.id == entry.thread) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        SnackBar(
+          content: Text('Already in ${controller.threadTitle(thread.id)}'),
+        ),
+      );
+      return;
+    }
+    final done = await controller.reassign(thread.id, node: entry.node);
+    if (!mounted) return;
+    final words = done == null
+        ? 'Reassign · ${controller.error ?? 'unavailable'}'
+        : done.summary(controller.threadTitle);
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(SnackBar(content: Text(words)));
+  }
+
   Future<void> _openCall() async {
     final live = _controller?.activeThread?.live;
     if (live == null) return;
@@ -472,6 +522,12 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
             icon: Icons.list_alt_outlined,
             label: 'Threads',
             onPressed: _showThreads,
+          ),
+          HarnessIconButton(
+            key: const ValueKey('inbox-header'),
+            icon: Icons.inbox_outlined,
+            label: 'Inbox',
+            onPressed: _showInbox,
           ),
           if (buddyHere) _BuddyAction(buddy: buddy),
           if (thread?.live != null)
@@ -884,6 +940,9 @@ class _WorkspaceScreenState extends State<WorkspaceScreen> {
             child: _TimelineEntry(
               entry: entry,
               thread: _threadFor(controller, entry.thread),
+              threadTitle: (id) =>
+                  _threadFor(controller, id)?.title ?? id,
+              onReassign: _reassign,
             ),
           );
         },
@@ -1842,10 +1901,24 @@ class _ComputerWindowState extends State<_ComputerWindow> {
 }
 
 class _TimelineEntry extends StatelessWidget {
-  const _TimelineEntry({required this.entry, this.thread});
+  const _TimelineEntry({
+    required this.entry,
+    required this.threadTitle,
+    this.thread,
+    this.onReassign,
+  });
 
   final WorkspaceEntry entry;
   final WorkspaceThread? thread;
+
+  /// Move this message to another thread, when the screen offers it.
+  /// Only a message can be moved: a divider, a brief and a reassignment
+  /// line are what the workspace already recorded.
+  final ValueChanged<WorkspaceEntry>? onReassign;
+
+  /// Names a thread by its id, as the person reads it, so a provenance
+  /// label says the thread's title rather than its id.
+  final String Function(String id) threadTitle;
 
   @override
   Widget build(BuildContext context) {
@@ -1878,6 +1951,25 @@ class _TimelineEntry extends StatelessWidget {
         ),
       );
     }
+    if (entry.isReassignment) {
+      final to = threadTitle(entry.thread);
+      final from = entry.origin.isEmpty ? '' : threadTitle(entry.origin);
+      final delivery = entry.delivery.isEmpty ? 'uncertain' : entry.delivery;
+      // The words name both threads without an arrow: the bundled
+      // fonts do not all carry one, and a missing glyph reads as a box.
+      final words = from.isEmpty
+          ? 'Reassigned to $to · $delivery'
+          : 'Reassigned from $from to $to · $delivery';
+      return Padding(
+        padding: const EdgeInsets.only(bottom: HarnessSpace.lg),
+        child: Text(
+          words,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: HarnessText.caption(context),
+        ),
+      );
+    }
     if (entry.isBrief) {
       return Padding(
         padding: const EdgeInsets.only(bottom: HarnessSpace.lg),
@@ -1900,6 +1992,10 @@ class _TimelineEntry extends StatelessWidget {
     }
     final agent = entry.isAgent;
     final label = agent ? 'Agent' : 'You';
+    // Where the words came from, when that is not plain: the thread
+    // that began the exchange and the profile they arrived through.
+    final origin = entry.originLabel(threadTitle);
+    final moved = entry.reassignedLabel(threadTitle);
     final body = HarnessMarkdown(text: entry.text, compact: true, tight: true);
     final bubble = Container(
       width: double.infinity,
@@ -1918,12 +2014,49 @@ class _TimelineEntry extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            label,
-            style: HarnessText.label(context).copyWith(
-              color: agent ? HarnessColors.moss : theme.colorScheme.primary,
-            ),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              Text(
+                label,
+                style: HarnessText.label(context).copyWith(
+                  color: agent ? HarnessColors.moss : theme.colorScheme.primary,
+                ),
+              ),
+              // A user's message can be moved to another thread, from the
+              // row that names it: the action adds no line to the chat.
+              if (!agent && onReassign != null) ...[
+                const Spacer(),
+                HarnessTextButton(
+                  key: const ValueKey('reassign-message'),
+                  label: 'Reassign',
+                  onPressed: () => onReassign!(entry),
+                ),
+              ],
+            ],
           ),
+          // Where the words came from gets a line of its own, so a long
+          // thread title and its profile both read rather than eliding.
+          if (origin != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                origin,
+                maxLines: 2,
+                style: HarnessText.caption(context),
+              ),
+            ),
+          if (moved != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                moved,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: HarnessText.caption(context),
+              ),
+            ),
           const SizedBox(height: 4),
           body,
         ],
@@ -2143,6 +2276,213 @@ class _ThreadsSheet extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// What waits to be sent, read where the messages stand.
+/// The scope chooses what the inbox covers, and the rows name the thread,
+/// the message and the state it is in.  A session that cannot be read says
+/// so rather than reading as empty.
+class _InboxSheet extends StatelessWidget {
+  const _InboxSheet({
+    required this.controller,
+    required this.onScope,
+    required this.onRefresh,
+  });
+
+  final WorkspaceController controller;
+  final ValueChanged<String> onScope;
+  final VoidCallback onRefresh;
+
+  /// Each scope, the word naming it and what it covers.  The word is
+  /// the chip's label and the help is its tooltip, so a chip says which
+  /// messages pressing it would show.
+  static const _scopes = <String, (String, String)>{
+    'workspace': ('Workspace', 'Every thread of this workspace'),
+    'thread': ('Thread', 'The thread in view'),
+    'session': ('Session', 'The episode of the thread in view'),
+    'all': ('All', 'Every workspace'),
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        final inbox = controller.inbox;
+        return SafeArea(
+          child: SizedBox(
+            height: MediaQuery.sizeOf(context).height * 0.62,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    HarnessSpace.sheetGutter,
+                    0,
+                    HarnessSpace.sm,
+                    HarnessSpace.sm,
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          (inbox?.name.isNotEmpty ?? false)
+                              ? 'Inbox · ${inbox!.name}'
+                              : 'Inbox',
+                          style: HarnessText.sheetTitle(context),
+                        ),
+                      ),
+                      HarnessTextButton(
+                        label: 'Refresh',
+                        onPressed: onRefresh,
+                      ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: HarnessSpace.sheetGutter,
+                  ),
+                  child: Wrap(
+                    spacing: HarnessSpace.sm,
+                    children: [
+                      for (final entry in _scopes.entries)
+                        Tooltip(
+                          message: entry.value.$2,
+                          child: ChoiceChip(
+                            label: Text(entry.value.$1),
+                            selected: controller.inboxScope == entry.key,
+                            onSelected: (_) => onScope(entry.key),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: HarnessSpace.sm),
+                Expanded(child: _body(context, inbox)),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _body(BuildContext context, WorkspaceInbox? inbox) {
+    if (controller.inboxLoading && inbox == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    final failure = controller.inboxError;
+    if (failure != null && failure.isNotEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: HarnessSpace.sheetGutter,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Inbox · unavailable', style: HarnessText.label(context)),
+            const SizedBox(height: HarnessSpace.sm),
+            Text(failure, style: HarnessText.caption(context)),
+            const SizedBox(height: HarnessSpace.md),
+            HarnessTextButton(label: 'Retry', onPressed: onRefresh),
+          ],
+        ),
+      );
+    }
+    final items = inbox?.items ?? const <WorkspaceInboxItem>[];
+    if (items.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: HarnessSpace.sheetGutter,
+        ),
+        child: Text(
+          'No messages waiting',
+          style: HarnessText.caption(context),
+        ),
+      );
+    }
+    final counts = inbox?.countsLabel ?? '';
+    return ListView(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HarnessSpace.sheetGutter,
+      ),
+      children: [
+        if (counts.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: HarnessSpace.sm),
+            child: Text(counts, style: HarnessText.caption(context)),
+          ),
+        for (final item in items)
+          _InboxRow(
+            item: item,
+            workspace: inbox?.workspace ?? '',
+          ),
+      ],
+    );
+  }
+}
+
+class _InboxRow extends StatelessWidget {
+  const _InboxRow({required this.item, this.workspace = ''});
+
+  final WorkspaceInboxItem item;
+
+  /// The workspace the sheet shows.  A row waiting in another workspace
+  /// names it, so the `All' scope says which workspace each message
+  /// belongs to; a row of this workspace leaves it out, because the
+  /// title already says it.
+  final String workspace;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final elsewhere = item.workspace.isNotEmpty &&
+        item.workspace != workspace &&
+        item.workspaceName.isNotEmpty;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: HarnessSpace.md),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  elsewhere
+                      ? '${item.workspaceName} · ${item.title}'
+                      : item.title,
+                  style: HarnessText.label(context),
+                ),
+              ),
+              Text(
+                item.stateLabel,
+                style: HarnessText.caption(context).copyWith(
+                  color: item.isUnavailable
+                      ? theme.colorScheme.error
+                      : theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+          if (item.isUnavailable)
+            Text(
+              item.why.isEmpty ? 'Session unavailable' : item.why,
+              style: HarnessText.caption(context).copyWith(
+                color: theme.colorScheme.error,
+              ),
+            )
+          else if (item.text.isNotEmpty)
+            Text(
+              item.text,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: HarnessText.caption(context),
+            ),
+        ],
       ),
     );
   }
