@@ -147,7 +147,7 @@ and supervisor load only when they are named.
 | [naming](naming.md) | by default | [session](session.md), [provider](provider.md), [agent](agent.md) | Name nameless sessions with a cheap model as soon as their first message is sent. |
 | [notifications](notifications.md) |  |  | Notifications for the user through pluggable providers: desktop (system) and Gotify. |
 | [otel](otel.md) | when named | [agent](agent.md), [tools](tools.md) | Opt-in OpenTelemetry export of turns, model requests and tool calls, over OTLP/HTTP. |
-| [patch-review](patch-review.md) |  | [store](store.md), [tasks](tasks.md), [tools-review](tools-review.md), [thread-reply](thread-reply.md) | The threads of a task's review: kept in the state directory, delivered with the feedback, answered by the agent. |
+| [patch-review](patch-review.md) |  | [store](store.md), [tasks](tasks.md), [tools-review](tools-review.md), [thread-reply](thread-reply.md) | The threads of a task's review: kept in the state directory, delivered with the feedback, answered by the agent, with the messages their transitions leave. |
 | [perms](perms.md) | by default | [config](config.md), [tools](tools.md) | Directory jail, directory requests, permission modes, auto judge, user prompts with a cheap model's summary of the call, and the user's approval of denied calls. |
 | [pet](pet.md) |  | [store](store.md), [provider](provider.md) | A companion pet: hatched with random bones, named and voiced by a cheap model, growing with use. |
 | [plugins](plugins.md) |  | [session](session.md) | Projects' plugins: what a project's trusted .dir-locals.el loads, and the plugin modules each session froze. |
@@ -345,6 +345,7 @@ column "To the UI"); they hear it through `harness-ui-event-functions`.
 | `openrouter/route-selected` | [provider-openrouter](provider-openrouter.md) | [provider-openrouter](provider-openrouter.md) |  |  |
 | `patch-review/changed` | [patch-review](patch-review.md) | [patch-review](patch-review.md) | [ui-patch-review](ui-patch-review.md) | yes |
 | `patch-review/last-close` | [patch-review](patch-review.md) | [patch-review](patch-review.md) | [ui-patch-review](ui-patch-review.md) | yes |
+| `patch-review/last-reviewed` | [patch-review](patch-review.md) | [patch-review](patch-review.md) | [ui-patch-review](ui-patch-review.md) | yes |
 | `permission/decided` | [tools](tools.md) | [tools](tools.md) | [access](access.md), [agent](agent.md), [insights](insights.md), [perms](perms.md) |  |
 | `permission/dir-allowed` | [perms](perms.md) | [access](access.md), [perms](perms.md) |  | yes |
 | `permission/dir-revoked` | [perms](perms.md) | [access](access.md), [perms](perms.md) | [sandbox-session](sandbox-session.md), [tools-jobs](tools-jobs.md) | yes |

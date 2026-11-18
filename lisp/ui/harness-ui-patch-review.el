@@ -14,7 +14,8 @@
 ;; waiting; [Send drafts] sends them together (`patch-review/send-replies'),
 ;; as one message to the agent, which answers them in their threads, and
 ;; so does C-c C-c on the threads the chat shows in place of its box.
-;; The harness's message that the last thread is closed waits with them
+;; The harness's messages that no thread is left to answer and no close is
+;; left to review wait with them
 ;; (THE LAST CLOSE).
 ;; The compose view's threads have the buttons their headers have
 ;; elsewhere, and the keys and the line over them do the same; the review
@@ -129,8 +130,9 @@
 ;; the comments and drafts of the user have opened what they wrote in.
 ;;
 ;; THE LAST CLOSE.  Closing the last open thread of a task at work leaves
-;; the harness's message that no thread is left to answer
-;; (`patch-review/last-close') as a draft of the task's session.  It is
+;; the harness's messages that no thread is left to answer
+;; (`patch-review/last-close') and no close is left to review
+;; (`patch-review/last-reviewed') as drafts of the task's session.  Each is
 ;; one of the review's drafts: the line that sends the replies counts it
 ;; and [Send drafts] sends it with them (or alone, when no reply waits),
 ;; as does C-c C-c on the threads the chat shows.  It is drawn with the
@@ -138,7 +140,7 @@
 ;; message it will be, from "review", marked a draft, and [Discard] drops
 ;; it.  It is no block of the transcript until it goes.  A report or chat
 ;; opened after the close asks the harness once whether the message waits
-;; (`harness-ui-patch-review--fetch-last-close').
+;; (`harness-ui-patch-review--fetch-harness-drafts').
 ;;
 ;; Reviewing a branch is going through its files, and two settings make
 ;; that go the way a reviewer wants, each a button of the changes with its
@@ -781,6 +783,12 @@ about its code, which the branch has gone past."
 (defvar harness-ui-patch-review--reviews (make-hash-table :test 'equal)
   "Task id -> the review of its changes.")
 
+;; The harness's messages a UI draws with the drafts, and the words for
+;; each (defined with them below): the methods named above run after the
+;; file is read.
+(defvar harness-ui-patch-review--harness-draft-kinds)
+(defvar harness-ui-patch-review--harness-drafts)
+
 (defvar-local harness-ui-patch-review--review nil
   "In an Ediff control panel of a review, the review.")
 
@@ -1282,7 +1290,7 @@ come with them."
     (harness-ui-patch-review--load-viewed review)
     ;; A message the last close left while this Emacs was not listening,
     ;; or before it started: it waits with the drafts, to be sent.
-    (harness-ui-patch-review--fetch-last-close review)
+    (harness-ui-patch-review--fetch-harness-drafts review)
     (harness-ui-call
      "_harness/patch-review/get" (list :task-id id)
      (lambda (data)
@@ -3799,8 +3807,9 @@ them as they were."
                     (concat
                      (when-let* ((note (harness-ui-patch-review--drafts-note review t)))
                        (propertize (concat "  " note "\n") 'wrap-prefix "  "))
-                     (when-let* ((draft (harness-ui-patch-review--last-close-draft-string review)))
-                       (propertize (concat "  " draft "\n") 'wrap-prefix "  "))))
+                     (mapconcat (lambda (draft)
+                                  (propertize (concat "  " draft "\n") 'wrap-prefix "  "))
+                                (harness-ui-patch-review--harness-draft-strings review) "")))
                   (harness-ui-patch-review--wrap-headers
                    (change-review-ui-threads-string
                     set :filter filter :details change-review-ui--details
@@ -3863,16 +3872,20 @@ feedback that sends it back."
     (harness-ui-call
      "_harness/patch-review/send-replies" (list :task-id id)
      (lambda (result)
-       (let ((sent (or (plist-get result :sent) 0))
-             (close (plist-get result :last-close)))
+       (let* ((sent (or (plist-get result :sent) 0))
+              (messages (cl-loop for (kind) in harness-ui-patch-review--harness-draft-kinds
+                                 when (plist-get result (intern (format ":%s" kind)))
+                                 collect (plist-get (harness-ui-patch-review--harness-kind kind)
+                                                    :sent))))
          (message "%s"
-                  (cond ((and (> sent 0) close)
-                         (format "Sent %s and the harness's message to the agent"
-                                 (harness-ui-patch-review--plural sent "reply" "replies")))
+                  (cond ((and (> sent 0) messages)
+                         (format "Sent %s and %s to the agent"
+                                 (harness-ui-patch-review--plural sent "reply" "replies")
+                                 (string-join messages " and ")))
                         ((> sent 0)
                          (format "Sent %s to the agent"
                                  (harness-ui-patch-review--plural sent "reply" "replies")))
-                        (close "Sent the harness's message that the last thread is closed")
+                        (messages (harness-ui-patch-review--sentence-case (string-join messages " and ")))
                         (t "Sent the drafts to the agent")))))
      (lambda (err)
        (message "Could not send the drafts: %s" (harness-error-message err))))))
@@ -4725,10 +4738,11 @@ its key.  COMPACT uses shorter words."
   "Return the lines that tell what to know about REVIEW, above its files."
   (let ((tip (harness-ui-patch-review--r-tip review)))
     (delq nil
-          (list
-           (and (harness-ui-patch-review--r-loading review)
-                (propertize (if tip "Reading the branch again…" "Reading the branch…") 'face 'harness-dim-face))
-           (and (harness-ui-patch-review--r-error review)
+          (append
+           (list
+            (and (harness-ui-patch-review--r-loading review)
+                 (propertize (if tip "Reading the branch again…" "Reading the branch…") 'face 'harness-dim-face))
+            (and (harness-ui-patch-review--r-error review)
                 (concat (propertize (format "Could not read the branch: %s" (harness-ui-patch-review--r-error review))
                                     'face 'error)
                         "  "
@@ -4736,27 +4750,28 @@ its key.  COMPACT uses shorter words."
                                                (lambda (_) (harness-ui-patch-review--load review))
                                                nil "Read the branch again")
                                     'mouse-face 'highlight)))
-           ;; The diff the reviewer chose was not there to read: the one
-           ;; before is shown, and this says why.
-           (and (harness-ui-patch-review--r-selection-error review)
-                (propertize (harness-ui-patch-review--r-selection-error review) 'face 'error))
-           (when-let* ((note (harness-ui-patch-review--drafts-note review)))
-             note)
-           (when-let* ((draft (harness-ui-patch-review--last-close-draft-string review)))
-             draft)
-           (let ((drafts (length (and (harness-ui-patch-review--r-set review)
-                                      (change-review-drafts (harness-ui-patch-review--r-set review))))))
-             (and (> drafts 0)
-                  (not (harness-ui-patch-review--working-p (harness-ui-patch-review--r-task review)))
-                  (propertize
-                   (format "%s to send · feedback sends the task back · empty box included"
-                           (harness-ui-patch-review--plural drafts "draft"))
-                   'face 'change-review-ui-draft-face)))
-           (and (harness-ui-patch-review--r-dirty review)
-                (propertize "Worktree changes · not committed · not on the branch"
-                            'face 'warning))
-           (and tip (null (harness-ui-patch-review--r-files review))
-                (propertize (harness-ui-patch-review--nothing-text review) 'face 'harness-dim-face))))))
+            ;; The diff the reviewer chose was not there to read: the one
+            ;; before is shown, and this says why.
+            (and (harness-ui-patch-review--r-selection-error review)
+                 (propertize (harness-ui-patch-review--r-selection-error review) 'face 'error))
+            (when-let* ((note (harness-ui-patch-review--drafts-note review)))
+              note))
+           ;; The harness's messages, each a draft of its own, above the files.
+           (harness-ui-patch-review--harness-draft-strings review)
+           (list
+            (let ((drafts (length (and (harness-ui-patch-review--r-set review)
+                                       (change-review-drafts (harness-ui-patch-review--r-set review))))))
+              (and (> drafts 0)
+                   (not (harness-ui-patch-review--working-p (harness-ui-patch-review--r-task review)))
+                   (propertize
+                    (format "%s to send · feedback sends the task back · empty box included"
+                            (harness-ui-patch-review--plural drafts "draft"))
+                    'face 'change-review-ui-draft-face)))
+            (and (harness-ui-patch-review--r-dirty review)
+                 (propertize "Worktree changes · not committed · not on the branch"
+                             'face 'warning))
+            (and tip (null (harness-ui-patch-review--r-files review))
+                 (propertize (harness-ui-patch-review--nothing-text review) 'face 'harness-dim-face)))))))
 
 (defun harness-ui-patch-review--nothing-text (review)
   "Return what REVIEW's report says when the diff it shows changes no file."
@@ -7673,102 +7688,186 @@ Ediff."
       (cl-some #'buffer-live-p (harness-ui-patch-review--r-banners review))
       (buffer-live-p (harness-ui-patch-review--r-tree-buffer review))))
 
-;;;; The last close's message, waiting with the drafts
+;;;; The harness's messages, waiting with the drafts
 
-;; The harness's half keeps the message that a task's last review thread
-;; is closed (`patch-review/last-close'): from "review", it says no
-;; thread is left to answer.  It is no message until it goes, so it is
-;; drawn where the review's drafts are -- the notes above its files, and
-;; the threads view the chat shows -- as one of them: the drafts line
-;; counts it, [Send drafts] sends it with the replies, and C-c C-c on the
-;; threads does the same.  A report or chat opened after the close asks
-;; the harness once for it (`harness-ui-patch-review--fetch-last-close'),
-;; so a message a reload kept is there to send.
+;; The harness's half keeps a message of its own for each transition of a
+;; review that leaves the agent something to hear (`patch-review/last-close',
+;; `patch-review/last-reviewed'): from "review", they say that no thread is
+;; left to answer, and that no close is left to review.  A message is no
+;; message until it goes, so it is drawn where the review's drafts are --
+;; the notes above its files, and the threads view the chat shows -- as one
+;; of them: the drafts line counts it, [Send drafts] sends it with the
+;; replies, and C-c C-c on the threads does the same.  A report or chat
+;; opened after the transition asks the harness once for it
+;; (`harness-ui-patch-review--fetch-harness-draft'), so a message a reload
+;; kept is there to send.  The two are one kind of thing to a UI
+;; (`harness-ui-patch-review--harness-draft-kinds'): each has the method
+;; that gives it, the method that drops it, the event that announces it,
+;; and the words the drafts note and the echo area use.
 
-(defvar harness-ui-patch-review--last-close-drafts (make-hash-table :test #'equal)
-  "Task id -> the draft of the harness's message that its last thread is closed.
-The draft is the harness's own (`patch-review/last-close'), a plist of
-`:task', `:session', `:text', `:from' and `:time'.  It is drawn with
-the review's drafts (`harness-ui-patch-review--last-close-draft-string'),
-never as a block of the transcript, and sending the drafts sends it
+(defconst harness-ui-patch-review--harness-draft-kinds
+  '((last-close
+     :method "patch-review/last-close"
+     :discard "patch-review/discard-last-close"
+     :event "patch-review/last-close"
+     :note "harness message that the last thread is closed"
+     :waiting "the harness's message that the last thread is closed"
+     :dropped "Dropped the harness's message that the last thread is closed"
+     :sent "Sent the harness's message that the last thread is closed")
+    (last-reviewed
+     :method "patch-review/last-reviewed"
+     :discard "patch-review/discard-last-reviewed"
+     :event "patch-review/last-reviewed"
+     :note "harness message that every close is reviewed"
+     :waiting "the harness's message that every close is reviewed"
+     :dropped "Dropped the harness's message that every close is reviewed"
+     :sent "Sent the harness's message that every close is reviewed"))
+  "The harness's messages a UI shows with the review's drafts, by kind.
+`:method' gives the draft, `:discard' drops it, `:event' announces it,
+`:note' is how the drafts note names it, `:waiting' how the compact note
+does, and `:dropped' and `:sent' what the echo area says when the user
+drops it, or sends the drafts.")
+
+(defun harness-ui-patch-review--sentence-case (text)
+  "Return TEXT with its first letter in upper case, the rest as it is.
+`capitalize' would upper-case every word of a phrase, which a note is."
+  (if (string-empty-p text)
+      text
+    (concat (upcase (substring text 0 1)) (substring text 1))))
+
+(defun harness-ui-patch-review--harness-kind (kind)
+  "Return what KIND, a kind of harness message, is."
+  (or (cdr (assq kind harness-ui-patch-review--harness-draft-kinds))
+      (user-error "No harness message %s" kind)))
+
+(defvar harness-ui-patch-review--harness-drafts (make-hash-table :test #'equal)
+  "\(KIND . TASK-ID) -> the harness's message the review waits to send.
+The draft is the harness's own (`patch-review/last-close',
+`patch-review/last-reviewed'), a plist of `:task', `:session', `:text',
+`:from' and `:time'.  It is drawn with the review's drafts
+\(`harness-ui-patch-review--harness-draft-string'), never as a block of
+the transcript, and sending the drafts sends it
 \(`harness-ui-patch-review-send-replies').")
 
-(defun harness-ui-patch-review--last-close-draft (review)
-  "Return the last-close message REVIEW waits to send, or nil."
+(defun harness-ui-patch-review--harness-draft (kind review)
+  "Return KIND's message REVIEW waits to send, or nil."
   (when-let* ((id (harness-ui-patch-review--r-id review)))
-    (gethash id harness-ui-patch-review--last-close-drafts)))
+    (gethash (cons kind id) harness-ui-patch-review--harness-drafts)))
 
-(defun harness-ui-patch-review--last-close-changed (task-id draft)
-  "Keep DRAFT, the last-close message of TASK-ID, or forget it when nil.
+(defun harness-ui-patch-review--harness-drafts-waiting (review)
+  "Return the harness's messages REVIEW waits to send, as (KIND . DRAFT)."
+  (cl-loop for (kind) in harness-ui-patch-review--harness-draft-kinds
+           for draft = (harness-ui-patch-review--harness-draft kind review)
+           when draft collect (cons kind draft)))
+
+(defun harness-ui-patch-review--harness-draft-changed (kind task-id draft)
+  "Keep DRAFT, KIND's message of TASK-ID, or forget it when nil.
 Every surface that shows the review draws the drafts again; with no
-review here, the echo area says the message waits with them."
+review here, the echo area names the message that waits with them."
   (if draft
-      (puthash task-id draft harness-ui-patch-review--last-close-drafts)
-    (remhash task-id harness-ui-patch-review--last-close-drafts))
+      (puthash (cons kind task-id) draft harness-ui-patch-review--harness-drafts)
+    (remhash (cons kind task-id) harness-ui-patch-review--harness-drafts))
   (if-let* ((review (harness-ui-patch-review--known task-id)))
       (progn
         (when-let* ((set (harness-ui-patch-review--r-set review)))
           (change-review-ui-refresh set))
         (harness-ui-patch-review--refresh review))
     (when draft
-      (message "The last thread of the review is closed: its message waits with its drafts"))))
+      (message "%s · waiting with the drafts"
+               (harness-ui-patch-review--sentence-case (plist-get (harness-ui-patch-review--harness-kind kind) :waiting))))))
 
-(defun harness-ui-patch-review--fetch-last-close (review)
-  "Ask the harness whether REVIEW's task has a last-close message waiting.
-A report or chat opened after the close learns of it this way."
-  (when-let* ((id (harness-ui-patch-review--r-id review)))
+(defun harness-ui-patch-review--fetch-harness-draft (kind review)
+  "Ask the harness whether REVIEW's task has KIND's message waiting.
+A report or chat opened after the transition learns of it this way."
+  (when-let* ((id (harness-ui-patch-review--r-id review))
+              (method (plist-get (harness-ui-patch-review--harness-kind kind) :method)))
     (harness-ui-call
-     "_harness/patch-review/last-close" (list :task-id id)
+     (concat "_harness/" method) (list :task-id id)
      (lambda (draft)
        (when (eq review (gethash id harness-ui-patch-review--reviews))
-         (harness-ui-patch-review--last-close-changed id draft)))
+         (harness-ui-patch-review--harness-draft-changed kind id draft)))
      #'ignore)))
 
+(defun harness-ui-patch-review--fetch-harness-drafts (review)
+  "Ask the harness which of its messages REVIEW's task waits to send."
+  (dolist (entry harness-ui-patch-review--harness-draft-kinds)
+    (harness-ui-patch-review--fetch-harness-draft (car entry) review)))
+
 (defun harness-ui-patch-review--draft-count (review)
-  "Return how many drafts REVIEW has to send: replies, and the last-close message."
+  "Return how many drafts REVIEW has to send: replies, and the harness's messages."
   (+ (length (and (harness-ui-patch-review--r-set review)
                   (change-review-drafts (harness-ui-patch-review--r-set review))))
-     (if (harness-ui-patch-review--last-close-draft review) 1 0)))
+     (length (harness-ui-patch-review--harness-drafts-waiting review))))
 
-(defun harness-ui-patch-review--last-close-draft-string (review)
-  "Return REVIEW's last-close message drawn as a draft, or nil.
+(defun harness-ui-patch-review--harness-draft-string (kind review)
+  "Return KIND's message of REVIEW drawn as a draft, or nil.
 It reads as the system message it will be, from \"review\", marked a
 draft, with the button that drops it: sending the drafts sends it with
-the replies.  Every line after the first carries its own indent, for
-the note it is drawn in."
-  (when-let* ((draft (harness-ui-patch-review--last-close-draft review))
+the replies.  Every line after the first carries its own indent, for the
+note it is drawn in."
+  (when-let* ((draft (harness-ui-patch-review--harness-draft kind review))
               (line (harness-chat--from-line (plist-get draft :from))))
     (concat (string-trim-right line)
             (propertize " · draft" 'face 'change-review-ui-draft-face)
             "   "
             (harness-ui-action-button
-             "[Discard]" (lambda () (harness-ui-patch-review-discard-last-close review))
+             "[Discard]" (lambda () (harness-ui-patch-review-discard-harness-message kind review))
              :help "Drop the harness's message: the agent is not told")
             "\n  "
             (propertize (plist-get draft :text)
                         'face 'harness-system-face 'wrap-prefix "  "))))
 
+(defun harness-ui-patch-review--harness-draft-strings (review)
+  "Return the harness's messages of REVIEW, each drawn as a draft."
+  (delq nil (mapcar (lambda (entry)
+                      (harness-ui-patch-review--harness-draft-string (car entry) review))
+                    harness-ui-patch-review--harness-draft-kinds)))
+
+(defun harness-ui-patch-review--harness-drafts-note (review)
+  "Return how the drafts note names the harness's messages REVIEW waits for.
+The one message's own words for one, and both named for two; nil when
+none waits."
+  (let ((kinds (mapcar #'car (harness-ui-patch-review--harness-drafts-waiting review))))
+    (pcase kinds
+      ('nil nil)
+      (`(,one) (plist-get (harness-ui-patch-review--harness-kind one) :note))
+      (_ "harness messages that the last thread is closed and every close is reviewed"))))
+
+(defun harness-ui-patch-review--harness-drafts-waiting-note (review)
+  "Return how the compact note says the harness's messages of REVIEW wait.
+The subject only: the caller says whether it waits or they wait."
+  (let ((kinds (mapcar #'car (harness-ui-patch-review--harness-drafts-waiting review))))
+    (pcase kinds
+      ('nil nil)
+      (`(,one) (plist-get (harness-ui-patch-review--harness-kind one) :waiting))
+      (_ "the harness's messages that the last thread is closed and every close is reviewed"))))
+
 (defun harness-ui-patch-review--drafts-note (review &optional compact)
   "Return the line about the drafts waiting in REVIEW, or nil.
 The drafts are the replies the user wrote in its threads and the
-harness's message that the last one is closed (`patch-review/last-close'):
-the working phase sends them together (`harness-ui-patch-review-send-replies').
-COMPACT says it in one line, as the chat's threads view has room for:
-the count, the button and the key that sends them."
+harness's messages about them (`patch-review/last-close',
+`patch-review/last-reviewed'): the working phase sends them together
+\(`harness-ui-patch-review-send-replies').  COMPACT says it in one
+line, as the chat's threads view has room for: the count, the button and
+the key that sends them."
   (when (harness-ui-patch-review--working-p (harness-ui-patch-review--r-task review))
     (let* ((replies (length (and (harness-ui-patch-review--r-set review)
                                  (change-review-drafts (harness-ui-patch-review--r-set review)))))
-           (close (harness-ui-patch-review--last-close-draft review))
-           (count (harness-ui-patch-review--plural replies "reply" "replies")))
-      (when (or (> replies 0) close)
+           (messages (length (harness-ui-patch-review--harness-drafts-waiting review)))
+           (count (harness-ui-patch-review--plural replies "reply" "replies"))
+           (note (harness-ui-patch-review--harness-drafts-note review))
+           (waiting (harness-ui-patch-review--harness-drafts-waiting-note review))
+           (total (+ replies messages)))
+      (when (> total 0)
         (if compact
             (concat
              (propertize
-              (cond (close
-                     (if (> replies 0)
-                         (format "%s and the harness's message waiting  " count)
-                       "The harness's message that the last thread is closed waits  "))
-                    (t (format "%s waiting  " count)))
+              (cond ((and (> replies 0) (> messages 1))
+                     (format "%s and the harness's messages waiting  " count))
+                    ((and (> replies 0) (> messages 0))
+                     (format "%s and the harness's message waiting  " count))
+                    ((> replies 0) (format "%s waiting  " count))
+                    (t (concat (harness-ui-patch-review--sentence-case waiting) (if (> messages 1) " wait  " " waits  "))))
               'face 'change-review-ui-draft-face)
              (propertize (buttonize "[Send drafts]"
                                     (lambda (_) (harness-ui-patch-review-send-replies review))
@@ -7778,42 +7877,55 @@ the count, the button and the key that sends them."
                          'help-echo "Send the drafts to the agent together"))
           (concat
            (propertize
-            (cond (close
+            (cond ((> messages 0)
                    (if (> replies 0)
-                       (format "To send · %s · harness message that the last thread is closed · " count)
-                     "To send · harness message that the last thread is closed · "))
+                       (format "To send · %s · %s · " count note)
+                     (format "To send · %s · " note)))
                   (t (format "%s waiting: C-c C-c saves one; " count)))
             'face 'change-review-ui-draft-face)
            (propertize (buttonize "[Send drafts]"
                                   (lambda (_) (harness-ui-patch-review-send-replies review))
                                   nil "Send the drafts to the agent together")
                        'mouse-face 'highlight)
-           (propertize (if close
-                           (if (> replies 0)
-                               " sends them to the agent together."
-                             " sends it to the agent.")
-                         " sends them to the agent together when you are done.")
+           (propertize (cond ((> messages 0)
+                              (if (> total 1) " sends them to the agent together."
+                                " sends it to the agent."))
+                             (t " sends them to the agent together when you are done."))
                        'face 'change-review-ui-draft-face)))))))
+
+(defun harness-ui-patch-review-discard-harness-message (kind &optional review)
+  "Drop KIND's message of REVIEW, which waited as one of the review's drafts.
+REVIEW is the one at point by default.  Nothing is sent: the agent is not
+told."
+  (let* ((review (or review (harness-ui-patch-review--review-here)
+                     (harness-ui-patch-review--current)))
+         (id (harness-ui-patch-review--r-id review))
+         (what (harness-ui-patch-review--harness-kind kind)))
+    (harness-ui-call
+     (concat "_harness/" (plist-get what :discard)) (list :task-id id)
+     (lambda (_result)
+       (remhash (cons kind id) harness-ui-patch-review--harness-drafts)
+       (harness-ui-patch-review--harness-draft-changed kind id nil)
+       (message "%s" (plist-get what :dropped)))
+     (lambda (err)
+       ;; It may be gone already, or stopped being true: ask the harness.
+       (harness-ui-patch-review--fetch-harness-draft kind review)
+       (message "Could not drop the harness's message: %s"
+                (harness-error-message err))))))
 
 (defun harness-ui-patch-review-discard-last-close (&optional review)
   "Drop the harness's message that the last thread of REVIEW is closed.
 It waited as one of the review's drafts, unsent: the agent is not told.
 REVIEW is the one at point by default."
   (interactive)
-  (let* ((review (or review (harness-ui-patch-review--review-here)
-                     (harness-ui-patch-review--current)))
-         (id (harness-ui-patch-review--r-id review)))
-    (harness-ui-call
-     "_harness/patch-review/discard-last-close" (list :task-id id)
-     (lambda (_result)
-       (remhash id harness-ui-patch-review--last-close-drafts)
-       (harness-ui-patch-review--last-close-changed id nil)
-       (message "Dropped the harness's message that the last thread is closed"))
-     (lambda (err)
-       ;; It may be gone already, or stopped being true: ask the harness.
-       (harness-ui-patch-review--fetch-last-close review)
-       (message "Could not drop the harness's message: %s"
-                (harness-error-message err))))))
+  (harness-ui-patch-review-discard-harness-message 'last-close review))
+
+(defun harness-ui-patch-review-discard-last-reviewed (&optional review)
+  "Drop the harness's message that every close of REVIEW is reviewed.
+It waited as one of the review's drafts, unsent: the agent is not told.
+REVIEW is the one at point by default."
+  (interactive)
+  (harness-ui-patch-review-discard-harness-message 'last-reviewed review))
 
 (defun harness-ui-patch-review--on-event (event args)
   "Follow the tasks whose changes are reviewed: EVENT about a task, with ARGS."
@@ -7846,10 +7958,12 @@ REVIEW is the one at point by default."
     ("task/deleted"
      (when-let* ((review (harness-ui-patch-review--known (car args))))
        (harness-ui-patch-review--ended review)))
-    ;; The message that the last close leaves for the user to send, or
-    ;; the one that no longer waits: drawn with the review's drafts.
-    ("patch-review/last-close"
-     (harness-ui-patch-review--last-close-changed (car args) (cadr args)))
+    ;; The harness's messages, when one waits for the user to send it
+    ;; and when one no longer does: drawn with the review's drafts.
+    ((or "patch-review/last-close" "patch-review/last-reviewed")
+     (harness-ui-patch-review--harness-draft-changed
+      (if (equal event "patch-review/last-close") 'last-close 'last-reviewed)
+      (car args) (cadr args)))
     ;; What the harness did to the threads of a review: an agent's comment,
     ;; the drafts sent, or the user's own operation come back.
     ("patch-review/changed"
@@ -7859,6 +7973,7 @@ REVIEW is the one at point by default."
            (change-review-apply (harness-ui-patch-review--r-set review) op)
          (change-review-error
           (harness-log 'warn "patch review: could not perform %S: %s" op (error-message-string err))))))))
+
 
 ;;;; Opening the review from a session
 

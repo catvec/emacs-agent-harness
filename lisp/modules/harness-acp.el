@@ -255,7 +255,7 @@ it can answer for another one.")
     permission/dir-allowed permission/dir-revoked
     config/changed harness/reloaded tools/file-written acp/remote-changed pet/changed pet/said version/checked
     decision/changed access/changed access/judged patch-review/changed tool-slots/changed
-    patch-review/last-close
+    patch-review/last-close patch-review/last-reviewed
     cache/warm-changed event-watch/changed chatgpt-plan/accounts-changed memory/changed
     admission/waiting admission/cooldown
     speech/changed)

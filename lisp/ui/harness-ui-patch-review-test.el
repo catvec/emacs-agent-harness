@@ -4401,7 +4401,7 @@ draft with the replies that wait, and C-c C-c sends them all together."
         (harness-ui-patch-review-test--draft-thread id "t-one" "Because the loop counts from one.")
         (harness-ui-patch-review-test--close-thread id "t-one")
         (harness-ui-patch-review-test--close-thread id "t-two")
-        (harness-test-wait (lambda () (harness-ui-patch-review--last-close-draft review))
+        (harness-test-wait (lambda () (harness-ui-patch-review--harness-draft 'last-close review))
                            5 "the UI to hear of the message of the last close")
         ;; The report draws it with the drafts: what waits, the message as
         ;; the system message it will be, and the button that sends them.
@@ -4453,7 +4453,7 @@ draft with the replies that wait, and C-c C-c sends them all together."
                            (plist-get (car (cadr close)) :text))))
           ;; Both went: neither draft waits, in the harness or the UI.
           (harness-test-wait
-           (lambda () (null (harness-ui-patch-review--last-close-draft review)))
+           (lambda () (null (harness-ui-patch-review--harness-draft 'last-close review)))
            5 "the message to leave the drafts")
           (should-not (harness-call 'patch-review/last-close id))
           (harness-test-wait
@@ -4462,6 +4462,164 @@ draft with the replies that wait, and C-c C-c sends them all together."
                    (change-review-thread-last-comment
                     (change-review-find-thread set "t-one")))))
            5 "the reply to be sent"))))))
+
+(ert-deftest harness-ui-patch-review-the-last-reviewed-waits-with-the-drafts ()
+  "Marking the last close that waited reviewed leaves the harness's message
+among the review's drafts: the report draws it as the system message it
+will be, [Discard] drops it unsent, and [Send drafts] sends it alone when
+nothing else waits."
+  (let ((harness-tasks-working-phase t))
+    (harness-ui-patch-review-test-with-task
+      (let* ((popout (harness-ui-patch-review-test--changes board id))
+             (review (gethash id harness-ui-patch-review--reviews))
+             (set (harness-ui-patch-review--r-set review))
+             (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"
+                                                            :sent 10.0))
+             captured)
+        (harness-ui-patch-review-test--wait-harness-threads id 1)
+        (harness-call 'task/return-to-work id)
+        (harness-test-wait
+         (lambda () (equal "working" (plist-get (harness-ui-patch-review--r-task review) :phase)))
+         5 "the review to hear the task is at work")
+        (let ((thread (harness-ui-patch-review-test--agent-closes
+                       review id sid two "Because two reads better.")))
+          (should (change-review-thread-unreviewed-p set thread))
+          (should-not (harness-ui-patch-review--harness-draft 'last-reviewed review))
+          ;; The reviewer marks it reviewed, as m does: the close is the last
+          ;; one that waited, so the harness offers its message.
+          (let ((status-id (plist-get (change-review-thread-closing thread) :id)))
+            (harness-call 'patch-review/apply id
+                          (list :op "mark-reviewed" :thread (change-review-thread-id thread)
+                                :status-id status-id :time (float-time))))
+          (harness-test-wait (lambda () (harness-ui-patch-review--harness-draft 'last-reviewed review))
+                             5 "the UI to hear of the message of the last reviewed")
+          ;; The report draws it with the drafts: as the system message it
+          ;; will be, with the button that drops it.
+          (with-current-buffer popout
+            (let ((notes (string-join (harness-ui-patch-review--notes review) "")))
+              (should (string-search "To send · harness message that every close is reviewed" notes))
+              (should (string-search "System · review · draft" notes))
+              (should (string-search harness-patch-review-last-reviewed-message notes))
+              (should (string-search "[Send drafts]" notes))
+              (should (string-search "[Discard]" notes))
+              ;; The last close's own message is not there: no thread was
+              ;; closed, and the message is about the review, not the task.
+              (should-not (string-search harness-patch-review-last-close-message notes))))
+          ;; [Send drafts] sends it, alone: no reply waits.
+          (cl-letf (((symbol-function 'harness-method/agent/prompt)
+                     (lambda (session blocks &optional opts)
+                       (push (list session blocks opts) captured)
+                       (harness-resolved nil))))
+            (with-current-buffer popout
+              (harness-ui-patch-review-send-replies review))
+            (harness-test-wait (lambda () captured) 5 "the drafts to reach the agent"))
+          (should (= 1 (length captured)))
+          (should (equal harness-patch-review-last-reviewed-message
+                         (plist-get (car (cadar captured)) :text)))
+          (should (eq 'system (harness-sender-kind (plist-get (caddar captured) :from))))
+          (should (equal "review" (plist-get (plist-get (caddar captured) :from) :source)))
+          (harness-test-wait (lambda () (null (harness-ui-patch-review--harness-draft 'last-reviewed review)))
+                             5 "the message to leave the drafts")
+          (should-not (harness-call 'patch-review/last-reviewed id)))))))
+
+(ert-deftest harness-ui-patch-review-the-two-messages-note-reads-right ()
+  "The drafts line names the harness's messages as they are: one message
+waiting says so with \"waits\", two say \"wait\", and a reply with them is
+counted.  The echo area names the message that waits with the drafts."
+  (let ((harness-tasks-working-phase t))
+    (harness-ui-patch-review-test-with-task
+      (let* ((popout (harness-ui-patch-review-test--changes board id))
+             (review (gethash id harness-ui-patch-review--reviews))
+             (set (harness-ui-patch-review--r-set review))
+             (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"
+                                                            :sent 10.0))
+             (three (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 18) "And three?"
+                                                             :sent 10.0)))
+        (harness-ui-patch-review-test--wait-harness-threads id 2)
+        (harness-call 'task/return-to-work id)
+        (harness-test-wait
+         (lambda () (equal "working" (plist-get (harness-ui-patch-review--r-task review) :phase)))
+         5 "the review to hear the task is at work")
+        ;; One message waiting, no reply: the compact line says it waits.
+        (let ((thread (harness-ui-patch-review-test--agent-closes
+                       review id sid two "Because two reads better.")))
+          (harness-call 'patch-review/apply id
+                        (list :op "mark-reviewed" :thread (change-review-thread-id thread)
+                              :status-id (plist-get (change-review-thread-closing thread) :id)
+                              :time (float-time))))
+        (harness-test-wait (lambda () (harness-ui-patch-review--harness-draft 'last-reviewed review))
+                           5 "the UI to hear of the message")
+        (with-current-buffer popout
+          (should (equal "The harness's message that every close is reviewed waits  "
+                         (substring-no-properties
+                          (harness-ui-patch-review--drafts-note review t)
+                          0 (length "The harness's message that every close is reviewed waits  "))))
+          (should (string-search "To send · harness message that every close is reviewed · "
+                                 (substring-no-properties
+                                  (harness-ui-patch-review--drafts-note review)))))
+        ;; Both messages waiting, still no reply: they wait.
+        (let ((thread (harness-ui-patch-review-test--agent-closes
+                       review id sid three "Because three is the last.")))
+          (harness-call 'patch-review/apply id
+                        (list :op "mark-reviewed" :thread (change-review-thread-id thread)
+                              :status-id (plist-get (change-review-thread-closing thread) :id)
+                              :time (float-time))))
+        (harness-test-wait (lambda () (harness-ui-patch-review--harness-draft 'last-reviewed review))
+                           5 "the UI to hear of the message")
+        ;; The last close's message is not there: no sent open thread was
+        ;; closed.  Only the one message, so it is the one that waits.
+        (with-current-buffer popout
+          (should (string-search "waits  " (substring-no-properties
+                                            (harness-ui-patch-review--drafts-note review t))))
+          (should-not (string-search " wait  " (substring-no-properties
+                                                (harness-ui-patch-review--drafts-note review t)))))
+        ;; The echo area, with no review open here, names the message.
+        (cl-letf (((symbol-function 'harness-ui-patch-review--known) (lambda (_id) nil)))
+          (should (equal "The harness's message that every close is reviewed · waiting with the drafts"
+                         (let ((said nil))
+                           (cl-letf (((symbol-function 'message)
+                                      (lambda (fmt &rest args)
+                                        (setq said (apply #'format fmt args)))))
+                             (harness-ui-patch-review--harness-draft-changed
+                              'last-reviewed id (harness-call 'patch-review/last-reviewed id))
+                             said)))))))))
+
+(ert-deftest harness-ui-patch-review-the-last-reviewed-can-be-dropped-unsent ()
+  "The message of the last reviewed is a draft like any other: [Discard]
+drops it, the harness forgets it, and the agent is not told."
+  (let ((harness-tasks-working-phase t))
+    (harness-ui-patch-review-test-with-task
+      (let* ((popout (harness-ui-patch-review-test--changes board id))
+             (review (gethash id harness-ui-patch-review--reviews))
+             (set (harness-ui-patch-review--r-set review))
+             (two (harness-ui-patch-review-test--comment-on review "a.el" '(:new . 2) "Why two?"
+                                                            :sent 10.0))
+             sent)
+        (harness-ui-patch-review-test--wait-harness-threads id 1)
+        (harness-call 'task/return-to-work id)
+        (harness-test-wait
+         (lambda () (equal "working" (plist-get (harness-ui-patch-review--r-task review) :phase)))
+         5 "the review to hear the task is at work")
+        (let ((thread (harness-ui-patch-review-test--agent-closes
+                       review id sid two "Because two reads better.")))
+          (harness-call 'patch-review/apply id
+                        (list :op "mark-reviewed" :thread (change-review-thread-id thread)
+                              :status-id (plist-get (change-review-thread-closing thread) :id)
+                              :time (float-time))))
+        (harness-test-wait (lambda () (harness-ui-patch-review--harness-draft 'last-reviewed review))
+                           5 "the UI to hear of the message")
+        (cl-letf (((symbol-function 'harness-method/agent/prompt)
+                   (lambda (&rest _) (push t sent) (harness-resolved nil))))
+          (with-current-buffer popout
+            (harness-ui-patch-review-discard-last-reviewed review))
+          (harness-test-wait (lambda () (null (harness-call 'patch-review/last-reviewed id)))
+                             5 "the harness to drop the message"))
+        (should-not sent)
+        (harness-test-wait (lambda () (null (harness-ui-patch-review--harness-draft 'last-reviewed review)))
+                           5 "the UI to forget the message")
+        (with-current-buffer popout
+          (should-not (string-search harness-patch-review-last-reviewed-message
+                                     (string-join (harness-ui-patch-review--notes review) ""))))))))
 
 (ert-deftest harness-ui-patch-review-the-last-close-alone-uses-the-drafts-send ()
   "The last-close message is a pending review draft, not a chat panel:
@@ -4525,13 +4683,13 @@ draws it, and its [Discard] drops it there, unsent."
          (lambda () (equal "working" (plist-get (harness-ui-patch-review--r-task review) :phase)))
          5 "the review to hear the task is at work")
         (harness-ui-patch-review-test--close-thread id "t-one")
-        (harness-test-wait (lambda () (harness-ui-patch-review--last-close-draft review))
+        (harness-test-wait (lambda () (harness-ui-patch-review--harness-draft 'last-close review))
                            5 "the UI to hear of the message")
         ;; A UI that missed the event asks the harness once, as one that
         ;; opened after the close does.
-        (clrhash harness-ui-patch-review--last-close-drafts)
-        (harness-ui-patch-review--fetch-last-close review)
-        (harness-test-wait (lambda () (harness-ui-patch-review--last-close-draft review))
+        (clrhash harness-ui-patch-review--harness-drafts)
+        (harness-ui-patch-review--fetch-harness-draft 'last-close review)
+        (harness-test-wait (lambda () (harness-ui-patch-review--harness-draft 'last-close review))
                            5 "the message to come from the harness")
         ;; Dropped: the harness forgets it, nothing is sent, and the
         ;; report stops drawing it.
@@ -4542,7 +4700,7 @@ draws it, and its [Discard] drops it there, unsent."
           (harness-test-wait (lambda () (null (harness-call 'patch-review/last-close id)))
                              5 "the harness to drop the message"))
         (should-not captured)
-        (harness-test-wait (lambda () (null (harness-ui-patch-review--last-close-draft review)))
+        (harness-test-wait (lambda () (null (harness-ui-patch-review--harness-draft 'last-close review)))
                            5 "the UI to forget the message")
         (with-current-buffer popout
           (should-not (string-search harness-patch-review-last-close-message

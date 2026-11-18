@@ -9979,6 +9979,27 @@ whose strict syntax it reads, and the correction of a malformed reply;
   when the task leaves the working phase, and when it is sent or
   dropped.  The agent's own close, a close in a task waiting for
   review, and a thread of drafts offer none.
+- The last reviewed.  The user marks the closes they looked at, one at a
+  time (`mark-reviewed`) or all at once (the UI's bulk mark, which sends
+  one `mark-reviewed` per close).  Marking the last close that waited
+  leaves nothing of the agent's work to look at, and in a task at work
+  the module keeps the harness's message that no close is left to review
+  (`harness-patch-review-last-reviewed-message`, from "review") as a
+  draft of the task's session (`harness-patch-review-draft-on-last-reviewed`,
+  on by default), by the same path as the last close's: it waits with the
+  drafts, `patch-review/send-replies` sends it after the replies (the
+  send returns `:last-reviewed` beside `:last-close`), and
+  `patch-review/discard-last-reviewed` drops it unsent.  A mark of a
+  close that was already marked is no transition, so it offers no second
+  message; a close the agent makes afterwards waits again, and the draft
+  that said no close was left goes.  It is kept in
+  `patch-review-last-reviewed/TASK-ID.json`, announced in
+  `patch-review/last-reviewed TASK-ID DRAFT`, and given by
+  `patch-review/last-reviewed TASK-ID`.  It is about the review of the
+  closes, not the task: a close marked reviewed is no verification, no
+  merge and no completion, and a task waiting for review offers none.
+  The two messages are one kind of thing (`harness-patch-review--kinds`),
+  kept, announced, re-read and sent together.
 - The files viewed.  The files the reviewer compared in Ediff and those
   approved are kept in `patch-review-viewed/TASK-ID.json`: `:seen` and
   `:approved`, lists of `(:path PATH :blob BLOB)` -- the blob the file

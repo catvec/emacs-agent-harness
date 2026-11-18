@@ -78,7 +78,7 @@
 `repo' is a repository with a branch task/fix; `events' collects the
 \(TASK-ID OP) each `patch-review/changed' announced, newest first;
 `last-closes' collects the (TASK-ID DRAFT) each `patch-review/last-close'
-announced."
+announced; `last-revieweds' the ones `patch-review/last-reviewed' did."
   (declare (indent 0))
   `(harness-test-with-temp-state
      (harness-patch-review-test--repo dir)
@@ -93,7 +93,7 @@ announced."
      (clrhash harness-tasks--table)
      (clrhash harness-tasks--starting)
      (clrhash harness-patch-review--sets)
-     (clrhash harness-patch-review--last-close-drafts)
+     (clrhash harness-patch-review--harness-drafts)
      (setq harness-tasks--loaded t harness-acp--clients nil)
      (harness-test-load-module 'tools-handin)
      (harness-test-load-module 'tools-review)
@@ -111,11 +111,13 @@ announced."
            (default-directory dir)
            (repo dir)
            (events nil)
-           (last-closes nil))
+           (last-closes nil)
+           (last-revieweds nil))
        (harness-add-filter 'permission/decide
                            (lambda (_d next &rest _) (funcall next (list :behavior 'allow))) 10)
        (harness-on 'patch-review/changed (lambda (id op) (push (list id op) events)))
        (harness-on 'patch-review/last-close (lambda (id draft) (push (list id draft) last-closes)))
+       (harness-on 'patch-review/last-reviewed (lambda (id draft) (push (list id draft) last-revieweds)))
        (unwind-protect (progn ,@body)
          (dolist (c (copy-sequence harness-acp--clients))
            (harness-acp--drop-client c))))))
@@ -488,7 +490,7 @@ hands in.  The message says what changed, not to hand in."
           (should (equal (list id draft) (car last-closes))))
         ;; The user sends the drafts -- there is only the message -- and
         ;; the turn that hands in runs.
-        (should (equal (list :sent 0 :last-close t)
+        (should (equal (list :sent 0 :last-close t :last-reviewed nil)
                        (harness-call 'patch-review/send-replies id)))
         (should-not (harness-call 'patch-review/last-close id))
         (should (equal (list id nil) (car last-closes)))
@@ -520,7 +522,7 @@ waits afterwards."
                             :id "s-both" :time 6.0 :author '(:kind "user" :name "Noah")))
         (should (harness-call 'patch-review/last-close id))
         (should (= 1 (length (harness-call 'patch-review/drafts id))))
-        (should (equal (list :sent 1 :last-close t)
+        (should (equal (list :sent 1 :last-close t :last-reviewed nil)
                        (harness-call 'patch-review/send-replies id)))
         ;; Both went, and no draft waits.
         (should-not (harness-call 'patch-review/last-close id))
@@ -574,7 +576,7 @@ is an open question, so the earlier last-close message must not go."
                    (lambda (_session blocks &optional opts)
                      (push (list blocks opts) sent)
                      (harness-resolved nil))))
-          (should (equal (list :sent 1 :last-close nil)
+          (should (equal (list :sent 1 :last-close nil :last-reviewed nil)
                          (harness-call 'patch-review/send-replies id))))
         (should (= 1 (length sent)))
         (should-not (plist-get (cadar sent) :from))
@@ -602,7 +604,7 @@ and tells the UI immediately, without another read of the message."
                        (list (harness-thread-block (list :response "One more question.")))))
         ;; The event came without an explicit last-close read to clean up.
         (should (equal (list id nil) (car last-closes)))
-        (should-not (gethash id harness-patch-review--last-close-drafts))
+        (should-not (harness-patch-review--draft 'last-close id))
         (should-not (harness-call 'patch-review/last-close id))))))
 
 (ert-deftest harness-patch-review-a-failed-last-close-send-keeps-the-draft ()
@@ -733,16 +735,357 @@ and sending the drafts sends it."
         (let ((draft (harness-call 'patch-review/last-close id)))
           (should draft)
           ;; A reload forgets the table, not the message.
-          (clrhash harness-patch-review--last-close-drafts)
+          (clrhash harness-patch-review--harness-drafts)
           (should (equal draft (harness-call 'patch-review/last-close id)))
           ;; And it goes, once, from what was kept.
-          (clrhash harness-patch-review--last-close-drafts)
-          (should (equal (list :sent 0 :last-close t)
+          (clrhash harness-patch-review--harness-drafts)
+          (should (equal (list :sent 0 :last-close t :last-reviewed nil)
                          (harness-call 'patch-review/send-replies id)))
           (should-not (harness-call 'patch-review/last-close id))
           (harness-test-wait
            (lambda () (eq 'review (plist-get (harness-call 'task/get id) :state)))
            15 "the agent to hand in after the message was sent"))))))
+
+(defun harness-patch-review-test--agent-closes-in (id text &optional close)
+  "Have the agent of task ID start a thread of the user's and answer it.
+TEXT is what the user wrote in the thread; CLOSE is the status the agent
+leaves it in, `closed' by default.  Return (THREAD-ID . STATUS-ID): the
+thread, and the id of the change of status that closed it, or nil."
+  (let* ((close (or close "closed"))
+         (made (harness-patch-review-test--user-comment id text :sent 5.0))
+         (thread (car made)))
+    (harness-patch-review-test--agent-answers
+     id (harness-patch-review-test--thread-block thread "Because the loop needs it." close))
+    (cons thread
+          (when close
+            (plist-get (car (last (harness-patch-review-test--history id thread))) :id)))))
+
+(defun harness-patch-review-test--review (id thread status-id &optional unreviewed)
+  "Mark THREAD of task ID reviewed, or unreviewed, as the user does."
+  (harness-call 'patch-review/apply
+                id (list :op (if unreviewed "unmark-reviewed" "mark-reviewed")
+                         :thread thread :status-id status-id :time (float-time))))
+
+(ert-deftest harness-patch-review-the-last-reviewed-offers-a-message-for-the-user-to-send ()
+  "The user marking the last close that waited reviewed leaves the harness's
+message as a draft: nothing starts a turn until the user sends the
+drafts, and sending them sends it by itself.  It says what changed, not
+to hand in, and it is the harness's own, from \"review\"."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t))
+      (let* ((id (harness-patch-review-test--working-task))
+             (sid (plist-get (harness-call 'task/get id) :session))
+             (closed (harness-patch-review-test--agent-closes-in id "Why eighteen?"))
+             (thread (car closed))
+             (status-id (cdr closed)))
+        ;; The close waits for the user's review: nothing is offered yet.
+        (should (equal (list thread)
+                       (mapcar #'change-review-thread-id
+                               (harness-patch-review--unreviewed-threads
+                                (harness-patch-review--set-for id)))))
+        (should-not (harness-call 'patch-review/last-reviewed id))
+        (should (harness-patch-review-test--review id thread status-id))
+        ;; The message waits for the user: nothing is sent, no turn starts.
+        (harness-patch-review-test--spin)
+        (should (eq 'active (plist-get (harness-call 'task/get id) :state)))
+        (should (eq 'blocked (plist-get (harness-call 'session/get sid) :status)))
+        (should-not (cl-find-if (lambda (node)
+                                  (equal harness-patch-review-last-reviewed-message
+                                         (plist-get node :content)))
+                                (harness-call 'session/nodes sid)))
+        (let* ((draft (harness-call 'patch-review/last-reviewed id))
+               (from (plist-get draft :from)))
+          (should draft)
+          (should (equal harness-patch-review-last-reviewed-message (plist-get draft :text)))
+          (should (equal id (plist-get draft :task)))
+          (should (equal sid (plist-get draft :session)))
+          (should (eq 'system (harness-sender-kind from)))
+          (should (equal "review" (plist-get from :source)))
+          ;; What changed, not what to do: the task's prompt says to hand in.
+          (should-not (string-match-p "hand_in\\|hand in"
+                                      harness-patch-review-last-reviewed-message))
+          ;; It is about the review of the closes, not about closing a
+          ;; thread, verifying the task or merging it.
+          (should-not (string-match-p "closed\\|verified\\|merged"
+                                      harness-patch-review-last-reviewed-message))
+          ;; The UI heard it wait, and not go.
+          (should (equal (list id draft) (car last-revieweds)))
+          (should-not (harness-call 'patch-review/last-close id)))
+        ;; The user sends the drafts -- there is only the message -- and
+        ;; the turn that hands in runs.
+        (should (equal (list :sent 0 :last-close nil :last-reviewed t)
+                       (harness-call 'patch-review/send-replies id)))
+        (should-not (harness-call 'patch-review/last-reviewed id))
+        (should (equal (list id nil) (car last-revieweds)))
+        (harness-test-wait (lambda () (eq 'review (plist-get (harness-call 'task/get id) :state)))
+                           15 "the agent to hand in after the last reviewed")
+        (let* ((node (cl-find-if (lambda (node)
+                                   (equal harness-patch-review-last-reviewed-message
+                                          (plist-get node :content)))
+                                 (harness-call 'session/nodes sid)))
+               (sender (and node (harness-node-sender node))))
+          (should node)
+          (should (eq 'system (harness-sender-kind sender)))
+          (should (equal "review" (plist-get sender :source))))))))
+
+(ert-deftest harness-patch-review-a-partly-reviewed-set-offers-nothing ()
+  "One close marked reviewed while another waits is no transition: the
+message of the last reviewed waits for the last close only."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t))
+      (let* ((id (harness-patch-review-test--working-task))
+             (one (harness-patch-review-test--agent-closes-in id "Why eighteen?"))
+             (two (harness-patch-review-test--agent-closes-in id "And the cache?")))
+        (should (harness-patch-review-test--review id (car one) (cdr one)))
+        (should-not (harness-call 'patch-review/last-reviewed id))
+        (should-not last-revieweds)
+        ;; The last one is the transition, once.
+        (should (harness-patch-review-test--review id (car two) (cdr two)))
+        (should (harness-call 'patch-review/last-reviewed id))
+        (should (equal 1 (length last-revieweds)))
+        (harness-patch-review-test--spin)
+        (should (eq 'active (plist-get (harness-call 'task/get id) :state)))))))
+
+(ert-deftest harness-patch-review-a-close-the-user-closed-offers-no-reviewed-message ()
+  "A thread the user closed waits for nobody's review: marking it, or
+closing the last open thread, offers no message of the last reviewed."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t))
+      (let* ((id (harness-patch-review-test--working-task))
+             (thread (car (harness-patch-review-test--user-comment id "Why eighteen?" :sent 5.0))))
+        (harness-call 'patch-review/apply id
+                      (list :op "set-status" :thread thread :status "closed"
+                            :id "s-user" :time 6.0))
+        (should (harness-call 'patch-review/last-close id))
+        ;; There was nothing of the agent's to look at: the user's own
+        ;; close is not a close that waits, so marking it offers nothing.
+        (harness-patch-review-test--review id thread "s-user")
+        (should-not (harness-patch-review--unreviewed-threads
+                     (harness-patch-review--set-for id)))
+        (should-not (harness-call 'patch-review/last-reviewed id))
+        (should-not last-revieweds)))))
+
+(ert-deftest harness-patch-review-marking-every-close-reviewed-offers-one-message ()
+  "The bulk mark, which marks every close that waits at once, offers the
+message once, as the last mark does: a UI that marks them one by one
+reaches the same transition."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t))
+      (let* ((id (harness-patch-review-test--working-task))
+             (one (harness-patch-review-test--agent-closes-in id "Why eighteen?"))
+             (two (harness-patch-review-test--agent-closes-in id "And the cache?"))
+             (three (harness-patch-review-test--agent-closes-in id "And the tests?")))
+        ;; The bulk mark: each close marked reviewed as `M' marks them.
+        (dolist (closed (list one two three))
+          (harness-patch-review-test--review id (car closed) (cdr closed)))
+        (should (harness-call 'patch-review/last-reviewed id))
+        ;; One message, however many marks the bulk operation made.
+        (should (equal 1 (length last-revieweds)))
+        (should (equal (list id (harness-call 'patch-review/last-reviewed id))
+                       (car last-revieweds)))))))
+
+(ert-deftest harness-patch-review-a-marked-close-marked-again-is-no-second-message ()
+  "Marking a close that is marked changes nothing, so nothing is offered
+again; reading the message, or sending the drafts, is no second one
+either."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t))
+      (let* ((id (harness-patch-review-test--working-task))
+             (closed (harness-patch-review-test--agent-closes-in id "Why eighteen?"))
+             (thread (car closed)))
+        (should (harness-patch-review-test--review id thread (cdr closed)))
+        (let ((draft (harness-call 'patch-review/last-reviewed id)))
+          (should draft)
+          (should (equal 1 (length last-revieweds)))
+          ;; Marked again: the operation changes nothing, and nothing is
+          ;; announced or offered.
+          (should-not (plist-get (harness-patch-review-test--review id thread (cdr closed))
+                                 :changed))
+          (harness-patch-review-test--spin)
+          (should (equal 1 (length last-revieweds)))
+          (should (equal draft (harness-call 'patch-review/last-reviewed id)))
+          (should (equal 1 (length last-revieweds)))
+          ;; Read again, and kept: still one.
+          (clrhash harness-patch-review--harness-drafts)
+          (should (equal draft (harness-call 'patch-review/last-reviewed id)))
+          (should (equal 1 (length last-revieweds)))
+          ;; Sending the drafts sends it once, and it does not wait after.
+          (clrhash harness-patch-review--harness-drafts)
+          (should (equal (list :sent 0 :last-close nil :last-reviewed t)
+                         (harness-call 'patch-review/send-replies id)))
+          (should-not (harness-call 'patch-review/last-reviewed id))
+          (should (equal (list id nil) (car last-revieweds))))))))
+
+(ert-deftest harness-patch-review-a-last-reviewed-message-survives-a-reload ()
+  "The draft of the last reviewed is kept in the state directory.  A
+harness that reloads while the user has not sent it has it still, and
+sending the drafts sends it once."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t))
+      (let* ((id (harness-patch-review-test--working-task))
+             (closed (harness-patch-review-test--agent-closes-in id "Why eighteen?")))
+        (harness-patch-review-test--review id (car closed) (cdr closed))
+        (let ((draft (harness-call 'patch-review/last-reviewed id)))
+          (should draft)
+          (should (harness-call 'store/load (format "patch-review-last-reviewed/%s.json" id)))
+          ;; A reload forgets the table, not the message.
+          (clrhash harness-patch-review--harness-drafts)
+          (should (equal draft (harness-call 'patch-review/last-reviewed id)))
+          (clrhash harness-patch-review--harness-drafts)
+          (should (equal (list :sent 0 :last-close nil :last-reviewed t)
+                         (harness-call 'patch-review/send-replies id)))
+          (should-not (harness-call 'patch-review/last-reviewed id))
+          (should-not (harness-call 'store/load (format "patch-review-last-reviewed/%s.json" id))))))))
+
+(ert-deftest harness-patch-review-a-new-close-the-user-has-not-reviewed-drops-the-last-reviewed ()
+  "A close the agent makes after the message waited puts the review back to
+review: the message that said no close was left goes, unsent, and the UI
+hears it go."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t))
+      (let* ((id (harness-patch-review-test--working-task))
+             (closed (harness-patch-review-test--agent-closes-in id "Why eighteen?")))
+        (harness-patch-review-test--review id (car closed) (cdr closed))
+        (should (harness-call 'patch-review/last-reviewed id))
+        ;; The agent closes another thread, which waits for the user.
+        (harness-patch-review-test--agent-closes-in id "And the cache?")
+        (should-not (harness-call 'patch-review/last-reviewed id))
+        (should (equal (list id nil) (car last-revieweds)))
+        ;; Marking the new one reviewed offers the message again: the
+        ;; condition legitimately reset.
+        (let ((unreviewed (harness-patch-review--unreviewed-threads
+                           (harness-patch-review--set-for id))))
+          (should (= 1 (length unreviewed)))
+          (let* ((thread (change-review-thread-id (car unreviewed)))
+                 (status-id (plist-get (change-review-thread-closing (car unreviewed)) :id)))
+            (should (harness-patch-review-test--review id thread status-id))
+            (should (harness-call 'patch-review/last-reviewed id))
+            ;; Two offers, and the drop between them.
+            (should (equal 2 (length (cl-remove-if-not #'cadr last-revieweds))))))))))
+
+(ert-deftest harness-patch-review-unmarking-a-reviewed-close-drops-the-last-reviewed ()
+  "A close put back to review makes the message untrue: it goes, unsent."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t))
+      (let* ((id (harness-patch-review-test--working-task))
+             (closed (harness-patch-review-test--agent-closes-in id "Why eighteen?")))
+        (harness-patch-review-test--review id (car closed) (cdr closed))
+        (should (harness-call 'patch-review/last-reviewed id))
+        (should (harness-patch-review-test--review id (car closed) (cdr closed) t))
+        (should-not (harness-call 'patch-review/last-reviewed id))
+        (should (equal (list id nil) (car last-revieweds)))))))
+
+(ert-deftest harness-patch-review-the-last-reviewed-message-can-be-dropped ()
+  "The user drops the message of the last reviewed: it goes unsent, and the
+harness has none left to give."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t))
+      (let* ((id (harness-patch-review-test--working-task))
+             (closed (harness-patch-review-test--agent-closes-in id "Why eighteen?")))
+        (harness-patch-review-test--review id (car closed) (cdr closed))
+        (should (harness-call 'patch-review/last-reviewed id))
+        (should (plist-get (harness-call 'patch-review/discard-last-reviewed id) :discarded))
+        (should-not (harness-call 'patch-review/last-reviewed id))
+        (should-not (plist-get (harness-call 'patch-review/discard-last-reviewed id) :discarded))
+        (should (equal (list id nil) (car last-revieweds)))
+        ;; And nothing was sent: the agent still waits.
+        (should (eq 'active (plist-get (harness-call 'task/get id) :state)))
+        (should-not (cl-find-if (lambda (node)
+                                  (equal harness-patch-review-last-reviewed-message
+                                         (plist-get node :content)))
+                                (harness-call 'session/nodes
+                                              (plist-get (harness-call 'task/get id) :session))))))))
+
+(ert-deftest harness-patch-review-the-last-reviewed-is-offered-only-when-asked ()
+  "With `harness-patch-review-draft-on-last-reviewed' off, marking the last
+close reviewed leaves no message; the last close's own option is no
+part of it."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t)
+          (harness-patch-review-draft-on-last-reviewed nil))
+      (let* ((id (harness-patch-review-test--working-task))
+             (closed (harness-patch-review-test--agent-closes-in id "Why eighteen?")))
+        (harness-patch-review-test--review id (car closed) (cdr closed))
+        (should-not (harness-call 'patch-review/last-reviewed id))
+        (should-not last-revieweds)
+        (should-not (harness-call 'store/load (format "patch-review-last-reviewed/%s.json" id)))))))
+
+(ert-deftest harness-patch-review-a-close-in-review-offers-no-reviewed-message ()
+  "A task waiting for review needs no turn when its closes are reviewed:
+nothing is offered there, and nothing for a task that is done."
+  (harness-patch-review-test-with
+    (let* ((id (harness-patch-review-test--task))
+           (closed (harness-patch-review-test--agent-closes id)))
+      (should (harness-patch-review-test--review id (car closed) (cdr closed)))
+      (should-not (harness-call 'patch-review/last-reviewed id))
+      (should-not last-revieweds)
+      (should-not (harness-call 'patch-review/last-close id)))))
+
+(ert-deftest harness-patch-review-the-two-messages-wait-and-go-together ()
+  "Closing the last open thread and reviewing the last close are two
+transitions, and each leaves its own message: the drafts send both after
+the replies, in one send, and neither waits afterwards."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t))
+      (let* ((id (harness-patch-review-test--working-task))
+             (sid (plist-get (harness-call 'task/get id) :session))
+             ;; A thread the agent closed, which waits for the user's review,
+             ;; and another one, still open, which the user answers.
+             (closed (harness-patch-review-test--agent-closes-in id "Why eighteen?"))
+             (thread (car closed))
+             (status-id (cdr closed))
+             (open (car (harness-patch-review-test--user-comment id "And the cache?" :sent 5.0)))
+             captured)
+        (harness-patch-review-test--user-comment id "Because it is small." :thread open)
+        ;; The user closes the last open thread, then reviews the close: both
+        ;; of the harness's messages wait.
+        ;; The harness fills the user in, as it does for a UI's operation:
+        ;; the author of the close is the user, so it is no close to review.
+        (harness-call 'patch-review/apply id
+                      (list :op "set-status" :thread open :status "closed"
+                            :id "s-both" :time 6.0))
+        (should (harness-call 'patch-review/last-close id))
+        (harness-patch-review-test--review id thread status-id)
+        (should (harness-call 'patch-review/last-reviewed id))
+        (cl-letf (((symbol-function 'harness-method/agent/prompt)
+                   (lambda (session blocks &optional opts)
+                     (push (list session blocks opts) captured)
+                     (harness-resolved nil))))
+          (should (equal (list :sent 1 :last-close t :last-reviewed t)
+                         (harness-call 'patch-review/send-replies id))))
+        (should (= 3 (length captured)))
+        ;; The replies, then the last close, then the last reviewed: each a
+        ;; message of its own, from "review".
+        (let ((reviewed (nth 0 captured))
+              (close (nth 1 captured))
+              (replies (nth 2 captured)))
+          (should (equal sid (car replies)))
+          (should (equal harness-patch-review-last-close-message
+                         (plist-get (car (cadr close)) :text)))
+          (should (equal harness-patch-review-last-reviewed-message
+                         (plist-get (car (cadr reviewed)) :text)))
+          (should (eq 'system (harness-sender-kind (plist-get (caddr reviewed) :from))))
+          (should (equal "review" (plist-get (plist-get (caddr reviewed) :from) :source))))
+        (should-not (harness-call 'patch-review/last-close id))
+        (should-not (harness-call 'patch-review/last-reviewed id))
+        (should (equal (list id nil) (car last-revieweds)))))))
+
+(ert-deftest harness-patch-review-a-sent-last-reviewed-needs-a-draft-to-send ()
+  "With the message gone and no reply waiting, sending the drafts signals,
+and nothing reaches the agent."
+  (harness-patch-review-test-with
+    (let ((harness-tasks-working-phase t))
+      (let* ((id (harness-patch-review-test--working-task))
+             (closed (harness-patch-review-test--agent-closes-in id "Why eighteen?")))
+        (harness-patch-review-test--review id (car closed) (cdr closed))
+        (harness-call 'patch-review/discard-last-reviewed id)
+        (should-error (harness-call 'patch-review/send-replies id) :type 'harness-error)
+        (should-not (cl-find-if (lambda (node)
+                                  (equal harness-patch-review-last-reviewed-message
+                                         (plist-get node :content)))
+                                (harness-call 'session/nodes
+                                              (plist-get (harness-call 'task/get id) :session))))))))
+
 
 (ert-deftest harness-patch-review-a-sent-last-close-needs-a-draft-to-send ()
   "With the message gone and no reply waiting, sending the drafts signals,
@@ -1280,7 +1623,7 @@ sent.  A blank draft is no reply and stays behind."
                    (lambda (session blocks &optional _opts)
                      (setq sent (list session blocks))
                      (harness-resolved nil))))
-          (should (equal (list :sent 2 :last-close nil)
+          (should (equal (list :sent 2 :last-close nil :last-reviewed nil)
                          (harness-call 'patch-review/send-replies id))))
         ;; One message, a block for each thread, in the order written.
         (should (equal sid (car sent)))
@@ -1346,7 +1689,7 @@ thread data names that comment, as the review draws it."
                    (lambda (session blocks &optional _opts)
                      (setq sent (list session blocks))
                      (harness-resolved nil))))
-          (should (equal (list :sent 1 :last-close nil)
+          (should (equal (list :sent 1 :last-close nil :last-reviewed nil)
                          (harness-call 'patch-review/send-replies id))))
         (let* ((block (cl-find-if #'harness-thread-block-p (cadr sent)))
                (text (plist-get block :text)))
@@ -1455,11 +1798,14 @@ message is refused, and a function that fails adds nothing."
   (should (member "patch-review/" harness-acp-extension-prefixes))
   (should (memq 'patch-review/changed harness-acp--forwarded-events))
   (should (memq 'patch-review/last-close harness-acp--forwarded-events))
+  (should (memq 'patch-review/last-reviewed harness-acp--forwarded-events))
   (dolist (method '(patch-review/get patch-review/apply patch-review/drafts
                                      patch-review/comment patch-review/send-replies
                                      patch-review/threads-text
                                      patch-review/last-close
-                                     patch-review/discard-last-close))
+                                     patch-review/discard-last-close
+                                     patch-review/last-reviewed
+                                     patch-review/discard-last-reviewed))
     (should (harness-method-exists-p method))))
 
 ;;;; The earlier rounds
