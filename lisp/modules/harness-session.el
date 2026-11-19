@@ -206,9 +206,147 @@ defaults."
 ;;;; Conversions
 
 (defun harness-session--get (id)
-  "Return the session struct for ID or signal."
+  "Return the session struct for ID or signal.
+A session whose saved record could not be hydrated is no session in
+memory, and says so rather than that it does not exist."
   (or (gethash id harness-sessions)
-      (signal 'harness-error (list (format "No session %s" id)))))
+      (if-let* ((reason (harness-session--hydration-fault id)))
+          (signal 'harness-error
+                  (list (format "Session %s is not hydrated: %s" id reason)))
+        (signal 'harness-error (list (format "No session %s" id))))))
+
+;;;; Hydration
+;;
+;; A session is hydrated from its own record, `sessions/ID.json', and from
+;; nothing else that shares its name.  The state directory holds sidecars
+;; of the same session beside that record -- the frozen body of its last
+;; request (`sessions/ID.frozen.json'), its responses, the payload of its
+;; last request, its images -- and the loader used to take any `.json'
+;; file there for a session record: `<id>.frozen.json' sorts before
+;; `<id>.json', so a cold boot took the frozen body for the session, found
+;; an `:id' it accepted and skipped the canonical record.  The session
+;; then had no head, no project, no working directory and sometimes no
+;; model, and a task retry sent the task's prompt again as a node with no
+;; parent -- a second, disconnected chain in the node log -- and saved
+;; that incomplete record over the canonical one.
+;;
+;; So the loader accepts a canonical name only, checks that the record's
+;; `:id' is the ID its name carries, and validates the record's shape.  A
+;; record it cannot hydrate is left exactly as it is, and its ID is held
+;; in `harness-session--hydration-faults': nothing saves over it, and no
+;; prompt, retry or append goes on from a session that was not hydrated.
+;; A node log with more than one root is the same damage, found when the
+;; log is read: the record's head has to descend from the first chain
+;; written there, or the session would carry a transcript it never had.
+;;
+;; The records already damaged that way are repaired only by
+;; `session/recover-hydration', which an operator invokes for one session
+;; at a time, after a dry run, and which backs up what it replaces.
+
+(defvar harness-session--hydration-faults (make-hash-table :test 'equal)
+  "Session id -> why its saved record could not be hydrated.
+A session with a fault is not in `harness-sessions' and nothing writes
+its record: a save would put an incomplete record over the one a
+recovery reads.  Cleared by `session/recover-hydration', and read
+again from the store at the start of the next harness.")
+
+(defun harness-session--hydration-fault (id)
+  "Return why session ID was not hydrated, or nil.
+Nil for a session that hydrated, and for one there is no record of."
+  (and (stringp id) (gethash id harness-session--hydration-faults)))
+
+(defun harness-session--note-hydration-fault (id reason)
+  "Hold session ID as one that was not hydrated, REASON saying why.
+It is logged once, and its record is left as it is until an operator
+recovers it (`session/recover-hydration')."
+  (unless (harness-session--hydration-fault id)
+    (harness-log 'warn "session %s is not hydrated: %s" id reason))
+  (puthash id reason harness-session--hydration-faults)
+  reason)
+
+(defun harness-session--clear-hydration-fault (id)
+  "Forget the hydration fault of session ID."
+  (remhash id harness-session--hydration-faults))
+
+(defun harness-session--refuse-unhydrated (id)
+  "Signal when session ID was not hydrated, before anything acts on it.
+Nothing is sent for such a session, no node is appended to its log and
+no record is written over the one its recovery reads."
+  (when-let* ((reason (harness-session--hydration-fault id)))
+    (signal 'harness-error
+            (list (format "Session %s is not hydrated: %s; session/recover-hydration restores it"
+                          id reason)))))
+
+(harness-defmethod session/hydration-fault (id)
+  "Return why session ID was not hydrated, or nil.
+A session whose saved record was not accepted at the start of this
+harness is not in memory: this says why, and `session/recover-hydration'
+is what repairs it.  Nil for a session that hydrated, and for one there
+is no record of."
+  (harness-session--hydration-fault id))
+
+(harness-defmethod session/hydration-faults ()
+  "Return the sessions this start did not hydrate, newest fault last.
+Each is (:id ID :reason TEXT), as `session/hydration-fault' gives it."
+  (let (out)
+    (maphash (lambda (id reason) (push (list :id id :reason reason) out))
+             harness-session--hydration-faults)
+    (sort out (lambda (a b) (string< (plist-get a :id) (plist-get b :id))))))
+
+(defconst harness-session--record-name-regexp "\\`sessions/\\([^./\\\\]+\\)\\.json\\'"
+  "The name of a canonical session record, its id in group 1.
+A sidecar of the same session -- `ID.frozen.json', `ID.recovery-….json'
+-- is no record of it, whatever its content names.  Session ids are
+made by the harness and hold no dot, so no record is one of these.")
+
+(defun harness-session--record-id (name)
+  "Return the id a canonical session record NAME carries, or nil."
+  (when (and (stringp name) (string-match harness-session--record-name-regexp name))
+    (match-string 1 name)))
+
+(defconst harness-session--statuses '(idle running blocked inactive)
+  "The statuses a record may name.
+A kind is open: the modules that make sessions of their own -- the
+workspace's episodes, a task's, a side conversation's -- name theirs, so
+a record's kind is checked for its shape, not against a list.")
+
+(defun harness-session--hydration-problem (plist id)
+  "Return why PLIST, the record stored for session ID, cannot be hydrated.
+Nil when it can.  The record has to be a JSON object whose `:id' is ID
+-- the ID its name carries -- with the working directory it was made
+in; a kind, a status, a head, a parent, a time and the names it keeps
+are checked for their shape when present.  A frozen body, a request
+payload or any other sidecar fails this: none of them is a session
+record."
+  (cond
+   ((not (and (consp plist) (keywordp (car plist)) (proper-list-p plist) (cl-evenp (length plist))))
+    "its record is not a JSON object")
+   ((not (equal (plist-get plist :id) id))
+    (let ((named (plist-get plist :id)))
+      (if (stringp named)
+          (format "its record names session %s" named)
+        "its record names no session")))
+   ((not (and (stringp (plist-get plist :cwd)) (not (string-empty-p (plist-get plist :cwd)))))
+    "its record has no working directory")
+   ((let ((created (plist-get plist :created)))
+      (and created (not (numberp created))))
+    "its record's creation time is no time")
+   ((let ((updated (plist-get plist :updated)))
+      (and updated (not (numberp updated))))
+    "its record's update time is no time")
+   ((let ((kind (plist-get plist :kind)))
+      (and kind (not (and (stringp kind) (not (string-empty-p kind))))))
+    "its record names a kind of session that is no name")
+   ((let ((status (plist-get plist :status)))
+      (and status (not (memq (intern (format "%s" status)) harness-session--statuses))))
+    "its record names a status this harness does not know")
+   ((not (or (null (plist-get plist :head)) (stringp (plist-get plist :head))))
+    "its record names a head that is no node")
+   ((cl-some (lambda (key)
+               (let ((value (plist-get plist key)))
+                 (and value (not (stringp value)))))
+             '(:project :worktree :parent-id :fork-node :model :host :name))
+    "its record holds a name, a directory or a model that is no string")))
 
 (defconst harness-session--lean-keys '(:provider-state :provider-node :allowed-dirs :move)
   "Keys a lean session listing leaves out.
@@ -468,11 +606,31 @@ The policy file is read again on reload, and may fix what it did not."
   "Return the store name of the node log of session ID."
   (format "sessions/%s.nodes.jsonl" id))
 
+(defun harness-session--save-problem (plist id)
+  "Return why PLIST, the record of session ID, must not be written, or nil.
+That is a record the next start could not hydrate: one whose `:id' is
+not the session's own, or which names no working directory.  A save
+that would leave such a record refuses instead."
+  (or (and (not (equal (plist-get plist :id) id)) "its record names no session")
+      (and (not (and (stringp (plist-get plist :cwd))
+                     (not (string-empty-p (plist-get plist :cwd)))))
+           "its record has no working directory")))
+
 (defun harness-session--save (id)
-  "Write the record of session ID now."
+  "Write the record of session ID now.
+A session this start did not hydrate has no record written for it: the
+one on disk is what its recovery reads, and an incomplete record must
+not go over the canonical one.  A record that would not hydrate again
+-- one whose `:id' is not its own, say -- is refused the same way, so a
+save never leaves a session this harness cannot load."
   (let ((s (gethash id harness-sessions)))
     (when s
-      (harness-call 'store/save (harness-session--meta-name id) (harness-session-plist s)))))
+      (harness-session--refuse-unhydrated id)
+      (let ((plist (harness-session-plist s)))
+        (when-let* ((problem (harness-session--save-problem plist (harness-session-id s))))
+          (signal 'harness-error
+                  (list (format "Session %s: refusing to write its record: %s" id problem))))
+        (harness-call 'store/save (harness-session--meta-name id) plist)))))
 
 (defvar harness-session--announced-windows (make-hash-table :test 'equal)
   "Session id -> the context window its last `session/changed' carried.")
@@ -507,10 +665,25 @@ A string `:kind' becomes a symbol, and `:is-error' becomes t or nil."
   "Load the node log of S into memory if not yet done.
 A record marked `update' is merged into the node it names, and one
 marked `delete' (see `session/discard-nodes') removes it, so a node
-discarded during a turn stays gone after a reload."
+discarded during a turn stays gone after a reload.
+
+A log that holds more than one chain -- a node with no parent written
+after the transcript had begun -- is the damage a session that was not
+hydrated did (`harness-session--hydration-faults'): its retry appended
+its prompt as a root of its own.  The session then refuses to read
+itself (`harness-session--refuse-unhydrated') rather than carry a
+transcript that is not its own, and its record is left for
+`session/recover-hydration'."
+  ;; A session this start did not hydrate does not read itself: its log
+  ;; is what its recovery reads.  A struct another module reads a log
+  ;; into is no session of the harness, and is left to read.
+  (when (eq s (gethash (harness-session-id s) harness-sessions))
+    (harness-session--refuse-unhydrated (harness-session-id s)))
   (unless (harness-session-loaded s)
-    (let ((table (harness-session-nodes s)))
-      (dolist (rec (harness-call 'store/read-all (harness-session--nodes-name (harness-session-id s))))
+    (let* ((id (harness-session-id s))
+           (table (harness-session-nodes s))
+           (order nil))
+      (dolist (rec (harness-call 'store/read-all (harness-session--nodes-name id)))
         (let ((rec (harness-session--intern-node rec)))
           (cond
            ((equal (plist-get rec :_op) "delete") (remhash (plist-get rec :id) table))
@@ -520,8 +693,70 @@ discarded during a turn stays gone after a reload."
                 (puthash (plist-get rec :id)
                          (harness-plist-merge existing (harness-plist-remove rec :_op))
                          table))))
-           (t (puthash (plist-get rec :id) rec table))))))
-    (setf (harness-session-loaded s) t)))
+           (t (unless (gethash (plist-get rec :id) table)
+                (push (plist-get rec :id) order))
+              (puthash (plist-get rec :id) rec table)))))
+      (setf (harness-session-loaded s) t)
+      ;; Only the session the harness holds is judged: another module
+      ;; reads a node log into a struct of its own to look at it, and
+      ;; that reader is no session whose record could be wrong.  It
+      ;; must not hold a fault against the session either.
+      (when (eq s (gethash id harness-sessions))
+        (when-let* ((problem (harness-session--chain-problem
+                              s table (nreverse order))))
+          (harness-session--note-hydration-fault id problem)
+          (harness-session--refuse-unhydrated id))))))
+
+(defun harness-session--chain-problem (s table order)
+  "Return why the transcript of S, nodes TABLE first written in ORDER, is broken.
+Nil when it is one chain, or several that share their first node -- a
+head moved back and written on, which `session/set-head' allows.  The
+problem is another root: a node with no parent, or whose parent is not
+in TABLE, written after the transcript had begun.  A session whose head
+is not on the first chain is one that read a record it never wrote, and
+would show a transcript of two conversations as if it were one; so is
+one whose record names no head at all, though its log holds nodes: the
+retry that wrote them had no head to continue, and the next one would
+not either."
+  (let ((roots (cl-loop for id in order
+                        for node = (gethash id table)
+                        when (let ((parent (plist-get node :parent)))
+                               (or (null parent) (not (gethash parent table))))
+                        collect id))
+        (head (harness-session-head s)))
+    (cond
+     ((and (null head) order)
+      (format "its record names no head though its node log holds %d nodes" (length order)))
+     ((cdr roots)
+      (let ((first (car roots)))
+        (cond
+         ((not (gethash head table))
+          (format "its node log holds %d chains and its head %s is none of them"
+                  (length roots) head))
+         ((not (harness-session--descends-from-p table head first))
+          (format "its node log holds %d chains, and its head descends from %s, not from its first node %s"
+                  (length roots) (harness-session--root-of table head) first))))))))
+
+(defun harness-session--descends-from-p (table node-id ancestor-id)
+  "Non-nil when NODE-ID of TABLE is ANCESTOR-ID, or comes after it."
+  (let ((id node-id)
+        (seen (make-hash-table :test 'equal))
+        (found nil))
+    (while (and id (not found) (not (gethash id seen)))
+      (puthash id t seen)
+      (if (equal id ancestor-id)
+          (setq found t)
+        (setq id (plist-get (gethash id table) :parent))))
+    found))
+
+(defun harness-session--root-of (table node-id)
+  "Return the node of TABLE that NODE-ID's chain starts at."
+  (let ((id node-id) (last nil) (seen (make-hash-table :test 'equal)))
+    (while (and id (not (gethash id seen)))
+      (puthash id t seen)
+      (setq last id
+            id (plist-get (gethash id table) :parent)))
+    last))
 
 (defun harness-session--persist-node (s node &optional update)
   "Append NODE to the node log of S.
@@ -1441,6 +1676,10 @@ some for a session (see `session/set-ext'), a plist."
                           (harness-session--btw-model usual cwd)
                         usual))))
          (s (make-harness-session)))
+    ;; A record this start did not hydrate is nobody's to replace: its
+    ;; recovery reads it, and a session made over it would be the one
+    ;; the corruption made, with a new name.
+    (when (plist-get plist :id) (harness-session--refuse-unhydrated (plist-get plist :id)))
     (setf (harness-session-id s) (or (plist-get plist :id) (harness-uuid))
           (harness-session-name s) (plist-get plist :name)
           (harness-session-kind s) kind
@@ -2970,6 +3209,410 @@ see `harness-session--interrupted'.  A reload finds nothing new: it
 loads no session."
   (reverse harness-session--interrupted))
 
+;;;; Recovering a record that was not hydrated
+;;
+;; A record the loader refuses is left as it is, and the session is not
+;; in memory (`harness-session--hydration-faults').  An operator recovers
+;; one session at a time, by hand: `session/recover-hydration' reads the
+;; record, the node log and what the rest of the harness kept about the
+;; session, works out what the record lost and where that can be read
+;; from, and refuses when two sources disagree.  It writes nothing until
+;; its plan stands, backs up what it replaces under a name that cannot
+;; overwrite an earlier backup, and writes the record in one atomic
+;; rename, so a second run finds nothing to recover and a run that dies
+;; leaves either the old record or the new one.
+;;
+;; The node log is never touched: both chains -- the session's own, and
+;; the one a session that was not hydrated appended after it -- stay in
+;; it, byte for byte, and the record's head goes back to the end of the
+;; first chain.  The frozen body is never touched either: whether it
+;; still continues the recovered transcript is the replay guard's to
+;; say, and this recovery does not reset it, weaken it or guess it.
+
+(defconst harness-session--recovery-kind "hydration-recovery"
+  "The `:kind' a recovery's audit record carries.")
+
+(defun harness-session--recovery-file (id &optional suffix)
+  "Return the store name of the backup recovery makes for session ID.
+SUFFIX names which backup; nil is the audit with the record before it.
+The name carries the time and a random part, so no run replaces the
+backup of another."
+  (format "sessions/%s.%s-%s-%s.json"
+          id (if suffix (concat "recovery-" suffix) "recovery")
+          (format-time-string "%Y%m%dT%H%M%S") (harness-short-id 6)))
+
+(defun harness-session--recovery-publish (name evidence)
+  "Publish EVIDENCE at store NAME without replacing any file; return its path.
+The temporary file is in the same directory, so publishing its hard link
+is one exclusive filesystem operation: a competing writer wins intact,
+and a backup never goes over one an earlier recovery left."
+  (let* ((path (expand-file-name name harness-state-directory))
+         (directory (file-name-directory path))
+         (temporary nil))
+    (harness-ensure-directory directory)
+    (unwind-protect
+        (progn
+          (setq temporary (make-temp-file (expand-file-name ".recovery-" directory)))
+          (let ((coding-system-for-write 'utf-8-unix))
+            (write-region (harness-json-encode evidence) nil temporary nil 'silent))
+          (add-name-to-file temporary path nil)
+          path)
+      (when (and temporary (file-exists-p temporary))
+        (delete-file temporary)))))
+
+(defun harness-session--journal-chains (order table)
+  "Return the chains the node log ORDER names in TABLE holds.
+Each chain is (:root ID :head ID :leaves (ID…) :nodes (ID…)), oldest
+first.  The first is the session's own: it is the chain the log began
+with.  Any other is a chain a session that was not this one appended
+after it -- its retry's prompt, written with no parent -- and is kept
+here only to be reported."
+  (let ((children (make-hash-table :test 'equal))
+        (roots nil)
+        (chains nil))
+    (dolist (id order)
+      (let* ((node (gethash id table))
+             (parent (plist-get node :parent)))
+        (cond
+         ((and parent (gethash parent table))
+          (puthash parent (append (gethash parent children) (list id)) children))
+         (t (push id roots)))))
+    (dolist (root (nreverse roots))
+      (let ((nodes nil) (leaves nil) (queue (list root)))
+        (while queue
+          (let ((id (pop queue)))
+            (push id nodes)
+            (let ((kids (gethash id children)))
+              (if kids (setq queue (append kids queue)) (push id leaves)))))
+        (push (list :root root :head (car leaves) :leaves (nreverse leaves)
+                    :nodes (nreverse nodes))
+              chains)))
+    (nreverse chains)))
+
+(defun harness-session--recovery-path (chain table)
+  "Return CHAIN's nodes as node plists, oldest first.
+CHAIN's `:nodes' is already in that order, so this only looks them up."
+  (delq nil (mapcar (lambda (id) (gethash id table)) (plist-get chain :nodes))))
+
+(defun harness-session--recovery-candidate (key value source sources &optional normalize)
+  "Return SOURCES with KEY's VALUE from SOURCE added; signal on disagreement.
+A recovery takes a field from what the harness kept of the session, and
+two stores that disagree about it are not a thing it may guess at.
+NORMALIZE, when given, is called on both values before they are
+compared, and its result is what SOURCES keeps: a directory is the same
+directory with or without its trailing slash."
+  (let* ((value (and value (if normalize (funcall normalize value) value)))
+         (known (alist-get key sources)))
+    (cond
+     ((null value) sources)
+     ((null known) (cons (cons key (list :value value :source source)) sources))
+     ((equal value (plist-get known :value)) sources)
+     (t (signal 'harness-error
+                (list (format "Its %s is ambiguous: %s says %S, %s says %S"
+                              (substring (symbol-name key) 1)
+                              (plist-get known :source) (plist-get known :value)
+                              source value)))))))
+
+(defun harness-session--recovery-directory (path)
+  "Return PATH as the directory name a record keeps, or nil for no directory.
+A path that is no local directory is no directory to recover a session
+in: a record names one that was there."
+  (when (and (stringp path) (not (string-empty-p path))
+             (not (file-remote-p path)) (file-directory-p path))
+    (file-name-as-directory (expand-file-name path))))
+
+(defun harness-session--recovery-head (record chain)
+  "Return the head the recovered session of RECORD, whose first CHAIN it is.
+The record's own `:head' when it is on CHAIN -- a session that moved its
+head back and wrote on is still one chain from its first node -- else
+CHAIN's only leaf.  A chain with several ends and no head to choose
+between them is not one to guess at."
+  (let ((recorded (plist-get record :head))
+        (leaves (plist-get chain :leaves)))
+    (cond
+     ((and (stringp recorded) (member recorded (plist-get chain :nodes))) recorded)
+     ((= 1 (length leaves)) (car leaves))
+     ((null leaves) (signal 'harness-error (list "Its first chain ends at no node")))
+     (t (signal 'harness-error
+                (list (format "Its first chain ends at %d nodes (%s) and its record names none of them"
+                              (length leaves) (mapconcat #'identity leaves ", "))))))))
+
+(defun harness-session--recovery-nodes-meta (path key)
+  "Return the newest value of KEY in the `:meta' of PATH's nodes, or nil.
+That is what the session's own transcript says about itself, as the
+model it ran on and the project it ran in."
+  (let (found)
+    (dolist (node path)
+      (let ((value (plist-get (plist-get node :meta) key)))
+        (when (and value (or (null found) (> (or (plist-get node :ts) 0) (car found))))
+          (setq found (cons (or (plist-get node :ts) 0) value)))))
+    (cdr found)))
+
+(defun harness-session--recovery-plan (id)
+  "Return what recovering session ID's record would write, or signal why not.
+Nothing is changed.  The plan is (:id ID :record-before PLIST
+:record-after PLIST :head ID :head-moved BOOL :chains CHAINS
+:provenance SOURCES): the record the store holds now, the one a recovery
+would write, the head it gives the session, every chain its node log
+holds, and where each field the record lost was read from.  A field two
+stores disagree about, a first chain with more than one end and no head
+to choose between them, a head that is not on the first chain, and a
+record that hydrates already are each refused, with the reason."
+  (unless (stringp id) (signal 'harness-error (list "A recovery names one session")))
+  (let* ((name (harness-session--meta-name id))
+         (record (harness-call 'store/load name))
+         (problem (harness-session--hydration-problem record id))
+         (fault (harness-session--hydration-fault id)))
+    (unless (or problem fault)
+      (signal 'harness-error
+              (list (format "Session %s hydrates already: nothing to recover" id))))
+    ;; A session that hydrated and then found its log broken is in
+    ;; memory with a fault: it is recovered here too, but only while
+    ;; nothing of it is at work.
+    (when (and (gethash id harness-sessions) (not fault))
+      (signal 'harness-error
+              (list (format "Session %s is in memory: a recovery is for one that was not loaded" id))))
+    (when (and fault (harness-method-exists-p 'agent/running)
+               (harness-call 'agent/running id))
+      (signal 'harness-error (list (format "Session %s is at work: stop its turn first" id))))
+    (let* ((table (make-hash-table :test 'equal))
+           (order (harness-session--journal-order id table))
+           (chains (harness-session--journal-chains order table)))
+      (unless chains (signal 'harness-error (list (format "Session %s has no node log to recover from" id))))
+      (when (cddr chains)
+        (signal 'harness-error
+                (list (format "Session %s: its node log holds %d chains, more than the session's own and one after it"
+                              id (length chains)))))
+      (let* ((original (car chains))
+             (path (harness-session--recovery-path original table))
+             (head (harness-session--recovery-head record original))
+
+             (task (and (harness-method-exists-p 'task/for-session)
+                        (ignore-errors (harness-call 'task/for-session id))))
+             (sources nil)
+             (first-ts (plist-get (gethash (car (plist-get original :nodes)) table) :ts))
+             (last-ts (plist-get (car (last path)) :ts))
+             (recorded-created (plist-get record :created))
+             (updated (plist-get record :updated))
+             ;; The session began when its first node was written, or
+             ;; earlier: a record the damage rewrote says when the
+             ;; session that replaced it was made, which is later.
+             (created (cond ((and (numberp recorded-created) (numberp first-ts))
+                             (min recorded-created first-ts))
+                            ((numberp recorded-created) recorded-created)
+                            ((numberp first-ts) first-ts)
+                            (t (signal 'harness-error
+                                       (list "Neither its record nor its node log says when it began")))))
+             (sources (harness-session--recovery-candidate :created first-ts "its node log" sources))
+             (sources (harness-session--recovery-candidate
+                       :model (harness-session--recovery-nodes-meta path :model)
+                       "its newest assistant message" sources))
+             (sources (harness-session--recovery-candidate
+                       :model (plist-get record :model) "its record" sources))
+             (sources (harness-session--recovery-candidate
+                       :project (harness-session--recovery-nodes-meta path :project)
+                       "its newest assistant message" sources))
+             (sources (harness-session--recovery-candidate
+                       :project (plist-get record :project) "its record" sources))
+             (sources (harness-session--recovery-candidate
+                       :project (plist-get task :project) "its task" sources))
+             (sources (harness-session--recovery-candidate
+                       :cwd (plist-get record :cwd) "its record" sources
+                       #'harness-session--recovery-directory))
+             (sources (harness-session--recovery-candidate
+                       :cwd (plist-get record :worktree) "its record's worktree" sources
+                       #'harness-session--recovery-directory))
+             (sources (harness-session--recovery-candidate
+                       :cwd (plist-get task :worktree) "its task's worktree" sources
+                       #'harness-session--recovery-directory))
+             (sources (harness-session--recovery-candidate
+                       :cwd (plist-get task :cwd) "its task" sources
+                       #'harness-session--recovery-directory))
+             (cwd (or (plist-get (alist-get :cwd sources) :value)
+                      (signal 'harness-error
+                              (list "Nothing says which directory it worked in"))))
+             (sources (harness-session--recovery-candidate
+                       :project (and (fboundp 'harness-files-main-root)
+                                     (ignore-errors (harness-files-main-root cwd)))
+                       "the project of its directory" sources
+                       #'harness-session--recovery-directory))
+             (sources (harness-session--recovery-candidate
+                       :worktree (plist-get record :worktree) "its record" sources
+                       #'harness-session--recovery-directory))
+             (sources (harness-session--recovery-candidate
+                       :worktree (and task (plist-get task :worktree)) "its task" sources
+                       #'harness-session--recovery-directory))
+             (project (plist-get (alist-get :project sources) :value))
+             (model (plist-get (alist-get :model sources) :value))
+             ;; The worktree is the session's directory when it had one;
+             ;; a directory that is no worktree of the project it is in
+             ;; is not one a record keeps.
+             (worktree (let ((known (plist-get (alist-get :worktree sources) :value)))
+                         (and known (equal known cwd) known)))
+             (last-message (cl-loop for node in path
+                                    when (memq (plist-get node :kind) '(user assistant))
+                                    maximize (or (plist-get node :ts) 0)))
+             (compaction (let* ((node (car (harness-path-from-compaction path))))
+                           (and (harness-node-compaction-in-force-p node)
+                                (list :node (plist-get node :id)
+                                      :replaced (plist-get (plist-get node :meta) :input-tokens)
+                                      :kind (harness-node-compaction-kind node)))))
+             ;; A provider conversation that had gone past a node of the
+             ;; other chain is that chain's: the session's own is the one
+             ;; its record keeps, or none, which starts it afresh from
+             ;; the transcript (`session/provider-continuation').
+             (provider-node (let ((node (plist-get record :provider-node)))
+                              (and (stringp node)
+                                   (member node (plist-get original :nodes))
+                                   node)))
+             (after (harness-plist-merge
+                     record
+                     (list :id id :cwd cwd :project project :worktree worktree
+                           :model model :created created
+                           :updated (max (or updated 0) (or last-ts 0))
+                           :head head
+                           :last-message (and last-message (> last-message 0) last-message)
+                           :status "inactive" :steering nil :pending nil
+                           :compaction compaction
+                           :provider-node provider-node
+                           :provider-state (and provider-node
+                                                (plist-get record :provider-state))))))
+        (when-let* ((still (harness-session--hydration-problem after id)))
+          (signal 'harness-error (list (format "The recovered record would not hydrate: %s" still))))
+        ;; A provider conversation that had gone past a node of the other
+        ;; chain is that chain's, and is dropped rather than resumed: the
+        ;; session starts one from its own transcript.  Nothing is
+        ;; inferred about what that conversation held.
+        (let ((dropped (and (plist-get record :provider-node)
+                            (not (plist-get after :provider-node)))))
+          (list :id id
+                :dry-run t
+                :record-before record
+                :record-after after
+                :head head
+                :head-moved (not (equal (plist-get record :head) head))
+                :provider-conversation-dropped dropped
+                :chains (mapcar (lambda (chain)
+                                  (list :root (plist-get chain :root) :head (plist-get chain :head)
+                                        :leaves (plist-get chain :leaves) :nodes (length (plist-get chain :nodes))))
+                                chains)
+                :provenance (mapcar (lambda (cell)
+                                      (list :key (car cell)
+                                            :value (plist-get (cdr cell) :value)
+                                            :source (plist-get (cdr cell) :source)))
+                                    sources)))))))
+
+(defun harness-session--journal-order (id table)
+  "Read the node log of session ID into TABLE; return its node ids in order.
+The order is the order the log first wrote them, and the records are
+merged as `harness-session--load-nodes' merges them, so what a recovery
+reads is what a load reads."
+  (let (order)
+    (dolist (rec (harness-call 'store/read-all (harness-session--nodes-name id)))
+      (let ((rec (harness-session--intern-node rec)))
+        (cond
+         ((equal (plist-get rec :_op) "delete") (remhash (plist-get rec :id) table))
+         ((equal (plist-get rec :_op) "update")
+          (let ((existing (gethash (plist-get rec :id) table)))
+            (when existing
+              (puthash (plist-get rec :id)
+                       (harness-plist-merge existing (harness-plist-remove rec :_op))
+                       table))))
+         (t (unless (gethash (plist-get rec :id) table)
+              (push (plist-get rec :id) order))
+            (puthash (plist-get rec :id) rec table)))))
+    (nreverse order)))
+
+(defun harness-session--recovery-audit (plan)
+  "Return the audit record of PLAN, the evidence a recovery keeps.
+It holds both records, the chains the node log keeps, where each field
+was read from, and what the replay guard was told about the frozen
+body -- never a prompt's text."
+  (let* ((id (plist-get plan :id))
+         (frozen (and (harness-method-exists-p 'replay/frozen-status)
+                      (ignore-errors (harness-call 'replay/frozen-status id)))))
+    (list :kind harness-session--recovery-kind
+          :id id
+          :at (float-time)
+          :head (plist-get plan :head)
+          :head-moved (plist-get plan :head-moved)
+          :chains (plist-get plan :chains)
+          :provenance (plist-get plan :provenance)
+          :record-before (plist-get plan :record-before)
+          :record-after (plist-get plan :record-after)
+          :frozen (list :present (and frozen t) :generation (plist-get frozen :generation)
+                        :reset (plist-get frozen :reset))
+          :replay "Unchanged: the guard still refuses a frozen body that does not continue the transcript")))
+
+(harness-defmethod session/recover-hydration (id &optional opts)
+  "Recover session ID's saved record, which this start could not hydrate.
+That is a record a cold boot refused (`session/hydration-faults'): one
+whose session was read from a sidecar and written back incomplete, so
+it lost the head of its transcript, its project, its working directory
+or its model.  This reads what is still there -- the record, the node
+log, the transcript's own messages and the task that worked in it --
+and writes back only the fields that can be read from them, refusing
+when two of them disagree.  The head goes to the record's own when it
+is on the first chain, else to that chain's only end; a node log with
+more than one chain is reported, and the chains after the first are
+kept exactly as they are, never read as the session's.
+
+OPTIONS `:dry-run' returns the plan and writes nothing.  A recovery
+writes an audit under `sessions/ID.recovery-…json' first -- the record
+before and after it, the chains, the provenance and the replay guard's
+state -- and then the record, in one atomic rename.  Nothing else is
+written: the node log, the frozen body and the replay guard are left as
+they are, so a body that no longer continues the transcript still
+refuses the next request.  Run it again after it succeeded and there is
+nothing to recover: it is idempotent.
+
+Return the plan, with `:written' the path of the record it wrote and
+`:audit' the path of its audit, or with `:dry-run' t and no paths."
+  (let* ((plan (harness-session--recovery-plan id))
+         (dry (harness-json-true-p (plist-get opts :dry-run))))
+    (if dry
+        plan
+      (let* ((audit (harness-session--recovery-audit plan))
+             (record-path (expand-file-name (harness-session--meta-name id) harness-state-directory))
+             (audit-name (harness-session--recovery-file id))
+             (audit-path (harness-session--recovery-publish audit-name audit)))
+        ;; The record may have changed while the plan was made: what
+        ;; was backed up is not what would be replaced.
+        (unless (equal (harness-call 'store/load (harness-session--meta-name id))
+                       (plist-get plan :record-before))
+          (signal 'harness-error
+                  (list (format "Session %s: its record changed while it was recovered; nothing was written" id))))
+        (harness-write-file-atomically record-path (harness-json-encode (plist-get plan :record-after)))
+        (harness-session--clear-hydration-fault id)
+        ;; A session that hydrated and then found its log broken is in
+        ;; memory, poisoned: it takes the recovered record and reads its
+        ;; transcript again.  One that was never loaded waits for the
+        ;; next start, which loads it from the record just written.
+        (when-let* ((s (gethash id harness-sessions)))
+          (let ((restored (harness-session--from-plist (plist-get plan :record-after))))
+            (setf (harness-session-nodes s) (harness-session-nodes restored)
+                  (harness-session-loaded s) nil
+                  (harness-session-head s) (harness-session-head restored)
+                  (harness-session-project s) (harness-session-project restored)
+                  (harness-session-cwd s) (harness-session-cwd restored)
+                  (harness-session-worktree s) (harness-session-worktree restored)
+                  (harness-session-model s) (harness-session-model restored)
+                  (harness-session-created s) (harness-session-created restored)
+                  (harness-session-updated s) (harness-session-updated restored)
+                  (harness-session-last-message s) (harness-session-last-message restored)
+                  (harness-session-compaction s) (harness-session-compaction restored)
+                  (harness-session-provider-node s) (harness-session-provider-node restored)
+                  (harness-session-provider-state s) (harness-session-provider-state restored))
+            (harness-session--load-nodes s)
+            (harness-session--announce s)))
+        (harness-log 'info "session %s: recovered its record from %s"
+                     id (mapconcat (lambda (p) (format "%s from %s"
+                                                       (substring (symbol-name (plist-get p :key)) 1)
+                                                       (plist-get p :source)))
+                                   (plist-get plan :provenance) ", "))
+        (append (harness-plist-remove plan :dry-run)
+                (list :dry-run nil :audit audit-path :written record-path))))))
+
 (defun harness-session--price-record (model record)
   "Return RECORD for MODEL with a missing `:cost' and `:list-cost' priced.
 The cost is what was billed and the list cost what the call costs at
@@ -4196,21 +4839,48 @@ loads closed like any other session at rest."
            (let ((pending (plist-get plist :pending)))
              (and (seqp pending) (> (length pending) 0))))))
 
+(defun harness-session--accept-record (name plist)
+  "Make the session PLIST, stored as NAME, the session it names; return it.
+NAME has to be the canonical record of PLIST's id, and PLIST has to
+pass `harness-session--hydration-problem'; a record that does not is
+left as it is, and its id held in `harness-session--hydration-faults'
+so nothing writes over it.  A session already in memory is not
+replaced.  Return nil for a record that is not hydrated."
+  (let* ((id (harness-session--record-id name))
+         (problem (and id (harness-session--hydration-problem plist id))))
+    (cond
+     ((null id) nil)                    ; a sidecar, or no record at all
+     ((gethash id harness-sessions) nil) ; already loaded: the record it came from wins
+     (problem (harness-session--note-hydration-fault id problem) nil)
+     (t (let ((s (harness-session--from-plist plist)))
+          (puthash id s harness-sessions)
+          s)))))
+
 (defun harness-session--load-all ()
   "Load every persisted session record (nodes stay on disk until needed).
+A record is loaded from its canonical name only, `sessions/ID.json'
+\(`harness-session--record-id'): the sidecars of the same session --
+its frozen body, its responses, the payload of its last request -- are
+no record of it, whatever id they name.  A record that does not
+hydrate is left as it is and held in
+`harness-session--hydration-faults' (`session/hydration-faults'), so
+that nothing saves over it before an operator recovers it.
+
 Sessions saved mid-turn (`harness-session--interrupted-record-p') are
 settled with `harness-session--settle', and listed in
 `harness-session--interrupted' for whoever recovers them."
   (setq harness-session--interrupted nil)
   (let (interrupted loaded)
     (dolist (name (harness-call 'store/list "sessions" "\\.json\\'"))
-      (let ((pl (harness-call 'store/load name)))
-        (when (and pl (plist-get pl :id) (not (gethash (plist-get pl :id) harness-sessions)))
-          (let ((s (harness-session--from-plist pl)))
-            (puthash (plist-get pl :id) s harness-sessions)
+      ;; Only a canonical record is read at all: a sidecar of the same
+      ;; session can be tens of megabytes, and none of it is a record.
+      (when (harness-session--record-id name)
+        (let ((plist (harness-call 'store/load name)))
+          (when-let* ((s (harness-session--accept-record name plist)))
             (push s loaded)
-            (when (harness-session--interrupted-record-p pl)
-              (push (list s (plist-get pl :pending) (intern (plist-get pl :status))) interrupted))))))
+            (when (harness-session--interrupted-record-p plist)
+              (push (list s (plist-get plist :pending) (intern (plist-get plist :status)))
+                    interrupted))))))
     (dolist (entry interrupted)
       (pcase-let ((`(,s ,pending ,status) entry))
         (condition-case err
@@ -4245,16 +4915,18 @@ Sessions used to copy `harness-budget' into a budget of their own when
 they were made, so the setting became one budget per session instead of
 one for them all.  Nothing else gave a session a budget then, so every
 session budget saved before the marker document exists is such a copy.
-After that, a budget a session has was given to it, and stays."
+After that, a budget a session has was given to it, and stays.
+Only the sessions loaded are changed: one that did not hydrate keeps
+its record as it is."
   (unless (harness-call 'store/load harness-session--budget-copies-marker)
     (let ((n 0))
-      (dolist (name (harness-call 'store/list "sessions" "\\.json\\'"))
-        (let ((s (gethash (file-name-base name) harness-sessions)))
-          (when (and s (harness-session-budget s))
-            (setf (harness-session-budget s) nil)
-            (harness-session--save (harness-session-id s))
-            (harness-session--announce s)
-            (cl-incf n))))
+      (maphash (lambda (_ s)
+                 (when (harness-session-budget s)
+                   (setf (harness-session-budget s) nil)
+                   (harness-session--save (harness-session-id s))
+                   (harness-session--announce s)
+                   (cl-incf n)))
+               harness-sessions)
       (harness-call 'store/save harness-session--budget-copies-marker
                     (list :dropped n :date (format-time-string "%F")))
       (when (> n 0)

@@ -102,6 +102,8 @@ module guarantees only what the harness sends.
 - `replay/responses` (id) — Return the responses kept on disk for session ID, oldest first.
 - `replay/responses-p` (id) — Non-nil when the disk holds responses kept for session ID.
 - `replay/save-request` (request) — Keep REQUEST's payload for its session, to continue the next one from.
+- `session/system-transition-status` (id) — Return ID's frozen generation and old/current system SHA-256 hashes.
+- `session/transition-system` (id generation old-sha256 new-sha256) — Explicitly approve only ID's current system text at GENERATION.
 
 ### Events
 
@@ -118,6 +120,8 @@ module guarantees only what the harness sends.
 
 ### Methods it calls
 
+- `session/exists-p` ([session](session.md))
+- `session/get` ([session](session.md))
 - `session/messages-from` ([session](session.md))
 - `session/render-digest` ([session](session.md))
 - `session/render-state` ([session](session.md))

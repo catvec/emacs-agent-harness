@@ -143,6 +143,8 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/fork` (id &rest plist) — Fork session ID; return a promise of the new session plist.
 - `session/get` (id) — Return the public plist of session ID.
 - `session/hint` (id text) — Append a system hint TEXT to session ID.
+- `session/hydration-fault` (id) — Return why session ID was not hydrated, or nil.
+- `session/hydration-faults` — Return the sessions this start did not hydrate, newest fault last.
 - `session/image` (id path) — Return the picture PATH, a file session ID's transcript shows, as data.
 - `session/internal-finish` (id &rest plist) — Finish internal session ID, recording how its model call ended.
 - `session/internal-start` (&rest plist) — Start an internal session, the record of one model call; return its id.
@@ -166,9 +168,11 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/queue-remove` (id qid) — Remove queued item QID from session ID.
 - `session/queue-take` (id &optional qids) — Return and remove the queued items of session ID, in queue order.
 - `session/queue-update` (id qid text &optional attachments) — Replace the text (and attachments when given) of queued item QID in session ID.
+- `session/recover-hydration` (id &optional opts) — Recover session ID's saved record, which this start could not hydrate.
 - `session/redact-text` (id secrets &optional dry-run) — Take SECRETS out of the stored text of session ID, or count them (DRY-RUN).
 - `session/render-digest` (id ids) — Return the digest of IDS, the first nodes IDS of ID's transcript, or nil.
 - `session/render-state` (id) — Return the nodes `session/messages` renders for ID, and a digest of them.
+- `session/repair-task-project` (id task-id) — Restore only a missing project for task TASK-ID's inactive session ID.
 - `session/reset-drops-cache-p` (id) — Non-nil when `session/reset-provider` on session ID would drop its prompt cache.
 - `session/reset-provider` (id) — Drop the provider conversation of session ID: its next turn starts a new one.
 - `session/resume` (id) — Make session ID active again (status idle) and load its nodes.
@@ -176,7 +180,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/select` (&optional filter) — Return the session plists FILTER selects, newest first.
 - `session/set-all` (settings &optional filter) — Apply SETTINGS to every session FILTER selects; return the ids changed.
 - `session/set-compaction` (id compaction) — Say which compaction of session ID is the one in force, or nil for none.
-- `session/set-ext` (id key value &optional hint) — Set the setting KEY of session ID's `:ext` to VALUE; return the session plist.
+- `session/set-ext` (id key value &optional hint persist) — Set the setting KEY of session ID's `:ext` to VALUE; return the session plist.
 - `session/set-head` (id node-id) — Move the head of session ID to NODE-ID (time travel within the DAG).
 - `session/set-plan` (id text) — Set the current plan TEXT of session ID.
 - `session/set-provider-node` (id node-id) — Record NODE-ID as the node the provider conversation of session ID reached.
@@ -246,6 +250,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `provider/model` ([provider](provider.md)), when it is loaded
 - `provider/tier-model` ([provider](provider.md)), when it is loaded
 - `question/cancel` ([tools-question](tools-question.md)), when it is loaded
+- `replay/frozen-status` ([replay](replay.md)), when it is loaded
 - `replay/redact` ([replay](replay.md)), when it is loaded
 - `store/append` ([store](store.md))
 - `store/delete` ([store](store.md))
@@ -254,6 +259,7 @@ take it in.  The session list hides internal sessions unless asked.
 - `store/read-all` ([store](store.md))
 - `store/save` ([store](store.md))
 - `task/for-session` ([tasks](tasks.md)), when it is loaded
+- `task/get` ([tasks](tasks.md)), when it is loaded
 - `task/session-ids` ([tasks](tasks.md)), when it is loaded
 - `usage/price` ([usage](usage.md)), when it is loaded
 

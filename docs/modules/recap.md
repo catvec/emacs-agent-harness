@@ -72,6 +72,11 @@ one's.
 
 ## Provides
 
+### Methods
+
+- `session/recap-recovery-status` (sid task-id) — Inspect a proven recap-only prefix without changing it.
+- `session/recover-recap-prefix` (sid task-id generation sha256) — Archive and discard only a proven ancillary prefix after explicit approval.
+
 ### Events
 
 - `recap/done` — (SESSION-ID RECAP) after a task card's recap was stored.
@@ -87,9 +92,11 @@ one's.
 - `provider/tier-model` ([provider](provider.md))
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))
+- `session/list` ([session](session.md))
 - `session/nodes` ([session](session.md))
 - `session/set-ext` ([session](session.md))
 - `task/for-session` ([tasks](tasks.md))
+- `task/get` ([tasks](tasks.md))
 - `task/set-recap` ([tasks](tasks.md))
 
 ### Events it handles

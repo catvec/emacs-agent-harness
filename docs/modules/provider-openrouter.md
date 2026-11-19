@@ -60,7 +60,7 @@ the policy never allowed.
 The catalogue read is asynchronous, so the policy is read again
 immediately before the body is built, and that reading -- not the one
 the dispatch began with -- is the only one the request's fields come
-from (`harness-openrouter--sending`).  A policy disabled, removed or
+from (the request's `:openrouter-policy`).  A policy disabled, removed or
 otherwise changed while a request was in flight refuses it with
 `policy-changed`; the next request is prepared afresh under the policy
 then in force.  Sending the old request would send under a policy the
@@ -125,6 +125,7 @@ behaviour of filter-then-cheapest, not a special case.
 - `openrouter/catalogue-hold` (&optional model) — Return why work routed by MODEL's policy cannot be sent now, or nil.
 - `openrouter/route` (session-id) — Return SESSION-ID's pinned OpenRouter route, or nil.
 - `provider/admission-identity` (request) — Return the pool REQUEST of OpenRouter belongs to, or nil.
+- `session/recover-openrouter-send` (id token) — Recover an interrupted dispatch owned by a proven dead local process.
 
 ### Events
 
@@ -163,6 +164,7 @@ behaviour of filter-then-cheapest, not a special case.
 
 ### Methods it calls
 
+- `agent/running` ([agent](agent.md)), when it is loaded
 - `session/exists-p` ([session](session.md)), when it is loaded
 - `session/get` ([session](session.md))
 - `session/hint` ([session](session.md)), when it is loaded

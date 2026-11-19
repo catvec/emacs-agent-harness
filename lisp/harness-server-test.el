@@ -258,6 +258,12 @@ on the main Lisp thread and exit successfully, without fallback signals."
               (should (plist-get saved :main))
               (should (> (plist-get saved :writers) 0))
               (should (> (plist-get saved :active) 0)))
+            ;; The sentinel that closes the shutdown watchdog runs as an
+            ;; event after the child is reaped, not before: wait for it,
+            ;; rather than reading the process slots in that window.
+            (harness-test-wait
+             (lambda () (not (process-get proc 'harness-server--stop-timer)))
+             10 "the shutdown watchdog to be closed")
             (should-not (process-get proc 'harness-server--stop-timer))
             (should-not (process-get proc 'harness-server--stop-socket)))
         (when conn (ignore-errors (harness-acp-close conn)))
@@ -333,6 +339,9 @@ on the main Lisp thread and exit successfully, without fallback signals."
               (should (equal (reverse signals) '(term kill)))
               (should (eq (process-status proc) 'signal))
               (should (= (process-exit-status proc) 9))
+              (harness-test-wait
+               (lambda () (not (process-get proc 'harness-server--stop-timer)))
+               10 "the shutdown watchdog to be closed")
               (should-not (process-get proc 'harness-server--stop-timer))
               ;; A late watchdog retains the dead process object, never a
               ;; bare PID that could now identify an unrelated process.

@@ -501,6 +501,7 @@ here logs, emits or returns one.
 - `session/exists-p` ([session](session.md))
 - `session/get` ([session](session.md))
 - `session/hint` ([session](session.md))
+- `session/hydration-fault` ([session](session.md))
 - `session/list` ([session](session.md))
 - `session/nodes` ([session](session.md))
 - `session/resume` ([session](session.md))

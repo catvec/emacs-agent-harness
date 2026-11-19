@@ -96,6 +96,7 @@
 
 (declare-function harness-tool-title "harness-tools")
 (declare-function harness-tools-tail-line "harness-tools" (text))
+(declare-function harness-session--refuse-unhydrated "harness-session" (id))
 
 (defconst harness-agent--base-system-prompt
   "You are an expert software engineering agent working inside the user's GNU Emacs through the Emacs agent harness.
@@ -1484,6 +1485,10 @@ A message that starts a turn or steers one goes through the
 one does when its queue is sent.  An internal session (see
 `session/internal-start') refuses every message: it records one model
 call the harness made and cannot be continued."
+  ;; Before anything is built, recorded or sent: a session this start
+  ;; did not hydrate has no transcript to continue, and a message sent
+  ;; to it would be the disconnected root that made the damage.
+  (harness-session--refuse-unhydrated session-id)
   (when (and (harness-call 'session/exists-p session-id)
              (eq (plist-get (harness-call 'session/get session-id) :kind) 'internal))
     (signal 'harness-error

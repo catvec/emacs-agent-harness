@@ -1089,6 +1089,17 @@ holds there are.")
        (cl-loop for task being the hash-values of harness-tasks--table
                 when (equal (plist-get task :session) session-id) return task)))
 
+(defun harness-tasks--refuse-unhydrated (session-id)
+  "Signal when SESSION-ID, a task's session, was not hydrated.
+Nothing of the task goes on: the prompt it would send again, the node
+that would become a root of its log, and the save of its record are all
+refused until an operator restores it (`session/recover-hydration')."
+  (when (and session-id (harness-method-exists-p 'session/hydration-fault))
+    (when-let* ((reason (harness-call 'session/hydration-fault session-id)))
+      (signal 'harness-error
+              (list (format "Session %s is not hydrated: %s; session/recover-hydration restores it"
+                            session-id reason))))))
+
 (defun harness-tasks--before-move (gate session _dir)
   "Keep the session of a task in the task's directory.
 A `session/before-move' filter: GATE is (:proceed t) and SESSION the
@@ -4384,7 +4395,8 @@ session that has no name yet takes the task's title."
   (condition-case err
       (let* ((task (harness-tasks--get id))
              (sid (plist-get task :session))
-             (session (harness-call 'session/get sid))
+             (session (progn (harness-tasks--refuse-unhydrated sid)
+                             (harness-call 'session/get sid)))
              (cwd (file-name-as-directory (expand-file-name cwd)))
              (settings (harness-tasks--work-settings task)))
         (unless (equal cwd (plist-get session :cwd))
@@ -4470,6 +4482,7 @@ the task's worktree, if any, for the hint."
   (condition-case err
       (let* ((task (harness-tasks--get id))
              (sid (plist-get task :session)))
+        (harness-tasks--refuse-unhydrated sid)
         (when (eq (plist-get (harness-call 'session/get sid) :status) 'inactive)
           (harness-call 'session/resume sid))
         (harness-call 'session/hint sid
@@ -5415,7 +5428,8 @@ in this process works on it, the process that did has stopped."
 A session that never received the task gets the task itself."
   (let* ((task (harness-tasks--get id))
          (sid (plist-get task :session))
-         (begun (progn (harness-call 'session/resume sid)
+         (begun (progn (harness-tasks--refuse-unhydrated sid)
+                       (harness-call 'session/resume sid)
                        (cl-find 'user (harness-call 'session/nodes sid) :key (lambda (n) (plist-get n :kind))))))
     (harness-log 'info "task %s: resuming session %s after a restart" id sid)
     (puthash id t harness-tasks--starting)
@@ -5473,7 +5487,10 @@ restart."
           (cond
            ((plist-get task :session)
             (cond ((not (harness-tasks--session task))
-                   (harness-tasks--set id :outcome 'error :error "its session no longer exists"))
+                   (if-let* ((reason (harness-call 'session/hydration-fault (plist-get task :session))))
+                       (harness-tasks--set id :outcome 'error
+                                           :error (format "its session is not hydrated: %s" reason))
+                     (harness-tasks--set id :outcome 'error :error "its session no longer exists")))
                   ((and (harness-tasks--backlog-p task) (not (harness-tasks--work-begun-p task)))
                    (if harness-tasks-resume-interrupted
                        (progn (harness-log 'info "task %s: starting it again after a restart" id)
@@ -6611,6 +6628,9 @@ follows the start's own carry-on."
       (error "Task %s is waiting for a slot; task/start starts it" id))
     (when (plist-get task :worktree-removed)
       (error "Task %s was archived and its worktree removed; submit a new task" id))
+    ;; A session this start did not hydrate takes no message: it has no
+    ;; transcript to join, and the message would be a root of its own.
+    (harness-tasks--refuse-unhydrated (plist-get task :session))
     (cond
      ((and (harness-tasks--returned-p task)
            (or (harness-json-true-p (plist-get task :parked))
@@ -6691,6 +6711,10 @@ it to carry on.  The task holds its slot from now, as when it starts."
         (sid (plist-get task :session)))
     (when (plist-get task :worktree-removed)
       (error "Task %s was archived and its worktree removed; submit a new task" id))
+    ;; Before the task holds a slot or its prompt goes again: a session
+    ;; that did not hydrate has no transcript to carry on from, and the
+    ;; prompt would become a root of its own in its node log.
+    (harness-tasks--refuse-unhydrated sid)
     (puthash id t harness-tasks--starting)
     (harness-tasks--set id :merge-attempts 0)
     (let ((begun (harness-tasks--work-begun-p task)))
@@ -6717,7 +6741,8 @@ one left without a session starts over.  A task at work, waiting for an
 answer, merging, in review or done has nothing to retry."
   (let* ((task (harness-tasks--get id))
          (state (plist-get task :state))
-         (session (harness-tasks--session task)))
+         (session (progn (harness-tasks--refuse-unhydrated (plist-get task :session))
+                         (harness-tasks--session task))))
     (cond
      ((plist-get session :pending)
       (error "Task %s waits for your answer to its %s" id
