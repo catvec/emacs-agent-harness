@@ -41,6 +41,9 @@
 (declare-function harness-recap--maybe "harness-recap")
 (declare-function harness-recap--due-p "harness-recap")
 (declare-function harness-recap--model "harness-recap")
+(declare-function harness-recap--request "harness-recap")
+(declare-function harness-replay-seam "harness-replay")
+(declare-function harness-replay-seam-keep "harness-replay")
 
 (defmacro harness-recap-test-with (&rest body)
   "Load the state layer with the demo provider, tasks and recaps; run BODY.
@@ -211,6 +214,187 @@ say what the work is doing out of the request."
         (should-not (string-match-p "line 010" work))
         (should (< (length work) 2000))))))
 
+
+(ert-deftest harness-recap-does-not-read-or-replace-the-conversation-prefix ()
+  "Real recap requests leave a parent's frozen bytes and strict guard intact."
+  (harness-recap-test-with
+    (harness-test-load-module 'replay)
+    (let* ((sid (harness-recap-test-session))
+           (id (harness-recap-test-task sid))
+           (session (harness-call 'session/get sid))
+           (request (list :model "m" :session session))
+           (body (list :model "m" :messages
+                       (list (list :role "system" :content "Conversation é")
+                             (list :role "user" :content "Work"))))
+           (recap (harness-recap--request session (harness-recap-test-record id) "m"))
+           (recap-body (list :model "m" :messages
+                             (list (list :role "system" :content (plist-get recap :system))
+                                   (list :role "user" :content "Summarize")))))
+      ;; First a recap before the first real request must not establish a prefix.
+      (should-not (cdr (harness-replay-seam recap "m" "route" recap-body)))
+      (harness-replay-seam-keep recap "m" "route" recap-body)
+      (should-not (harness-call 'replay/frozen-status sid))
+      (harness-replay-seam-keep request "m" "route" body)
+      (let ((before (copy-tree (harness-call 'replay/frozen-status sid)))
+            (wire (car (harness-replay-seam request "m" "route" body))))
+        ;; Then another recap with a completely different system is independent.
+        (should-not (cdr (harness-replay-seam recap "m" "route" recap-body)))
+        (harness-replay-seam-keep recap "m" "route" recap-body)
+        (should (equal before (harness-call 'replay/frozen-status sid)))
+        (should (equal wire (car (harness-replay-seam request "m" "route" body))))
+        ;; No reset or weakened check: a real conversation mutation is refused.
+        (let ((changed (copy-tree body)))
+          (setf (plist-get (car (plist-get changed :messages)) :content) "Mutated")
+          (should (cdr (harness-replay-seam request "m" "route" changed)))))
+      (should (equal "Recap" (plist-get recap :job)))
+      (should (equal sid (plist-get recap :job-parent)))
+      (should (equal session (plist-get recap :session))))))
+
+(defun harness-recap-test-recovery-fixture ()
+  "Create a parent and a witnessed recap prefix; return their ids."
+  (harness-test-load-module 'replay)
+  (let* ((model "openrouter:deepseek/deepseek-v4.1-flash-1017")
+         (sid (harness-recap-test-session :model model))
+         (task (harness-recap-test-task sid))
+         (job (harness-call 'session/internal-start :job "Recap" :model model
+                            :cwd (harness-test-temp-dir) :parent-id sid :prompt "Recap work"))
+         (body (list :model "deepseek/deepseek-v4.1-flash-1017"
+                     :messages (list (list :role "system" :content harness-recap--system-prompt)
+                                     (list :role "user" :content
+                                           (list (list :type "text" :text "Recap work"))))
+                     :reasoning (list :effort "none"))))
+    (harness-call 'session/append sid '(:kind user :content "Original assignment"))
+    (harness-call 'session/hint sid "Error: HTTP 400")
+    (harness-call 'replay/frozen-record sid body model "openrouter|-|https://openrouter.ai/api/v1")
+    (harness-call 'session/internal-finish job :reply "UNCHANGED" :stop-reason 'end-turn)
+    (harness-call 'session/append job
+                  '(:kind hint :content "Slots changed"
+                    :meta (:fold (:key "tool-slots-load"))))
+    (list sid task job body)))
+
+(ert-deftest harness-recap-recovery-archives-only-proven-prefix ()
+  (harness-recap-test-with
+    (pcase-let* ((`(,sid ,task ,job ,_) (harness-recap-test-recovery-fixture))
+                 (before (copy-tree (harness-call 'session/nodes sid)))
+                 (status (harness-call 'session/recap-recovery-status sid task))
+                 (result (harness-call 'session/recover-recap-prefix sid task
+                                      (plist-get status :generation) (plist-get status :sha256)))
+                 (audit (plist-get result :transition))
+                 (archive (harness-call 'store/load (plist-get audit :archive))))
+      (should (equal job (plist-get status :job-id)))
+      (should (plist-get archive :frozen))
+      (should (equal (harness-json-encode-text before)
+                     (harness-json-encode-text (plist-get archive :parent-nodes))))
+      (should (equal before (harness-call 'session/nodes sid)))
+      (should (equal sid (plist-get (harness-call 'task/get task) :session)))
+      (should (= 0 (plist-get (harness-call 'replay/frozen-status sid) :bytes)))
+      ;; A fresh main prefix is permitted, and subsequent true mutations are not.
+      (let* ((req (list :session (harness-call 'session/get sid)))
+             (body '(:model "m" :messages ((:role "system" :content "Main")))))
+        (should-not (cdr (harness-replay-seam req "m" "route" body)))
+        (harness-replay-seam-keep req "m" "route" body)
+        (should (cdr (harness-replay-seam req "m" "route"
+                                        '(:model "m" :messages ((:role "system" :content "Changed"))))))))))
+
+(ert-deftest harness-recap-recovery-refuses-stale-and-substantive-evidence ()
+  (harness-recap-test-with
+    (pcase-let* ((`(,sid ,task ,_ ,_) (harness-recap-test-recovery-fixture))
+                 (status (harness-call 'session/recap-recovery-status sid task))
+                 (before (harness-call 'replay/frozen-status sid)))
+      (should-error (harness-call 'session/recover-recap-prefix sid task
+                                 (1+ (plist-get status :generation)) (plist-get status :sha256)))
+      (should-error (harness-call 'session/recover-recap-prefix sid task
+                                 (plist-get status :generation) "wrong"))
+      (should (equal before (harness-call 'replay/frozen-status sid)))
+      (harness-call 'session/append sid '(:kind assistant :content "Real result"))
+      (should-error (harness-call 'session/recap-recovery-status sid task))
+      (should (equal before (harness-call 'replay/frozen-status sid))))))
+
+(ert-deftest harness-recap-recovery-refuses-extra-fields-and-active-session ()
+  (harness-recap-test-with
+    (pcase-let* ((`(,sid ,task ,_ ,body) (harness-recap-test-recovery-fixture)))
+      (puthash sid t harness-recap--running)
+      (should-error (harness-call 'session/recap-recovery-status sid task))
+      (remhash sid harness-recap--running)
+      (harness-call 'session/set-status sid 'running)
+      (should-error (harness-call 'session/recap-recovery-status sid task))
+      (harness-call 'session/set-status sid 'idle)
+      (harness-call 'replay/frozen-record sid (append body '(:tools ((:name "real-tool"))))
+                    "openrouter:deepseek/deepseek-v4.1-flash-1017" "openrouter|-|https://openrouter.ai/api/v1")
+      (should-error (harness-call 'session/recap-recovery-status sid task)))))
+
+(ert-deftest harness-recap-recovery-refuses-ambiguous-witness ()
+  (harness-recap-test-with
+    (pcase-let* ((`(,sid ,task ,_ ,body) (harness-recap-test-recovery-fixture))
+                 (model "openrouter:deepseek/deepseek-v4.1-flash-1017")
+                 (job (harness-call 'session/internal-start :job "Recap" :model model
+                                    :cwd (harness-test-temp-dir) :parent-id sid :prompt "Recap work")))
+      (harness-call 'replay/frozen-record sid body model "openrouter|-|https://openrouter.ai/api/v1")
+      (harness-call 'session/internal-finish job :reply "UNCHANGED" :stop-reason 'end-turn)
+      ;; Place both witnessed responses after the kept body's timestamp.
+      (let* ((sessions (harness-call 'session/list (list :kind 'internal :parent-id sid)))
+             (at (plist-get (harness-replay--frozen-read sid) :at)))
+        (dolist (session sessions)
+          (let* ((nodes (harness-call 'session/nodes (plist-get session :id)))
+                 (answer (cl-find-if (lambda (n) (eq (plist-get n :kind) 'assistant)) nodes)))
+            (harness-call 'session/update-node (plist-get session :id) (plist-get answer :id)
+                          :ts (+ at 0.1)))))
+      (should-error (harness-call 'session/recap-recovery-status sid task)))))
+
+(ert-deftest harness-recap-recovery-archive-failure-preserves-prefix ()
+  (harness-recap-test-with
+    (pcase-let* ((`(,sid ,task ,_ ,_) (harness-recap-test-recovery-fixture))
+                 (status (harness-call 'session/recap-recovery-status sid task))
+                 (before (harness-replay--frozen-read sid)))
+      (cl-letf (((symbol-function 'harness-recap--archive-exclusive)
+                 (lambda (&rest _) (error "Archive unavailable"))))
+        (should-error (harness-call 'session/recover-recap-prefix sid task
+                                   (plist-get status :generation) (plist-get status :sha256))))
+      (should (equal before (harness-replay--frozen-read sid))))))
+
+(ert-deftest harness-recap-recovery-refuses-concurrent-change-and-archive-overwrite ()
+  (harness-recap-test-with
+    (pcase-let* ((`(,sid ,task ,_ ,_) (harness-recap-test-recovery-fixture))
+                 (status (harness-call 'session/recap-recovery-status sid task))
+                 (before (harness-replay--frozen-read sid))
+                 (save (symbol-function 'harness-recap--archive-exclusive)))
+      (cl-letf (((symbol-function 'harness-recap--archive-exclusive)
+                 (lambda (&rest args)
+                   (prog1 (apply save args)
+                     (harness-call 'session/update sid :silent t :name "Concurrent change")))))
+        (should-error (harness-call 'session/recover-recap-prefix sid task
+                                   (plist-get status :generation) (plist-get status :sha256))))
+      (should (equal before (harness-replay--frozen-read sid)))
+      ;; The abandoned attempt's archive remains evidence, never overwritten.
+      (should-error (harness-call 'session/recover-recap-prefix sid task
+                                 (plist-get status :generation) (plist-get status :sha256)))
+      (should (equal before (harness-replay--frozen-read sid))))))
+
+(ert-deftest harness-recap-recovery-concurrent-archive-writer-wins-intact ()
+  "An archive created after the early check is never replaced, even in a race."
+  (harness-recap-test-with
+    (pcase-let* ((`(,sid ,task ,_ ,_) (harness-recap-test-recovery-fixture))
+                 (status (harness-call 'session/recap-recovery-status sid task))
+                 (before (harness-replay--frozen-read sid))
+                 (link (symbol-function 'add-name-to-file))
+                 (path (harness-replay--file
+                        (format "sessions/%s.recap-recovery-%s.json"
+                                sid (plist-get status :generation))))
+                 (sentinel "Other writer's immutable evidence\n"))
+      (cl-letf (((symbol-function 'add-name-to-file)
+                 (lambda (from to &optional overwrite)
+                   (should (equal to path))
+                   (should-not overwrite)
+                   ;; Another writer publishes after validation, before ours.
+                   (with-temp-file to (insert sentinel))
+                   (funcall link from to overwrite))))
+        (should-error (harness-call 'session/recover-recap-prefix sid task
+                                   (plist-get status :generation) (plist-get status :sha256))
+                      :type 'file-already-exists))
+      (should (equal sentinel (harness-read-file path)))
+      (should (equal before (harness-replay--frozen-read sid)))
+      (should-not (directory-files (file-name-directory path) nil "\\`\\.recap-archive-")))))
+
 (ert-deftest harness-recap-turn-threshold-makes-one ()
   "Crossing the turn threshold sends a short request and stores the recap."
   (harness-recap-test-with
@@ -242,6 +426,7 @@ say what the work is doing out of the request."
         (should (equal "demo:scripted" (plist-get req :model)))
         ;; Recorded as an internal session of the session recapped.
         (should (equal "Recap" (plist-get req :job)))
+        (should (eq t (plist-get req :ephemeral)))
         (should (equal sid (plist-get req :job-parent)))
         (should (equal (list (list "Recap" sid 'idle))
                        (mapcar (lambda (s) (list (plist-get s :name) (plist-get s :parent-id) (plist-get s :status)))

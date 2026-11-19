@@ -491,6 +491,9 @@ and `recap-ask', as MODEL's overrides have them."
   (append
    (list :model model
          :session session
+         ;; A recap reads the conversation but is not its next request.
+         ;; Its own prompt must neither splice nor replace the parent prefix.
+         :ephemeral t
          ;; Recorded as an internal session made for SESSION.
          :job "Recap" :job-parent (plist-get session :id)
          :system (harness-prompt-effective 'recap-system
@@ -507,6 +510,153 @@ and `recap-ask', as MODEL's overrides have them."
          :no-thinking (null harness-tasks-recap-thinking))
    (and harness-tasks-recap-thinking
         (list :thinking harness-tasks-recap-thinking))))
+
+;;;; Explicit recovery of a proven recap-only prefix
+
+(declare-function harness-agent-running-p "harness-agent")
+(declare-function harness-replay--frozen-read "harness-replay")
+(declare-function harness-replay--frozen-write "harness-replay")
+(declare-function harness-replay--piece "harness-replay")
+(declare-function harness-replay--piece-text "harness-replay")
+(declare-function harness-replay--file "harness-replay")
+
+(defun harness-recap--recovery-state (sid task-id)
+  "Validate a narrow recap-only prefix of SID owned by TASK-ID.
+This proves no substantive output, not that no request was sent."
+  (unless (and (fboundp 'harness-replay--frozen-read)
+               (not (harness-agent-running-p sid))
+               (not (gethash sid harness-recap--running))
+               (not (gethash sid harness-recap--session-running)))
+    (error "Recap recovery requires an idle session and replay support"))
+  (let* ((session (harness-call 'session/get sid))
+         (task (harness-call 'task/get task-id))
+         (owner (harness-call 'task/for-session sid))
+         (nodes (harness-call 'session/nodes sid))
+         (record (harness-replay--frozen-read sid))
+         (model (plist-get record :model))
+         (at (plist-get record :at))
+         (jobs (harness-call 'session/list (list :kind 'internal :parent-id sid)))
+         matches)
+    (unless (and (equal sid (plist-get task :session))
+                 (equal task-id (plist-get owner :id))
+                 (memq (plist-get session :status) '(idle inactive))
+                 (not (plist-get session :pending)) (not (plist-get session :move))
+                 (not (plist-get session :compaction))
+                 (= 0 (or (plist-get (plist-get session :usage) :output) 0))
+                 (integerp (plist-get record :generation)) (numberp at)
+                 (equal model (plist-get session :model))
+                 (string-prefix-p "openrouter:" model)
+                 (equal (plist-get record :route) "openrouter|-|https://openrouter.ai/api/v1")
+                 (equal (plist-get record :version) 1)
+                 ;; Unknown node kinds are not evidence of an empty conversation.
+                 (cl-every (lambda (n) (memq (plist-get n :kind) '(user hint))) nodes))
+      (error "Recap recovery ownership, state or output evidence mismatch"))
+    (dolist (job jobs)
+      (when (and (equal (plist-get job :name) "Recap")
+                 (equal (plist-get job :model) model)
+                 (eq (plist-get job :status) 'idle)
+                 (numberp (plist-get job :created))
+                 (<= (plist-get job :created) at)
+                 ;; A deliberately narrow temporal witness, not an inferred lineage.
+                 (<= (- at (plist-get job :created)) 120))
+        (let* ((jn (harness-call 'session/nodes (plist-get job :id)))
+               (users (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'user)) jn))
+               (answers (cl-remove-if-not (lambda (n) (eq (plist-get n :kind) 'assistant)) jn)))
+          (when (and (= (length users) 1) (= (length answers) 1)
+                     (cl-every (lambda (node)
+                                 (or (memq (plist-get node :kind) '(user assistant))
+                                     (and (eq (plist-get node :kind) 'hint)
+                                          (equal (plist-get (plist-get (plist-get node :meta) :fold) :key)
+                                                 "tool-slots-load")))) jn)
+                     (stringp (plist-get (car users) :content))
+                     (numberp (plist-get (car answers) :ts))
+                     (<= at (plist-get (car answers) :ts))
+                     (<= (- (plist-get (car answers) :ts) at) 120))
+            (let* ((body (list :model (substring model (length "openrouter:"))
+                               :messages
+                               (list (list :role "system"
+                                           :content (harness-prompt-effective
+                                                     'recap-system harness-recap--system-prompt model))
+                                     (list :role "user"
+                                           :content (list (list :type "text"
+                                                               :text (plist-get (car users) :content)))))
+                               :reasoning (list :effort "none")))
+                   (expected (harness-replay--piece body)))
+              ;; Exact full structure and scalar bytes: no extra messages, tools,
+              ;; fields, overrides or unseen main-conversation prefix can pass.
+              (when (equal (harness-replay--piece-text expected)
+                           (harness-replay--piece-text (plist-get record :body)))
+                (push (list :job job :nodes jn) matches)))))))
+    (unless (= (length matches) 1)
+      (error "Recap recovery requires one exact persisted recap witness"))
+    (list :record record :nodes nodes :witness (car matches)
+          :session session :task task
+          :prior-request-log (let ((file (harness-replay--file
+                                         (format "sessions/%s.request.jsonl" sid))))
+                               (and (file-exists-p file) (harness-read-file file)))
+          :generation (plist-get record :generation)
+          :sha256 (secure-hash 'sha256 (encode-coding-string
+                                      (harness-replay--piece-text (plist-get record :body)) 'utf-8)))))
+
+(harness-defmethod session/recap-recovery-status (sid task-id)
+  "Inspect a proven recap-only prefix without changing it."
+  (let ((state (harness-recap--recovery-state sid task-id)))
+    (list :generation (plist-get state :generation) :sha256 (plist-get state :sha256)
+          :job-id (plist-get (plist-get (plist-get state :witness) :job) :id))))
+
+(defun harness-recap--archive-exclusive (name evidence)
+  "Publish complete EVIDENCE at store NAME without replacing any existing file.
+The temporary file is in the same directory, so publishing its hard link is
+one exclusive filesystem operation.  A competing writer wins intact; failure
+leaves the frozen prefix untouched and always removes our temporary name."
+  (let* ((path (harness-replay--file name))
+         (directory (file-name-directory path))
+         temporary)
+    (harness-ensure-directory directory)
+    (unwind-protect
+        (progn
+          (setq temporary (make-temp-file (expand-file-name ".recap-archive-" directory)))
+          (let ((coding-system-for-write 'utf-8-unix))
+            (write-region (harness-json-encode evidence) nil temporary nil 'silent))
+          ;; Unlike a check followed by an overwriting rename, link creation
+          ;; with no replacement fails atomically when PATH already exists.
+          (add-name-to-file temporary path nil)
+          path)
+      (when (and temporary (file-exists-p temporary))
+        (delete-file temporary)))))
+
+(harness-defmethod session/recover-recap-prefix (sid task-id generation sha256)
+  "Archive and discard only a proven ancillary prefix after explicit approval.
+Keep the task, transcript, worktree and provider pin unchanged.  Never infer
+that earlier requests were unsent.  The normal replay guard is unchanged."
+  (let* ((state (harness-recap--recovery-state sid task-id))
+         (record (plist-get state :record))
+         (archive (format "sessions/%s.recap-recovery-%s.json" sid generation)))
+    (unless (and (equal generation (plist-get state :generation))
+                 (equal sha256 (plist-get state :sha256)))
+      (error "Recap recovery expectation mismatch"))
+    (when (file-exists-p (harness-replay--file archive))
+      (error "Recap recovery archive already exists; existing evidence preserved"))
+    (let* ((audit (list :kind "recap-prefix-recovery" :at (float-time)
+                        :from-generation generation :sha256 sha256 :archive archive
+                        :task-id task-id :job-id
+                        (plist-get (plist-get (plist-get state :witness) :job) :id)
+                        :prior-dispatch "Not assumed unsent; request evidence retained")))
+      ;; Persist the complete evidence first; failure leaves the prefix untouched.
+      (harness-recap--archive-exclusive archive
+                    (list :audit audit :frozen record :parent-nodes (plist-get state :nodes)
+                          :witness (plist-get state :witness)
+                          :session (plist-get state :session) :task (plist-get state :task)
+                          :prior-request-log (plist-get state :prior-request-log)))
+      (unless (and (not (harness-agent-running-p sid))
+                   (equal state (harness-recap--recovery-state sid task-id)))
+        (error "Recap recovery evidence changed during validation"))
+      (unless (harness-replay--frozen-write
+               sid (list :id sid :version 1 :generation (1+ generation)
+                         :reset "recap-prefix-recovery" :at (float-time)
+                         :transition audit :body (list :kind "object" :fields nil)))
+        (error "Recap recovery could not be persisted"))
+      (list :generation (1+ generation) :transition audit))))
 
 (defun harness-recap--ask (session task on-done)
   "Ask the model for a recap of SESSION about TASK; call ON-DONE at its end.
