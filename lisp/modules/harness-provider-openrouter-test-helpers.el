@@ -397,10 +397,12 @@ bus, so `provider/complete' still works."
                     ('session/get harness-openrouter-test--session-value)
                     ('session/exists-p t)
                     ('session/set-ext
-                     (setq harness-openrouter-test--stored (nth 2 args)
-                           harness-openrouter-test--session-value
+                     (when (eq (nth 1 args) :openrouter-route)
+                       (setq harness-openrouter-test--stored (nth 2 args)))
+                     (setq harness-openrouter-test--session-value
                            (plist-put (copy-sequence harness-openrouter-test--session-value)
-                                      :ext (list :openrouter-route (nth 2 args))))
+                                      :ext (plist-put (copy-sequence (plist-get harness-openrouter-test--session-value :ext))
+                                                      (nth 1 args) (nth 2 args))))
                      args)
                     ('session/hint
                      (push (nth 1 args) harness-openrouter-test--hints)
@@ -429,22 +431,24 @@ them, and no late callback reaches a bus that does not hold them."
   `(let* ((harness-openrouter-test--stored nil)
           (harness-openrouter-test--hints nil)
           (harness-openrouter-test--session-value nil)
-          (sessions (mapcar (lambda (s) (cons (plist-get s :id) (copy-sequence s)))
+          (registry (mapcar (lambda (s) (cons (plist-get s :id) (copy-sequence s)))
                             ,sessions))
           (real (symbol-function 'harness-call)))
      (cl-letf (((symbol-function 'harness-call)
                 (lambda (method &rest args)
                   (pcase method
-                    ('session/get (cdr (assoc (car args) sessions)))
-                    ('session/exists-p (and (assoc (car args) sessions) t))
+                    ('session/get (cdr (assoc (car args) registry)))
+                    ('session/exists-p (and (assoc (car args) registry) t))
                     ('session/set-ext
                      (let* ((id (nth 0 args))
                             (route (nth 2 args))
-                            (cell (assoc id sessions)))
-                       (setq harness-openrouter-test--stored route)
+                            (cell (assoc id registry)))
+                       (when (eq (nth 1 args) :openrouter-route)
+                         (setq harness-openrouter-test--stored route))
                        (when cell
                          (setcdr cell (plist-put (cdr cell) :ext
-                                                 (list :openrouter-route route))))
+                                                (plist-put (copy-sequence (plist-get (cdr cell) :ext))
+                                                           (nth 1 args) route))))
                        args))
                     ('session/hint
                      (push (nth 1 args) harness-openrouter-test--hints)

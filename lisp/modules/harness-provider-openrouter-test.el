@@ -169,16 +169,16 @@ it compares."
     (should (equal '(98 . 1000000000) (plist-get (plist-get decision :record) :prompt)))
     (should (equal '(51 . 100) (plist-get (plist-get decision :record) :discount)))))
 
-(ert-deftest harness-provider-openrouter-sorts-by-price-not-by-list-order ()
-  "The cheaper provider wins even when the policy names it second."
+(ert-deftest harness-provider-openrouter-follows-qualified-provider-preference ()
+  "The first qualified provider wins, independent of catalogue ordering."
   (let* ((policy (harness-openrouter-test-policy
                   :providers '("Cohere" "DeepInfra")))
          (records (harness-openrouter-parse-endpoints
                    (harness-json-parse (harness-openrouter-test--catalogue-json))))
          (decision (harness-openrouter-test--select records policy)))
     (should (plist-get decision :ok))
-    (should (equal "DeepInfra" (plist-get decision :provider)))
-    (should (equal "deepinfra/fp8" (plist-get (plist-get decision :endpoint) :slug)))))
+    (should (equal "Cohere" (plist-get decision :provider)))
+    (should (equal "cohere/fp8" (plist-get (plist-get decision :endpoint) :slug)))))
 
 (ert-deftest harness-provider-openrouter-the-example-ceilings-admit-both-and-pick-the-cheaper ()
   "The example's ceilings filter by price, and the sort orders the rest.
@@ -222,8 +222,8 @@ components that are over, not by the one that is not."
     (should (plist-get decision :ok))
     (should (equal "DeepInfra" (plist-get decision :provider)))
     (should (equal "deepinfra/fp8" (plist-get (plist-get decision :endpoint) :slug)))
-    ;; The same two the other way round in the policy: still the cheaper.
-    (should (equal "deepinfra/fp8"
+    ;; The policy order is the preference among price-qualified providers.
+    (should (equal "cohere/fp8"
                    (plist-get (plist-get (harness-openrouter-test--select
                                           records
                                           (harness-openrouter-test-policy
@@ -791,7 +791,7 @@ The pin is stored on the session before the request goes out, so every
 later request of the same session is restricted to it."
   (let ((policy (harness-openrouter-test-policy)))
     (harness-openrouter-test-with-policy policy
-      (harness-openrouter-test-with-session (harness-openrouter-test--session "s-new")
+      (harness-openrouter-test-with-session (harness-openrouter-test--session "s-1")
         (harness-openrouter-test-with-fake
             (list (harness-openrouter-test--catalogue-response)
                   (harness-openrouter-test--completion-response))
@@ -1119,11 +1119,10 @@ send to, whatever its prompt price says."
     (should (eq 'price-component-unknown (plist-get decision :reason)))
     (should (string-match-p "input_cache_write" (plist-get decision :detail)))))
 
-(ert-deftest harness-provider-openrouter-an-absent-pinned-endpoint-is-unavailable ()
-  "An endpoint the catalogue marks unavailable is refused, not used.
-OpenRouter's own endpoint listing carries a status for each endpoint; a
-non-zero one is the catalogue saying it is not serving requests, which
-is not a price and not something to send to."
+(ert-deftest harness-provider-openrouter-an-unhealthy-new-candidate-is-not-unknown-policy ()
+  "Reported nonzero health excludes a candidate, without inventing its cause.
+A new session may select qualified Cohere; an existing pin still requires
+separate transition evidence and authorization."
   (let* ((policy (harness-openrouter-test-policy))
          (records (harness-openrouter-parse-endpoints
                    (harness-json-parse
@@ -1136,8 +1135,8 @@ is not a price and not something to send to."
                       :pricing '(:prompt "0.00000015" :completion "0.0000005"
                                  :input_cache_read "0.000000003" :discount 0))))))
          (decision (harness-openrouter-test--select records policy)))
-    (should-not (plist-get decision :ok))
-    (should (eq 'endpoint-unavailable (plist-get decision :reason)))))
+    (should (plist-get decision :ok))
+    (should (equal "Cohere" (plist-get decision :provider)))))
 
 (ert-deftest harness-provider-openrouter-the-wire-carries-a-max-price ()
   "A routed request states the configured maximum as `max_price' on the wire.
@@ -2901,7 +2900,7 @@ and the request is refused rather than sent with its restrictions."
   (let* ((policy (harness-openrouter-test-policy))
          (route (harness-openrouter-test--route))
          (request (append (harness-openrouter-test--request)
-                          (list :openrouter-route nil :openrouter-policy nil)))
+                          (list :ephemeral t :openrouter-route nil :openrouter-policy nil)))
          (sent nil))
     (harness-openrouter-test-with-policy policy
       (cl-letf (((symbol-function 'harness-retry-send)
@@ -3295,7 +3294,7 @@ request, five pins, five sends."
     (harness-openrouter-test-with-policy policy
       (harness-openrouter-test-with-fake
           (list (harness-openrouter-test--completion-response))
-        (harness-openrouter-test-with-session (car sessions)
+        (harness-openrouter-test-with-sessions sessions
           (setq harness-openrouter-test--hold-catalogue t)
           (dolist (session sessions)
             (harness-call 'provider/complete
@@ -3306,7 +3305,8 @@ request, five pins, five sends."
           (harness-test-wait (lambda () (= 5 (length (harness-openrouter-test--done-events events))))
                              5 "five answers")
           (should (= 1 (harness-openrouter-test--catalogue-reads)))
-          (should (= 5 (length (harness-openrouter-test--sent-completions)))))))))
+          (ert-info ((format "events: %S" events))
+            (should (= 5 (length (harness-openrouter-test--sent-completions))))))))))
 
 (ert-deftest harness-provider-openrouter-a-failed-refresh-uses-the-last-reading ()
   "A refresh that fails serves the last reading, while the policy admits it.
@@ -3420,7 +3420,7 @@ read once per the shared interval, by whoever gets there first."
     (harness-openrouter-test-with-policy policy
       (harness-openrouter-test-with-fake
           (list (harness-openrouter-test--completion-response))
-        (harness-openrouter-test-with-session (car sessions)
+        (harness-openrouter-test-with-sessions sessions
           (setq harness-openrouter-test--hold-catalogue t)
           (dolist (session (append sessions judges))
             (harness-call 'provider/complete
@@ -3931,7 +3931,7 @@ leaves answers the next caller with no request at all."
     (harness-openrouter-test-with-policy policy
       (harness-openrouter-test-with-fake
           (list (harness-openrouter-test--completion-response))
-        (harness-openrouter-test-with-session (car sessions)
+        (harness-openrouter-test-with-sessions sessions
           (should (eq 'absent (plist-get (harness-openrouter-catalogue-status) :state)))
           (setq harness-openrouter-test--hold-catalogue t)
           (dolist (session sessions)

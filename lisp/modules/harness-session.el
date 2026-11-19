@@ -1795,7 +1795,7 @@ lists the ids that changed, newest first."
           (push id changed))))
     (nreverse changed)))
 
-(harness-defmethod session/set-ext (id key value &optional hint)
+(harness-defmethod session/set-ext (id key value &optional hint persist)
   "Set the setting KEY of session ID's `:ext' to VALUE; return the session plist.
 The `ext' plist is where modules keep what they remember about a
 session, such as whether it is a supervisor's (see
@@ -1811,7 +1811,9 @@ forks take.
 The change is saved and announced like any other, and `session/ext-changed'
 \(ID KEY VALUE) says which setting changed, KEY being the keyword and
 VALUE nil once it was removed.  A HINT that is a string is added to the
-transcript as a hint (`session/hint')."
+transcript as a hint (`session/hint').  PERSIST writes immediately before
+announcing the change, for evidence that must survive before an external
+side effect.  A write failure restores the previous ext and signals."
   (let* ((s (harness-session--get id))
          (key (harness-session--ext-key key))
          (ext (harness-session-ext s)))
@@ -1823,6 +1825,11 @@ transcript as a hint (`session/hint')."
           (if (null value)
               (harness-plist-remove ext key)
             (plist-put (copy-sequence ext) key value)))
+    (when (harness-json-true-p persist)
+      (condition-case err
+          (harness-session--save id)
+        (error (setf (harness-session-ext s) ext)
+               (signal (car err) (cdr err)))))
     (when (and (stringp hint) (not (harness-string-blank-p hint)))
       (harness-call 'session/hint id hint))
     (harness-emit 'session/ext-changed id key value)

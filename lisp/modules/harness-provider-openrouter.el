@@ -154,10 +154,14 @@ endpoint.  When set it is a plist:
               \"openrouter:MODEL\" is routed by it.
   :providers  the providers allowed to serve it, by the name the
               catalogue gives them, e.g. (\"DeepInfra\" \"Cohere\").
-              They are the allowlist, and the order they are written in
-              decides nothing: an endpoint of any other provider is
-              never a candidate, however cheap it is, and among those
-              allowed the cheapest that fits is chosen.
+              They are the allowlist and default preference order.
+              The first healthy, price-qualified endpoint is chosen;
+              another provider is never a candidate, however cheap.
+  :prefer     optional preference order within the allowlist.
+  :cold-failover optional (:enabled t :max-input-cost USD), explicit
+              permission for an unavailable pin to reselect only after
+              its cache expires and the entire unchanged input fits
+              this additional conservative cold-input spending bound.
   :max-price  the most this policy is willing to pay, in US dollars per
               million tokens: (:prompt N :completion N :cache-read N).
               A spending limit, not a claim about a provider's rate --
@@ -199,8 +203,9 @@ Once a session is pinned every dispatch checks the policy again -- that
 the pin's provider is still allowed and the pin still the identity it
 was vetted as, that the price the pin recorded is inside the current
 limits, and that the catalogue reading is fresh -- and pauses the
-session when any of it fails.  It never chooses another endpoint: a
-switch is the user's (`harness-openrouter-switch').  A session this
+session when any of it fails.  It chooses another endpoint only for an unsent pin or under the explicit
+cold-failover policy described above; a manual switch remains available
+(`harness-openrouter-switch').  A session this
 policy routes is also guarded from `harness-fallback': running out of
 quota, out of money or out of anything else stops the turn instead of
 moving a cache-cold conversation to a model the policy never allowed.
@@ -1118,6 +1123,17 @@ component this module cannot weigh.")
      ((cl-some (lambda (key) (not (harness-openrouter--decimal-p (plist-get limits key))))
                harness-openrouter--price-keys)
       "the maximum price is incomplete or not a plain decimal")
+     ((and (plist-get policy :prefer)
+           (or (harness-openrouter--providers-error (plist-get policy :prefer))
+               (cl-some (lambda (name) (not (member name (plist-get policy :providers))))
+                        (plist-get policy :prefer))))
+      "the preference must name only allowed providers, without duplicates")
+     ((and (plist-get policy :cold-failover)
+           (not (and (listp (plist-get policy :cold-failover))
+                     (eq t (plist-get (plist-get policy :cold-failover) :enabled))
+                     (harness-openrouter--decimal-p
+                      (plist-get (plist-get policy :cold-failover) :max-input-cost)))))
+      "cold failover needs explicit enabled and maximum input cost in USD")
      ((not (and (numberp freshness) (>= freshness 0)))
       "the policy names no freshness bound"))))
 
@@ -1275,12 +1291,13 @@ prices nothing but what is compared."
 
 (defun harness-openrouter--unreadable (record)
   "Return (REASON . DETAIL) when RECORD is not a price that can be read.
-A listing whose rate depends on the time of the week is not one price:
+Health is classified separately from price readability.  A listing
+whose rate depends on the time of the week is not one price:
 the top-level figure is only the rate outside its override windows, and
 which window a request lands in is not something this module reads.  It
 blocks, like any other reading it cannot make.  So does a listing that
-prices a component the limits do not cover, and one whose endpoint the
-catalogue reports as unavailable (`:status' anything but zero)."
+prices a component the limits do not cover.  Malformed health status
+also blocks; numeric nonzero health is classified only after these checks."
   (cond
    ((null record)
     (cons 'unknown-endpoint
@@ -1288,10 +1305,8 @@ catalogue reports as unavailable (`:status' anything but zero)."
    ((plist-get record :model-mismatch)
     (cons 'model-mismatch "lists another model"))
    ((and (plist-get record :status)
-         (not (and (numberp (plist-get record :status))
-                   (zerop (plist-get record :status)))))
-    (cons 'endpoint-unavailable
-          (format "the catalogue reports status %s for it" (plist-get record :status))))
+         (not (integerp (plist-get record :status))))
+    (cons 'health-unknown "has a malformed health status"))
    ((plist-get record :overrides)
     (cons 'price-varies-by-time "prices by a window of the week"))
    ((or (null (plist-get record :cache-read))
@@ -1312,6 +1327,7 @@ record resolved for it, or why it could not be resolved.  A plist with
                 than the limits; `:order' is the sort key
   `out'      -- its fresh listing is exact and some component is dearer,
                 so it is known not to qualify
+  `unavailable' -- a valid listing reports numeric nonzero health status
   `unknown'  -- its listing cannot be read, which says nothing about its
                 price, so it blocks rather than being dropped
 
@@ -1329,6 +1345,15 @@ and `:provider', `:record', `:reason' and `:detail'."
       (list :standing 'unknown :provider provider :record record
             :reason (car unreadable)
             :detail (format "%s %s" provider (cdr unreadable))))
+     ((and (integerp (plist-get record :status))
+           (not (zerop (plist-get record :status))))
+      ;; A numeric nonzero status is not healthy.  Do not invent the
+      ;; meaning of individual codes (notably -2), or confuse this with
+      ;; unknown identity/prices: those were checked above first.
+      (list :standing 'unavailable :provider provider :record record
+            :reason 'endpoint-unavailable
+            :detail (format "%s reports nonzero health status %s"
+                            provider (plist-get record :status))))
      (over
       (list :standing 'out :provider provider :record record
             :reason 'over-max-price
@@ -1375,7 +1400,7 @@ catalogue's order for which one wins."
                                                        (plist-get b :order))))))
 
 (defun harness-openrouter-select (policy records read-at)
-  "Choose the cheapest allowed endpoint among RECORDS read at READ-AT.
+  "Choose a healthy, price-qualified preferred endpoint from RECORDS at READ-AT.
 RECORDS are `harness-openrouter-parse-endpoints''s, read from
 OpenRouter's catalogue at READ-AT.  Return (\=':ok t :provider NAME
 :record RECORD :reading READ-AT) or (:ok nil :reason SYMBOL :detail
@@ -1383,8 +1408,9 @@ STRING).
 
 Only the policy's providers are candidates, and each is resolved to one
 exact standard endpoint of this model.  One whose fresh listing is
-dearer than `:max-price' in any component is dropped; the cheapest of
-the rest is chosen.  One whose listing cannot be read blocks the
+dearer than `:max-price' in any component is dropped; the first healthy
+candidate in `:prefer' or `:providers' order is chosen.  One whose listing
+cannot be read blocks the
 decision, because that is not a reading about its price."
   (let ((problem (harness-openrouter--policy-error policy)))
     (cond
@@ -1401,7 +1427,15 @@ decision, because that is not a reading about its price."
                                 (harness-openrouter--candidates policy records)))
              (unknown (cl-find-if (lambda (s) (eq (plist-get s :standing) 'unknown))
                                   standings))
-             (chosen (harness-openrouter--cheapest standings)))
+             (preferred (delete-dups (append (copy-sequence (plist-get policy :prefer))
+                                             (copy-sequence (plist-get policy :providers)))))
+             (chosen (or (and preferred
+                              (cl-loop for name in preferred
+                                       thereis (cl-find-if
+                                                (lambda (s) (and (equal name (plist-get s :provider))
+                                                                 (eq (plist-get s :standing) 'eligible)))
+                                                standings)))
+                         (harness-openrouter--cheapest standings))))
         (cond
          ;; An unreadable candidate could have been the cheapest, so the
          ;; decision waits for a reading rather than picking around it.
@@ -2517,7 +2551,7 @@ a governed session must never be sent."
     (cons 'disabled "the policy is configured but not enabled"))))
 
 (defconst harness-openrouter--policy-keys
-  '(:enabled :model :providers :max-price :freshness)
+  '(:enabled :model :providers :max-price :freshness :prefer :cold-failover)
   "The keys of a policy that decide what a request may be.
 They are the whole schema; a policy that differs in any of them is not
 the policy a request in flight was prepared under.")
@@ -2660,7 +2694,7 @@ at all, which is not evidence that the pin still exists."
                             (list :provider provider :record record) limits))
                  (kind (plist-get standing :standing)))
             (cond
-             ((eq kind 'unknown)
+             ((memq kind '(unknown unavailable))
               (cons (plist-get standing :reason)
                     (format "the pinned endpoint %s can no longer be read: %s"
                             (plist-get route :slug) (plist-get standing :detail))))
@@ -2669,6 +2703,137 @@ at all, which is not evidence that the pin still exists."
                     (format "the pinned endpoint %s is now dearer than the maximum price: %s"
                             (plist-get route :slug) (plist-get standing :detail))))))))))
      (t nil))))
+
+;;;; Health transitions (never a conversation reset)
+
+(defconst harness-openrouter--send-key :openrouter-send
+  "Persisted evidence of substantive dispatch, separate from a chosen pin.")
+
+(defun harness-openrouter--live-session (request)
+  "Return the current session of REQUEST, failing closed when it disappeared."
+  (let* ((id (plist-get (plist-get request :session) :id))
+         (session (harness-call 'session/get id)))
+    (unless (and (stringp id) (not (string-empty-p id)) (equal id (plist-get session :id)))
+      (error "OpenRouter session identity changed"))
+    session))
+
+(defun harness-openrouter--send-evidence (session)
+  "Return SESSION's substantive send evidence, or nil for legacy uncertainty."
+  (plist-get (plist-get session :ext) harness-openrouter--send-key))
+
+(defun harness-openrouter--cold-evidence (session evidence)
+  "Return cache expiry evidence for SESSION, or nil when warm or unknown.
+A TTL supplied by the cache layer may be an estimate; say so.  A send
+more recent than the cache stamp extends that estimate conservatively.
+An interrupted send or a partial answer is never evidence of coldness."
+  (let* ((cache (plist-get session :cache))
+         (expires (plist-get cache :expires))
+         (ttl (plist-get cache :ttl))
+         (sent (plist-get evidence :at)))
+    (when (and (numberp expires) (numberp ttl) (> ttl 0)
+               (numberp sent)
+               (equal (plist-get cache :model) (plist-get session :model))
+               (equal (plist-get evidence :model) (plist-get session :model))
+               (equal (plist-get evidence :slug)
+                      (plist-get (harness-openrouter--route-of session) :slug))
+               (not (plist-get evidence :inflight))
+               (not (plist-get evidence :partial)))
+      (let ((until (max expires (+ sent ttl))))
+        (when (<= until (float-time))
+          (list :kind "estimated-expiry" :expires until :ttl ttl :last-send sent))))))
+
+(defun harness-openrouter--reselection-evidence (policy request session)
+  "Return why REQUEST may reselect under POLICY, or nil.
+Only an explicitly recorded unused pin is unsent.  Missing evidence on
+an old session never means unsent.  An identical retry, one-off call,
+concurrent send or partial answer never changes endpoint here."
+  (let ((evidence (harness-openrouter--send-evidence session)))
+    (unless (or (plist-get request :ephemeral)
+                (harness-retry-authority-of request)
+                (plist-get evidence :inflight)
+                (plist-get evidence :partial))
+      (cond
+       ((equal (plist-get evidence :state) "unsent") (list :kind "unsent"))
+       ((and (eq t (plist-get (plist-get policy :cold-failover) :enabled))
+             (equal (plist-get evidence :state) "sent"))
+        (harness-openrouter--cold-evidence session evidence))))))
+
+(defun harness-openrouter--cold-cost (policy route request)
+  "Return conservative input-cost evidence for REQUEST on ROUTE, or nil.
+Count every UTF-8 byte of the full wire body as an input token, including
+all history and tools.  This intentionally overestimates ordinary text.
+Non-text multimodal payloads are refused: byte count cannot price them.
+No prompt is shortened, rewritten or compacted to fit the bound."
+  (let* ((snapshot (plist-put (plist-put (copy-sequence request)
+                                        :openrouter-route route)
+                             :openrouter-policy policy))
+         (body (harness-openai--body (harness-openrouter--endpoint)
+                                     (plist-get policy :model) snapshot))
+         (messages (plist-get body :messages))
+         (text-only
+          (cl-every (lambda (message)
+                      (let ((content (plist-get message :content)))
+                        (or (null content) (stringp content)
+                            (and (listp content)
+                                 (cl-every (lambda (block)
+                                             (equal (plist-get block :type) "text")) content)))))
+                    messages))
+         (bytes (string-bytes (harness-json-encode body)))
+         (rate (harness-openrouter--limit-per-token (plist-get route :prompt)))
+         (limit (harness-openrouter--decimal
+                 (plist-get (plist-get policy :cold-failover) :max-input-cost))))
+    (when (and text-only rate limit
+               (<= (harness-openrouter--decimal-compare
+                    (cons (* bytes (car rate)) (cdr rate)) limit) 0))
+      (list :input-token-upper-bound bytes :max-input-cost
+            (plist-get (plist-get policy :cold-failover) :max-input-cost)))))
+
+(defun harness-openrouter--health-reselect (state policy old request on-event reading)
+  "Try an audited same-model health transition, returning non-nil if handled.
+READING is the fresh catalogue proving OLD's reported nonzero health.
+Only valid policy/identity/price evidence can reach this path.  The
+original request is sent intact through the ordinary strict replay seam."
+  (let* ((session (harness-openrouter--live-session request))
+         (evidence (harness-openrouter--reselection-evidence policy request session)))
+    (when (and evidence (equal old (harness-openrouter--route-of session)))
+      (let* ((decision (harness-openrouter--select-decision
+                        policy (plist-get reading :endpoints) (plist-get reading :at)))
+             (route (and (plist-get decision :ok)
+                         (harness-openrouter--route-plist decision (plist-get reading :canonical-slug))))
+             (cost (and route
+                        (or (and (equal (plist-get evidence :kind) "unsent")
+                                 (null (plist-get policy :cold-failover)))
+                            (harness-openrouter--cold-cost policy route request)))))
+        (cond
+         ((not route)
+          (harness-openrouter--refuse (plist-get session :id) on-event
+                                     (cons (plist-get decision :reason) (plist-get decision :detail))))
+         ((or (equal (plist-get old :slug) (plist-get route :slug)) (not cost))
+          (harness-openrouter--refuse (plist-get session :id) on-event
+                                     '(cold-budget . "no eligible alternative inside the cold-input budget")))
+         ((or (harness-openrouter--cancelled-p state)
+              (harness-openrouter--policy-changed-refusal policy harness-openrouter-routing)
+              (not (equal session (harness-openrouter--live-session request))))
+          (harness-openrouter--refuse (plist-get session :id) on-event
+                                     '(routing-changed . "state changed while checking the health transition")))
+         (t
+          (setq route (append route (list :transition
+                                         (list :from (plist-get old :slug)
+                                               :reason "reported-nonzero-health"
+                                               :cache evidence :cost (unless (eq cost t) cost)
+                                               :at (float-time)))))
+          (setq route (plist-put route :transitions
+                                 (append (copy-tree (plist-get old :transitions))
+                                         (list (plist-get route :transition)))))
+          (harness-openrouter--store-route (plist-get session :id) route)
+          (harness-openrouter--hint
+           (plist-get session :id)
+           (format "OpenRouter endpoint %s · health transition · %s"
+                   (plist-get route :slug) (plist-get evidence :kind)))
+          (harness-openrouter--start-pinned state
+                                            (list :policy policy :route route :reading reading)
+                                            request on-event)))
+        t))))
 
 (defun harness-openrouter--cancelled-p (state)
   "Non-nil when STATE, a shared dispatch state, was cancelled."
@@ -2722,6 +2887,156 @@ has already set the flag, and nothing is sent."
     (let ((sent (harness-openrouter--dispatch snapshot request on-event)))
       (setcar (cdr state) (plist-get sent :cancel))))
   nil)
+
+(defun harness-openrouter--owner ()
+  "Return this local process's identity for durable dispatch ownership."
+  (let ((attrs (process-attributes (emacs-pid))))
+    (list :host (system-name) :uid (user-uid) :pid (emacs-pid)
+          :start (and (alist-get 'start attrs)
+                      (float-time (alist-get 'start attrs))))))
+
+(defun harness-openrouter--owner-dead-p (owner)
+  "Non-nil only when recorded local OWNER is verifiably no longer alive.
+An inaccessible process, another host/user, or incomplete ownership is
+unknown, not dead.  A reused PID is distinguished by its start time."
+  (let ((pid (plist-get owner :pid))
+        (start (plist-get owner :start)))
+    (when (and (equal (plist-get owner :host) (system-name))
+               (equal (plist-get owner :uid) (user-uid))
+               (integerp pid) (> pid 0) (numberp start)
+               (file-directory-p "/proc/self"))
+      (let* ((attrs (process-attributes pid))
+             (current (alist-get 'start attrs)))
+        (if attrs
+            (and current (/= start (float-time current)))
+          (not (file-directory-p (format "/proc/%d" pid))))))))
+
+(harness-defmethod session/recover-openrouter-send (id token)
+  "Recover an interrupted dispatch owned by a proven dead local process.
+ID must be idle with no active agent or pending interaction; TOKEN must
+exactly name its persisted in-flight send.  Keep the pin and conversation,
+and mark the send uncertain, never unsent.  A deliberate same-pin retry
+is then possible, while automatic endpoint movement remains forbidden."
+  (unless (harness-method-exists-p 'agent/running)
+    (error "Agent liveness unavailable"))
+  (let* ((observed (harness-call 'session/get id))
+         (session (copy-tree observed))
+         (evidence (copy-tree (harness-openrouter--send-evidence session)))
+         (owner (plist-get evidence :owner)))
+    (unless (and (stringp token) (not (string-empty-p token))
+                 (equal token (plist-get evidence :inflight))
+                 (equal (plist-get evidence :state) "sent"))
+      (error "Interrupted dispatch evidence mismatch"))
+    (unless (and (memq (plist-get session :status) '(idle inactive))
+                 (not (plist-get session :pending))
+                 (not (harness-call 'agent/running id)))
+      (error "Interrupted dispatch recovery requires an idle session"))
+    (unless (harness-openrouter--owner-dead-p owner)
+      (error "Dispatch owner is alive or cannot be verified dead"))
+    (unless (and (equal session (harness-call 'session/get id))
+                 (not (harness-call 'agent/running id)))
+      (error "Session changed during interrupted dispatch recovery"))
+    (let* ((at (float-time))
+           (audit (list :token token :reason "owner-exited" :owner owner :at at))
+           (recovered (copy-tree evidence)))
+      (setq recovered (plist-put recovered :inflight nil)
+            recovered (plist-put recovered :partial t)
+            recovered (plist-put recovered :at at)
+            recovered (plist-put recovered :recoveries
+                                 (append (plist-get evidence :recoveries) (list audit))))
+      (harness-call 'session/set-ext id harness-openrouter--send-key recovered nil t)
+      (harness-log 'info "openrouter: %s recovered dispatch %s from exited owner" id token)
+      (list :id id :recovered t :endpoint (plist-get evidence :slug)))))
+
+
+(defun harness-openrouter--tracked-complete (request)
+  "Dispatch REQUEST with durable conservative substantive-send evidence.
+Persist before transport admission: a crash never makes a possible send
+look unsent.  Cancellation/partial output forbids automatic movement,
+but not a later deliberate retry of the same endpoint."
+  (if (plist-get request :ephemeral)
+      (harness-openai--complete (harness-openrouter--endpoint) request)
+    (let* ((session (harness-openrouter--live-session request))
+           (id (plist-get session :id))
+           (before (harness-openrouter--send-evidence session))
+           (live-route (harness-openrouter--copy-authority (harness-openrouter--route-of session)))
+           (token (harness-uuid))
+           (stamp (list :state "sent" :at (float-time) :inflight token
+                        :owner (harness-openrouter--owner)
+                        :recoveries (copy-tree (plist-get before :recoveries))
+                        :model (plist-get request :model)
+                        :slug (plist-get (plist-get request :openrouter-route) :slug)
+                        :partial (plist-get before :partial)))
+           (on-event (or (plist-get request :on-event) #'ignore))
+           (authority (harness-openrouter--copy-authority (plist-get request :openrouter-policy)))
+           (partial nil))
+      (if (plist-get before :inflight)
+          (progn
+            (harness-openrouter--refuse id on-event
+                                       '(routing-inflight . "another substantive request is still in flight"))
+            (list :cancel #'ignore))
+        (cl-labels
+            ((finish (uncertain)
+               (let* ((live (harness-call 'session/get id))
+                      (current (harness-openrouter--send-evidence live)))
+                 (when (equal token (plist-get current :inflight))
+                   (harness-call 'session/set-ext id harness-openrouter--send-key
+                                 (list :state "sent" :at (float-time)
+                                       :sent-at (plist-get stamp :at)
+                                       :owner (plist-get stamp :owner)
+                                       :recoveries (plist-get before :recoveries)
+                                       :model (plist-get stamp :model) :slug (plist-get stamp :slug)
+                                       :partial (and uncertain t))
+                                 nil t)))))
+          (condition-case err
+              (let* ((handle
+                      (harness-openai--complete
+                       (harness-openrouter--endpoint)
+                       (plist-put
+                        (plist-put (copy-sequence request) :before-dispatch
+                                   (lambda ()
+                                     (let ((live (harness-call 'session/get id)))
+                                       (unless (equal id (plist-get live :id))
+                                         (error "Session changed before transport admission"))
+                                       (unless (equal before (harness-openrouter--send-evidence live))
+                                         (error "Substantive dispatch evidence changed before transport"))
+                                       (when (and authority
+                                                  (or (harness-openrouter--not-routing-refusal harness-openrouter-routing)
+                                                      (harness-openrouter--policy-changed-refusal authority harness-openrouter-routing)
+                                                      (harness-openrouter--pin-refusal
+                                                       authority (plist-get request :openrouter-route)
+                                                       (gethash (plist-get authority :model) harness-openrouter--catalogue))))
+                                         (error "Routing authority changed before transport"))
+                                       (unless (equal (harness-openrouter--route-of live) live-route)
+                                         (error "Endpoint changed before transport admission"))
+                                       (harness-call 'session/set-ext id harness-openrouter--send-key stamp nil t)
+                                       ;; The durable setter emits synchronous hooks.  They
+                                       ;; must not rewrite authority between admission and POST.
+                                       (let ((after (harness-call 'session/get id)))
+                                         (unless (and (equal id (plist-get after :id))
+                                                      (equal stamp (harness-openrouter--send-evidence after))
+                                                      (equal live-route (harness-openrouter--route-of after))
+                                                      (or (null authority)
+                                                          (not (or (harness-openrouter--not-routing-refusal harness-openrouter-routing)
+                                                                   (harness-openrouter--policy-changed-refusal authority harness-openrouter-routing)
+                                                                   (harness-openrouter--pin-refusal authority (plist-get request :openrouter-route)
+                                                                                                     (gethash (plist-get authority :model) harness-openrouter--catalogue))))))
+                                           (error "Routing authority changed during transport admission"))))))
+                        :on-event
+                        (lambda (event)
+                          (when (memq (plist-get event :type) '(text thinking tool-call))
+                            (setq partial t))
+                          (when (eq (plist-get event :type) 'done)
+                            (finish (or (eq (plist-get event :stop-reason) 'cancelled)
+                                        (and (eq (plist-get event :stop-reason) 'error)
+                                             (or partial (plist-get before :partial))))))
+                          (funcall on-event event)))))
+                     (cancel (plist-get handle :cancel)))
+                (plist-put (copy-sequence handle) :cancel
+                           (lambda ()
+                             (unwind-protect (when cancel (funcall cancel))
+                               (finish t)))))
+            (error (finish t) (signal (car err) (cdr err)))))))))
 
 (defun harness-openrouter--dispatch (snapshot request on-event)
   "Send REQUEST through the shared transport, unless a check refuses it.
@@ -2784,8 +3099,7 @@ layer (`harness-provider-max-output-tokens'), not to a routing policy."
              ;; ungoverned when this is gone.
              (counted (harness-retry-authorise
                        counted (list :policy policy :route route))))
-        (harness-openai--complete
-         (harness-openrouter--endpoint)
+        (harness-openrouter--tracked-complete
          (plist-put (plist-put (copy-sequence counted) :openrouter-route route)
                     :openrouter-policy policy))))))
 
@@ -2796,8 +3110,9 @@ unchanged.  With one: a session with no pin is a new session and gets
 one chosen from a fresh catalogue; a pinned session is checked again --
 model, providers, the pin's recorded identity and price, the maximum
 and the catalogue -- and refused with a stop reason when the check
-fails.  Nothing is switched: a switch is the user's
-\(`harness-openrouter-switch')."
+fails.  Unused preliminary pins may reselect a healthy candidate;
+sent sessions require explicit cold-failover policy and expiry evidence.
+Neither path changes the conversation or weakens the replay guard."
   (let* ((harness-openrouter--ephemeral (and (plist-get request :ephemeral) t))
          (on-event (or (plist-get request :on-event) #'ignore))
          (policy harness-openrouter-routing)
@@ -2890,10 +3205,15 @@ request that worked."
   ;; is judged by.
   (let ((state (list nil nil nil))
         (ephemeral (and (plist-get request :ephemeral) t)))
-    (let ((refusal (harness-openrouter--pin-refusal policy route)))
+    (let ((refusal (harness-openrouter--pin-refusal policy route
+                                                            (gethash (plist-get policy :model) harness-openrouter--catalogue))))
       (cond
        ((and refusal (not (eq (car refusal) 'catalogue-stale)))
-        (harness-openrouter--refuse session-id on-event refusal))
+        (unless (and (eq (car refusal) 'endpoint-unavailable)
+                     (harness-openrouter--health-reselect
+                      state policy route request on-event
+                      (gethash (plist-get policy :model) harness-openrouter--catalogue)))
+          (harness-openrouter--refuse session-id on-event refusal)))
        ((null refusal)
         ;; The pin is evidence fresh enough to send on.  The route is
         ;; completed from its model's slug before it goes out; that is a
@@ -2902,11 +3222,18 @@ request that worked."
          (harness-openrouter--ensure-canonical session-id route ephemeral)
          (lambda (route)
            (unless (harness-openrouter--cancelled-p state)
-             (let ((refusal (harness-openrouter--pin-refusal policy route)))
+             (let ((refusal (harness-openrouter--pin-refusal policy route
+                                                            (gethash (plist-get policy :model) harness-openrouter--catalogue))))
                (if (and refusal (not (eq (car refusal) 'catalogue-stale)))
-                   (harness-openrouter--refuse session-id on-event refusal)
+                   (unless (and (eq (car refusal) 'endpoint-unavailable)
+                                (harness-openrouter--health-reselect
+                                 state policy route request on-event
+                                 (gethash (plist-get policy :model) harness-openrouter--catalogue)))
+                     (harness-openrouter--refuse session-id on-event refusal))
                  (harness-openrouter--start-pinned
-                  state (list :policy policy :route route) request on-event)))))))
+                  state (list :policy policy :route route
+                              :reading (gethash (plist-get policy :model) harness-openrouter--catalogue))
+                  request on-event)))))))
        (t
         (harness-then
          (harness-all (list (harness-openrouter--state-wait
@@ -2930,7 +3257,10 @@ request that worked."
                                    (harness-openrouter--pin-refusal
                                     in-force route reading))))
                  (if refusal
-                     (harness-openrouter--refuse session-id on-event refusal)
+                     (unless (and (eq (car refusal) 'endpoint-unavailable)
+                                  (harness-openrouter--health-reselect
+                                   state in-force route request on-event reading))
+                       (harness-openrouter--refuse session-id on-event refusal))
                    (progn
                      (harness-openrouter--degraded session-id reading)
                      (harness-openrouter--start-pinned
@@ -2993,6 +3323,10 @@ Nothing is sent until the pin exists."
               session-id on-event
               (cons (or (plist-get decision :reason) 'route-paused)
                     (plist-get decision :detail))))
+            ((and (not (plist-get request :ephemeral))
+                  (harness-openrouter--route-of (harness-openrouter--live-session request)))
+             (harness-openrouter--refuse session-id on-event
+                                        '(routing-changed . "another request selected the session endpoint")))
             (t
              (let* ((route (harness-openrouter--store-route
                             session-id (harness-openrouter--route-plist
@@ -3000,10 +3334,15 @@ Nothing is sent until the pin exists."
                             (plist-get request :ephemeral)))
                     (snapshot (list :policy in-force :route route)))
                (harness-openrouter--degraded session-id reading)
-               (harness-openrouter--hint
-                session-id
-                (format "OpenRouter endpoint %s pinned for this session (cache cold)"
-                        (plist-get route :slug)))
+               (unless (plist-get request :ephemeral)
+                 (unless (harness-openrouter--send-evidence
+                          (harness-openrouter--live-session request))
+                   (harness-call 'session/set-ext session-id harness-openrouter--send-key
+                                 (list :state "unsent")))
+                 (harness-openrouter--hint
+                  session-id
+                  (format "OpenRouter endpoint %s pinned for this session (cache cold)"
+                          (plist-get route :slug))))
                ;; The request goes out with the session as it is now: the
                ;; catalogue read may have taken a moment, and the route the
                ;; body describes is the one just stored.  A cancelled

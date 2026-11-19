@@ -4209,3 +4209,15 @@ the catalogue says the model reads images."
 
 (provide 'harness-session-test)
 ;;; harness-session-test.el ends here
+
+(ert-deftest harness-session-ext-immediate-persistence-and-failure-rollback ()
+  (harness-session-test-with
+    (let* ((s (harness-call 'session/create :cwd dir))
+           (id (plist-get s :id)))
+      (harness-call 'session/set-ext id :dispatch '(:state "sent") nil t)
+      (should (equal '(:state "sent")
+                     (plist-get (plist-get (harness-call 'store/load (format "sessions/%s.json" id)) :ext) :dispatch)))
+      (let ((before (plist-get (harness-call 'session/get id) :ext)))
+        (cl-letf (((symbol-function 'harness-session--save) (lambda (_) (error "disk full"))))
+          (should-error (harness-call 'session/set-ext id :dispatch '(:state "other") nil t)))
+        (should (equal before (plist-get (harness-call 'session/get id) :ext)))))))

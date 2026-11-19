@@ -1522,7 +1522,12 @@ An ordinary request carries none, and its events are unchanged."
               :host (harness-openai--host endpoint)))
        (condition-case err
           (setf (harness-openai--stream-http stream)
-                (harness-http-request
+                (progn
+                  ;; Internal admission evidence belongs after local body
+                  ;; validation, immediately before transport, not at pin selection.
+                  (when-let* ((before (plist-get request :before-dispatch)))
+                    (funcall before))
+                  (harness-http-request
                  url
                  :method "POST"
                  :headers (harness-openai--body-headers endpoint key)
@@ -1589,7 +1594,7 @@ An ordinary request carries none, and its events are unchanged."
                                             (harness-openai--error-message text s)
                                             (or (harness-openai--error-detail endpoint text s)
                                                 "")))))
-                                (t (harness-openai--stream-complete stream)))))))
+                                (t (harness-openai--stream-complete stream))))))))
         (error (harness-openai--stream-finish stream 'error (harness-error-message err)))))))
     (list :cancel (lambda ()
                     (unless (harness-openai--stream-finished stream)

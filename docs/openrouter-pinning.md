@@ -1,5 +1,42 @@
 # Price-aware OpenRouter endpoint pinning
 
+## Health-aware routing update
+
+New sessions use the configured `:providers` order among healthy,
+price-qualified candidates (`DeepInfra`, then `Cohere` in the existing
+policy). `:prefer` can explicitly override that order within the allowlist.
+Numeric nonzero endpoint status excludes that candidate; it does not
+explain why the endpoint is unhealthy. In particular, `-2` is not treated
+as proof of an outage. The [endpoint API reference](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints)
+does not establish that meaning. A missing status remains legacy-compatible, not proof of good health.
+Malformed health, unknown identity,
+model mismatch and unreadable prices still fail closed, including when
+another endpoint looks healthy.
+
+A preliminary pin is not a send. Substantive dispatch evidence is saved
+synchronously before transport, separately from ancillary calls. Unknown
+legacy evidence is not assumed unsent. Concurrent, interrupted and partial
+requests cannot move endpoints automatically; retries retain their original
+request authority. An orphaned in-flight marker is not silently cleared.
+`session/recover-openrouter-send` requires an idle session, exact token and
+proof its local owning process exited; it records recovery and permits only
+a deliberate same-pin retry, never automatic movement.
+
+Existing sent sessions only reselect with explicit policy permission:
+` :cold-failover (:enabled t :max-input-cost "0.10")` (USD per cold input).
+The bound is an example, not an activated setting. Cache model and endpoint
+must match, and expiry is conservatively extended from the latest send by
+the cache TTL, measured from terminal activity rather than request start. This is recorded as **estimated expiry**, not proof of a
+server eviction. The unchanged full wire body's UTF-8 bytes bound ordinary
+text input tokens; multimodal input is refused. No compaction, truncation,
+model change or replay reset is performed. All original privacy/price
+checks remain, and the transition records old endpoint, reason, expiry,
+cost bound and time. A warm/unknown cache or uncertain prior send blocks.
+
+This update supersedes the historical cheapest-only and manual-switch-only
+selection descriptions below. No configuration or live activation occurs
+by applying the source change.
+
 This document is the design for `harness-provider-openrouter.el`: a
 provider module that owns everything OpenRouter-specific, and an
 opt-in policy that chooses one exact endpoint for one exact model per
