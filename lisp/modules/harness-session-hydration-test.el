@@ -874,5 +874,71 @@ resume one that belongs to the session that replaced it."
         (should-not (plist-get (plist-get plan :record-after) :provider-state))
         (should (plist-get plan :written))))))
 
+(ert-deftest harness-session-hydration-recovery-explicit-head-multiple-retries ()
+  "Recover only from the selected ancestry and leave all log bytes alone."
+  (harness-session-hydration-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (s (harness-call 'session/create :cwd cwd :name "Damaged" :worktree cwd))
+           (id (plist-get s :id))
+           (root (plist-get (harness-call 'session/append id (list :kind 'user :content "original")) :id))
+           (choice (list :original-head "chosen" :head-evidence "Recorded pre-restart head")))
+      (harness-session-hydration-test-forget)
+      (harness-session-hydration-test-damage id)
+      (dolist (node (list (list :id "chosen" :parent root :meta (list :model "demo:scripted"))
+                          (list :id "alternate" :parent root :meta (list :model "other:model"))
+                          (list :id "retry-1") (list :id "retry-2")))
+        (harness-call 'store/append (harness-session-hydration-test-journal-name id)
+                      (append node (list :session id :kind "assistant"
+                                         :content (plist-get node :id)
+                                         :ts (if (equal (plist-get node :id) "alternate") 20 10)))))
+      (harness-session-hydration-test-sidecars id)
+      (harness-session-hydration-test-boot)
+      (should-error (harness-call 'session/recover-hydration id (list :dry-run t)) :type 'harness-error)
+      (should-error (harness-call 'session/recover-hydration id
+                                  (list :dry-run t :original-head "retry-2" :head-evidence "Wrong tree"))
+                    :type 'harness-error)
+      (let* ((before (harness-session-hydration-test-record-text id))
+             (journal (harness-session-hydration-test-journal-text id))
+             (plan (harness-call 'session/recover-hydration id (append '(:dry-run t) choice)))
+             (fp (plist-get plan :fingerprint)))
+        (should (= 3 (length (plist-get plan :chains))))
+        (should (equal "demo:scripted" (plist-get (plist-get plan :record-after) :model)))
+        (should (equal before (harness-session-hydration-test-record-text id)))
+        (should-not (harness-session-hydration-test-recovered-files))
+        (should-error (harness-call 'session/recover-hydration id (append choice '(:expected-fingerprint "wrong")))
+                      :type 'harness-error)
+        (should-not (harness-session-hydration-test-recovered-files))
+        (let* ((applied (harness-call 'session/recover-hydration id
+                                      (append choice (list :expected-fingerprint fp))))
+               (audit (harness-call 'store/load (file-relative-name (plist-get applied :audit)
+                                                                    harness-state-directory))))
+          (should (equal fp (plist-get audit :fingerprint)))
+          (should (equal "Recorded pre-restart head" (plist-get audit :head-evidence)))
+          (should (equal journal (harness-session-hydration-test-journal-text id)))
+          (should (equal "inactive" (plist-get (harness-session-hydration-test-record id) :status))))
+        (harness-session-hydration-test-boot)
+        (should (equal "chosen" (plist-get (harness-call 'session/get id) :head)))
+        (should (equal '("original" "chosen")
+                       (mapcar (lambda (n) (plist-get n :content))
+                               (harness-call 'session/nodes id))))))))
+
+(ert-deftest harness-session-hydration-recovery-task-cwd-is-not-its-worktree ()
+  "Verify that a task's base cwd and linked worktree have distinct roles."
+  (require 'harness-files)
+  (let* ((project (harness-test-temp-dir))
+         (outside (harness-test-temp-dir))
+         (tree (expand-file-name "linked" outside))
+         (default-directory project))
+    (should (= 0 (call-process "git" nil nil nil "init" "--quiet")))
+    (should (= 0 (call-process "git" nil nil nil "-c" "user.name=Fixture"
+                               "-c" "user.email=fixture@example.invalid" "-c" "commit.gpgsign=false"
+                               "commit" "--quiet" "--allow-empty" "-m" "Fixture")))
+    (should (= 0 (call-process "git" nil nil nil "worktree" "add" "--detach" tree)))
+    (should-not (harness-session--recovery-task-cwd
+                 (list :cwd project :project project :worktree tree)))
+    (should-error (harness-session--recovery-task-cwd
+                   (list :cwd project :project project :worktree outside))
+                  :type 'harness-error)))
+
 (provide 'harness-session-hydration-test)
 ;;; harness-session-hydration-test.el ends here

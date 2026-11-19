@@ -3289,10 +3289,41 @@ here only to be reported."
               chains)))
     (nreverse chains)))
 
-(defun harness-session--recovery-path (chain table)
-  "Return CHAIN's nodes as node plists, oldest first.
-CHAIN's `:nodes' is already in that order, so this only looks them up."
-  (delq nil (mapcar (lambda (id) (gethash id table)) (plist-get chain :nodes))))
+(defun harness-session--recovery-path (head table)
+  "Return only HEAD and its ancestors in TABLE, oldest first."
+  (let (path)
+    (while head
+      (let ((node (gethash head table)))
+        (push node path)
+        (setq head (plist-get node :parent))))
+    path))
+
+(defun harness-session--recovery-inputs (id)
+  "Fingerprint the canonical record, journal and frozen sidecar for ID."
+  (mapcar (lambda (name)
+            (let ((file (expand-file-name name harness-state-directory)))
+              (when (file-exists-p file)
+                (with-temp-buffer
+                  (set-buffer-multibyte nil)
+                  (insert-file-contents-literally file)
+                  (secure-hash 'sha256 (current-buffer))))))
+          (list (harness-session--meta-name id) (harness-session--nodes-name id)
+                (format "sessions/%s.frozen.json" id))))
+
+(defun harness-session--recovery-task-cwd (task)
+  "Return TASK's cwd only when it is not merely its worktree's project root.
+Verify a claimed task worktree belongs to the task's actual Git repository."
+  (let* ((base (harness-session--recovery-directory (plist-get task :cwd)))
+         (project (harness-session--recovery-directory (plist-get task :project)))
+         (tree (harness-session--recovery-directory (plist-get task :worktree))))
+    (when (and tree project (not (file-equal-p tree project)))
+      (let ((common (harness-files-git-common-dir project))
+            (tree-common (harness-files-git-common-dir tree)))
+        (unless (and common tree-common (file-equal-p common tree-common))
+          (signal 'harness-error (list "Its task worktree is not in its task's Git repository"))))
+      (when (and base (file-equal-p base project))
+        (setq base nil)))
+    base))
 
 (defun harness-session--recovery-candidate (key value source sources &optional normalize)
   "Return SOURCES with KEY's VALUE from SOURCE added; signal on disagreement.
@@ -3321,7 +3352,7 @@ in: a record names one that was there."
              (not (file-remote-p path)) (file-directory-p path))
     (file-name-as-directory (expand-file-name path))))
 
-(defun harness-session--recovery-head (record chain)
+(defun harness-session--recovery-head (record chain explicit)
   "Return the head the recovered session of RECORD, whose first CHAIN it is.
 The record's own `:head' when it is on CHAIN -- a session that moved its
 head back and wrote on is still one chain from its first node -- else
@@ -3330,6 +3361,11 @@ between them is not one to guess at."
   (let ((recorded (plist-get record :head))
         (leaves (plist-get chain :leaves)))
     (cond
+     (explicit
+      (unless (and (stringp explicit) (member explicit (plist-get chain :nodes))
+                   (member explicit leaves))
+        (signal 'harness-error (list "Explicit original head is not a leaf of the original chain")))
+      explicit)
      ((and (stringp recorded) (member recorded (plist-get chain :nodes))) recorded)
      ((= 1 (length leaves)) (car leaves))
      ((null leaves) (signal 'harness-error (list "Its first chain ends at no node")))
@@ -3348,7 +3384,7 @@ model it ran on and the project it ran in."
           (setq found (cons (or (plist-get node :ts) 0) value)))))
     (cdr found)))
 
-(defun harness-session--recovery-plan (id)
+(defun harness-session--recovery-plan (id &optional explicit evidence)
   "Return what recovering session ID's record would write, or signal why not.
 Nothing is changed.  The plan is (:id ID :record-before PLIST
 :record-after PLIST :head ID :head-moved BOOL :chains CHAINS
@@ -3358,8 +3394,11 @@ holds, and where each field the record lost was read from.  A field two
 stores disagree about, a first chain with more than one end and no head
 to choose between them, a head that is not on the first chain, and a
 record that hydrates already are each refused, with the reason."
-  (unless (stringp id) (signal 'harness-error (list "A recovery names one session")))
+  (unless (and (stringp id)
+               (equal id (harness-session--record-id (harness-session--meta-name id))))
+    (signal 'harness-error (list "A recovery names one canonical session ID")))
   (let* ((name (harness-session--meta-name id))
+         (inputs (harness-session--recovery-inputs id))
          (record (harness-call 'store/load name))
          (problem (harness-session--hydration-problem record id))
          (fault (harness-session--hydration-fault id)))
@@ -3379,13 +3418,16 @@ record that hydrates already are each refused, with the reason."
            (order (harness-session--journal-order id table))
            (chains (harness-session--journal-chains order table)))
       (unless chains (signal 'harness-error (list (format "Session %s has no node log to recover from" id))))
-      (when (cddr chains)
+      (unless (= (hash-table-count table)
+                 (cl-loop for chain in chains sum (length (plist-get chain :nodes))))
+        (signal 'harness-error (list "Its journal contains a cycle or unreachable node")))
+      (when (and (cddr chains) (not explicit))
         (signal 'harness-error
                 (list (format "Session %s: its node log holds %d chains, more than the session's own and one after it"
                               id (length chains)))))
       (let* ((original (car chains))
-             (path (harness-session--recovery-path original table))
-             (head (harness-session--recovery-head record original))
+             (head (harness-session--recovery-head record original explicit))
+             (path (harness-session--recovery-path head table))
 
              (task (and (harness-method-exists-p 'task/for-session)
                         (ignore-errors (harness-call 'task/for-session id))))
@@ -3426,7 +3468,7 @@ record that hydrates already are each refused, with the reason."
                        :cwd (plist-get task :worktree) "its task's worktree" sources
                        #'harness-session--recovery-directory))
              (sources (harness-session--recovery-candidate
-                       :cwd (plist-get task :cwd) "its task" sources
+                       :cwd (harness-session--recovery-task-cwd task) "its task" sources
                        #'harness-session--recovery-directory))
              (cwd (or (plist-get (alist-get :cwd sources) :value)
                       (signal 'harness-error
@@ -3463,7 +3505,7 @@ record that hydrates already are each refused, with the reason."
              ;; the transcript (`session/provider-continuation').
              (provider-node (let ((node (plist-get record :provider-node)))
                               (and (stringp node)
-                                   (member node (plist-get original :nodes))
+                                   (cl-find node path :key (lambda (n) (plist-get n :id)) :test #'equal)
                                    node)))
              (after (harness-plist-merge
                      record
@@ -3477,6 +3519,8 @@ record that hydrates already are each refused, with the reason."
                            :provider-node provider-node
                            :provider-state (and provider-node
                                                 (plist-get record :provider-state))))))
+        (unless (equal inputs (harness-session--recovery-inputs id))
+          (signal 'harness-error (list "Recovery inputs changed while planning")))
         (when-let* ((still (harness-session--hydration-problem after id)))
           (signal 'harness-error (list (format "The recovered record would not hydrate: %s" still))))
         ;; A provider conversation that had gone past a node of the other
@@ -3487,6 +3531,12 @@ record that hydrates already are each refused, with the reason."
                             (not (plist-get after :provider-node)))))
           (list :id id
                 :dry-run t
+                :input-hashes inputs
+                :fingerprint (secure-hash 'sha256
+                                          (harness-json-encode
+                                           (list :inputs inputs :task task :head head
+                                                 :evidence evidence :after after)))
+                :head-evidence evidence
                 :record-before record
                 :record-after after
                 :head head
@@ -3521,7 +3571,19 @@ reads is what a load reads."
          (t (unless (gethash (plist-get rec :id) table)
               (push (plist-get rec :id) order))
             (puthash (plist-get rec :id) rec table)))))
-    (nreverse order)))
+    (let ((survivors (delete-dups (delq nil
+                                      (mapcar (lambda (node) (and (gethash node table) node))
+                                              (nreverse order))))))
+      (dolist (node survivors)
+        (let* ((record (gethash node table))
+               (parent (plist-get record :parent)))
+          (unless (and (stringp node) (equal id (plist-get record :session)))
+            (signal 'harness-error (list "Its journal has a foreign or malformed node")))
+          (when (and parent (not (gethash parent table)))
+            (signal 'harness-error (list "Its journal has a missing parent")))))
+      survivors)))
+
+
 
 (defun harness-session--recovery-audit (plan)
   "Return the audit record of PLAN, the evidence a recovery keeps.
@@ -3536,6 +3598,9 @@ body -- never a prompt's text."
           :at (float-time)
           :head (plist-get plan :head)
           :head-moved (plist-get plan :head-moved)
+          :head-evidence (plist-get plan :head-evidence)
+          :input-hashes (plist-get plan :input-hashes)
+          :fingerprint (plist-get plan :fingerprint)
           :chains (plist-get plan :chains)
           :provenance (plist-get plan :provenance)
           :record-before (plist-get plan :record-before)
@@ -3557,7 +3622,12 @@ is on the first chain, else to that chain's only end; a node log with
 more than one chain is reported, and the chains after the first are
 kept exactly as they are, never read as the session's.
 
-OPTIONS `:dry-run' returns the plan and writes nothing.  A recovery
+OPTIONS `:dry-run' returns the plan and writes nothing.  An ambiguous
+original tree or multiple retry chains require `:original-head' naming
+an original leaf and `:head-evidence' documenting its provenance.
+To apply that explicit choice, pass the reviewed plan's `:fingerprint'
+as `:expected-fingerprint'; any change to the inputs refuses the apply.
+Run with other writers to this session stopped.  A recovery
 writes an audit under `sessions/ID.recovery-…json' first -- the record
 before and after it, the chains, the provenance and the replay guard's
 state -- and then the record, in one atomic rename.  Nothing else is
@@ -3568,50 +3638,56 @@ nothing to recover: it is idempotent.
 
 Return the plan, with `:written' the path of the record it wrote and
 `:audit' the path of its audit, or with `:dry-run' t and no paths."
-  (let* ((plan (harness-session--recovery-plan id))
+  (let* ((head (plist-get opts :original-head))
+         (evidence (plist-get opts :head-evidence))
          (dry (harness-json-true-p (plist-get opts :dry-run))))
-    (if dry
-        plan
-      (let* ((audit (harness-session--recovery-audit plan))
-             (record-path (expand-file-name (harness-session--meta-name id) harness-state-directory))
-             (audit-name (harness-session--recovery-file id))
-             (audit-path (harness-session--recovery-publish audit-name audit)))
-        ;; The record may have changed while the plan was made: what
-        ;; was backed up is not what would be replaced.
-        (unless (equal (harness-call 'store/load (harness-session--meta-name id))
-                       (plist-get plan :record-before))
-          (signal 'harness-error
-                  (list (format "Session %s: its record changed while it was recovered; nothing was written" id))))
-        (harness-write-file-atomically record-path (harness-json-encode (plist-get plan :record-after)))
-        (harness-session--clear-hydration-fault id)
-        ;; A session that hydrated and then found its log broken is in
-        ;; memory, poisoned: it takes the recovered record and reads its
-        ;; transcript again.  One that was never loaded waits for the
-        ;; next start, which loads it from the record just written.
-        (when-let* ((s (gethash id harness-sessions)))
-          (let ((restored (harness-session--from-plist (plist-get plan :record-after))))
-            (setf (harness-session-nodes s) (harness-session-nodes restored)
-                  (harness-session-loaded s) nil
-                  (harness-session-head s) (harness-session-head restored)
-                  (harness-session-project s) (harness-session-project restored)
-                  (harness-session-cwd s) (harness-session-cwd restored)
-                  (harness-session-worktree s) (harness-session-worktree restored)
-                  (harness-session-model s) (harness-session-model restored)
-                  (harness-session-created s) (harness-session-created restored)
-                  (harness-session-updated s) (harness-session-updated restored)
-                  (harness-session-last-message s) (harness-session-last-message restored)
-                  (harness-session-compaction s) (harness-session-compaction restored)
-                  (harness-session-provider-node s) (harness-session-provider-node restored)
-                  (harness-session-provider-state s) (harness-session-provider-state restored))
-            (harness-session--load-nodes s)
-            (harness-session--announce s)))
-        (harness-log 'info "session %s: recovered its record from %s"
-                     id (mapconcat (lambda (p) (format "%s from %s"
-                                                       (substring (symbol-name (plist-get p :key)) 1)
-                                                       (plist-get p :source)))
-                                   (plist-get plan :provenance) ", "))
-        (append (harness-plist-remove plan :dry-run)
-                (list :dry-run nil :audit audit-path :written record-path))))))
+    (when (and head (not (and (stringp evidence) (not (string-empty-p (string-trim evidence))))))
+      (signal 'harness-error (list "An explicit original head requires provenance evidence")))
+    (let ((plan (harness-session--recovery-plan id head evidence)))
+      (when (and (not dry) (or head (plist-member opts :expected-fingerprint))
+                 (not (equal (plist-get opts :expected-fingerprint) (plist-get plan :fingerprint))))
+        (signal 'harness-error (list "Recovery fingerprint differs; review a new dry run")))
+      (if dry
+          plan
+        (let* ((audit (harness-session--recovery-audit plan))
+               (record-path (expand-file-name (harness-session--meta-name id) harness-state-directory))
+               (audit-name (harness-session--recovery-file id))
+               (audit-path (harness-session--recovery-publish audit-name audit)))
+          ;; The record may have changed while the plan was made: what
+          ;; was backed up is not what would be replaced.
+          (unless (equal (harness-session--recovery-inputs id) (plist-get plan :input-hashes))
+            (signal 'harness-error
+                    (list (format "Session %s: its inputs changed during recovery; the canonical record was not written" id))))
+          (harness-write-file-atomically record-path (harness-json-encode (plist-get plan :record-after)))
+          (harness-session--clear-hydration-fault id)
+          ;; A session that hydrated and then found its log broken is in
+          ;; memory, poisoned: it takes the recovered record and reads its
+          ;; transcript again.  One that was never loaded waits for the
+          ;; next start, which loads it from the record just written.
+          (when-let* ((s (gethash id harness-sessions)))
+            (let ((restored (harness-session--from-plist (plist-get plan :record-after))))
+              (setf (harness-session-nodes s) (harness-session-nodes restored)
+                    (harness-session-loaded s) nil
+                    (harness-session-head s) (harness-session-head restored)
+                    (harness-session-project s) (harness-session-project restored)
+                    (harness-session-cwd s) (harness-session-cwd restored)
+                    (harness-session-worktree s) (harness-session-worktree restored)
+                    (harness-session-model s) (harness-session-model restored)
+                    (harness-session-created s) (harness-session-created restored)
+                    (harness-session-updated s) (harness-session-updated restored)
+                    (harness-session-last-message s) (harness-session-last-message restored)
+                    (harness-session-compaction s) (harness-session-compaction restored)
+                    (harness-session-provider-node s) (harness-session-provider-node restored)
+                    (harness-session-provider-state s) (harness-session-provider-state restored))
+              (harness-session--load-nodes s)
+              (harness-session--announce s)))
+          (harness-log 'info "session %s: recovered its record from %s"
+                       id (mapconcat (lambda (p) (format "%s from %s"
+                                                         (substring (symbol-name (plist-get p :key)) 1)
+                                                         (plist-get p :source)))
+                                     (plist-get plan :provenance) ", "))
+          (append (harness-plist-remove plan :dry-run)
+                  (list :dry-run nil :audit audit-path :written record-path)))))))
 
 (defun harness-session--price-record (model record)
   "Return RECORD for MODEL with a missing `:cost' and `:list-cost' priced.
