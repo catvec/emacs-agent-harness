@@ -21,6 +21,9 @@
 (defvar harness-ui--sessions)
 (defvar mwheel-scroll-up-function)
 (defvar mwheel-scroll-down-function)
+(defvar harness-tool-slots-load-enabled)
+(defvar harness-tool-slots-load--timer)
+(declare-function harness-tool-slots-load--shutdown "harness-tool-slots-load" ())
 (defvar harness-perms-rules)
 (defvar harness-perms--session-rules)
 (defvar compose-quote-inline-hint)
@@ -54,7 +57,9 @@
      (clrhash harness-agent--turns)
      (setq harness-acp--clients nil
            harness-ui-chat-test-events nil)
-     (let ((harness-provider-demo--delay 0.005)
+     (let (;; Chat notice tests inject announcements explicitly, never host load.
+           (harness-tool-slots-load-enabled nil)
+           (harness-provider-demo--delay 0.005)
            (harness-acp-token nil)
            (default-directory dir))
        (harness-add-filter 'permission/decide
@@ -84,11 +89,24 @@
        (add-hook 'harness-ui-event-functions #'harness-ui-chat-test-record-event)
        (unwind-protect
            (progn ,@body)
+         (when (fboundp 'harness-tool-slots-load--shutdown)
+           (harness-tool-slots-load--shutdown))
          (remove-hook 'harness-ui-event-functions #'harness-ui-chat-test-record-event)
          (maphash (lambda (_ b) (when (buffer-live-p b) (kill-buffer b))) harness-chat--buffers)
          (clrhash harness-chat--buffers)
          (dolist (c (copy-sequence harness-acp--clients))
            (harness-acp--drop-client c))))))
+
+(ert-deftest harness-ui-chat-fixture-cleans-load-monitor ()
+  "A fixture never leaves host-load timers running into another chat."
+  (let (timer)
+    (harness-ui-chat-test-with
+      (dolist (module '(priority tool-slots tool-slots-load))
+        (harness-test-load-module module))
+      (setq timer harness-tool-slots-load--timer)
+      (should (timerp timer)))
+    (should-not (memq timer timer-list))
+    (should-not harness-tool-slots-load--timer)))
 
 (defun harness-ui-chat-test-session (&optional name)
   "Create a demo session called NAME and return its id."

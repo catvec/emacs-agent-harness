@@ -3990,6 +3990,7 @@ task setting's cap, and the session's transcript says so
                      (harness-tasks--work-settings task)))
          (session (apply #'harness-call 'session/create
                          :cwd (or cwd (plist-get task :cwd))
+                         :project (plist-get task :project)
                          (append (and worktree (list :worktree worktree))
                                  (list :ext (harness-priority-ext
                                              (or priority (harness-priority-of-task task))))

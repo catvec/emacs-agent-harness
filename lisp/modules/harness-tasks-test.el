@@ -2,6 +2,7 @@
 ;;; Code:
 
 (require 'harness-test-helpers)
+(require 'harness-session)
 
 (defvar harness-provider-demo-script-override)
 (defvar harness-provider-demo--delay)
@@ -3893,6 +3894,116 @@ The edit names the task afresh, from the new text, as it always did."
     (harness-tasks-test--git root "add" "shared.txt")
     (harness-tasks-test--git root "commit" "-q" "-m" "initial")
     root))
+
+(defmacro harness-tasks-test-with-missing-project (&rest body)
+  "Run BODY with a real task worktree and a damaged missing session project."
+  (declare (indent 0))
+  `(harness-tasks-test-with
+     (harness-test-load-module 'replay)
+     (let* ((root (harness-tasks-test--make-repo))
+            (wt (expand-file-name "repair-worktree/" (harness-test-temp-dir))))
+       (harness-tasks-test--git root "worktree" "add" "-q" "-b" "repair" wt)
+       (let* ((sid (plist-get (harness-call 'session/create :cwd wt :worktree wt
+                                           :project root :model "demo:scripted") :id))
+              (task (list :id "t-repair" :project root :cwd root :worktree wt
+                          :session sid :state 'active))
+              (s (harness-session--get sid)))
+         (harness-tasks--put task)
+         (harness-call 'session/append sid '(:kind user :content "preserve transcript"))
+         (harness-call 'session/set-provider-state sid '(:provider "test" :id "pin"))
+         (harness-replay-seam-keep (list :session (list :id sid)) "m" "route"
+                                   '(:model "m" :messages [(:role "user" :content "keep")]))
+         (setf (harness-session-project s) nil)
+         (harness-session--save sid)
+         (let ((before (harness-call 'session/get sid))
+               (nodes (harness-call 'session/nodes sid))
+               (frozen (harness-replay--frozen-read sid)))
+           ,@body)))))
+
+(ert-deftest harness-tasks-repair-missing-session-project-preserves-state ()
+  (harness-tasks-test-with-missing-project
+    (let ((after (harness-call 'session/repair-task-project sid "t-repair")))
+      (should (equal (plist-get after :project) root))
+      (should (equal (harness-plist-remove before :project)
+                     (harness-plist-remove after :project)))
+      (should (equal nodes (harness-call 'session/nodes sid)))
+      (should (equal frozen (harness-replay--frozen-read sid)))
+      (should (equal task (harness-tasks--get "t-repair")))
+      (should (equal root (plist-get (harness-call 'store/load (harness-session--meta-name sid)) :project)))
+      (should-error (harness-call 'session/repair-task-project sid "t-repair")))))
+
+(ert-deftest harness-tasks-repair-missing-session-project-rejects-mismatch ()
+  (harness-tasks-test-with-missing-project
+    (should-error (harness-call 'session/repair-task-project sid "wrong-task"))
+    (dolist (change (list (list :session "wrong-session")
+                          (list :worktree root) (list :project wt)
+                          (list :cwd (harness-test-temp-dir))
+                          (list :worktree-removed t)))
+      (harness-tasks--put (apply #'harness-plist-merge task (list change)))
+      (should-error (harness-call 'session/repair-task-project sid "t-repair"))
+      (should (equal before (harness-call 'session/get sid))))
+    (harness-tasks--put task)
+    (puthash sid t harness-agent--turns)
+    (should-error (harness-call 'session/repair-task-project sid "t-repair"))
+    (remhash sid harness-agent--turns)
+    (dolist (status '(running blocked))
+      (setf (harness-session-status s) status)
+      (should-error (harness-call 'session/repair-task-project sid "t-repair")))
+    (setf (harness-session-status s) 'idle (harness-session-project s) wt)
+    (should-error (harness-call 'session/repair-task-project sid "t-repair"))
+    (should (equal frozen (harness-replay--frozen-read sid)))
+    (should (equal nodes (harness-call 'session/nodes sid)))))
+
+(ert-deftest harness-tasks-repair-missing-session-project-rolls-back-failed-save ()
+  (harness-tasks-test-with-missing-project
+    (cl-letf (((symbol-function 'harness-session--save)
+               (lambda (&rest _) (error "simulated write failure"))))
+      (should-error (harness-call 'session/repair-task-project sid "t-repair")))
+    (should (equal before (harness-call 'session/get sid)))
+    (should (equal frozen (harness-replay--frozen-read sid)))
+    (setf (harness-session-move s) '(:cwd "pending"))
+    (should-error (harness-call 'session/repair-task-project sid "t-repair"))))
+
+(ert-deftest harness-tasks-repair-missing-session-project-refuses-concurrent-change ()
+  (harness-tasks-test-with-missing-project
+    (let ((original (symbol-function 'harness-files-main-root)))
+      (cl-letf (((symbol-function 'harness-files-main-root)
+                 (lambda (path)
+                   (prog1 (funcall original path)
+                     (setf (harness-session-project s) "concurrent-change")))))
+        (should-error (harness-call 'session/repair-task-project sid "t-repair"))))
+    (should (equal (harness-session-project s) "concurrent-change"))
+    (should (equal frozen (harness-replay--frozen-read sid)))))
+
+(ert-deftest harness-tasks-repair-missing-session-project-refuses-replaced-record ()
+  (harness-tasks-test-with-missing-project
+    (let ((original (symbol-function 'harness-files-main-root))
+          (replacement (copy-sequence s))
+          (writes 0))
+      ;; Equal field values do not make a replacement the captured object.
+      (should (equal (harness-session-plist s) (harness-session-plist replacement)))
+      (cl-letf (((symbol-function 'harness-files-main-root)
+                 (lambda (path)
+                   (prog1 (funcall original path)
+                     (puthash sid replacement harness-sessions))))
+                ((symbol-function 'harness-session--save)
+                 (lambda (&rest _) (cl-incf writes))))
+        (should-error (harness-call 'session/repair-task-project sid "t-repair")))
+      (should (= 0 writes))
+      (should (eq replacement (gethash sid harness-sessions)))
+      (should-not (harness-session-project s))
+      (should-not (harness-session-project replacement))
+      (should (equal before (harness-call 'session/get sid)))
+      (should-not (plist-get (harness-call 'store/load (harness-session--meta-name sid)) :project))
+      (should (equal frozen (harness-replay--frozen-read sid))))))
+
+(ert-deftest harness-tasks-new-session-keeps-task-project-when-discovery-empty ()
+  (harness-tasks-test-with
+    (let* ((root (harness-test-temp-dir))
+           (task (list :id "t-project" :project root :cwd root :state 'pending)))
+      (harness-tasks--put task)
+      (cl-letf (((symbol-function 'harness-method/project/root) (lambda (&rest _) nil)))
+        (should (equal root (plist-get (harness-tasks--make-session task) :project)))))))
 
 (defvar harness-tasks-test--commit-on-call 1
   "The call of the change tool (1-based) from which it also commits.")
