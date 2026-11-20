@@ -13246,6 +13246,64 @@ above it, the line `from the box: C-c . e` ending the message
 (`harness-chat--queued-hint`, left out where `harness-ui-pending-box-hints`
 is nil).
 
+A message that left the harness says how far it got, from a receipt on
+its own node and from nothing else: `:meta :receipt`, a plist
+`(:state STATE :at TIME :attempt N)` (`harness-node-receipt`, which
+every client reads: the Emacs chat here and the Flutter app's
+`DeliveryReceipt`, from the node each already has, so a local harness
+and a remote one draw the same thing).  The turn loop writes it
+(`harness-agent--receipt-mark`), because the turn alone knows the
+request a message went out in and how that request ended, and the
+states are evidence rather than a hope (`harness-receipt-states`):
+
+- `sending`: the message is in a request handed to the provider, with
+  no answer yet.  `harness-agent--receipt-send` marks the messages
+  recorded since the last request (`harness-agent-turn-fresh`) as the
+  step hands the request over.
+- `retrying`: that request failed and the step is being tried again
+  (`harness-agent--receipt-retrying`, from `harness-agent--step-failed`).
+- `delivered`: the provider answered a request that carried the message
+  -- words, thinking, a tool call or its usage came back on it, or it
+  ended with no error (`harness-agent--receipt-answer`, from
+  `harness-agent--on-event`).  That the provider was answered is all it
+  says: whether a model read the message, and what it made of it, is not
+  observable from the harness, and the tooltip says so.
+- `failed`: the request ended in an error and the turn ended
+  (`harness-agent--end` with the reason `error`).
+- `unconfirmed`: the request was cancelled, or the harness stopped while
+  it was in flight, so the provider may have had the message and nothing
+  here can tell.  A turn's `done` with the stop reason `cancelled`
+  settles it (`harness-agent--receipt-settle`), and a receipt left in
+  flight in a node log -- a harness stopped mid-request -- is settled to
+  `unconfirmed` as the log is read
+  (`harness-session--settle-receipts`, from
+  `harness-session--load-nodes`, only when no turn runs).
+
+Nothing else moves a receipt.  A transport that opened (`start`), a
+successful local enqueue, a response to some other request and a turn
+running are no evidence that a model got this message, so none of them
+writes one: a message the harness still holds -- a queue item, one
+waiting for the turn's next step, one a gate keeps -- is no node yet,
+and says "queued" by that alone.  `delivered` is never taken away: a
+failed retry of a later attempt leaves a message the provider already
+answered as it is (`harness-agent--receipt-mark` refuses to overwrite
+it).  The receipt is the harness's own bookkeeping and never reaches a
+model: it is not among `harness-session--render-meta-fields`, so writing
+one leaves the replayed request, and its prompt cache, as it was.
+
+The chat draws the receipt as a mark after the sender's name
+(`harness-chat--receipt-note`): a dim "sending", "retrying" or
+"unconfirmed", a red "failed", and a green "delivered".  It is subtle on
+purpose -- a state a message reached is drawn on the message itself,
+but "delivered" stands only on the newest message that carries a receipt
+(`harness-chat--newest-receipt-id`, `harness-chat--receipt-latest-p`),
+moving off the one before as the next arrives, as a last-read marker
+does, rather than a tick on every message of a long conversation.  A
+receipt that changes redraws the block it changed and the newest one
+(`harness-chat--redraw-sending`, and the `_harness/node` branch of
+`harness-chat--apply-update`), so the mark moves in the same moment the
+node arrives.
+
 Chat buffer (`harness-ui-chat`): transcript region (read-only) + queued
 messages + attachments row + compose region at the bottom.  Rendering is
 incremental (append and in-place update by node id using markers);

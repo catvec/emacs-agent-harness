@@ -5802,13 +5802,15 @@ It is never added to the running turn."
       (buffer-substring-no-properties (harness-chat-block-start block) (harness-chat-block-end block)))))
 
 (defun harness-ui-chat-test-last-user-sender-line (buf)
-  "Return the sender line of the newest user block of BUF, timestamp and all."
+  "Return the sender line of the newest user block of BUF, as it is drawn.
+That is the label, the timestamp and the note of the message's delivery,
+up to the newline that ends the line."
   (with-current-buffer buf
     (let ((block (car (last (harness-ui-chat-test-blocks buf "user")))))
-      (concat harness-chat-user-label
-              (if-let* ((time (harness-chat-block-time block)))
-                  (concat "  " (harness-chat--time-label time))
-                "")
+      (concat (car (split-string (buffer-substring-no-properties
+                                  (harness-chat-block-start block)
+                                  (harness-chat-block-end block))
+                                 "\n"))
               "\n"))))
 
 (defun harness-ui-chat-test-state-line (state)
@@ -5958,7 +5960,8 @@ no message of the transcript yet: the model has not read it, and the
 transcript reads in the order the model got things.  Once the turn has
 taken it the message is one of the transcript, where the model read it
 -- after the result of the tool that ran meanwhile, before the call that
-followed -- and reads as any other; nothing of it is left above the
+followed -- and reads as any other, its sender line carrying the receipt
+of the request that took it; nothing of it is left above the
 box.  The tooltip of the word says what it waits for.  The [send now] of
 a queued message says that the running turn gets it."
   (harness-ui-chat-test-with
@@ -6022,10 +6025,15 @@ a queued message says that the running turn gets it."
       (harness-test-wait (lambda () (equal '("user" "tool-call" "user" "tool-call")
                                            (harness-ui-chat-test-block-kinds buf)))
                          5 "the message after the first call and before the second")
-      (should (equal (concat harness-chat-user-label "\nright now\n\n") (harness-ui-chat-test-last-user-text buf)))
+      ;; It is one of the transcript now, and its receipt says how far it
+      ;; got: the request the turn made after taking it carried it, and the
+      ;; call that answered that request proves the provider read it.
+      (should (equal (concat (harness-ui-chat-test-last-user-sender-line buf) "right now\n\n")
+                     (harness-ui-chat-test-last-user-text buf)))
+      (should (string-match-p (regexp-quote (harness-ui-chat-test-receipt-mark 'delivered))
+                              (harness-ui-chat-test-last-user-sender-line buf)))
       (should-not (harness-ui-chat-test-find buf waiting))
       (should-not (harness-ui-chat-test-waiting-texts buf))
-      (should-not (harness-ui-chat-test-find buf "delivered"))
       (should (equal '("user" "tool-call" "user" "tool-call") (harness-ui-chat-test-block-kinds buf)))
       ;; The turn ends, and the message needs no state any more.
       (harness-resolve (nth 1 gates) t)
@@ -12696,6 +12704,139 @@ as two, and the range's dash joins them."
     (should-not (harness-chat--time-range nil))
     (should-not (harness-chat--time-range (list nil 'not-a-time)))
     (should-not (harness-chat--time-slot-string nil))))
+
+;;;; Delivery receipts, as the chat draws them
+
+(defun harness-ui-chat-test-receipt-mark (state)
+  "Return the mark a message with receipt STATE shows, as the chat draws it.
+STATE is a symbol of `harness-receipt-states': a small icon and the
+state's word, the icon the green circle for `delivered', the red
+triangle for `failed' and the grey circle otherwise."
+  (concat (harness-ui-icon (pcase state
+                             ('delivered 'harness-icon-success)
+                             ('failed 'harness-icon-failure)
+                             (_ 'harness-icon-caution)))
+          " "
+          (cdr (assq state harness-receipt-states))))
+
+(ert-deftest harness-ui-chat-receipt-copy-is-what-the-states-say ()
+  "Every receipt state has the word and tooltip the chat shows for it.
+The words are nouns and adjectives; the tooltip is one line, and says
+what was observed and no more: a delivered message reached the model's
+provider, which is no claim that the model read it."
+  (should (equal '((sending . "sending") (retrying . "retrying") (delivered . "delivered")
+                   (failed . "failed") (unconfirmed . "unconfirmed"))
+                 harness-receipt-states))
+  (dolist (state '(sending retrying delivered failed unconfirmed))
+    (should (equal (harness-ui-chat-test-receipt-mark state)
+                   (harness-chat--receipt-mark-text state))))
+  (should (equal "Sending · in the request, no answer yet"
+                 (harness-chat--receipt-help '(:state sending))))
+  (should (equal "Retrying · the request failed, another try under way · attempt 2"
+                 (harness-chat--receipt-help '(:state retrying :attempt 2))))
+  (should (equal "Failed · the request ended in an error"
+                 (harness-chat--receipt-help '(:state failed))))
+  (should (equal "Unconfirmed · the request was cancelled, the provider's answer unknown"
+                 (harness-chat--receipt-help '(:state unconfirmed))))
+  (let ((help (harness-chat--receipt-help (list :state 'delivered :at (float-time)))))
+    (should (string-prefix-p "Delivered " help))
+    (should (string-suffix-p " · provider answered the request · model reading not observable" help))
+    ;; One line, whatever it holds: a tooltip that wraps moves the text under the mouse.
+    (should-not (string-match-p "\n" help))))
+
+(ert-deftest harness-ui-chat-a-delivered-mark-stands-on-the-newest-message-alone ()
+  "Only the newest message with a receipt says \"delivered\".
+The mark moves off the message it stood on when the next arrives, so a
+transcript of many sent messages never becomes a column of ticks."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (delivered (harness-ui-chat-test-receipt-mark 'delivered))
+           (feed (lambda (id text) (harness-chat--on-update
+                                    sid (list :sessionUpdate "_harness/node"
+                                              :node (list :id id :kind "user" :content text :ts (float-time)
+                                                          :meta (list :receipt (list :state "delivered"
+                                                                                     :at (float-time)))))))))
+      (with-current-buffer buf
+        (funcall feed "u1" "first")
+        (funcall feed "a1" nil)
+        (harness-chat--on-update sid (list :sessionUpdate "_harness/node"
+                                           :node (list :id "a1" :kind "assistant" :content "ok" :ts (float-time))))
+        (should (= 1 (harness-ui-chat-test-count buf (regexp-quote delivered))))
+        (should (string-match-p (regexp-quote delivered)
+                                (harness-ui-chat-test-node-text buf "u1")))
+        (funcall feed "u2" "second")
+        (should (= 1 (harness-ui-chat-test-count buf (regexp-quote delivered))))
+        (should-not (string-match-p (regexp-quote delivered)
+                                    (harness-ui-chat-test-node-text buf "u1")))
+        (should (string-match-p (regexp-quote delivered)
+                                (harness-ui-chat-test-node-text buf "u2")))
+        ;; The whole transcript drawn again reads the same.
+        (harness-chat--render-nodes
+         (list (list :id "u1" :kind "user" :content "first" :ts 1.0
+                     :meta (list :receipt (list :state "delivered" :at 1.0)))
+               (list :id "a1" :kind "assistant" :content "ok" :ts 2.0)
+               (list :id "u2" :kind "user" :content "second" :ts 3.0
+                     :meta (list :receipt (list :state "delivered" :at 3.0)))))
+        (should (= 1 (harness-ui-chat-test-count buf (regexp-quote delivered))))
+        (should (string-match-p (regexp-quote delivered)
+                                (harness-ui-chat-test-node-text buf "u2")))))))
+
+(ert-deftest harness-ui-chat-only-the-messages-a-request-concerns-say-it-is-in-flight ()
+  "A message in flight, one tried again and one that failed say so on themselves.
+They are the exception, so each shows its own state; a message that
+waited and was never sent has no receipt and says nothing of the kind."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (feed (lambda (id text state)
+                   (harness-chat--on-update
+                    sid (list :sessionUpdate "_harness/node"
+                              :node (list :id id :kind "user" :content text :ts (float-time)
+                                          :meta (list :receipt (list :state state :at (float-time)))))))))
+      (with-current-buffer buf
+        (funcall feed "u1" "in flight" "sending")
+        (should (string-match-p (regexp-quote (harness-ui-chat-test-receipt-mark 'sending))
+                                (harness-ui-chat-test-node-text buf "u1")))
+        (funcall feed "u1" "in flight" "retrying")
+        (should (string-match-p (regexp-quote (harness-ui-chat-test-receipt-mark 'retrying))
+                                (harness-ui-chat-test-node-text buf "u1")))
+        (funcall feed "u1" "in flight" "failed")
+        (should (string-match-p (regexp-quote (harness-ui-chat-test-receipt-mark 'failed))
+                                (harness-ui-chat-test-node-text buf "u1")))
+        ;; A failure is drawn in the failure's colour, the rest dim.
+        (should (harness-ui-chat-test-prop-face buf "failed" 'harness-failure-face))
+        ;; A message the harness never sent carries no receipt at all: it
+        ;; shows the note of a message the turn never took, and no state
+        ;; of a request that never carried it.
+        (harness-chat--on-update sid (list :sessionUpdate "_harness/node"
+                                           :node (list :id "u2" :kind "user" :content "never sent"
+                                                       :ts (float-time) :meta (list :steering t))))
+        (should-not (harness-node-receipt (gethash "u2" harness-chat--blocks)))
+        (dolist (state '(sending retrying delivered failed unconfirmed))
+          (should-not (string-match-p
+                       (regexp-quote (harness-ui-chat-test-receipt-mark state))
+                       (harness-ui-chat-test-node-text buf "u2"))))))))
+
+(ert-deftest harness-ui-chat-a-receipt-is-the-only-source-of-a-delivery-mark ()
+  "A turn running, a node arriving and a response claim no delivery by themselves.
+A message with no receipt shows none of the marks, though its turn ran
+and its answer arrived; only the harness's own receipt moves one."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (feed (lambda (node) (harness-chat--on-update
+                                 sid (list :sessionUpdate "_harness/node" :node node)))))
+      (with-current-buffer buf
+        (setq harness-chat--turn-start (float-time))
+        (funcall feed (list :id "u1" :kind "user" :content "hello" :ts (float-time)))
+        (funcall feed (list :id "a1" :kind "assistant" :content "Hi there" :ts (float-time)))
+        (setq harness-chat--turn-start nil)
+        (harness-chat--turn-changed)
+        (dolist (state '(sending retrying delivered failed unconfirmed))
+          (should-not (string-match-p
+                       (regexp-quote (cdr (assq state harness-receipt-states)))
+                       (harness-ui-chat-test-node-text buf "u1"))))))))
 
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here

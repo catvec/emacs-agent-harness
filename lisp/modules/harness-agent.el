@@ -211,7 +211,8 @@ WHY says what stopped it."
   step-nodes                            ; the nodes this step wrote, for a retry
   (pending 0) waiting-done stop-reason error hosted last-usage started
   retry                                 ; the request the next step repeats, once a failure decided one
-  ending)                               ; a tool ended the turn (hand_in): its provider's usage still counts
+  ending                                ; a tool ended the turn (hand_in): its provider's usage still counts
+  sending fresh)                        ; node ids the request in flight carries, and those recorded since it
 
 (defvar harness-agent--turns (make-hash-table :test 'equal)
   "Session id -> running `harness-agent-turn'.")
@@ -1197,6 +1198,109 @@ Each is (:type \"image\" :mime MIME) with `:data', base64, or a `:path'
 to read, and a `:label' when the message's text names it by its token."
   (cl-remove-if-not (lambda (b) (equal (plist-get b :type) "image")) blocks))
 
+;;;; Delivery receipts
+;;
+;; A message of the user's that goes to a model carries what is known of
+;; its delivery in its node's `:meta' `:receipt' (`harness-node-receipt'
+;; reads it, and the UI draws it).  The turn writes it, because the turn
+;; alone knows the request the message went out in: the ids of the
+;; messages a request carries are kept as it is sent
+;; (`harness-agent-turn-sending'), marked `sending' as the request goes
+;; to the provider, `delivered' when the provider answers that request,
+;; `retrying' when it fails and the step is tried again, `failed' when
+;; the turn ends with the error, and `unconfirmed' when it is cancelled
+;; -- the provider may have read it, and nothing here can tell.
+;;
+;; A message the harness still holds is no node, and says `queued' by
+;; that alone: a queue item, a message waiting for the turn's next step,
+;; one a gate holds.  A request the transport opened and never answered,
+;; a response to some other request, and a successful enqueue move no
+;; receipt: they are no evidence that a model got this message.
+;;
+;; The receipt is the harness's own bookkeeping and never reaches a
+;; model: `harness-session--render-meta-fields' does not read it, so
+;; writing one leaves the replayed request, and its prompt cache, as it
+;; was.
+
+(defun harness-agent--receipt (state &optional attempt)
+  "Return a delivery receipt in STATE, now, on attempt ATTEMPT.
+See `harness-receipt-states'."
+  (append (list :state (if (symbolp state) (symbol-name state) state) :at (float-time))
+          (and attempt (list :attempt attempt))))
+
+(defun harness-agent--receipt-mark (sid ids state &optional attempt)
+  "Record STATE as the delivery of the messages IDS of SID.
+IDS are node ids of user messages, ATTEMPT which request of them it was
+\(see `harness-agent--receipt').  A message the provider has answered
+keeps `delivered': an answer that came back is evidence nothing later
+undoes, so a failed retry of a later attempt does not take it away.  A
+node that is gone is skipped without a word: a receipt is a note about
+a message, and never a reason for a turn to fail.  Nothing is recorded
+for a session that is gone."
+  (when (and ids (harness-call 'session/exists-p sid))
+    (dolist (id ids)
+      (harness-agent--try (format "recording the delivery of %s" id)
+        (when-let* ((node (harness-call 'session/node sid id)))
+          (unless (and (eq (harness-node-receipt-state node) 'delivered)
+                       (not (eq state 'delivered)))
+            (harness-call 'session/update-node sid id
+                          :meta (plist-put (copy-sequence (plist-get node :meta))
+                                           :receipt (harness-agent--receipt state attempt)))))))))
+
+(defun harness-agent--receipt-answer (turn)
+  "Mark the messages TURN's request carries `delivered': the provider answered.
+Called when the provider produces something of the request that carries
+them -- words, thinking, a tool call, its usage -- or ends it without
+an error: that answer came back on the request the messages went out in,
+so they reached the model's provider.  Whether the model read them, and
+what it made of them, is not observable, and no state says it is."
+  (when (harness-agent-turn-sending turn)
+    (harness-agent--receipt-settle turn 'delivered)))
+
+(defun harness-agent--receipt-fresh (turn ids)
+  "Keep IDS, nodes a request of TURN has not carried yet, for its next one."
+  (when ids
+    (setf (harness-agent-turn-fresh turn)
+          (append (harness-agent-turn-fresh turn) ids))))
+
+(defun harness-agent--receipt-send (turn)
+  "Mark the messages TURN's request carries as `sending'; return their ids.
+That is those recorded since the last request
+\(`harness-agent--receipt-fresh'): what this request is said to carry.
+The messages an earlier attempt at the same step carried are no part of
+it, and keep the `retrying' that attempt gave them.  A request handed to
+the provider with no answer yet is all `sending' claims."
+  (let ((ids (harness-agent-turn-fresh turn))
+        (sid (harness-agent-turn-session-id turn))
+        (attempt (max 1 (or (gethash (harness-agent-turn-session-id turn)
+                                     harness-agent--step-attempts)
+                            1))))
+    (setf (harness-agent-turn-fresh turn) nil)
+    (when ids
+      (setf (harness-agent-turn-sending turn)
+            (append (harness-agent-turn-sending turn) ids))
+      (harness-agent--receipt-mark sid ids 'sending attempt))
+    (harness-agent-turn-sending turn)))
+
+(defun harness-agent--receipt-retrying (turn)
+  "Mark the messages TURN's failed request carried as being sent again."
+  (let ((ids (harness-agent-turn-sending turn))
+        (attempt (1+ (or (gethash (harness-agent-turn-session-id turn)
+                                  harness-agent--step-attempts)
+                         1))))
+    (when ids
+      (harness-agent--receipt-mark (harness-agent-turn-session-id turn) ids 'retrying attempt))))
+
+(defun harness-agent--receipt-settle (turn state)
+  "Mark the messages the request of TURN carries in STATE, and forget them.
+The receipt keeps the attempt of the request they went out in."
+  (let ((ids (harness-agent-turn-sending turn))
+        (attempt (max 1 (or (gethash (harness-agent-turn-session-id turn)
+                                     harness-agent--step-attempts)
+                            1))))
+    (setf (harness-agent-turn-sending turn) nil)
+    (harness-agent--receipt-mark (harness-agent-turn-session-id turn) ids state attempt)))
+
 ;; A message sent to a running turn steers it, and it is a node of the
 ;; transcript from the moment the model gets it, not before: the
 ;; transcript reads in the order the model got things, so a message sent
@@ -1436,7 +1540,8 @@ nodes: a UI that drew them waiting draws them where they are."
     (when (and held (harness-call 'session/exists-p sid))
       (dolist (entry held)
         (harness-agent--try (format "recording a message held for %s" sid)
-          (harness-call 'session/append sid (harness-agent--opening-node entry)))))
+          (when-let* ((stored (harness-call 'session/append sid (harness-agent--opening-node entry))))
+            (harness-agent--receipt-fresh turn (list (plist-get stored :id)))))))
     (when shown
       (remhash turn harness-agent--shown)
       (harness-agent--publish-steering turn))))
@@ -1633,7 +1738,10 @@ META extra metadata for the node the message becomes."
            ;; A message the user took back while the gate held it
            ;; (`agent/withdraw') is never recorded: it was deleted.
            (progn (unless (gethash turn harness-agent--withdrawn)
-                    (harness-call 'session/append session-id node))
+                    (when-let* ((stored (harness-call 'session/append session-id node)))
+                      ;; It goes in the turn's first request, whose receipt
+                      ;; says how far it got (`harness-agent--receipt-send').
+                      (harness-agent--receipt-fresh turn (list (plist-get stored :id)))))
                   (harness-agent--flush-held turn))
          (remhash turn harness-agent--held))
        (remhash turn harness-agent--withdrawn)
@@ -1791,6 +1899,10 @@ the payload)."
                  harness-agent--step-attempts)
         (harness-emit 'agent/step-started sid (harness-agent-turn-steps turn))
         (harness-agent--update-activity sid '(:phase waiting))
+        ;; The messages this request carries are in flight from here: the
+        ;; request is handed to the provider, and nothing says yet whether
+        ;; a model read any of it.
+        (harness-agent--receipt-send turn)
         (setf (harness-agent-turn-handle turn) (harness-call 'provider/complete request)))))))
 
 (defun harness-agent--add-step-usage (sid ev)
@@ -1888,6 +2000,12 @@ ever, to deliver it."
               (harness-log 'warn "agent: a message to %s could not be recorded, and is dropped" sid)))))
       (setf (harness-agent-turn-steering turn) (nreverse kept))
       (harness-agent--publish-steering turn)
+      ;; The messages are nodes now, where the model reads them: the next
+      ;; request of the turn carries them, and their receipts follow it.
+      (harness-agent--receipt-fresh turn
+                                    (delq nil (mapcar (lambda (p)
+                                                        (and (consp p) (plist-get p :node)))
+                                                      taken)))
       (nreverse taken))))
 
 (defun harness-agent--deliver-entry (sid entry anchor)
@@ -2027,9 +2145,12 @@ provider to report (`harness-agent--late-event')."
          (harness-agent--update-activity
           sid (harness-agent--compact (list :phase (plist-get ev :phase) :tool (plist-get ev :tool)
                                             :chars (plist-get ev :chars)))))
-        ('text (harness-agent--stream turn 'assistant (plist-get ev :delta)))
-        ('thinking (harness-agent--stream turn 'thinking (plist-get ev :delta)))
-        ('tool-call (if (plist-get ev :builtin)
+        ('text (harness-agent--receipt-answer turn)
+               (harness-agent--stream turn 'assistant (plist-get ev :delta)))
+        ('thinking (harness-agent--receipt-answer turn)
+                   (harness-agent--stream turn 'thinking (plist-get ev :delta)))
+        ('tool-call (harness-agent--receipt-answer turn)
+                    (if (plist-get ev :builtin)
                         (harness-agent--builtin-call turn ev)
                       (harness-agent--tool-call turn ev)))
         ('tool-permission (harness-agent--tool-permission turn ev))
@@ -2070,6 +2191,16 @@ provider to report (`harness-agent--late-event')."
          (setf (harness-agent-turn-stop-reason turn) (plist-get ev :stop-reason)
                (harness-agent-turn-error turn) (plist-get ev :error)
                (harness-agent-turn-waiting-done turn) t)
+         ;; What became of the messages the request carried.  One the
+         ;; provider ended without an error reached it, whatever it said;
+         ;; one it ended with an error may be tried again
+         ;; (`harness-agent--step-failed'), and a cancelled request may or
+         ;; may not have been read: nothing here can tell, and the receipt
+         ;; says so.
+         (pcase (plist-get ev :stop-reason)
+           ('cancelled (harness-agent--receipt-settle turn 'unconfirmed))
+           ('error nil)
+           (_ (harness-agent--receipt-answer turn)))
          (when (eq (plist-get ev :stop-reason) 'error)
            ;; Kept for `agent/step-error', with the model the step ran on.
            (puthash sid (append (harness-plist-remove ev :type :stop-reason)
@@ -2870,8 +3001,11 @@ Otherwise, and once the turn was cancelled, it ends with `error'."
                       ;; The same logical step, tried again: it stays open,
                       ;; and its next attempt adds to its counts.
                       ;; failed, with what it spent and what authorised it.
+                      ;; The messages it carried go out in it again, and
+                      ;; their receipts say a try is under way.
                       (setf (harness-agent-turn-retry turn)
                             (plist-get decision :state))
+                      (harness-agent--receipt-retrying turn)
                       (harness-agent--step turn))
              ;; Its fate is known: it ends the turn, and is reported once.
              (harness-agent--end turn 'error error kind))))
@@ -2894,6 +3028,16 @@ not given."
       ;; A turn cancelled before its provider was done.
       (when (harness-call 'session/exists-p sid)
         (harness-agent--close-builtins turn reason))
+      ;; What became of the messages a request still in flight carried when
+      ;; the turn ended: one it ends with an error on never got an answer,
+      ;; and one it cuts short -- a cancellation, a tool handing the work in
+      ;; -- leaves the provider's reading unknown, which is what the receipt
+      ;; then says.  An answered request settled them already, and a
+      ;; `delivered' receipt is never taken back.
+      (harness-agent--receipt-settle
+       turn (pcase reason
+              ('error 'failed)
+              (_ 'unconfirmed)))
       ;; A step still open ended with the turn: a cancellation, or a failure
       ;; that is not tried again.  It is reported before `agent/turn-ended',
       ;; so a subscriber sees the step end before the turn does.

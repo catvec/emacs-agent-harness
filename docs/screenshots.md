@@ -48,6 +48,17 @@ HARNESS_SHOTS=screenshots flutter test test/computers_screenshots_test.dart
 They are `computers-phone.png`, `computers-phone-large.png`,
 `computers-desktop.png`, `computers-empty.png` and `computer-screen.png`.
 
+The **delivery receipts** picture is the same kind.  `message-receipts.png`
+is the app's own test drawing a conversation whose messages say what became
+of them -- `Sending`, `Retrying`, `Failed`, `Unconfirmed` on the messages
+they concern, `Delivered` on the newest alone -- from the receipts the
+harness wrote on their nodes, with the real fonts:
+
+```sh
+cd harness_client
+HARNESS_SHOTS=screenshots flutter test test/message_receipt_test.dart
+```
+
 The **unsent speech** pictures are the last exception.  Both Emacs
 pictures, `voice-turn-completion-emacs.png` and
 `voice-turn-cut-off-emacs.png`, come from `scripts/voice-turn-demo.sh`: a
@@ -149,7 +160,7 @@ The pictures, by the name `scripts/media.sh` takes:
 | `chat-decisions` | Two chats: an "Always deny" answer for `bash` in the left one, a `bash` call that rule denied in the right one, naming the answer; [Undo] was clicked on the right, so both strike the answer through and offer [Redo] [Change] | `harness-media-shot-chat-decisions` |
 | `chat-decisions-cold` | Two chats whose prompt caches went cold: the left one answered "always" start afresh, the right one took that default unasked and names the answer; both offer [Undo] [Change] | `harness-media-shot-chat-decisions-cold` |
 | `notes` | A session's chat whose `spawn_agent` call runs, and the sub-agent's chat beside it: the note under the spawn call says what the child does, with a recap of it and its facts, and the note under the child's `bash` call says it is still running | `harness-media-shot-notes` |
-| `chat-queue` | A chat whose turn runs, `acme/db.py` beside it: a message sent during the turn that the model has taken reads as any other, one sent since says "queued" beside the name with `[edit]` and `[delete]`, each with its key, and two more queued messages, drawn as messages of the user's, say "queued" with `[send now]`, `[edit]` and `[delete]`, above the line saying what the turn does | `harness-media-shot-chat-queue` |
+| `chat-queue` | A chat whose turn runs, `acme/db.py` beside it: a message sent during the turn that the model has taken carries its delivery receipt, a green "delivered" after the name, one sent since says "queued" beside the name with `[edit]` and `[delete]`, each with its key, and two more queued messages, drawn as messages of the user's, say "queued" with `[send now]`, `[edit]` and `[delete]`, above the line saying what the turn does | `harness-media-shot-chat-queue` |
 | `prompt-region` | Lines of `acme/ratelimit.py` selected, and `C-c h V >` on them: the newest session's box holds where they come from and the code in a fenced block | `harness-media-shot-prompt-region` |
 | `slots` | The demo project's task slots: the Queues section above them (the project's queue, `[Pause]`, and `[Pause all]` and `[Resume all]` for the tasks and the queues); the four tasks in slots as rows of the session list's columns, at three priorities, the blocked one with its question and `[Answer…]` under it; four tasks waiting, by priority and next in line; and how long tasks waited for a slot this week. Taken last: it sets a limit, starts a task and queues four (`harness-media--fill-slots`) | `harness-media-shot-slots` |
 | `quote-reply` | A chat whose agent replied in three paragraphs, `acme/webhooks.py` beside it: the opening of the answer selected and `C-c >` pressed; the box holds a card, no Markdown quote, that says `agent's message` and links the message, the part quoted under it, and the reply typed under the card, point in the box | `harness-media-shot-quote-reply` |

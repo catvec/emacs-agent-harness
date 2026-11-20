@@ -52,6 +52,20 @@ broadcast extension required`, `File writing`, `Outbox only`.
 `test/computers_screenshots_test.dart` takes the pictures, including the
 this-client card.
 
+A message's delivery receipt follows the same rule in both clients.  The
+states are the harness's own words (`harness-receipt-states`), capitalised
+where a client shows them: `Sending`, `Retrying`, `Delivered`, `Failed`,
+`Unconfirmed`.  Each tooltip is one line and says what was observed and no
+more: `Sending · in the request, no answer yet`, `Retrying · the request
+failed, another try under way · attempt N`, `Delivered HH:MM · provider
+answered the request · model reading not observable`, `Failed · the request
+ended in an error`, `Unconfirmed · the request was cancelled, the provider's
+answer unknown`.  A message the harness still holds has no receipt and says
+`Queued` (Emacs: a dim "queued"), which is the existing queue copy, not a
+receipt.  `lisp/ui/harness-ui-chat-test.el` asserts the Emacs copy and
+`harness_client/test/message_receipt_test.dart` the app's, which also takes
+`message-receipts.png`.
+
 ## What `harness-ui` gives you
 
 Connection and requests

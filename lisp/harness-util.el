@@ -554,6 +554,66 @@ model of another provider holds (:mode transcript|compact :file PATH
   (let ((h (plist-get (plist-get node :meta) :handoff)))
     (and (consp h) h)))
 
+;;;; Delivery receipts
+;;
+;; A message of the user's that leaves the harness for a model carries
+;; what is known of its delivery in its node's `:meta' `:receipt', and
+;; every client draws that and nothing else.  The turn loop writes it
+;; (`harness-agent--receipt-mark'), because it alone knows the request
+;; the message went out in and how that request ended; the chat and the
+;; app read it (`harness-node-receipt') from the node they already have,
+;; so a local harness and a remote one, a phone and an Emacs, show the
+;; same thing.
+;;
+;; The states are evidence, never a hope:
+;;
+;;   sending      in a request handed to the provider, no answer yet
+;;   retrying     that request failed and is being sent again
+;;   delivered    the provider answered a request that carried it
+;;   failed       that request ended in an error and the turn ended
+;;   unconfirmed  the request was cancelled: the provider may have had it
+;;
+;; A transport that opened (`start') is no answer, so it moves nothing;
+;; neither does a successful enqueue, which is `queued' -- a message the
+;; harness holds, and says so by not being a node yet.  What the model
+;; did with a message -- read it, thought about it -- is not observable
+;; from here, and no state claims it.
+
+(defconst harness-receipt-states
+  '((sending . "sending")
+    (retrying . "retrying")
+    (delivered . "delivered")
+    (failed . "failed")
+    (unconfirmed . "unconfirmed"))
+  "The states of a delivery receipt, as (STATE . WORD).
+STATE is the value of a node's `:meta' `:receipt' `:state', and WORD
+is what a UI calls it.")
+
+(defun harness-node-receipt (node)
+  "Return the delivery receipt NODE, a user message, carries, or nil.
+It is (:state STATE :at TIME :attempt N), the `:meta' `:receipt' the
+turn loop wrote (`harness-receipt-states'): STATE is one of `sending',
+`retrying', `delivered', `failed' or `unconfirmed', AT when that state
+was reached, and ATTEMPT which request of the message it was.  Nil for
+a message the harness never sent -- one of the user's own queued
+messages, which is no node yet, or a node from a harness that kept no
+receipt."
+  (let* ((receipt (plist-get (plist-get node :meta) :receipt))
+         (state (and (consp receipt) (plist-get receipt :state)))
+         (state (cond ((keywordp state) (intern (substring (symbol-name state) 1)))
+                      ((stringp state) (and (not (string-empty-p state)) (intern state)))
+                      ((symbolp state) state))))
+    (when (and state (assq state harness-receipt-states))
+      (append (list :state state)
+              (let ((at (plist-get receipt :at))) (and (numberp at) (list :at at)))
+              (let ((attempt (plist-get receipt :attempt)))
+                (and (numberp attempt) (list :attempt attempt)))))))
+
+(defun harness-node-receipt-state (node)
+  "Return the state of NODE's delivery receipt, or nil.
+See `harness-node-receipt'."
+  (plist-get (harness-node-receipt node) :state))
+
 (defun harness-node-compaction-kind (node)
   "Return the kind of compaction NODE is, as a string, or nil for no compaction.
 That is its `:meta' `:compaction': \"summary\", \"brief\" (a summary of the

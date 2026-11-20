@@ -751,7 +751,39 @@ transcript that is not its own, and its record is left for
         (when-let* ((problem (harness-session--chain-problem
                               s table (nreverse order))))
           (harness-session--note-hydration-fault id problem)
-          (harness-session--refuse-unhydrated id))))))
+          (harness-session--refuse-unhydrated id))
+        ;; A request this process holds no turn for cannot still be in
+        ;; flight: its receipts say so (`harness-session--settle-receipts').
+        (unless (harness-session--turn-runs-p id)
+          (harness-session--settle-receipts s))))))
+
+(defun harness-session--settle-receipts (s)
+  "Settle the delivery receipts S was left holding in flight.
+A message marked `sending' or `retrying' when the harness stopped was in
+a request no answer can now reach it: the process that held that request
+is gone, so what became of the message is unknown, and its receipt says
+`unconfirmed' rather than keep a promise nothing can keep.  This runs
+once, when the session's node log is read into memory
+\(`harness-session--load-nodes'), which is when a stopped harness's
+transcript is read again; the receipts a turn of this process writes
+after that are its own.  Return the ids changed."
+  (let ((id (harness-session-id s))
+        (table (harness-session-nodes s))
+        changed)
+    (maphash
+     (lambda (node-id node)
+       (when (memq (harness-node-receipt-state node) '(sending retrying))
+         (let* ((meta (plist-put (copy-sequence (plist-get node :meta))
+                                 :receipt (list :state "unconfirmed" :at (float-time))))
+                (settled (plist-put (copy-sequence node) :meta meta)))
+           (puthash node-id settled table)
+           (harness-session--persist-node s (list :id node-id :meta meta) t)
+           (push node-id changed))))
+     table)
+    (when changed
+      (harness-log 'info "session %s: %d message(s) were in flight when the harness stopped; their delivery is unconfirmed"
+                   id (length changed)))
+    (nreverse changed)))
 
 (defun harness-session--chain-problem (s table order)
   "Return why the transcript of S, nodes TABLE first written in ORDER, is broken.

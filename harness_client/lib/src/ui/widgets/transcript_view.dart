@@ -110,6 +110,33 @@ class _TranscriptViewState extends State<TranscriptView> {
   int _lastCount = 0;
   int _lastLength = 0;
 
+  /// The key of the newest message of the user's that carries a delivery
+  /// receipt: a `delivered' mark stands there and on no other message, so a
+  /// conversation of many sent messages is never a column of ticks.
+  String? _newestReceiptKey;
+
+  /// The receipt to draw on [item], or null when it shows none.
+  ///
+  /// A message the harness holds is no node, and has no receipt: it says
+  /// "Queued" by that alone.  One that is in flight, being tried again,
+  /// failed or unconfirmed says so on itself -- it is the exception, and the
+  /// reader has to know.  A `delivered' one shows only where it stands
+  /// newest, as a last-read marker does.
+  DeliveryReceipt? _shownReceipt(TranscriptItem item) {
+    final receipt = item.receipt;
+    if (receipt == null || item.pending) return null;
+    if (!receipt.isDelivered) return receipt;
+    return item.key == _newestReceiptKey ? receipt : null;
+  }
+
+  void _noteNewestReceipt() {
+    String? newest;
+    for (final item in widget.items) {
+      if (item.isUser && item.receipt != null) newest = item.key;
+    }
+    _newestReceiptKey = newest;
+  }
+
   /// The keys of the items of the runs the person opened.  A run is open
   /// when any of its items is in here, so that one stays as it was left when
   /// a call joins it, or a call that waited for an answer comes back to it
@@ -190,6 +217,7 @@ class _TranscriptViewState extends State<TranscriptView> {
     _scroll.addListener(_onScroll);
     _lastCount = widget.items.length;
     _lastLength = _totalLength();
+    _noteNewestReceipt();
     // A conversation opens on its latest message, as one that is read as it
     // goes does: not on its first, which a long one has far behind it.  A
     // quote the screen was opened to show is found first.
@@ -208,6 +236,9 @@ class _TranscriptViewState extends State<TranscriptView> {
     super.didUpdateWidget(oldWidget);
     final count = widget.items.length;
     final length = _totalLength();
+    // The `delivered' mark moves off the message it stood on when the next
+    // one arrives, so which message is newest is worked out again.
+    _noteNewestReceipt();
     if (widget.scrollTick != oldWidget.scrollTick) {
       _jumpToBottom();
     } else if ((count != _lastCount || length != _lastLength) && _atBottom) {
@@ -381,6 +412,7 @@ class _TranscriptViewState extends State<TranscriptView> {
                   isLast: index == rows.length - 1,
                   showThinking: widget.showThinking,
                   streaming: widget.streaming,
+                  receipt: _shownReceipt(item),
                   onReply: widget.onReply,
                   onReplyThread: widget.onReplyThread,
                   onShowRef: widget.onShowRef,
@@ -480,6 +512,7 @@ class TranscriptEntry extends StatelessWidget {
     required this.isLast,
     required this.showThinking,
     required this.streaming,
+    this.receipt,
     this.onReply,
     this.onReplyThread,
     this.onShowRef,
@@ -491,6 +524,12 @@ class TranscriptEntry extends StatelessWidget {
   final bool isLast;
   final bool showThinking;
   final bool streaming;
+
+  /// The delivery receipt to draw on this message, or null when it shows
+  /// none: the view decides which messages carry a mark, so that a
+  /// `delivered' one stands only on the newest (see `_shownReceipt`).
+  final DeliveryReceipt? receipt;
+
   final void Function(TranscriptItem item)? onReply;
   final void Function(TranscriptItem item, ChatThread thread)? onReplyThread;
   final void Function(ChatThreadRef ref)? onShowRef;
@@ -504,6 +543,7 @@ class TranscriptEntry extends StatelessWidget {
         return _UserBubble(
           item: item,
           grouped: grouped,
+          receipt: receipt,
           onReply: onReply,
           onReplyThread: onReplyThread,
           onShowRef: onShowRef,
@@ -557,6 +597,7 @@ class _UserBubble extends StatelessWidget {
   const _UserBubble({
     required this.item,
     required this.grouped,
+    this.receipt,
     this.onReply,
     this.onReplyThread,
     this.onShowRef,
@@ -565,6 +606,10 @@ class _UserBubble extends StatelessWidget {
 
   final TranscriptItem item;
   final bool grouped;
+
+  /// What the harness observed of the delivery of this message, or null.
+  final DeliveryReceipt? receipt;
+
   final void Function(TranscriptItem item)? onReply;
   final void Function(TranscriptItem item, ChatThread thread)? onReplyThread;
   final void Function(ChatThreadRef ref)? onShowRef;
@@ -618,18 +663,24 @@ class _UserBubble extends StatelessWidget {
                       onTap: () => reply(item),
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
-                  Text(
-                    // A message the turn has not read yet waits, and says so.
-                    item.pending ? '$sender · Queued' : sender,
-                    style: HarnessText.meta(context).copyWith(
-                      color: fromSomeoneElse
-                          ? theme.colorScheme.onSurfaceVariant
-                          : theme.colorScheme.onSurfaceVariant.withValues(
-                              alpha: 0.7,
-                            ),
-                      fontWeight: FontWeight.w600,
+                  Flexible(
+                    child: Text(
+                      // A message the turn has not read yet waits, and says so.
+                      item.pending ? '$sender · Queued' : sender,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: HarnessText.meta(context).copyWith(
+                        color: fromSomeoneElse
+                            ? theme.colorScheme.onSurfaceVariant
+                            : theme.colorScheme.onSurfaceVariant.withValues(
+                                alpha: 0.7,
+                              ),
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
+                  if (receipt != null)
+                    _DeliveryMark(item: item, receipt: receipt!),
                 ],
               ),
             ),
@@ -683,6 +734,53 @@ class _UserBubble extends StatelessWidget {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+class _DeliveryMark extends StatelessWidget {
+  const _DeliveryMark({required this.item, required this.receipt});
+
+  final TranscriptItem item;
+  final DeliveryReceipt receipt;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cupertino = HarnessStyle.isCupertino(context);
+    final failed = receipt.state == 'failed';
+    final color = failed
+        ? (cupertino
+              ? CupertinoColors.systemRed.resolveFrom(context)
+              : theme.colorScheme.error)
+        : (cupertino
+              ? CupertinoColors.secondaryLabel.resolveFrom(context)
+              : theme.colorScheme.onSurfaceVariant);
+    // A small mark and the state's word, after the name: the reader sees at
+    // a glance that this one did not go out, and what became of it.
+    return Tooltip(
+      key: ValueKey('receipt-${item.key}'),
+      message: receipt.help,
+      child: Padding(
+        padding: const EdgeInsets.only(left: 8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              failed ? Icons.error_outline : Icons.circle,
+              size: failed ? 11 : 7,
+              color: color,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              receipt.word,
+              style: HarnessText.meta(
+                context,
+              ).copyWith(color: color, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
       ),
     );
   }

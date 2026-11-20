@@ -4389,8 +4389,9 @@ REQUEST's turn holds once it has it."
   "A chat whose turn runs, with messages in every state of their sending.
 One sent while the checks ran steered the turn at its next step: the
 model has it, and it stands in the transcript where the model read it,
-after the checks' results, and reads as any message, with nothing beside
-the name.  One sent since waits for the next step, pinned above the
+after the checks' results, carrying its delivery receipt: a green
+\"delivered\" after the name, on the newest message that has one.
+One sent since waits for the next step, pinned above the
 compose box with the queue and out of the transcript, which reads in the
 order the model got things: it says \"queued\", with its [edit] and
 [delete] and the key of each, and the line telling how to press them from

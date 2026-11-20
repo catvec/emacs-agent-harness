@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:collection/collection.dart';
+import 'package:intl/intl.dart';
 
 import '../acp/acp_message.dart';
 import 'chat_thread.dart';
@@ -114,6 +115,90 @@ class ToolView {
   };
 }
 
+/// What the harness observed of the delivery of one of the user's messages.
+///
+/// The turn writes it on the message's own node (`meta.receipt`), because the
+/// turn alone knows the request the message went out in and how that request
+/// ended; every client draws it, and nothing is inferred from a turn running,
+/// a node arriving or a response coming back.  See `harness-node-receipt' on
+/// the harness's side, which is the same record.
+///
+/// The states are evidence, never a hope:
+///
+///  * [sending]     in a request handed to the provider, no answer yet
+///  * [retrying]    that request failed and is being sent again
+///  * [delivered]   the provider answered a request that carried it
+///  * [failed]      that request ended in an error and the turn ended
+///  * [unconfirmed] the request was cancelled: the provider may have had it
+///
+/// A transport that opened is no answer, and neither is a successful enqueue:
+/// a message the harness holds is no node yet, and says "Queued" by that
+/// alone.  What a model did with a message -- read it, thought about it -- is
+/// not observable from here, and no state claims it.
+class DeliveryReceipt {
+  const DeliveryReceipt({required this.state, this.at, this.attempt});
+
+  /// The receipt of [meta], a node's `meta`, or null when it carries none.
+  /// A state this client does not know is no receipt: it draws nothing
+  /// rather than a word the harness never meant.
+  static DeliveryReceipt? fromMeta(JsonMap meta) {
+    final receipt = asMap(meta['receipt']);
+    if (receipt.isEmpty) return null;
+    final state = asString(receipt['state'])?.toLowerCase();
+    if (state == null || !states.contains(state)) return null;
+    return DeliveryReceipt(
+      state: state,
+      at: parseTimeForTranscript(receipt['at']),
+      attempt: asInt(receipt['attempt']),
+    );
+  }
+
+  /// The states of `harness-receipt-states`, which the harness writes.
+  static const states = {'sending', 'retrying', 'delivered', 'failed', 'unconfirmed'};
+
+  /// One of [states].
+  final String state;
+
+  /// When the state was reached, when the harness said.
+  final DateTime? at;
+
+  /// Which request of the message it was: 1 for the first, 2 for the one a
+  /// retry sent.
+  final int? attempt;
+
+  /// The word the app shows for [state]: a state, as a noun or an adjective.
+  /// It is the harness's own word (`harness-receipt-states`), capitalised as
+  /// the rest of the app's labels are.
+  String get word => switch (state) {
+    'sending' => 'Sending',
+    'retrying' => 'Retrying',
+    'delivered' => 'Delivered',
+    'failed' => 'Failed',
+    'unconfirmed' => 'Unconfirmed',
+    _ => '',
+  };
+
+  /// The one-line tooltip of the mark: what was observed, and no more.
+  String get help => switch (state) {
+    'sending' => 'Sending · in the request, no answer yet',
+    'retrying' =>
+      'Retrying · the request failed, another try under way'
+          '${attempt != null && attempt! > 1 ? ' · attempt $attempt' : ''}',
+    'delivered' =>
+      'Delivered${at == null ? '' : ' ${DateFormat('HH:mm').format(at!.toLocal())}'}'
+          ' · provider answered the request · model reading not observable',
+    'failed' => 'Failed · the request ended in an error',
+    'unconfirmed' =>
+      'Unconfirmed · the request was cancelled, the provider\'s answer unknown',
+    _ => 'Delivery receipt',
+  };
+
+  /// Whether the mark stands only on the newest message of the conversation:
+  /// a `delivered' one does, moving off the one before as the next arrives,
+  /// as a last-read marker does.
+  bool get isDelivered => state == 'delivered';
+}
+
 class TranscriptItem {
   TranscriptItem({
     required this.key,
@@ -167,6 +252,14 @@ class TranscriptItem {
   bool get isTool => kind == TranscriptKind.tool;
 
   JsonMap get _meta => asMap(node?['meta']);
+
+  /// What the harness observed of the delivery of this message, or null
+  /// (`meta.receipt`, which the turn writes: see [DeliveryReceipt]).
+  ///
+  /// A message the harness holds -- queued for the next turn, waiting for
+  /// this one's next step -- is no node, so it carries none, and says
+  /// "Queued" by that alone.
+  DeliveryReceipt? get receipt => DeliveryReceipt.fromMeta(_meta);
 
   /// A compaction the person took back: the model is sent the conversation
   /// before it, not its summary, until it is restored.  The harness marks
@@ -751,7 +844,10 @@ class TranscriptState {
             ..threads = chat.threads
             ..sender = sender ?? existing.sender
             ..localEcho = false
-            ..settled = true;
+            ..settled = true
+            // The whole node, so what the harness recorded on it -- its
+            // delivery receipt among the rest -- is read from it.
+            ..node = node;
           if (existing.pending) {
             // The turn took the message: it stands where the model read it.
             existing.pending = false;

@@ -1074,7 +1074,9 @@ The model gets it as a user message all the same."
         (should (equal system (harness-node-sender carry)))
         ;; The user's own messages name no sender.
         (should-not (harness-node-sender thanks))
-        (should-not (plist-get tour :meta))
+        ;; A message of the user's names no sender: what its meta holds is
+        ;; the delivery receipt, and no `:from'.
+        (should-not (plist-get (plist-get tour :meta) :from))
         ;; Steering keeps its own marks beside the sender.
         (should (equal "also this" (plist-get also :content)))
         (should (plist-get (plist-get also :meta) :steering))
@@ -3462,6 +3464,245 @@ What they wait for is the activity's phase, which the line says first."
   (let ((text (harness-agent-waiting-text (list (make-string 100 ?x)))))
     (should (string-match-p "\\`1 message waits: “x\\{39\\}…”\\'" text)))
   (should (equal "3 messages wait" (harness-agent-waiting-text '("a" "b" "c")))))
+
+;;;; Delivery receipts
+
+(defun harness-agent-test-receipt (id text)
+  "Return the delivery receipt of the user message TEXT of session ID, or nil."
+  (harness-node-receipt
+   (cl-find text (harness-agent-test-user-nodes id)
+            :key (lambda (n) (plist-get n :content)) :test #'equal)))
+
+(defun harness-agent-test-receipt-state (id text)
+  "Return the state of the delivery receipt of message TEXT of session ID."
+  (plist-get (harness-agent-test-receipt id text) :state))
+
+(defun harness-agent-test-receipt-log (id)
+  "Record every delivery receipt written on a message of session ID.
+Return a function of no arguments that returns what was recorded, oldest
+first: (NODE-ID STATE) for each state a receipt was given."
+  (let (log)
+    (harness-on 'session/node-updated
+                (lambda (sid node _transient)
+                  (when (equal sid id)
+                    (when-let* ((state (harness-node-receipt-state node)))
+                      (push (list (plist-get node :id) state) log)))))
+    (lambda () (nreverse log))))
+
+(defun harness-agent-test-receipt-states-of (id log)
+  "Return the states LOG, from `harness-agent-test-receipt-log', gave message ID."
+  (mapcar #'cadr (cl-remove-if-not (lambda (entry) (equal (car entry) id)) log)))
+
+(defun harness-agent-test-receipt-node (id text)
+  "Return the id of the node of message TEXT of session ID."
+  (plist-get (cl-find text (harness-agent-test-user-nodes id)
+                      :key (lambda (n) (plist-get n :content)) :test #'equal)
+             :id))
+
+(ert-deftest harness-agent-a-queued-message-has-no-receipt ()
+  "A message the harness only holds is no node, and claims nothing.
+Its enqueue succeeded; that is no evidence a model got it, so the
+session lists it in its queue and the transcript has no node of it."
+  (harness-agent-test-with
+    (let ((id (harness-agent-test-session)))
+      (harness-call 'agent/prompt id "for later" '(:queue t))
+      (should (equal '("for later") (mapcar (lambda (it) (plist-get it :text))
+                                            (plist-get (harness-call 'session/get id) :queue))))
+      (should-not (harness-agent-test-user-nodes id))
+      (should-not (harness-agent-test-receipt id "for later")))))
+
+(ert-deftest harness-agent-a-request-in-flight-is-sending-until-the-provider-answers ()
+  "The message in a request is `sending' until an answer comes back.
+The transport's `start' is no answer: the state stays `sending' after
+it, and only the provider's own words move it to `delivered'.  Those two
+states are all the request ever writes."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (log (harness-agent-test-receipt-log id))
+           (harness-provider-demo-script-override
+            '((:type start) (:type wait :seconds 0.2)
+              (:type text :delta "Hi") (:type done :stop-reason end-turn))))
+      (let ((p (harness-call 'agent/prompt id "hello")))
+        (harness-test-wait (lambda () (eq 'sending (harness-agent-test-receipt-state id "hello")))
+                           5 "the message to be in flight")
+        ;; The provider's transport opened; the model has answered nothing.
+        (sit-for 0.05)
+        (should (eq 'sending (harness-agent-test-receipt-state id "hello")))
+        (harness-test-await p 20))
+      (should (eq 'delivered (harness-agent-test-receipt-state id "hello")))
+      (should (numberp (plist-get (harness-agent-test-receipt id "hello") :at)))
+      (should (equal '(sending delivered)
+                     (harness-agent-test-receipt-states-of
+                      (harness-agent-test-receipt-node id "hello") (funcall log)))))))
+
+(ert-deftest harness-agent-an-answer-to-another-session-delivers-nothing-here ()
+  "A provider's answer to one request is no evidence about another's message.
+While a message waits in flight, another session's request is answered
+in full: the first message is still `sending', and its receipt says
+`delivered' only once its own answer comes."
+  (harness-agent-test-with
+    (let* ((waiting (harness-agent-test-session))
+           (other (harness-agent-test-session))
+           (log (harness-agent-test-receipt-log waiting))
+           (harness-provider-demo-script-override
+            (lambda (request)
+              (if (string-match-p "slow one" (format "%S" (plist-get request :messages)))
+                  '((:type start) (:type wait :seconds 0.4)
+                    (:type text :delta "Late.") (:type done :stop-reason end-turn))
+                '((:type text :delta "Quick.") (:type done :stop-reason end-turn))))))
+      (let ((p (harness-call 'agent/prompt waiting "slow one")))
+        (harness-test-wait (lambda () (eq 'sending (harness-agent-test-receipt-state waiting "slow one")))
+                           5 "the message to be in flight")
+        (harness-test-await (harness-call 'agent/prompt other "quick one") 20)
+        (should (eq 'delivered (harness-agent-test-receipt-state other "quick one")))
+        ;; The other session's answer came back; this one's message has not.
+        (should (eq 'sending (harness-agent-test-receipt-state waiting "slow one")))
+        (harness-test-await p 20))
+      (should (equal '(sending delivered)
+                     (harness-agent-test-receipt-states-of
+                      (harness-agent-test-receipt-node waiting "slow one") (funcall log)))))))
+
+(ert-deftest harness-agent-a-failed-request-retried-says-retrying-then-delivered ()
+  "A request that fails and is sent again says so, then says what came of it.
+The retry repeats the same messages: their receipt is `retrying' while
+it waits, and `delivered' once its answer arrives, at its second try."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (calls 0)
+           (log (harness-agent-test-receipt-log id))
+           (harness-provider-demo-script-override
+            (lambda (_request)
+              (cl-incf calls)
+              (if (= calls 1)
+                  '((:type start) (:type done :stop-reason error :error "connection reset"))
+                '((:type wait :seconds 0.1) (:type text :delta "Hi")
+                  (:type done :stop-reason end-turn))))))
+      (harness-add-filter 'agent/step-error
+                          (lambda (value next &rest _)
+                            (funcall next (if (plist-get value :retry) value (list :retry t))))
+                          60)
+      (let ((p (harness-call 'agent/prompt id "hello")))
+        (harness-test-wait (lambda () (eq 'retrying (harness-agent-test-receipt-state id "hello")))
+                           10 "the retry to be under way")
+        (harness-test-await p 20))
+      (should (= 2 calls))
+      (should (eq 'delivered (harness-agent-test-receipt-state id "hello")))
+      (should (= 2 (plist-get (harness-agent-test-receipt id "hello") :attempt)))
+      (should (equal '(sending retrying delivered)
+                     (harness-agent-test-receipt-states-of
+                      (harness-agent-test-receipt-node id "hello") (funcall log)))))))
+
+(ert-deftest harness-agent-a-request-that-fails-for-good-says-failed ()
+  "A request whose failure ends the turn says `failed', not `delivered'."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override
+            '((:type start) (:type done :stop-reason error :error "no route to host"))))
+      (should (eq 'error (plist-get (harness-test-await (harness-call 'agent/prompt id "hello")) :stop-reason)))
+      (should (eq 'failed (harness-agent-test-receipt-state id "hello"))))))
+
+(ert-deftest harness-agent-a-cancelled-request-is-unconfirmed-never-delivered ()
+  "A request cancelled with no answer says `unconfirmed': the provider may have read it.
+Nothing here can tell, so no receipt claims the model has it."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override
+            '((:type start) (:type wait :seconds 30)
+              (:type text :delta "never") (:type done :stop-reason end-turn))))
+      (let ((p (harness-call 'agent/prompt id "hello")))
+        (harness-test-wait (lambda () (eq 'sending (harness-agent-test-receipt-state id "hello")))
+                           5 "the message to be in flight")
+        (harness-call 'agent/cancel id)
+        (should (eq 'cancelled (plist-get (harness-test-await p 20) :stop-reason))))
+      (should (eq 'unconfirmed (harness-agent-test-receipt-state id "hello"))))))
+
+(ert-deftest harness-agent-a-batch-of-messages-is-one-node-with-one-receipt ()
+  "Messages queued together go out as one message, and one receipt is theirs.
+The queue is sent as a single turn of its own: the transcript records
+one user node for it, and the receipt on that node covers every message
+that went in the request, at once."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (log (harness-agent-test-receipt-log id))
+           (harness-provider-demo-script-override
+            '((:type wait :seconds 0.1) (:type text :delta "Both.")
+              (:type done :stop-reason end-turn))))
+      (harness-call 'agent/prompt id "one" '(:queue t))
+      (harness-call 'agent/prompt id "two" '(:queue t))
+      (let ((p (harness-call 'agent/send-queue id)))
+        (harness-test-wait (lambda () (eq 'sending (harness-agent-test-receipt-state id "one\n\ntwo")))
+                           10 "the batch in flight")
+        (harness-test-await p 20))
+      (should (equal '("one\n\ntwo")
+                     (mapcar (lambda (n) (plist-get n :content))
+                             (harness-agent-test-user-nodes id))))
+      (should (eq 'delivered (harness-agent-test-receipt-state id "one\n\ntwo")))
+      (should (equal '(sending delivered)
+                     (harness-agent-test-receipt-states-of
+                      (harness-agent-test-receipt-node id "one\n\ntwo") (funcall log)))))))
+
+(ert-deftest harness-agent-a-message-sent-mid-turn-follows-the-request-that-carries-it ()
+  "A steering message has no receipt until a request carries it, then follows that request.
+While it waits it is no node, and the answer to the request before it
+delivers nothing of it."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (gate (harness-make-promise))
+           (log (harness-agent-test-receipt-log id))
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "n1" :name "hold" :input (:n 1))
+              (:type wait :seconds 0.1) (:type text :delta "Done.")
+              (:type done :stop-reason end-turn))))
+      (harness-define-tool "hold" :label "Hold" :description "hold" :kind 'read
+                           :handler (lambda (_input _ctx) (harness-then gate (lambda (_) "held"))))
+      (let ((p (harness-call 'agent/prompt id "go")))
+        (harness-test-wait (lambda () (memq 'tool-call (harness-agent-test-kinds id))) 5 "the turn in its tool")
+        (harness-call 'agent/prompt id "change course")
+        ;; No node, and so no receipt, until a request carries it.
+        (should-not (harness-agent-test-receipt id "change course"))
+        (harness-resolve gate t)
+        (harness-test-wait (lambda () (eq 'sending (harness-agent-test-receipt-state id "change course")))
+                           10 "the message in flight in the next request")
+        (harness-test-await p 20))
+      (should (eq 'delivered (harness-agent-test-receipt-state id "change course")))
+      (should (equal '(sending delivered)
+                     (harness-agent-test-receipt-states-of
+                      (harness-agent-test-receipt-node id "change course") (funcall log)))))))
+
+(ert-deftest harness-agent-a-restored-transcript-keeps-its-receipts-and-settles-the-in-flight ()
+  "A receipt survives the restart that stopped the harness mid-request.
+One left `sending' or `retrying' by the process that stopped cannot
+still be in flight: reading the transcript again says `unconfirmed',
+which is all that is known, and a settled one keeps what it said."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override
+            '((:type text :delta "Hi") (:type done :stop-reason end-turn))))
+      (harness-test-await (harness-call 'agent/prompt id "hello"))
+      ;; The turn's next message is in a request that never answers: the
+      ;; harness stops with it in flight.
+      (setq harness-provider-demo-script-override
+            (lambda (_request) (list '(:type start))))
+      (harness-call 'agent/prompt id "in flight")
+      (harness-test-wait (lambda () (eq 'sending (harness-agent-test-receipt-state id "in flight")))
+                         5 "the message to be in flight")
+      (harness-call 'agent/cancel id)
+      ;; Written as the stopped harness left it, then read again.
+      (harness-call 'session/update-node id
+                    (plist-get (cl-find "in flight" (harness-agent-test-user-nodes id)
+                                        :key (lambda (n) (plist-get n :content)) :test #'equal)
+                               :id)
+                    :meta (list :receipt (list :state "sending" :at (float-time))))
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (eq 'delivered (harness-agent-test-receipt-state id "hello")))
+      (should (eq 'unconfirmed (harness-agent-test-receipt-state id "in flight")))
+      ;; Written down, so the next start reads the same.
+      (harness-session-flush)
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (eq 'unconfirmed (harness-agent-test-receipt-state id "in flight"))))))
 
 (provide 'harness-agent-test)
 ;;; harness-agent-test.el ends here

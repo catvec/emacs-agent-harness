@@ -1915,18 +1915,118 @@ holds -- the compaction under way, the question about the prompt cache
                    (list (list "[delete]" "d" (lambda () (harness-chat-delete-steering id))
                                "Message deletion · model does not see it"))))))
 
+;;;;; The delivery of a message: its receipt
+
+;; A message of the user's that left the harness says how far it got,
+;; and only from the receipt its node carries
+;; (`harness-node-receipt', written by the turn).  Nothing here infers
+;; one from a turn running, from a node arriving, or from a response:
+;; a state a client shows is a state the harness observed.
+;;
+;; The marks are few, and none is a badge on every message.  A message
+;; that waits -- in the queue, for the turn's next step, for a gate --
+;; keeps the dim "queued" of the tail (`harness-chat--queued-mark'),
+;; which says by itself that the model has not got it.  A message the
+;; turn took carries nothing of its own while things go well: the one
+;; that goes wrong says so on the messages it concerns (sending,
+;; retrying, failed, unconfirmed), and "delivered" is shown only on the
+;; newest message of the conversation, moving off the one before as the
+;; next arrives, as a last-read marker does -- never a tick on every
+;; message.
+;;
+;; What a receipt cannot say is said in its tooltip: the provider
+;; answered the request the message went out in, which is no claim that
+;; a model read it or understood it.
+
+(defun harness-chat--receipt-mark-text (state)
+  "Return the mark the chat draws for receipt STATE, a symbol.
+It is the state's word (`harness-receipt-states') after a small icon: a
+green circle for `delivered', a grey one while the request is in flight
+or its fate unknown, a red triangle for a failure."
+  (let ((word (or (cdr (assq state harness-receipt-states))
+                  (and state (format "%s" state))))
+        (icon (pcase state
+                ('delivered 'harness-icon-success)
+                ('failed 'harness-icon-failure)
+                (_ 'harness-icon-caution)))
+        (face (pcase state
+                ('delivered 'harness-success-face)
+                ('failed 'harness-failure-face)
+                (_ 'harness-dim-face))))
+    (when word
+      (concat (propertize (harness-ui-icon icon) 'face face)
+              " "
+              (propertize word 'face face)))))
+
+(defun harness-chat--receipt-help (receipt)
+  "Return the one-line tooltip of RECEIPT, a node's delivery receipt."
+  (let ((state (plist-get receipt :state))
+        (at (plist-get receipt :at))
+        (attempt (plist-get receipt :attempt)))
+    (harness-ui-one-line
+     (pcase state
+       ('sending "Sending · in the request, no answer yet")
+       ('retrying (format "Retrying · the request failed, another try under way%s"
+                          (if (and (numberp attempt) (> attempt 1))
+                              (format " · attempt %d" attempt) "")))
+       ('delivered (concat "Delivered"
+                           (if (numberp at) (format " %s" (harness-chat--time-label at)) "")
+                           " · provider answered the request · model reading not observable"))
+       ('failed "Failed · the request ended in an error")
+       ('unconfirmed "Unconfirmed · the request was cancelled, the provider's answer unknown")
+       (_ "Delivery receipt")))))
+
+(defun harness-chat--receipt-note (block)
+  "Return the note of the delivery of user BLOCK, or nil when it needs none.
+That is the receipt of the message when it says something the reader
+must know: it is in flight, being tried again, failed, or unconfirmed.
+A `delivered' one shows on the newest message of the transcript alone
+\(`harness-chat--receipt-latest-p'), and a message whose turn never took
+it says \"not delivered\" until a turn does (`harness-chat--delivery-note')."
+  (let ((receipt (harness-node-receipt (harness-chat-block-node block))))
+    (pcase (plist-get receipt :state)
+      ('delivered (when (harness-chat--receipt-latest-p (harness-chat-block-id block))
+                    (harness-chat--receipt-string receipt)))
+      ('sending (harness-chat--receipt-string receipt))
+      ('retrying (harness-chat--receipt-string receipt))
+      ('failed (harness-chat--receipt-string receipt))
+      ('unconfirmed (harness-chat--receipt-string receipt))
+      (_ nil))))
+
+(defun harness-chat--receipt-string (receipt)
+  "Return RECEIPT drawn as the chat draws it, its tooltip with it."
+  (let ((mark (harness-chat--receipt-mark-text (plist-get receipt :state))))
+    (and mark (propertize mark 'help-echo (harness-chat--receipt-help receipt)))))
+
+(defun harness-chat--newest-receipt-id ()
+  "Return the id of the newest user block that carries a delivery receipt.
+A message the harness wrote on its own carries none, so a system note
+arriving after the user's message does not take the `delivered' mark
+off it."
+  (cl-find-if (lambda (id)
+                (when-let* ((block (gethash id harness-chat--blocks)))
+                  (and (equal (harness-chat-block-kind block) "user")
+                       (harness-node-receipt (harness-chat-block-node block)))))
+              harness-chat--order))
+
+(defun harness-chat--receipt-latest-p (id)
+  "Non-nil when ID is the newest message that carries a receipt.
+The `delivered' mark shows there, and on no other block: one mark, on
+the message last sent, as a last-read marker stands on the newest."
+  (equal id (harness-chat--newest-receipt-id)))
+
 (defun harness-chat--delivery-note (block)
   "Return the note about the delivery of user BLOCK, for its sender line, or nil.
-Only a block in `harness-chat--sending' has one, and only once the turn
-is over: a message it never delivered is \"not delivered\".  While the
-turn goes on a message that waits is no block of the transcript but
-draws in the tail (`harness-chat--insert-queue'), and one the turn took
-needs no note.  The tooltip says what the note means."
-  (when (and (null harness-chat--turn-start)
-             (member (harness-chat-block-id block) harness-chat--sending)
-             (not (harness-chat--delivered-p (harness-chat-block-node block))))
-    (propertize "not delivered" 'face 'harness-dim-face
-                'help-echo "The turn ended before the model got this message; the next turn reads it")))
+A block with a receipt says what the receipt says
+\(`harness-chat--receipt-note').  A block in `harness-chat--sending', once
+the turn is over, is one the turn never delivered: it says \"not
+delivered\", and the tooltip says what the note means."
+  (or (harness-chat--receipt-note block)
+      (when (and (null harness-chat--turn-start)
+                 (member (harness-chat-block-id block) harness-chat--sending)
+                 (not (harness-chat--delivered-p (harness-chat-block-node block))))
+        (propertize "not delivered" 'face 'harness-dim-face
+                    'help-echo "The turn ended before the model got this message; the next turn reads it"))))
 
 (defun harness-chat--with-note (body note)
   "Return BODY, the text of a user message, with NOTE on its sender line.
@@ -1959,11 +2059,21 @@ a turn cancelled before it took them left them there."
 
 (defun harness-chat--redraw-sending ()
   "Work out which user blocks carry a delivery note, and draw them again.
-That is those that had one and those that have one now."
+That is those that had one and those that have one now, and the newest
+message with a receipt and the one before it: a `delivered' mark stands
+on the newest, and moves off the one it stood on when the next message
+arrives."
   (let ((before harness-chat--sending)
-        (after (harness-chat--sending-candidates)))
+        (after (harness-chat--sending-candidates))
+        (newest nil))
     (setq harness-chat--sending after)
-    (dolist (id (cl-union before after :test #'equal))
+    (dolist (id harness-chat--order)
+      (when (and (< (length newest) 2)
+                 (when-let* ((block (gethash id harness-chat--blocks)))
+                   (and (equal (harness-chat-block-kind block) "user")
+                        (harness-node-receipt (harness-chat-block-node block)))))
+        (push id newest)))
+    (dolist (id (cl-union before (append after newest) :test #'equal))
       (when-let* ((block (gethash id harness-chat--blocks)))
         (harness-chat--rerender block)))))
 
@@ -4567,12 +4677,23 @@ above or dropped move the groups they fall in."
 (defun harness-chat--apply-update (update)
   "Apply one session UPDATE to the current buffer."
   (pcase (plist-get update :sessionUpdate)
-    ("_harness/node" (harness-chat--on-node (plist-get update :node))
-                     (when (equal (harness-chat--str (plist-get (plist-get update :node) :kind)) "user")
-                       ;; The message the turn took leaves the tail as it joins the transcript.
-                       (harness-chat--taken (plist-get (plist-get update :node) :id))
-                       ;; A message of the user's may steer the turn that goes on.
-                       (harness-chat--refresh-sending)))
+    ("_harness/node" (let ((node (plist-get update :node))
+                           (before (harness-chat--newest-receipt-id)))
+                       (harness-chat--on-node node)
+                       (when (equal (harness-chat--str (plist-get node :kind)) "user")
+                         ;; The message the turn took leaves the tail as it joins the transcript.
+                         (harness-chat--taken (plist-get node :id))
+                         ;; A message of the user's may steer the turn that goes on.
+                         (harness-chat--refresh-sending))
+                       ;; A `delivered' mark stands on the newest message
+                       ;; alone: one that arrived takes it off the message
+                       ;; before it, and a receipt that changed draws its
+                       ;; own message again.
+                       (unless (or harness-chat--batch harness-chat--loading)
+                         (let ((after (harness-chat--newest-receipt-id)))
+                           (dolist (id (delq nil (list before after)))
+                             (when-let* ((block (gethash id harness-chat--blocks)))
+                               (harness-chat--rerender block)))))))
     ("agent_message_chunk" (harness-chat--on-chunk update "assistant"))
     ("agent_thought_chunk" (harness-chat--on-chunk update "thinking"))
     ("_harness/activity" (harness-chat--on-activity (plist-get update :activity)))
