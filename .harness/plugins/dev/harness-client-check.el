@@ -68,7 +68,7 @@
 
 (defvar harness-client-check--paths
   '("harness_client/lib" "harness_client/test" "harness_client/android"
-    "harness_client/assets" "harness_client/pubspec.yaml"
+    "harness_client/linux" "harness_client/assets" "harness_client/pubspec.yaml"
     "harness_client/pubspec.lock" "harness_client/analysis_options.yaml"
     "harness_client/.flutter-version")
   "The paths, relative to the repository, that a build of the Flutter app reads.

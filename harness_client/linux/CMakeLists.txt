@@ -39,9 +39,21 @@ endif()
 # Be cautious about adding new options here, as plugins use this function by
 # default. In most cases, you should add new options to specific targets instead
 # of modifying this function.
+#
+# -Wall is here, but -Werror is NOT: this function runs for every plugin that
+# asks for it too, and a plugin's sources come from the pub cache, where we
+# cannot fix a warning a newer compiler learns to make.  Clang 23 added
+# -Wunused-but-set-global, and flutter_webrtc 1.6.3 sets a Windows-only
+# messenger pointer on Linux, which the plugin is not ours to edit: with -Werror
+# the whole desktop build stopped at
+#
+#   flutter_common.cc:13:14: error: variable 'g_host_messenger' set but not used
+#   [-Werror,-Wunused-but-set-global]
+#
+# The app's own sources keep the stricter setting, in linux/runner/CMakeLists.txt.
 function(APPLY_STANDARD_SETTINGS TARGET)
   target_compile_features(${TARGET} PUBLIC cxx_std_14)
-  target_compile_options(${TARGET} PRIVATE -Wall -Werror)
+  target_compile_options(${TARGET} PRIVATE -Wall)
   target_compile_options(${TARGET} PRIVATE "$<$<NOT:$<CONFIG:Debug>>:-O3>")
   target_compile_definitions(${TARGET} PRIVATE "$<$<NOT:$<CONFIG:Debug>>:NDEBUG>")
 endfunction()

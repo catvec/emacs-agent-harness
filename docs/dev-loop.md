@@ -375,9 +375,15 @@ nothing, and neither is one that changed nothing of the app.
 The check builds what is **committed**, in a copy under
 `scripts/.dev/client-check/work/` (never in the checkout), and runs, in
 order: `flutter pub get --enforce-lockfile` (`pubspec.lock` agrees with
-`pubspec.yaml`), `flutter analyze`, `flutter test`, and `flutter build apk
+`pubspec.yaml`), `flutter analyze`, `flutter test`, `flutter build apk
 --release`, from an empty `build/`, which is what `tool/qr_install.sh`
-installs.  When `pubspec.yaml`, `pubspec.lock`, `.flutter-version` or
+installs, and `flutter build linux --release`, which compiles the desktop
+app's native side: its runner and every plugin's Linux sources, which no
+other step here touches (clang 23's `-Wunused-but-set-global` in
+`flutter_webrtc` 1.6.3 stopped that build, and nothing else saw it).  A
+machine without cmake, ninja, clang or the GTK 3 headers skips the Linux
+build and says so, rather than failing a branch for the machine it was
+checked on.  When `pubspec.yaml`, `pubspec.lock`, `.flutter-version` or
 `android/` differ from the base's, it builds the base's tree first and then
 the branch's tree over that `build/`: the build a person makes after
 merging, over the one they made before (a base that does not build itself is

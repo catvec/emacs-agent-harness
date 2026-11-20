@@ -16,6 +16,11 @@
 #                                                   failures this branch brought
 #   build       flutter build apk --release         the APK tool/qr_install.sh
 #                                                   installs, from an empty build/
+#   build-linux flutter build linux --release       the desktop app's native side
+#                                                   (the runner and every plugin's
+#                                                   Linux sources), skipped and said
+#                                                   where cmake, ninja, clang or the
+#                                                   GTK 3 headers are missing
 #   upgrade     when pubspec.yaml, pubspec.lock, .flutter-version or android/
 #               differ from BASE's: BASE's tree built, then HEAD's tree built
 #               over that build/ -- the build you make after merging, over the
@@ -65,8 +70,10 @@ project_dir="$(dirname "$tool_dir")"
 
 # The paths of the app, relative to harness_client/, that a build or a test of
 # it reads.  .harness/plugins/dev/harness-client-check.el has the same list
-# (harness-client-check--paths); a test keeps the two equal.
-inputs=(lib test android assets pubspec.yaml pubspec.lock analysis_options.yaml .flutter-version)
+# (harness-client-check--paths); a test keeps the two equal.  `linux' is here
+# because the check builds the Linux app too (see the build-linux step), and a
+# runner or plugin-registration change there is what a Linux build reads.
+inputs=(lib test android linux assets pubspec.yaml pubspec.lock analysis_options.yaml .flutter-version)
 # Of those, what the upgrade build is about: what a version of a dependency or
 # of the Android build can leave behind in build/.
 upgrade_inputs=(pubspec.yaml pubspec.lock .flutter-version android)
@@ -418,6 +425,31 @@ if [ -f "$apk" ]; then
 else
   echo "FAIL build    produced no APK at $apk"
   finish 1
+fi
+
+# --- the Linux build -------------------------------------------------------------
+
+# The desktop app is the same Dart code and a different native side: its own
+# runner, and every plugin's Linux sources.  A warning a newer compiler learns
+# to make in a plugin's sources -- clang 23's -Wunused-but-set-global in
+# flutter_webrtc 1.6.3 -- fails `flutter build linux` and nothing else here
+# ever compiled those files, which is how a broken Linux build reached main.
+# It needs cmake, ninja, clang and the GTK 3 development headers, and none of
+# the Android toolchain; where those are missing the step is skipped and said,
+# rather than failing a branch for the machine it was checked on.
+linux_tools_missing() {
+  local tool
+  for tool in cmake ninja clang++ pkg-config; do
+    command -v "$tool" >/dev/null 2>&1 || { printf '%s' "$tool"; return 0; }
+  done
+  pkg-config --exists gtk+-3.0 2>/dev/null || { printf '%s' "gtk+-3.0 (libgtk-3-dev)"; return 0; }
+  return 1
+}
+
+if missing="$(linux_tools_missing)"; then
+  echo "skip build-linux (no $missing: the desktop build needs cmake, ninja, clang and gtk+-3.0)"
+else
+  step build-linux "$tree" "$flutter" build linux --release
 fi
 
 # --- the upgrade build ---------------------------------------------------------

@@ -16,6 +16,11 @@ add_executable(${BINARY_NAME}
 # that need different build settings.
 apply_standard_settings(${BINARY_NAME})
 
+# The app's own sources are ours to keep warning-free, so they alone are held to
+# -Werror.  apply_standard_settings cannot do it: plugins call it too, and their
+# sources come from the pub cache (see linux/CMakeLists.txt).
+target_compile_options(${BINARY_NAME} PRIVATE -Werror)
+
 # Add preprocessor definitions for the application ID.
 add_definitions(-DAPPLICATION_ID="${APPLICATION_ID}")
 

@@ -273,6 +273,15 @@ elif args[:1] == ["test"]:
     for event in events:
         print(json.dumps(event))
     sys.exit(1 if failing else 0)
+elif args[:2] == ["build", "linux"]:
+    if os.path.exists("LINUX_BUILD_FAILS"):
+        print("linux/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/common/cpp/src/"
+              "flutter_common.cc:13:14: error: variable 'g_host_messenger' set but "
+              "not used [-Werror,-Wunused-but-set-global]")
+        sys.exit(1)
+    os.makedirs("build/linux/x64/release/bundle", exist_ok=True)
+    with open("build/linux/x64/release/bundle/app", "w") as f:
+        f.write("a linux build\n")
 elif args[:2] == ["build", "apk"]:
     if os.path.exists("BUILD_FAILS"):
         print("FAILURE: Build failed with an exception.")
@@ -388,19 +397,22 @@ class CheckBuildTest(CheckFixture):
             ("head/harness_client", "analyze"),
             ("head/harness_client", "test --reporter json"),
             ("head/harness_client", "build apk --release"),
+            ("head/harness_client", "build linux --release"),
         ])
         stamp = self.stamp()
         self.assertEqual(stamp["result"], "pass")
         self.assertEqual(stamp["head"], head)
         self.assertEqual(stamp["base"], self.git("rev-parse", "main"))
-        self.assertEqual(stamp["steps"], ["pub-get", "analyze", "test", "build"])
+        self.assertEqual(stamp["steps"],
+                         ["pub-get", "analyze", "test", "build", "build-linux"])
         self.assertEqual(len(stamp["apk_sha256"]), 64)
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertFalse(os.path.exists(os.path.join(self.client, "build")))
         # The whole output of every step is kept.
         logs = sorted(os.listdir(os.path.join(self.out, "logs")))
         self.assertEqual([name for name in logs if name.endswith(".log")],
-                         ["01-pub-get.log", "02-analyze.log", "03-test.log", "04-build.log"])
+                         ["01-pub-get.log", "02-analyze.log", "03-test.log", "04-build.log",
+                          "05-build-linux.log"])
         self.assertIn("No issues found!", read(os.path.join(self.out, "logs", "02-analyze.log")))
         # The copies are thrown away once it passed.
         self.assertFalse(os.path.exists(os.path.join(self.out, "work")))
@@ -548,7 +560,8 @@ class CheckBuildTest(CheckFixture):
             ("upgrade/harness_client", "build apk --release"),
         ])
         self.assertEqual(self.stamp()["steps"],
-                         ["pub-get", "analyze", "test", "build", "upgrade-from", "upgrade"])
+                         ["pub-get", "analyze", "test", "build", "build-linux",
+                          "upgrade-from", "upgrade"])
 
     def test_the_build_over_the_base_catches_what_a_clean_build_cannot(self):
         # The failure that started this: a plugin upgraded over an older build
@@ -578,7 +591,8 @@ class CheckBuildTest(CheckFixture):
         self.assertIn("FAIL upgrade-from", result.stdout)
         self.assertIn("does not build either", result.stdout)
         self.assertIn("PASSED", result.stdout)
-        self.assertEqual(self.stamp()["steps"], ["pub-get", "analyze", "test", "build"])
+        self.assertEqual(self.stamp()["steps"],
+                         ["pub-get", "analyze", "test", "build", "build-linux"])
 
     def test_the_head_is_built_over_the_base_with_the_files_it_deleted_gone(self):
         self.commit("deps", {"pubspec.lock": "packages: {a: 2}\n", "android/old.gradle": "x\n"})
@@ -601,6 +615,45 @@ class CheckBuildTest(CheckFixture):
         self.assertNotIn("upgrade-from", self.stamp()["steps"])
         self.assertEqual(len([c for c in self.calls() if c[1] == "build apk --release"]), 1)
 
+    def test_the_linux_build_is_made_and_a_failure_of_it_fails_the_check(self):
+        # The desktop app's native side -- its runner and every plugin's Linux
+        # sources -- is compiled by nothing else here, and clang 23 made a
+        # plugin warning an error that stopped `flutter build linux` on main.
+        self.commit("ui", {"lib/main.dart": "void main() { run(); }\n"})
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, self.output(result))
+        self.assertIn("ok   build-linux", result.stdout)
+        self.assertIn("build-linux", self.stamp()["steps"])
+
+        self.commit("break linux", {"LINUX_BUILD_FAILS": "yes\n"})
+        # The passing run above wrote a stamp for its own commit; a check that
+        # fails writes none, so this one must not be left behind.
+        os.unlink(os.path.join(self.out, "stamp.json"))
+        broken = self.run_check()
+        self.assertEqual(broken.returncode, 1, self.output(broken))
+        self.assertIn("FAIL build-linux", broken.stdout)
+        self.assertIn("unused-but-set-global", broken.stdout)
+        self.assertNotIn("PASSED", broken.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "stamp.json")))
+        # Nothing after it ran.
+        self.assertNotIn("tool-test_qr_tools", broken.stdout)
+
+    def test_a_machine_without_the_desktop_tools_skips_the_linux_build(self):
+        # A sandbox has no GTK 3 headers, and a branch is not failed for the
+        # machine it was checked on: the step is skipped, and said.  The
+        # machine is made to look like one by a pkg-config that finds no
+        # gtk+-3.0, which is the last of the four things the step needs.
+        self.commit("ui", {"lib/main.dart": "void main() { run(); }\n"})
+        no_gtk = os.path.join(self.tmp, "no-gtk-bin")
+        write(os.path.join(no_gtk, "pkg-config"),
+              "#!/bin/sh\nexit 1\n", 0o755)
+        result = self.run_check(PATH=no_gtk + os.pathsep + os.environ.get("PATH", ""))
+        self.assertEqual(result.returncode, 0, self.output(result))
+        self.assertIn("skip build-linux", result.stdout)
+        self.assertIn("gtk+-3.0", result.stdout)
+        self.assertNotIn("build-linux", self.stamp()["steps"])
+        self.assertNotIn("build linux --release", [args for _, args in self.calls()])
+
     def test_the_tools_own_tests_run_when_the_tools_changed(self):
         write(os.path.join(self.client, "tool", "test_qr_tools.py"),
               "import sys\nprint('tool tests ran')\nsys.exit(0)\n")
@@ -609,7 +662,8 @@ class CheckBuildTest(CheckFixture):
         result = self.run_check()
         self.assertEqual(result.returncode, 0, self.output(result))
         self.assertIn("ok   tool-test_qr_tools", result.stdout)
-        self.assertIn("tool tests ran", read(os.path.join(self.out, "logs", "05-tool-test_qr_tools.log")))
+        self.assertIn("tool tests ran",
+                      read(os.path.join(self.out, "logs", "06-tool-test_qr_tools.log")))
         self.assertIn("tool-test_qr_tools", self.stamp()["steps"])
         # A failure of theirs fails the check.
         self.commit("break", {"tool/test_qr_tools.py": "import sys\nprint('a tool is broken')\nsys.exit(1)\n"})

@@ -2065,6 +2065,7 @@ matches.  It is what keeps the app's idea of the plan the harness's own.
 ```sh
 flutter build apk --release        # build/app/outputs/flutter-apk/app-release.apk
 flutter build web --release        # build/web
+flutter build linux --release      # build/linux/x64/release/bundle
 flutter build macos --release      # on a Mac with Xcode
 flutter build ios --release        # on a Mac with Xcode, signed for a device
 ```
@@ -2073,6 +2074,23 @@ The Android build in this checkout used JDK 21 and Android SDK 36; set
 `JAVA_HOME` and `ANDROID_HOME` accordingly. Release builds use the generated
 debug signing config so they install for testing; replace it before publishing.
 The icon is generated from `assets/icon.png` with `dart run flutter_launcher_icons`.
+
+The Linux build needs `cmake`, `ninja`, `clang` and the GTK 3 development
+headers (`gtk+-3.0` through `pkg-config`), and nothing of the Android
+toolchain.  `linux/CMakeLists.txt`'s `apply_standard_settings` runs for the
+plugins as well as the runner, so it sets `-Wall` but not `-Werror`: a plugin's
+sources come from the pub cache, and a warning a newer compiler learns to make
+there is not ours to fix.  Clang 23 added `-Wunused-but-set-global` and
+`flutter_webrtc` 1.6.3 sets a Windows-only messenger pointer on Linux, which
+stopped the build at
+
+```
+flutter_common.cc:13:14: error: variable 'g_host_messenger' set but not used
+[-Werror,-Wunused-but-set-global]
+```
+
+The app's own sources keep `-Werror`, in `linux/runner/CMakeLists.txt`;
+`test/desktop_runners_test.dart` holds both halves of that arrangement.
 
 `tool/qr_install.sh` builds for the ABI of the phone that is connected already,
 so one phone costs a build of one ABI instead of three.  Where a release build's

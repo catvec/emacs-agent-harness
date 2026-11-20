@@ -40,6 +40,57 @@ void main() {
     expect(application, contains('gtk_window_set_title(window, "Harness");'));
   });
 
+  test('the Linux runner is a whole one', () {
+    for (final path in const [
+      'linux/CMakeLists.txt',
+      'linux/flutter/CMakeLists.txt',
+      'linux/flutter/generated_plugin_registrant.cc',
+      'linux/runner/CMakeLists.txt',
+      'linux/runner/main.cc',
+      'linux/runner/my_application.cc',
+      'linux/runner/my_application.h',
+    ]) {
+      expect(File(path).existsSync(), isTrue, reason: path);
+    }
+    expect(_read('.metadata'), contains('platform: linux'));
+  });
+
+  test('only the app\'s own sources are compiled with -Werror', () {
+    // apply_standard_settings runs for the plugins as well, and their sources
+    // come from the pub cache, where a warning a newer compiler learns to make
+    // is not ours to fix.  Clang 23 added -Wunused-but-set-global and
+    // flutter_webrtc 1.6.3 sets a Windows-only messenger pointer on Linux, so
+    // `-Werror` there stopped `flutter build linux` outright:
+    //
+    //   flutter_common.cc:13:14: error: variable 'g_host_messenger' set but not
+    //   used [-Werror,-Wunused-but-set-global]
+    //
+    // No Dart test builds the desktop app, so the files are read instead.  The
+    // prose in them may name the flag; the compile options may not.
+    final flags = RegExp(r'^\s*target_compile_options\(.*$', multiLine: true);
+    final standard = _read('linux/CMakeLists.txt');
+    final inherited = flags
+        .allMatches(standard)
+        .map((match) => match.group(0)!)
+        .where((line) => line.contains('-Werror'));
+    expect(
+      inherited,
+      isEmpty,
+      reason:
+          'linux/CMakeLists.txt apply_standard_settings is applied to every '
+          'plugin, whose sources are not ours: -Werror there breaks the Linux '
+          'build on a plugin warning',
+    );
+    expect(standard, contains('target_compile_options(\${TARGET} PRIVATE -Wall)'));
+    expect(
+      _read('linux/runner/CMakeLists.txt'),
+      contains('target_compile_options(\${BINARY_NAME} PRIVATE -Werror)'),
+      reason:
+          'the app\'s own sources must stay held to -Werror: they are ours to '
+          'keep warning-free',
+    );
+  });
+
   test('Windows opens at 1280x820 and stops at 760x560', () {
     final main = _read('windows/runner/main.cpp');
     expect(main, contains('Win32Window::Size size(1280, 820);'));
