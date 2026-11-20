@@ -2964,6 +2964,45 @@ is then possible, while automatic endpoint movement remains forbidden."
       (list :id id :recovered t :endpoint (plist-get evidence :slug)))))
 
 
+(defun harness-openrouter--recovered-evidence (evidence token reason)
+  "Return EVIDENCE with its in-flight TOKEN recovered for REASON.
+The marker is dropped, the send it stood for is kept as uncertain
+\(`:partial') and the recovery is audited, exactly as
+`session/recover-openrouter-send' records a deliberate one.  A
+recovered send is still a send: the pin, the conversation and the
+refusal to move endpoints on its own all stand, so what the recovery
+buys is a deliberate same-pin retry, never automatic movement."
+  (let ((recovered (copy-tree evidence))
+        (at (float-time)))
+    (setq recovered (plist-put recovered :inflight nil)
+          recovered (plist-put recovered :partial t)
+          recovered (plist-put recovered :at at)
+          recovered (plist-put recovered :recoveries
+                               (append (plist-get evidence :recoveries)
+                                       (list (list :token token :reason reason
+                                                   :owner (plist-get evidence :owner)
+                                                   :at at)))))
+    recovered))
+
+(defun harness-openrouter--recover-orphan (session evidence)
+  "Recover SESSION's in-flight EVIDENCE when its owner is proven dead.
+Return the evidence to send under: EVIDENCE itself while a request may
+still be in flight, or the recovered one when the process that sent it
+is gone.  A marker whose owner is alive, another host's, or cannot be
+verified dead is left alone -- an unproven orphan is not a licence to
+send twice.  The recovered record is written before the send it allows,
+so a crash during that send cannot lose the audit."
+  (let ((token (plist-get evidence :inflight)))
+    (if (and token (harness-openrouter--owner-dead-p (plist-get evidence :owner)))
+        (let ((recovered (harness-openrouter--recovered-evidence
+                          evidence token "owner-exited")))
+          (harness-call 'session/set-ext (plist-get session :id)
+                        harness-openrouter--send-key recovered nil t)
+          (harness-log 'info "openrouter: %s recovered orphaned dispatch %s from exited owner"
+                       (plist-get session :id) token)
+          recovered)
+      evidence)))
+
 (defun harness-openrouter--tracked-complete (request)
   "Dispatch REQUEST with durable conservative substantive-send evidence.
 Persist before transport admission: a crash never makes a possible send
@@ -2973,7 +3012,11 @@ but not a later deliberate retry of the same endpoint."
       (harness-openai--complete (harness-openrouter--endpoint) request)
     (let* ((session (harness-openrouter--live-session request))
            (id (plist-get session :id))
-           (before (harness-openrouter--send-evidence session))
+           ;; A marker left by a process that has exited is not a request
+           ;; in flight: recovering it here is what keeps a crash from
+           ;; wedging the session for good, which no retry could undo.
+           (before (harness-openrouter--recover-orphan
+                    session (harness-openrouter--send-evidence session)))
            (live-route (harness-openrouter--copy-authority (harness-openrouter--route-of session)))
            (token (harness-uuid))
            (stamp (list :state "sent" :at (float-time) :inflight token

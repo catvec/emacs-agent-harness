@@ -264,6 +264,32 @@
                 (should (equal "sent" (plist-get (harness-openrouter--send-evidence harness-openrouter-test--session-value) :state))))))))))
 )
 
+(ert-deftest harness-openrouter-health-orphaned-marker-recovers-instead-of-wedging ()
+  "A marker whose owning process exited must not refuse every later send.
+The manual `session/recover-openrouter-send' was the only way to clear
+one, so a crash while a send was in flight wedged its session for good:
+every retry was refused `routing-inflight' and no retry could undo it."
+  (let* ((s (harness-openrouter-health-test--session "sent"))
+         (e (plist-get (plist-get s :ext) :openrouter-send))
+         (dead nil))
+    (setf (plist-get e :inflight) "orphan-token"
+          (plist-get e :owner) '(:host "test" :uid 1000 :pid 999 :start 10)
+          (plist-get (plist-get s :ext) :openrouter-send) e)
+    (harness-openrouter-test-with-session s
+      (cl-letf (((symbol-function 'harness-openrouter--owner-dead-p) (lambda (_) dead)))
+        ;; While the owner may still be alive the marker stands: the recovery
+        ;; hands back exactly the evidence it was given.
+        (should (eq e (harness-openrouter--recover-orphan s e)))
+        (should (equal "orphan-token" (plist-get e :inflight)))
+        (setq dead t)
+        (let ((recovered (harness-openrouter--recover-orphan s e)))
+          (should-not (plist-get recovered :inflight))
+          (should (plist-get recovered :partial))
+          (should (equal "sent" (plist-get recovered :state)))
+          (should (= 1 (length (plist-get recovered :recoveries))))
+          (should (equal "orphan-token" (plist-get (car (plist-get recovered :recoveries)) :token)))
+          (should (equal "owner-exited" (plist-get (car (plist-get recovered :recoveries)) :reason))))))))
+
 (ert-deftest harness-openrouter-health-dead-owner-recovery-is-explicit-and-conservative ()
   (let* ((s (harness-openrouter-health-test--session "sent"))
          (req (harness-openrouter-test--request s))
