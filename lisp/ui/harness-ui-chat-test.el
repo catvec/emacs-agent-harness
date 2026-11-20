@@ -4899,6 +4899,125 @@ is drawn whole, and then the words."
             (should-not (string-search "<thread" text))
             (should-not (string-search "<quote>" text))))))))
 
+(ert-deftest harness-ui-chat-draws-a-compact-thread-block-as-the-same-card ()
+  "A <thread> block laid out on one line is the card of the multiline one.
+The agent writes the tags close together -- the opening tag and the
+quote with the first words after them, and the closing tag after the
+last -- and every one of them was drawn as its tags.  The card names
+the thread and its status, quotes what the reply answers, draws the
+words, bullets and all, and says where the block was written, so C-c >
+on it replies to the thread; the text before and after it is the
+message's, and nothing of it is lost."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (compact (concat "<thread id=\"t-551f154b\" status=\"closed\">"
+                            "<quote>don't modify the test data</quote>"
+                            "Agreed, I'm leaving the test data alone.</thread>"))
+           (multiline (concat "<thread id=\"t-551f154b\" status=\"closed\">\n"
+                              "<quote>don't modify the test data</quote>\n"
+                              "Agreed, I'm leaving the test data alone.\n</thread>")))
+      (harness-call 'session/append sid
+                    (list :kind 'assistant
+                          :content (concat "Fixed it.\n\n" compact "\n\nAnd the bullets:\n\n"
+                                           "<thread id=\"t-2\" status=\"open\"><quote>why?</quote>"
+                                           "Because reasons.\n\n- one\n- two\n</thread>\n\nDone.")))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (with-current-buffer buf
+          (goto-char (point-min))
+          (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+            (should-not (string-search "<thread" text))
+            (should-not (string-search "</thread>" text))
+            (should-not (string-search "<quote>" text)))
+          ;; The thread, its status, and what it answers.
+          (should (search-forward "Fixed it." nil t))
+          (should (search-forward "↳ " nil t))
+          (should (search-forward "t-551f154b" nil t))
+          (should (search-forward "closed" nil t))
+          (should (search-forward "don't modify the test data" nil t))
+          (should (memq 'harness-thread-quote-face
+                        (ensure-list (get-text-property (match-beginning 0) 'face))))
+          (should (search-forward "Agreed, I'm leaving the test data alone." nil t))
+          ;; The words after the first block are the message's, not swallowed.
+          (should (search-forward "And the bullets:" nil t))
+          ;; The second block, its words, the bullets under them.
+          (should (search-forward "t-2" nil t))
+          (should (search-forward "open" nil t))
+          (should (search-forward "Because reasons." nil t))
+          (should (search-forward "• one" nil t))
+          (should (search-forward "• two" nil t))
+          ;; And the words after that one.
+          (should (search-forward "Done." nil t))
+          ;; The card says where the whole block was written, so a quote of
+          ;; it is a quote of that block, not of the message around it.
+          (should (equal (cons (string-search compact (harness-chat--message-text
+                                                        (car (harness-ui-chat-test-blocks buf "assistant"))))
+                               (+ (string-search compact (harness-chat--message-text
+                                                          (car (harness-ui-chat-test-blocks buf "assistant"))))
+                                  (length compact)))
+                         (get-text-property (1- (harness-ui-chat-test-find buf "don't modify"))
+                                            'harness-md-source)))
+          ;; The same block laid out on lines of its own draws the same.
+          (let* ((other (harness-ui-chat-test-session "Multiline"))
+                 (multiline-buf (progn
+                                  (harness-call 'session/append other
+                                                (list :kind 'assistant :content multiline))
+                                  (harness-ui-chat-test-open other))))
+            (should (equal (harness-ui-chat-test-card-text buf "↳ " "alone.")
+                           (harness-ui-chat-test-card-text multiline-buf "↳ " "alone.")))))))))
+
+(defun harness-ui-chat-test-card-text (buf from &optional to)
+  "Return the card in BUF from FROM, or from FROM to TO, as plain text.
+The words a card is drawn from are found by what they say, so the same
+card drawn from two messages reads the same."
+  (with-current-buffer buf
+    (let ((start (harness-ui-chat-test-find buf from))
+          (end (and to (harness-ui-chat-test-find buf to))))
+      (and start end (string-trim (substring-no-properties
+                                   (buffer-substring-no-properties start end)))))))
+
+(ert-deftest harness-ui-chat-a-compact-thread-block-streams-and-reloads ()
+  "A compact <thread> block is a card while it streams and once it is reloaded.
+Half of a block, with no closing tag yet, is the text it was written as;
+closed, it is the card.  The transcript read again from the session --
+as a reload draws it -- is the same card, not its tags."
+  (harness-ui-chat-test-with
+    (harness-ui-chat-test-connect)
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid))
+           (w (selected-window))
+           (block (concat "<thread id=\"t-9\" status=\"closed\"><quote>the tests</quote>"
+                          "They pass.</thread>")))
+      (save-window-excursion
+        (set-window-buffer w buf)
+        (with-current-buffer buf
+          (harness-chat--on-window-buffer-change w)
+          (harness-chat--apply-update (list :sessionUpdate "_harness/node"
+                                            :node (list :id "n-thread" :kind "assistant" :content "")))
+          (harness-chat--apply-update (harness-ui-chat-test-chunk "n-thread" "Answer.\n\n"))
+          (harness-chat--apply-update (harness-ui-chat-test-chunk "n-thread" (substring block 0 40)))
+          ;; Unclosed, it is what was written, and no card is drawn.
+          (harness-test-wait (lambda () (harness-ui-chat-test-find buf "<thread")) 5 "the text so far")
+          (should-not (harness-ui-chat-test-find buf "↳ "))
+          (harness-chat--apply-update (harness-ui-chat-test-chunk "n-thread" (substring block 40)))
+          (harness-test-wait (lambda () (and (not (harness-ui-chat-test-find buf "<thread"))
+                                             (harness-ui-chat-test-find buf "They pass.")))
+                             5 "the card, once the block is closed")
+          (should (harness-ui-chat-test-find buf "↳ "))
+          (should (harness-ui-chat-test-find buf "t-9"))))
+      ;; A reload reads the same words from the session and draws the card.
+      (harness-call 'session/append sid (list :kind 'assistant :content (concat "Answer.\n\n" block)))
+      (with-current-buffer buf
+        (harness-chat--load)
+        (harness-test-wait (lambda () (with-current-buffer buf (not harness-chat--loading)))
+                           5 "the transcript reloaded")
+        (should-not (harness-ui-chat-test-find buf "<thread"))
+        (should (harness-ui-chat-test-find buf "↳ "))
+        (should (harness-ui-chat-test-find buf "t-9"))
+        (should (harness-ui-chat-test-find buf "the tests"))
+        (should (harness-ui-chat-test-find buf "They pass."))
+        ;; The transcript is the session's now, not the streamed copy.
+        (should (= 1 (length (harness-ui-chat-test-blocks buf "assistant"))))))))
+
 (defun harness-ui-chat-test-bars (pos)
   "Return the bars drawn down the left of the line at POS, as a string.
 Those of the line's prefix, which the transcript draws beside the text

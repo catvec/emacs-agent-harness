@@ -885,5 +885,109 @@ lines a quote renders as each say where the whole quote was."
     (should (equal "# Title" (substring text 0 7)))
     (should-not (get-text-property (length (cdr (nth 0 seen))) 'harness-md-source out))))
 
+(ert-deftest harness-md-a-reply-in-a-thread-is-drawn-however-it-is-written ()
+  "A <thread> block is drawn as the view draws it, wherever it is laid out.
+The tags may be alone on their lines, all of the block on one line, or
+the opening tag and the quote with the first words after them and the
+closing tag lines later: it is the same reply, and the tags never show.
+A block in code is an example, text around one is Markdown as any
+other, and one written in a sentence, a list item, a heading or a table
+cell is words of that block; a block that is not strict is the text it
+was written as."
+  (let* ((card (lambda (block)
+                 (format "CARD %s %s [%s] %s\n"
+                         (or (plist-get block :id) "new")
+                         (or (plist-get block :status) "-")
+                         (plist-get block :quote)
+                         (plist-get block :body))))
+         (harness-ui-markdown-thread-function card)
+         (compact (concat "<thread id=\"t-1\" status=\"closed\"><quote>the test data</quote>"
+                          "Agreed, I left it alone.</thread>"))
+         (multiline (concat "<thread id=\"t-1\" status=\"closed\">\n<quote>the test data</quote>"
+                            "\nAgreed, I left it alone.\n</thread>"))
+         (opening-line (concat "<thread id=\"t-1\" status=\"closed\"><quote>the test data</quote>"
+                               "Agreed, I left it alone.\n\n- one\n- two\n</thread>")))
+    (should (equal "CARD t-1 closed [the test data] Agreed, I left it alone."
+                   (substring-no-properties (harness-ui-markdown-render compact))))
+    ;; The same reply, laid out three ways, draws the same.
+    (should (equal (substring-no-properties (harness-ui-markdown-render compact))
+                   (substring-no-properties (harness-ui-markdown-render multiline))))
+    (should (equal "CARD t-1 closed [the test data] Agreed, I left it alone.
+
+- one
+- two"
+                   (substring-no-properties (harness-ui-markdown-render opening-line))))
+    ;; What is written around it is Markdown, and a blank line stays one.
+    (should (equal "Before.\n\nCARD t-1 - [q] a\n\nAfter."
+                   (substring-no-properties
+                    (harness-ui-markdown-render
+                     (concat "Before.\n\n<thread id=\"t-1\"><quote>q</quote>a</thread>\n\nAfter.")))))
+    (should (equal "Before.\nCARD t-1 - [q] a\nAfter."
+                   (substring-no-properties
+                    (harness-ui-markdown-render
+                     (concat "Before.\n<thread id=\"t-1\"><quote>q</quote>a</thread>\nAfter.")))))
+    ;; Two of them, on one line or on lines of their own, are two cards.
+    (should (equal "CARD t-1 - [q1] a1\nCARD t-2 - [q2] a2"
+                   (substring-no-properties
+                    (harness-ui-markdown-render
+                     (concat "<thread id=\"t-1\"><quote>q1</quote>a1</thread>"
+                             "<thread id=\"t-2\"><quote>q2</quote>a2</thread>")))))
+    ;; A block written in a sentence, a list item or a table cell is
+    ;; words of it, as the Markdown around it says.
+    (should (equal "It writes <thread id=\"t-1\"><quote>q</quote>a</thread> like this."
+                   (substring-no-properties
+                    (harness-ui-markdown-render
+                     (concat "It writes <thread id=\"t-1\"><quote>q</quote>a</thread> like this.")))))
+    (should (equal "• <thread id=\"t-1\"><quote>q</quote>a</thread>"
+                   (substring-no-properties
+                    (harness-ui-markdown-render
+                     (concat "- <thread id=\"t-1\"><quote>q</quote>a</thread>")))))
+    (should (equal "<thread id=\"t-1\"><quote>q</quote>a</thread>"
+                   (substring-no-properties
+                    (harness-ui-markdown-render
+                     (concat "# <thread id=\"t-1\"><quote>q</quote>a</thread>")))))
+    (let ((cell (harness-ui-markdown-render
+                 (concat "| <thread id=\"t-1\"><quote>q</quote>a</thread> | x |\n|---|---|"))))
+      (should (string-search "<thread" cell))
+      (should-not (string-search "CARD" cell)))
+    ;; The line after a sentence is a line, and a block on it is a card.
+    (should (equal "Before.\nCARD t-1 - [q] a"
+                   (substring-no-properties
+                    (harness-ui-markdown-render
+                     (concat "Before.\n<thread id=\"t-1\"><quote>q</quote>a</thread>")))))
+    ;; A block in a quote is a card in the quote.
+    (should (equal "┃ CARD t-1 - [q] a\n\nAfter."
+                   (substring-no-properties
+                    (harness-ui-markdown-render
+                     (concat "> <thread id=\"t-1\"><quote>q</quote>a</thread>\n\nAfter.")))))
+    ;; An example in code is an example, and one in inline code is words.
+    (should (equal "```\n<thread id=\"t-1\"><quote>q</quote>a</thread>\n```"
+                   (string-trim
+                    (harness-md-test-source
+                     (concat "```\n<thread id=\"t-1\"><quote>q</quote>a</thread>\n```")))))
+    (should (equal "Write `<thread id=\"t-1\"><quote>q</quote>a</thread>` like that."
+                   (harness-md-test-source
+                    (concat "Write `<thread id=\"t-1\"><quote>q</quote>a</thread>` like that."))))
+    ;; A block that is not strict is the text it was written as, and takes
+    ;; none of the text around it with it.
+    (should (equal "<thread id=\"t-1\"> text\nCARD t-2 - [q] a"
+                   (substring-no-properties
+                    (harness-ui-markdown-render
+                     (concat "<thread id=\"t-1\">\ntext\n"
+                             "<thread id=\"t-2\"><quote>q</quote>a</thread>")))))
+    (should (equal "<thread id=\"t-1\"> text"
+                   (substring-no-properties
+                    (harness-ui-markdown-render "<thread id=\"t-1\">\ntext"))))
+    ;; The card says where in the text the whole block was written, and
+    ;; the Markdown around it where its own blocks were.
+    (let* ((text (concat "Before.\n\n" compact "\n\nAfter."))
+           (out (harness-ui-markdown-render text)))
+      (should (equal (cons 9 (+ 9 (length compact)))
+                     (get-text-property (string-search "CARD" out) 'harness-md-source out)))
+      (should (equal '(0 . 7) (get-text-property 0 'harness-md-source out)))
+      (should (equal (cons (string-search "After." text) (length text))
+                     (let ((at (string-search "After." out)))
+                       (get-text-property at 'harness-md-source out)))))))
+
 (provide 'harness-ui-markdown-test)
 ;;; harness-ui-markdown-test.el ends here

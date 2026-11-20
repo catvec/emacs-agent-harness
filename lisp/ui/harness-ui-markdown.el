@@ -13,6 +13,14 @@
 ;; The renderer is pure: `harness-ui-markdown-render' returns a string
 ;; the caller inserts, so it can be used for streaming re-renders.
 ;;
+;; A reply in a thread -- a <thread> block, the form the agent answers
+;; a thread of a review in (harness-util.el) -- is no Markdown: the
+;; renderer cuts each block out of the text before it renders the rest,
+;; and draws it in its place as `harness-ui-markdown-thread-function'
+;; draws it.  The parser is the one the rest of the harness reads the
+;; form with, so a block in code is an example and one that is not
+;; strict is the text it was written as.
+;;
 ;; A link to something in the harness -- a session, a message, a tool
 ;; call, a task, a thread of a review (harness-links.el) -- is a link
 ;; like any other, written [text](harness:...), <harness:...> or bare;
@@ -679,14 +687,10 @@ the harness sends itself, would take the whole rendering down."
         (cl-incf i))
       (and rule (>= count 3)))))
 
-(defun harness-ui-markdown-render (text)
-  "Render Markdown TEXT into a propertized string.
-Each block of the result -- a paragraph, a heading, a list item, a code
-block, a table, the lines of a quote -- has the text property
-`harness-md-source', (FROM . TO): where in TEXT the block was written,
-as offsets of characters.  Something that acts on what is on the screen
--- a reply to part of it -- knows from that what the text it selects was
-rendered from."
+(defun harness-ui-markdown--render-text (text)
+  "Render TEXT, Markdown with no reply in a thread in it, as a string.
+Each block of the result has the text property `harness-md-source',
+where in TEXT it was written (`harness-ui-markdown-render')."
   (let* ((text (or text ""))
          (lines (split-string text "\n"))
          (all (vconcat lines))
@@ -755,28 +759,8 @@ rendered from."
               (while (and lines (string-match-p "|" (car lines)))
                 (push (pop lines) rows))
               (emit (mark (harness-ui-markdown--table (nreverse rows)) first (here)))))
-           ;; A reply in a thread, as a <thread> block
-           ((string-match "\\`[ ]\\{0,3\\}<thread\\(?:[ \t][^>]*\\)?>[ \t]*\\'" line)
-            (flush-para)
-            (let ((block-lines (list line))
-                  (closed nil))
-              (while (and lines (not closed))
-                (let ((next (pop lines)))
-                  (push next block-lines)
-                  (when (string-match-p "</thread>" next) (setq closed t))))
-              (let* ((raw (string-join (nreverse block-lines) "\n"))
-                     (parsed (car (harness-thread-parse-blocks raw)))
-                     (rendered
-                      (cond
-                       ((and parsed harness-ui-markdown-thread-function)
-                        (funcall harness-ui-markdown-thread-function parsed))
-                       (parsed
-                        (concat (propertize (format "↳ thread %s\n" (or (plist-get parsed :id) "new"))
-                                            'face 'harness-md-quote-bar)
-                                (harness-ui-markdown-render (plist-get parsed :body))))
-                       (t raw))))
-                (emit (mark (if (string-suffix-p "\n" rendered) rendered (concat rendered "\n"))
-                            first (here))))))
+           ;; A reply in a thread is no block of Markdown: it is cut out
+           ;; of the text before this runs (`harness-ui-markdown-render').
            ;; Block quote
            ((string-match "\\`[ ]\\{0,3\\}>[ ]?\\(.*\\)\\'" line)
             (flush-para)
@@ -824,6 +808,135 @@ rendered from."
 (defun harness-ui-markdown-insert (text)
   "Insert Markdown TEXT rendered at point."
   (insert (harness-ui-markdown-render text)))
+
+;;;; Replies in threads
+
+;; A reply in a thread is no Markdown: it is a <thread> block, the form
+;; the agent writes an answer in a thread of a review with, and the one
+;; the user answers one in (`harness-thread-parse-blocks').  The tags are
+;; cut out of the text before it is rendered, and the block is drawn in
+;; their place (`harness-ui-markdown-thread-function'); what is written
+;; around it is Markdown as any other text.  The parser is the one the
+;; rest of the harness reads the form with, so a block is a card exactly
+;; where it is a reply: in code it is an example, and one that is not
+;; strict is the text it was written as.
+
+(defun harness-ui-markdown--thread (block)
+  "Return BLOCK, a reply in a thread parsed, as the renderer draws it.
+`harness-ui-markdown-thread-function' draws it when the view sets one;
+else it is the words of the reply, under a line naming the thread.  It
+ends with a newline, and says where in the text it was written
+\(`harness-md-source')."
+  (let* ((rendered (if harness-ui-markdown-thread-function
+                       (funcall harness-ui-markdown-thread-function block)
+                     (concat (propertize (format "↳ thread %s\n" (or (plist-get block :id) "new"))
+                                         'face 'harness-md-quote-bar)
+                             (harness-ui-markdown-render (plist-get block :body)))))
+         (rendered (if (string-suffix-p "\n" rendered) rendered (concat rendered "\n"))))
+    (put-text-property 0 (length rendered) 'harness-md-source
+                       (cons (plist-get block :start) (plist-get block :end))
+                       rendered)
+    rendered))
+
+(defun harness-ui-markdown--shift-source (string offset)
+  "Return STRING, rendered, with its `harness-md-source' moved by OFFSET.
+The rendering of part of a text says where its blocks were written in
+the whole of it, not in the part."
+  (let ((pos 0)
+        (length (length string)))
+    (while (< pos length)
+      (let ((span (get-text-property pos 'harness-md-source string))
+            (next (next-single-property-change pos 'harness-md-source string length)))
+        (when span
+          (put-text-property pos next 'harness-md-source
+                             (cons (+ offset (car span)) (+ offset (cdr span)))
+                             string))
+        (setq pos next)))
+    string))
+
+(defun harness-ui-markdown--blank-line-at-p (text pos)
+  "Non-nil when the blanks of TEXT around POS hold a blank line.
+POS is where two pieces of TEXT meet, the end of one and the start of
+the next: the blanks either side of it are looked at together, so a
+paragraph and a card written apart stay apart."
+  (let ((start pos)
+        (end pos)
+        (newlines 0))
+    (while (and (> start 0) (memq (aref text (1- start)) '(?\s ?\t ?\n ?\r)))
+      (cl-decf start))
+    (while (and (< end (length text)) (memq (aref text end) '(?\s ?\t ?\n ?\r)))
+      (cl-incf end))
+    (dotimes (i (- end start))
+      (when (eq (aref text (+ start i)) ?\n) (cl-incf newlines)))
+    (>= newlines 2)))
+
+(defun harness-ui-markdown--thread-starts-block-p (text start after)
+  "Non-nil when the reply in a thread at START in TEXT begins a block.
+That is when only blanks come before it on its line, or when it follows
+the reply that ends at AFTER with nothing but blanks between: two of
+them written one after the other are two blocks.  A reply written in a
+sentence, a list item, a heading or a table cell is words of that
+block, as the Markdown around it says, and is drawn as it was written."
+  (and (or (harness-thread--at-line-start-p text start)
+           (and (>= start after)
+                (string-blank-p (substring text after start))))
+       t))
+
+(defun harness-ui-markdown-render (text)
+  "Render Markdown TEXT into a propertized string.
+Each block of the result -- a paragraph, a heading, a list item, a code
+block, a table, the lines of a quote -- has the text property
+`harness-md-source', (FROM . TO): where in TEXT the block was written,
+as offsets of characters.  Something that acts on what is on the screen
+-- a reply to part of it -- knows from that what the text it selects was
+rendered from.
+
+A reply in a thread -- a <thread> block, however it is laid out: the
+tags alone on their lines, all of it on one line, or the quote and the
+first words after the opening tag -- is drawn where it stands, as
+`harness-ui-markdown-thread-function' draws it, and the Markdown around
+it as any other, from the start of a line or on from another reply.  A
+reply written in a sentence, a list item or a table cell is words of
+that block, drawn as it was written; one that is not strict is the text
+it was written as, and takes no text with it."
+  (let* ((text (or text ""))
+         (blocks (and (string-search "<thread" text)
+                      (harness-thread-parse-blocks text))))
+    (if (null blocks)
+        (harness-ui-markdown--render-text text)
+      (let ((parts nil)
+            (pos 0))
+        (cl-labels
+            ((add (string start)
+               ;; A piece of the rendering, and where in TEXT it starts:
+               ;; the blanks between two pieces are the ones written.
+               (let ((string (string-trim string "\n+" "\n+")))
+                 (unless (string-empty-p string)
+                   (push (cons string start) parts)))))
+          (dolist (block blocks)
+            (let ((start (plist-get block :start))
+                  (end (plist-get block :end)))
+              ;; A block of its own is drawn; one written in a sentence,
+              ;; a list item or a table cell is words of it.
+              (when (harness-ui-markdown--thread-starts-block-p text start pos)
+                (when (< pos start)
+                  (add (harness-ui-markdown--shift-source
+                        (harness-ui-markdown--render-text (substring text pos start))
+                        pos)
+                       pos))
+                (add (harness-ui-markdown--thread block) start)
+                (setq pos end))))
+          (when (< pos (length text))
+            (add (harness-ui-markdown--shift-source
+                  (harness-ui-markdown--render-text (substring text pos))
+                  pos)
+                 pos)))
+        (let ((out nil))
+          (dolist (part (nreverse parts))
+            (when out
+              (push (if (harness-ui-markdown--blank-line-at-p text (cdr part)) "\n\n" "\n") out))
+            (push (car part) out))
+          (string-trim-right (apply #'concat (nreverse out)) "\n+"))))))
 
 ;;;; In lines
 

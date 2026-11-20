@@ -13250,7 +13250,23 @@ text with no markers left (`harness-ui-markdown-summary`); the comments
 of a review are drawn so (see `ui-patch-review`).  Tables are
 fitted to the window: a table wider than the chat wraps each cell
 inside its column, so the columns stay aligned, and is drawn again when
-the window's width changes.  The text rendered as Markdown is the
+the window's width changes.  A reply in a thread is no Markdown: the
+renderer cuts each `<thread>` block out of the text before it renders
+the rest, and draws the block in its place as
+`harness-ui-markdown-thread-function` draws it -- the card of a reply in
+a thread in the chat (`harness-chat--render-thread-tag`) -- wherever the
+block stands as a block and however it is laid out, all of it on one
+line or with its tags on lines of their own; the parser is the one the
+rest of the harness reads the form with
+(`harness-thread-parse-blocks`), so a block in code is an example, one
+that is not strict is the text it was written as, and neither takes the
+text around it.  A block is drawn where it begins a line, or on from
+another reply; one written in a sentence, a list item, a heading or a
+table cell is words of that block, drawn as written
+(`harness-ui-markdown--thread-starts-block-p`).  The card says where the
+whole block was written, as every block of a rendering says where its
+own was (`harness-md-source`), so a region of it quotes the block.
+The text rendered as Markdown is the
 agent's messages and plans; the user's messages, their line breaks kept
 as typed (`harness-ui-markdown-hard-breaks`); an ask_user question, in
 its panel and in its block; and its answer, which the block shows as a
