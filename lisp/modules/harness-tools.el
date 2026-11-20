@@ -1201,9 +1201,28 @@ that it did not know about reaches it in a message."
                   (harness-tools--names session)))
          (builtin (harness-tools--builtin session names))
          (names (cl-remove-if (lambda (n) (member n builtin)) names)))
-    (when (and session (not (consp settled)))
-      (ignore-errors (harness-call 'session/set-tool-schema session-id names)))
     (delq nil (mapcar (lambda (n) (let ((tool (harness-tool-get n))) (and tool (harness-tool-spec tool)))) names))))
+
+(harness-defmethod tools/settle (session-id)
+  "Settle the tool names SESSION-ID's requests carry, and return them.
+A session's schema follows the system prompt in a request, so it is
+fixed at its first request and is the same list for the rest of its
+life: a tool added mid-session -- a permission grant, a plugin, a
+module loading late -- would rewrite what the provider's prompt cache
+reads (`harness-agent--request').  Settling is this call's only
+business, so that reading the list (`tools/list') never changes a
+session: a UI that shows a session's tools, or a test that asks what it
+is offered, would otherwise freeze whatever was there at that moment --
+the moment before a confinement check, a mode change or a grant that
+was about to change it."
+  (let* ((session (and session-id (harness-tools--session session-id)))
+         (settled (and session (plist-get session :tool-schema))))
+    (cond
+     ((not session) nil)
+     ((consp settled) settled)
+     (t (let ((names (harness-tools--names session)))
+          (ignore-errors (harness-call 'session/set-tool-schema session-id names))
+          names)))))
 
 (harness-defmethod tools/builtin (session-id)
   "Return the names of the harness tools that SESSION-ID's provider runs itself.

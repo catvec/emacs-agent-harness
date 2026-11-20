@@ -1219,13 +1219,26 @@ rewrite it and cost the conversation again.  NAMES is settled at the
 session's first request and is that same list for the rest of its life.
 A session that has one keeps it: this changes nothing and returns what
 it already had.  A tool a session was not offered is not one it can
-call, and new information about what it may do reaches it in a message."
+call, and new information about what it may do reaches it in a message.
+
+NAMES nil forgets the settled list, so that the next request settles it
+again.  That is for a change the session cannot go on without -- a mode
+the supervisor's judge decided, which is the whole point of the judge
+-- and it costs the conversation's cache, which is what a mode change
+costs anyway.  Settling nil as a list is not this: a schema of no tools
+is a real schema, and `tools/settle' never makes one."
   (let ((s (harness-session--get id)))
-    (unless (consp (harness-session-tool-schema s))
-      (setf (harness-session-tool-schema s) (and (listp names) (copy-sequence names)))
-      (harness-session--settled s :tools)
-      (harness-session--touch s))
-    (harness-session-tool-schema s)))
+    (if (null names)
+        (progn
+          (when (consp (harness-session-tool-schema s))
+            (setf (harness-session-tool-schema s) nil)
+            (harness-session--touch s))
+          nil)
+      (unless (consp (harness-session-tool-schema s))
+        (setf (harness-session-tool-schema s) (and (listp names) (copy-sequence names)))
+        (harness-session--settled s :tools)
+        (harness-session--touch s))
+      (harness-session-tool-schema s))))
 
 (harness-defmethod session/set-system (id prompt)
   "Keep PROMPT as the system prompt session ID sends; return it.

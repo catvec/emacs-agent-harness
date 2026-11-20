@@ -1716,8 +1716,8 @@ the payload)."
          ;; that changed under it must not rewrite what a provider's
          ;; prompt cache reads.
          (prompt (harness-agent-session-system session))
-         (_schema (and (harness-method-exists-p 'tools/list)
-                       (harness-call 'tools/list session-id)))
+         (_schema (and (harness-method-exists-p 'tools/settle)
+                       (harness-call 'tools/settle session-id)))
          (session (harness-call 'session/get session-id))
          (model (plist-get session :model))
          (request (list :model model

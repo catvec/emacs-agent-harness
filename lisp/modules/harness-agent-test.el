@@ -2830,8 +2830,13 @@ that it did not know about reaches it in a message."
   (harness-agent-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted")
                           :id))
+           ;; A request settles the schema (`tools/settle'); reading the list
+           ;; does not, so a UI or a test that asks what a session is offered
+           ;; never freezes it.
+           (settled-first (harness-call 'tools/settle id))
            (first (mapcar (lambda (spec) (format "%s" (plist-get spec :name)))
                           (harness-call 'tools/list id))))
+      (should (equal settled-first first))
       (should (member "list_dir" first))
       (should-not (member "brand_new_tool" first))
       (harness-define-tool "brand_new_tool" :label "New" :description "new" :kind 'read
@@ -2846,8 +2851,9 @@ that it did not know about reaches it in a message."
       (let* ((other (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
                                              :model "demo:scripted")
                                :id))
-             (theirs (mapcar (lambda (spec) (format "%s" (plist-get spec :name)))
-                             (harness-call 'tools/list other))))
+             (theirs (progn (harness-call 'tools/settle other)
+                            (mapcar (lambda (spec) (format "%s" (plist-get spec :name)))
+                                    (harness-call 'tools/list other)))))
         (should (member "brand_new_tool" theirs))))))
 
 (ert-deftest harness-agent-step-request-is-what-a-step-sends ()

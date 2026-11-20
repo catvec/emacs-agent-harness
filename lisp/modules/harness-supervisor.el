@@ -1274,6 +1274,14 @@ and the event `supervisor/changed' -- which the chat header follows --
 and the note, with its `:meta', the chat's buttons, say the rest."
   (harness-supervisor--set-ext session-id harness-supervisor--judge-key nil)
   (harness-call 'session/set-ext session-id :supervisor verdict)
+  ;; The verdict is the judge deciding what this session may do, and it
+  ;; arrives while the first turn is already under way: that turn settled
+  ;; the schema of the mode the session started in, so the tools the
+  ;; verdict adds -- the writing ones, when it reads hands-on -- would
+  ;; never reach it.  Settling again is what makes the decision real.  It
+  ;; costs the conversation's cache once, which is the price of a mode
+  ;; change and is what the next request would pay anyway.
+  (harness-call 'session/set-tool-schema session-id nil)
   (harness-supervisor--note session verdict nil)
   (harness-emit 'supervisor/changed session-id verdict))
 
