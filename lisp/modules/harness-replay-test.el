@@ -619,6 +619,61 @@ The complaint names the field and the index, never the text."
                      "redaction"))
       (should (= 2 (plist-get (harness-call 'replay/frozen-status id) :generation))))))
 
+(ert-deftest harness-replay-settling-a-prompt-explains-the-change-it-makes ()
+  "A session that settles a system prompt after it sent one records a reset.
+That is a session from before prompts were settled at all: its record
+says nil, so the request it sends next is built from a prompt no earlier
+request sent, and the boundary check would refuse it as a change nothing
+explained.  Settling it is a change the harness knows, so it is recorded
+in advance and the next request goes out instead of being refused."
+  (harness-replay-test-with
+    (let* ((id (harness-replay-test-session))
+           (first (list (harness-replay-test--message "hi")))
+           (settled (list (harness-replay-test--message "hi" "assistant")
+                          (harness-replay-test--message "there"))))
+      ;; A request went out before the session settled a prompt.
+      (harness-replay-test--keep id first)
+      (should-not (plist-get (harness-call 'session/get id) :system))
+      ;; The settle is what the fix announces.  Its change is exactly what
+      ;; the boundary check refuses when nothing records it, which is the
+      ;; stranded session's failure: the prompt the next request is built
+      ;; from is not the one the frozen body kept.
+      (should (cdr (harness-replay-test--seam id settled :system "You are a test.")))
+      (harness-call 'session/set-system id "You are a test.")
+      ;; The reset is recorded, so the same body is sent, not refused.
+      (should (equal "system" (plist-get (harness-call 'replay/frozen-status id) :reset)))
+      (should (= 0 (plist-get (harness-call 'replay/frozen-status id) :bytes)))
+      (let ((seam (harness-replay-test--seam id settled :system "You are a test.")))
+        (should-not (cdr seam))))))
+
+(ert-deftest harness-replay-settling-a-tool-schema-explains-the-change-it-makes ()
+  "A session that settles a tool schema after it sent a request records a reset.
+The schema follows the prompt in a request, and a provider's cache reads
+it, so a session that settles one it did not send before has changed what
+it sends, and the change is recorded rather than refused."
+  (harness-replay-test-with
+    (let* ((id (harness-replay-test-session))
+           (messages (list (harness-replay-test--message "hi")))
+           (tool (list :type "function" :function (list :name "a" :description "d"))))
+      (harness-replay-test--keep id messages)
+      (should-not (plist-get (harness-call 'session/get id) :tool-schema))
+      (harness-call 'session/set-tool-schema id (list "a"))
+      (should (equal "tools" (plist-get (harness-call 'replay/frozen-status id) :reset)))
+      (let ((seam (harness-replay-test--seam id messages :tools (list tool))))
+        (should-not (cdr seam))))))
+
+(ert-deftest harness-replay-a-first-request-settling-a-prompt-records-nothing ()
+  "A session settling a prompt at its first request records no reset.
+Nothing was sent before it, so there is no frozen body to stop applying,
+and settling announces nothing: its first request is the first thing
+frozen."
+  (harness-replay-test-with
+    (let ((id (harness-replay-test-session)))
+      (should-not (harness-call 'replay/frozen-status id))
+      (harness-call 'session/set-system id "You are a test.")
+      (harness-call 'session/set-tool-schema id (list "a"))
+      (should-not (harness-call 'replay/frozen-status id)))))
+
 (ert-deftest harness-replay-the-tool-schema-is-a-component-of-its-own ()
   "A changed tool schema is refused, and an added tool is not a change of the old."
   (harness-replay-test-with

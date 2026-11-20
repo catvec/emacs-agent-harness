@@ -122,6 +122,18 @@ is refused.  The two are never the same code path.
 `harness-replay-reset-on-change` records `model`, `system`, `tools` or
 `route` before the next request is built.
 
+A session settling its prompt or its tool schema is one of those changes,
+and the one that is not a setting: `session/set-system` and
+`session/set-tool-schema` fix what every request starts with, so a session
+that had already sent one and settles it now has a frozen body built from
+a prompt this one replaces.  Both announce it on `session/updated`, which
+is what records the reset -- otherwise the next request is refused as a
+change nothing explained.  A session settling at its first request has
+sent nothing, so there is no frozen body to stop applying and neither
+announces anything.  Sessions that lived before prompts were settled at
+all are the ones this repairs: their records say nil, and their next
+request is the first after the settle.
+
 ## What may become the prefix: the conversation, not every request
 
 Not every request that names a session is a step of that session's

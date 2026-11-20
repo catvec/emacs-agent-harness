@@ -670,6 +670,31 @@ save never leaves a session this harness cannot load."
                     harness-session--save-delay #'harness-session--save (harness-session-id s))
   (harness-session--announce s))
 
+(defun harness-session--settled (s key)
+  "Announce that KEY, a component S settled, is what S now sends.
+KEY is `:system' or `:tools'.  Settling is not a change a session's
+settings went through, but it changes what its next request starts with,
+which is what a provider's prompt cache reads.  A session that sent a
+request before it settled one -- one that lived before prompts were
+settled at all, whose record says nil -- has a frozen body built from a
+prompt this one replaces, and the boundary check would refuse its next
+request for a change nothing explained (see the \"no recorded reset\"
+refusal in `harness-replay.el').  Emitting it as `session/updated' is how
+that change is explained in advance, exactly as a change of the model or
+of the system prompt made through `session/update' is: the replay module
+records the reset that empties the frozen body, and the next request is
+built fresh instead of refused.  A session settling at its first request
+has sent nothing yet, so there is no frozen body to stop applying and
+nothing is announced: its first request is the first thing frozen, and
+the reset would say a body stopped applying when none ever did."
+  (when (and (harness-method-exists-p 'replay/frozen-status)
+             (harness-call 'replay/frozen-status (harness-session-id s)))
+    ;; The value is what the reset is recorded from, not something a
+    ;; subscriber reads: `harness-replay-reset-on-change' matches the key
+    ;; and keeps its own reason for it.  A session's prompt is not carried
+    ;; on the bus, where every subscriber and the log would see it.
+    (harness-emit 'session/updated (harness-session-id s) (list key t))))
+
 (defun harness-session-flush ()
   "Write every session record now (used on exit)."
   (maphash (lambda (id _) (ignore-errors (harness-session--save id))) harness-sessions))
@@ -1198,6 +1223,7 @@ call, and new information about what it may do reaches it in a message."
   (let ((s (harness-session--get id)))
     (unless (consp (harness-session-tool-schema s))
       (setf (harness-session-tool-schema s) (and (listp names) (copy-sequence names)))
+      (harness-session--settled s :tools)
       (harness-session--touch s))
     (harness-session-tool-schema s)))
 
@@ -1215,6 +1241,7 @@ changes nothing and returns what it already had."
     (unless (and (stringp (harness-session-system s))
                  (not (string-empty-p (harness-session-system s))))
       (setf (harness-session-system s) prompt)
+      (harness-session--settled s :system)
       (harness-session--touch s))
     (harness-session-system s)))
 
