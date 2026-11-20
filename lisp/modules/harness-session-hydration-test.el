@@ -940,5 +940,99 @@ resume one that belongs to the session that replaced it."
                    (list :cwd project :project project :worktree outside))
                   :type 'harness-error)))
 
+(ert-deftest harness-session-hydration-recovery-head-is-the-node-written-last ()
+  "A chain with several ends is recovered at the node the log wrote last.
+A session that moved its head back left a branch behind; the transcript
+it went on writing is the end the log wrote last, and a hint written
+after the last thing the model said is where it went on to.  The rule
+reproduces the recorded head of every healthy multi-leaf record, so it
+is what a damaged one with the same shape is recovered to."
+  (let* ((chain (list :root "a" :nodes '("a" "b" "c" "d") :leaves '("b" "d")))
+         (order '("a" "b" "d" "c")))
+    ;; "d" was written after "b", and "c" is a branch written last of all:
+    ;; the newest node of the chain is the head.
+    (should (equal "c" (harness-session--recovery-head nil chain nil order))))
+  ;; A record that still names its head keeps it, wherever it is.
+  (let ((chain (list :root "a" :nodes '("a" "b" "c") :leaves '("b" "c"))))
+    (should (equal "b" (harness-session--recovery-head (list :head "b") chain nil
+                                                       '("a" "b" "c")))))
+  ;; The several ends without a write order are not guessed at.
+  (let ((chain (list :root "a" :nodes '("a" "b" "c") :leaves '("b" "c"))))
+    (should-error (harness-session--recovery-head nil chain nil nil) :type 'harness-error)
+    ;; An order that names none of the nodes decides nothing.
+    (should-error (harness-session--recovery-head nil chain nil '("x" "y")) :type 'harness-error))
+  ;; Nor does one that leaves a node unnamed: which it was is not known.
+  (should-not (harness-session--recovery-last-written '("a" "b") '("a"))))
+
+(ert-deftest harness-session-hydration-recovery-task-worktree-wins-over-its-cwd ()
+  "A task's worktree is where it worked; its cwd is where it was submitted.
+A task submitted from one worktree but working in another of its own
+names both, and the two are no disagreement: the worktree is the
+directory.  Without a worktree, the cwd is."
+  (require 'harness-files)
+  (let* ((project (harness-test-temp-dir))
+         (outside (harness-test-temp-dir))
+         (tree (expand-file-name "linked" outside))
+         (default-directory project))
+    (should (= 0 (call-process "git" nil nil nil "init" "--quiet")))
+    (should (= 0 (call-process "git" nil nil nil "-c" "user.name=Fixture"
+                               "-c" "user.email=fixture@example.invalid" "-c" "commit.gpgsign=false"
+                               "commit" "--quiet" "--allow-empty" "-m" "Fixture")))
+    (should (= 0 (call-process "git" nil nil nil "worktree" "add" "--detach" tree)))
+    ;; The worktree is the directory, and the cwd does not compete with it.
+    (should-not (harness-session--recovery-task-cwd
+                 (list :cwd outside :project project :worktree tree)))
+    ;; A task with no worktree works in its cwd.
+    (should (equal (file-name-as-directory (expand-file-name outside))
+                   (harness-session--recovery-task-cwd
+                    (list :cwd outside :project project))))))
+
+(ert-deftest harness-session-hydration-recovery-project-names-one-project ()
+  "A project's root and a worktree of it are one project, not a disagreement.
+A task's session that worked in a worktree names the worktree in its
+transcript and the project root in its task, and the recovery reads
+that as one project rather than refusing it."
+  (require 'harness-files)
+  (let* ((project (harness-test-temp-dir))
+         (outside (harness-test-temp-dir))
+         (tree (expand-file-name "linked" outside))
+         (default-directory project))
+    (should (= 0 (call-process "git" nil nil nil "init" "--quiet")))
+    (should (= 0 (call-process "git" nil nil nil "-c" "user.name=Fixture"
+                               "-c" "user.email=fixture@example.invalid" "-c" "commit.gpgsign=false"
+                               "commit" "--quiet" "--allow-empty" "-m" "Fixture")))
+    (should (= 0 (call-process "git" nil nil nil "worktree" "add" "--detach" tree)))
+    (should (harness-session--recovery-same-project
+             (file-name-as-directory (expand-file-name project))
+             (file-name-as-directory (expand-file-name tree))))
+    ;; A directory of another project is another project.
+    (should-not (harness-session--recovery-same-project
+                 (file-name-as-directory (expand-file-name project))
+                 (file-name-as-directory (expand-file-name outside))))))
+
+(ert-deftest harness-session-hydration-recovery-observed-cwd-is-unanimous-or-nothing ()
+  "The directory a session's own tool results name is read only when they agree.
+A session whose record and task both lost their directory still says
+where it ran in the `:cwd' of its tool results; a session that ran in
+two directories says no one thing, and nothing is taken from it."
+  (let* ((dir (file-name-as-directory (expand-file-name (harness-test-temp-dir))))
+         (other (file-name-as-directory (expand-file-name (harness-test-temp-dir)))))
+    (should (equal dir
+                   (harness-session--recovery-observed-cwd
+                    (list (list :kind 'tool-result :meta (list :cwd dir))
+                          (list :kind 'tool-result :meta (list :cwd dir))))))
+    (should-not (harness-session--recovery-observed-cwd
+                 (list (list :kind 'tool-result :meta (list :cwd dir))
+                       (list :kind 'tool-result :meta (list :cwd other)))))
+    ;; A tool result that names no directory says nothing either way.
+    (should (equal dir
+                   (harness-session--recovery-observed-cwd
+                    (list (list :kind 'tool-result :meta nil)
+                          (list :kind 'tool-result :meta (list :cwd dir))))))
+    ;; A directory that is gone is no directory.
+    (should-not (harness-session--recovery-observed-cwd
+                 (list (list :kind 'tool-result
+                             :meta (list :cwd (expand-file-name "gone" dir))))))))
+
 (provide 'harness-session-hydration-test)
 ;;; harness-session-hydration-test.el ends here

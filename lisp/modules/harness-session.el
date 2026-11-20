@@ -3312,6 +3312,10 @@ here only to be reported."
 
 (defun harness-session--recovery-task-cwd (task)
   "Return TASK's cwd only when it is not merely its worktree's project root.
+TASK's `:cwd' is where it was submitted from, which is no place it
+worked when its work went on in a worktree of its own: the worktree is
+the directory then, and this says nothing to compete with it.  A task
+with no worktree works in its cwd, unless that is only the project root.
 Verify a claimed task worktree belongs to the task's actual Git repository."
   (let* ((base (harness-session--recovery-directory (plist-get task :cwd)))
          (project (harness-session--recovery-directory (plist-get task :project)))
@@ -3321,8 +3325,9 @@ Verify a claimed task worktree belongs to the task's actual Git repository."
             (tree-common (harness-files-git-common-dir tree)))
         (unless (and common tree-common (file-equal-p common tree-common))
           (signal 'harness-error (list "Its task worktree is not in its task's Git repository"))))
-      (when (and base (file-equal-p base project))
-        (setq base nil)))
+      ;; The worktree is where the work was: the submission directory says
+      ;; nothing about it.
+      (setq base nil))
     base))
 
 (defun harness-session--recovery-candidate (key value source sources &optional normalize)
@@ -3331,13 +3336,22 @@ A recovery takes a field from what the harness kept of the session, and
 two stores that disagree about it are not a thing it may guess at.
 NORMALIZE, when given, is called on both values before they are
 compared, and its result is what SOURCES keeps: a directory is the same
-directory with or without its trailing slash."
+directory with or without its trailing slash.  Two names of one project
+are no disagreement about the project."
   (let* ((value (and value (if normalize (funcall normalize value) value)))
          (known (alist-get key sources)))
     (cond
      ((null value) sources)
      ((null known) (cons (cons key (list :value value :source source)) sources))
      ((equal value (plist-get known :value)) sources)
+     ((and (eq key :project)
+           (harness-session--recovery-same-project value (plist-get known :value)))
+      ;; The project's root and a worktree of it are one project: what a
+      ;; record keeps is the root, and the other name adds nothing.
+      (let ((root (or (harness-session--recovery-main-root (plist-get known :value))
+                      (plist-get known :value))))
+        (cons (cons key (list :value root :source (plist-get known :source)))
+              (assq-delete-all key (copy-sequence sources)))))
      (t (signal 'harness-error
                 (list (format "Its %s is ambiguous: %s says %S, %s says %S"
                               (substring (symbol-name key) 1)
@@ -3352,12 +3366,52 @@ in: a record names one that was there."
              (not (file-remote-p path)) (file-directory-p path))
     (file-name-as-directory (expand-file-name path))))
 
-(defun harness-session--recovery-head (record chain explicit)
+(defun harness-session--recovery-main-root (path)
+  "Return the main checkout of PATH's project, or nil.
+A session that worked in a worktree of its project names either the
+worktree or the project root, and both are the same project: the root
+of the main checkout is what tells them apart."
+  (when-let* ((dir (harness-session--recovery-directory path)))
+    (or (and (fboundp 'harness-files-main-root)
+             (ignore-errors (harness-session--recovery-directory
+                             (harness-files-main-root dir))))
+        dir)))
+
+(defun harness-session--recovery-same-project (a b)
+  "Non-nil when A and B name the same project.
+Two names of one project's directories -- its root and a worktree of it
+-- are one project, not a disagreement to refuse a recovery over."
+  (or (equal a b)
+      (let ((ra (harness-session--recovery-main-root a))
+            (rb (harness-session--recovery-main-root b)))
+        (and ra rb (equal ra rb)))))
+
+(defun harness-session--recovery-observed-cwd (path)
+  "Return the directory the session of PATH ran its tools in, or nil.
+A tool result records the directory its call was made in, in the `:cwd'
+of its `:meta' (see `harness-tools-shell--bash'): the session's own
+working directory at that moment.  Every result that names one has to
+name the same one -- a session that moved says several, and which was
+last is no evidence -- and a directory that is gone is no directory."
+  (let ((seen nil) (conflict nil))
+    (dolist (node path)
+      (when-let* ((dir (plist-get (plist-get node :meta) :cwd)))
+        (let ((name (harness-session--recovery-directory dir)))
+          (cond ((null name) nil)
+                ((null seen) (setq seen name))
+                ((not (equal seen name)) (setq conflict t))))))
+    (and seen (not conflict) seen)))
+
+(defun harness-session--recovery-head (record chain explicit &optional order)
   "Return the head the recovered session of RECORD, whose first CHAIN it is.
 The record's own `:head' when it is on CHAIN -- a session that moved its
 head back and wrote on is still one chain from its first node -- else
-CHAIN's only leaf.  A chain with several ends and no head to choose
-between them is not one to guess at."
+CHAIN's only leaf.  A chain with several ends is one whose ends are the
+transcript the session was writing and branches a head moved back left
+behind, and the session went on writing the newest of them: ORDER, the
+node ids in the order the log first wrote them, says which that is, and
+it is taken.  Without ORDER -- or when ORDER names none of the ends --
+the several ends are not a thing to guess at."
   (let ((recorded (plist-get record :head))
         (leaves (plist-get chain :leaves)))
     (cond
@@ -3369,9 +3423,32 @@ between them is not one to guess at."
      ((and (stringp recorded) (member recorded (plist-get chain :nodes))) recorded)
      ((= 1 (length leaves)) (car leaves))
      ((null leaves) (signal 'harness-error (list "Its first chain ends at no node")))
-     (t (signal 'harness-error
-                (list (format "Its first chain ends at %d nodes (%s) and its record names none of them"
-                              (length leaves) (mapconcat #'identity leaves ", "))))))))
+     (t (or (harness-session--recovery-last-written (plist-get chain :nodes) order)
+            (signal 'harness-error
+                    (list (format "Its first chain ends at %d nodes (%s) and its record names none of them"
+                                  (length leaves) (mapconcat #'identity leaves ", ")))))))))
+
+(defun harness-session--recovery-last-written (nodes order)
+  "Return the node of NODES that ORDER, a node log's write order, wrote last.
+That is where the session went on from: a hint written after the last
+thing the model said is a node the session went on to, and no branch
+of it.  Nil unless ORDER names one of NODES, and unless it names one of
+them after every other: a node log whose nodes were written in an order
+it does not keep is no evidence of where the session went on."
+  (when (and order nodes)
+    (let* ((position (make-hash-table :test 'equal))
+           (i 0)
+           (newest nil)
+           (newest-at -1)
+           (unique t))
+      (dolist (id order) (puthash id i position) (setq i (1+ i)))
+      (dolist (node nodes)
+        (let ((at (gethash node position)))
+          (cond
+           ((null at) (setq unique nil))
+           ((> at newest-at) (setq newest-at at newest node))
+           ((= at newest-at) (setq unique nil)))))
+      (and unique newest))))
 
 (defun harness-session--recovery-nodes-meta (path key)
   "Return the newest value of KEY in the `:meta' of PATH's nodes, or nil.
@@ -3426,7 +3503,7 @@ record that hydrates already are each refused, with the reason."
                 (list (format "Session %s: its node log holds %d chains, more than the session's own and one after it"
                               id (length chains)))))
       (let* ((original (car chains))
-             (head (harness-session--recovery-head record original explicit))
+             (head (harness-session--recovery-head record original explicit order))
              (path (harness-session--recovery-path head table))
 
              (task (and (harness-method-exists-p 'task/for-session)
@@ -3470,9 +3547,26 @@ record that hydrates already are each refused, with the reason."
              (sources (harness-session--recovery-candidate
                        :cwd (harness-session--recovery-task-cwd task) "its task" sources
                        #'harness-session--recovery-directory))
+             ;; A session whose record and task both lost their directory
+             ;; still says where it ran: its own tool results carry the
+             ;; directory the call was made in.  A tool run somewhere
+             ;; else says that somewhere else, so this is read only when
+             ;; nothing else named a directory at all, and only when
+             ;; every tool result that names one names the same.
+             (observed (harness-session--recovery-observed-cwd path))
              (cwd (or (plist-get (alist-get :cwd sources) :value)
+                      observed
+                      (harness-session--recovery-directory
+                       (plist-get (alist-get :project sources) :value))
                       (signal 'harness-error
                               (list "Nothing says which directory it worked in"))))
+             (sources (if (plist-get (alist-get :cwd sources) :value)
+                          sources
+                        (cons (cons :cwd (list :value cwd
+                                               :source (if observed
+                                                           "its own tool results"
+                                                         "the project it ran in")))
+                              sources)))
              (sources (harness-session--recovery-candidate
                        :project (and (fboundp 'harness-files-main-root)
                                      (ignore-errors (harness-files-main-root cwd)))
