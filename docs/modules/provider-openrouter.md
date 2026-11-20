@@ -132,6 +132,7 @@ behaviour of filter-then-cheapest, not a special case.
 - `openrouter/catalogue-degraded` — (SESSION-ID READING DETAIL) when a dispatch uses a reading whose refresh failed.
 - `openrouter/catalogue-recovered` — (MODEL) when a catalogue read settled, so a failure episode it ended is over.
 - `openrouter/catalogue-revalidating` — (SESSION-ID READING DETAIL) when a dispatch uses a reading a fresh one is being read beside.
+- `openrouter/catalogue-unread` — (SESSION-ID PARENT ROUTE) when a one-off call is sent on PARENT's pin because no catalogue could be read.
 - `openrouter/catalogue-waiting` — (SESSION-ID DETAIL) when a step waits for a catalogue outage to end.
 - `openrouter/response-mismatch` — (SESSION-ID DETAIL) when an answer came from another endpoint.
 - `openrouter/route-paused` — (SESSION-ID REASON DETAIL) when a pinned session may not send.
@@ -175,6 +176,7 @@ behaviour of filter-then-cheapest, not a special case.
 - `openrouter/catalogue-degraded`
 - `openrouter/catalogue-recovered`
 - `openrouter/catalogue-revalidating`
+- `openrouter/catalogue-unread`
 - `openrouter/catalogue-waiting`
 - `openrouter/response-mismatch`
 - `openrouter/route-paused`

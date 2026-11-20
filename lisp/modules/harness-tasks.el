@@ -786,6 +786,42 @@ complete only when the merge queue has merged that branch."
 (defconst harness-tasks--merge-attempts 3
   "Merges a task may try before it waits for the user.")
 
+(defcustom harness-tasks-stall-retries t
+  "When non-nil, a task whose turn a transient stall ended is tried again.
+A turn that ends `error' on a failure the shared retry layer reads as
+transient -- a connection that failed, a rate limit, a provider's process
+that died, a catalogue that could not be read -- is no verdict on the
+task: the next attempt usually answers.  The task goes back to the queue
+as a task parked for quota does (`harness-tasks--park'), with a
+`stalled' hold on its card saying when it is tried again, and starts
+again by itself.
+
+How many times and for how long are the shared retry layer's
+\(`harness-retry-max-attempts' and `harness-retry-max-seconds'), so a
+stall and a step of a turn are bounded alike.  With nil a stalled turn
+stops the task in needs-input, as any other error does, with the reason
+recorded (`harness-tasks--turn-end-hint')."
+  :type 'boolean :group 'harness)
+
+(defcustom harness-tasks-stall-retry-delay 15
+  "Seconds before a task whose turn stalled is started again.
+Each further retry waits twice as long, up to
+`harness-tasks-stall-retry-max-delay', and the number of them is
+`harness-retry-max-attempts'."
+  :type 'number :group 'harness)
+
+(defcustom harness-tasks-stall-retry-max-delay 300
+  "Longest wait before a task whose turn stalled is started again, in seconds."
+  :type 'number :group 'harness)
+
+(defconst harness-tasks--stall-message
+  "Your last turn stopped on a transient failure (see above); this is the next try. Your changes are still there: check where you left off and carry on."
+  "Message that starts a task again after a transient stall ended its turn.
+A task whose turn ended `error' on a failure a retry may get past goes
+back to the queue (`harness-tasks--park') with a `stalled' hold, and
+the queue starts it again after a doubling wait.  The session is told
+this, and the hint that names the failure, when it carries on.")
+
 (defcustom harness-tasks-resume-interrupted t
   "When non-nil, tasks a stopped harness interrupted carry on by themselves.
 A task that was working when the harness stopped (Emacs quit,
@@ -1308,9 +1344,10 @@ blocked on the user, which took it back once answered
 \(`harness-tasks--reclaim'; `:preempted-by' names the lender), or
 `sent-back' when the user sent it back from review while no slot could
 take it, so it waits for one with their feedback
-\(`harness-tasks--hold-back'), or `quota' or `budget' when its turn
-stopped because every provider it could run on was out of quota or
-money, or a hard budget was spent (`harness-tasks--park').  The reason
+\(`harness-tasks--hold-back'), or `quota', `budget' or `stalled' when
+its turn stopped because every provider it could run on was out of
+quota or money, a hard budget was spent, or a transient failure ended
+it and the harness is trying again (`harness-tasks--park').  The reason
 outlives `:returned' until the task's next turn begins: its start tells
 the session why it stopped (`harness-tasks--start-paused')."
   (or (plist-get task :return-reason) 'returned))
@@ -2525,6 +2562,12 @@ SUSPENDED), which the boards follow."
 ;;           reading inside the policy's `:freshness', so no price can be
 ;;           read and nothing can be sent.  `:until' is when the
 ;;           episode's next re-read is due, nil when one is under way.
+;;   stalled a transient failure ended the task's turn (`:stall' says
+;;           what): a connection that failed, a rate limit, a provider's
+;;           process that died, a catalogue that could not be read.
+;;           `:until' is when its next try is due, and the tries are
+;;           bounded by the shared retry layer's
+;;           (`harness-tasks-stall-retries').
 ;;
 ;; Quota, budget and catalogue holds are worked out, not stored: the
 ;; scheduler asks the fallback, the usage and the OpenRouter module at
@@ -2541,6 +2584,11 @@ SUSPENDED), which the boards follow."
 ;; A hold that ended starts the task like any queued task: by priority,
 ;; within the limit, unless its queue is suspended.
 ;;
+;; A stall's hold is the task's own record (`harness-tasks--stall-hold'),
+;; so it needs no event to keep it: `:retry-at' is the time, and the same
+;; timer starts the task when it passes.  A restart keeps it, and a turn
+;; that ends any other way clears it.
+;;
 ;; Parking: a turn that ends `error' or `blocked' while its task is held
 ;; for quota, a budget or the endpoint catalogue -- every provider ran
 ;; out, a hard budget stopped the turn between two steps or before it
@@ -2551,6 +2599,9 @@ SUSPENDED), which the boards follow."
 ;; ends it carries on where it stopped, told why by
 ;; `harness-tasks--quota-message', `harness-tasks--budget-message' or
 ;; `harness-tasks--catalogue-message'.
+;; So does a turn a transient stall ended (`harness-tasks--stall-try'):
+;; nothing about the task's work was judged, and the next attempt usually
+;; answers.
 
 (defun harness-tasks--paused-p (task)
   "Non-nil when the user paused TASK, which waits to be resumed.
@@ -2631,17 +2682,20 @@ policy governs the task's requests."
          (substring model (length "openrouter:")))))
 
 (defun harness-tasks--compute-hold (task)
-  "Return the quota, budget or catalogue hold on TASK's work, or nil.
+  "Return the quota, budget, catalogue or stall hold on TASK's work, or nil.
 Quota first: a task out of both is shown the quota, and its budget once
-that is back.  The catalogue is asked last, since it stops the work
-whatever the account can do, and only for a task this policy routes.
-Nil for a task with no session.  This asks; the scheduler's table
+that is back.  The catalogue is asked next, since it stops the work
+whatever the account can do, and only for a task this policy routes.  A
+task a stalled turn parked (`harness-tasks--stall-hold') is held by its
+own record until its next try is due.  Nil for a task with no session.
+This asks; the scheduler's table
 \(`harness-tasks--holds') is what the rest reads."
   (when-let* ((sid (plist-get task :session)))
     (or (harness-tasks--quota-hold sid)
         (harness-tasks--budget-hold sid)
         (and (harness-tasks--routed-p task)
-             (harness-tasks--catalogue-hold task)))))
+             (harness-tasks--catalogue-hold task))
+        (harness-tasks--stall-hold task))))
 
 (defun harness-tasks--routed-p (task)
   "Non-nil when TASK's session is one an OpenRouter routing policy routes.
@@ -2656,12 +2710,12 @@ loaded."
 (defun harness-tasks--hold (task)
   "Return why queued TASK is held back from starting, a plist, or nil.
 `:kind' is `paused' (the user paused it, `:since' when), `quota',
-`budget' or `catalogue' (`harness-tasks--compute-hold', as the
+`budget', `catalogue' or `stalled' (`harness-tasks--compute-hold', as the
 scheduler found it at its last pass); `:reason' says what for, `:until'
 when it ends (nil: not by itself), `:guess' whether that is a retry time
-rather than a reset, `:items' the marks, budgets or catalogue behind it.
-Nil for a task that is not in the queue (`harness-tasks--queued-p') and
-for one nothing holds."
+rather than a reset, `:items' the marks, budgets, catalogue or attempts
+behind it.  Nil for a task that is not in the queue
+\(`harness-tasks--queued-p') and for one nothing holds."
   (when (harness-tasks--queued-p task)
     (if (harness-tasks--paused-p task)
         (let ((since (plist-get task :paused)))
@@ -2750,11 +2804,11 @@ readings."
 
 (defun harness-tasks--park (id hold)
   "Put task ID back in the queue: its work cannot go on, for HOLD.
-HOLD is a quota or budget hold (`harness-tasks--compute-hold') found as
-the task's turn ended.  The task is returned to pending as
+HOLD is a quota, budget or stall hold (`harness-tasks--compute-hold')
+found as the task's turn ended.  The task is returned to pending as
 `task/return-to-pending' returns one -- its session, branch and
 worktree kept, first in line of its priority -- with `:return-reason'
-`quota' or `budget', and the hold is its own at once, so the card that
+the hold's kind, and the hold is its own at once, so the card that
 announces the change says why it waits.  The turn is over already; what
 its session left running outside it stops (`harness-tasks--stop-outstanding'),
 and the session says why the task waits.  Return the task's view."
@@ -2767,6 +2821,168 @@ and the session says why the task waits.  Return the task's view."
         (harness-call 'session/hint sid (harness-tasks--park-hint hold)))
       (harness-tasks--stop-outstanding id)
       (harness-tasks--arm-hold-timer))))
+
+;;;; A stalled turn is tried again
+;;
+;; A turn that ends `error' on a transient failure -- a connection that
+;; reset, a gateway's 502, a rate limit, a provider's process killed, a
+;; catalogue that could not be read -- is no verdict on the task: nothing
+;; about its work was judged, and the next attempt usually answers.  The
+;; reported incident was a 600 s request timeout, a retry that timed out
+;; too, and then a 20 s catalogue read that stalled as well: the task was
+;; left `active' with the outcome `error', no live turn, no retry and no
+;; recorded reason, and it sat there until a person noticed.
+;;
+;; So such a turn parks its task like a quota hold (`harness-tasks--park')
+;; with a `stalled' hold of its own, and the queue starts it again after a
+;; doubling wait.  The bounds are the shared retry layer's
+;; (`harness-retry-max-attempts' and `harness-retry-max-seconds'), read
+;; here, so a stall and a step of a turn are bounded alike; the waits are
+;; `harness-tasks-stall-retry-delay', doubling, capped at
+;; `harness-tasks-stall-retry-max-delay'.  A failure no retry would get
+;; past (a refusal, a login, a malformed request) is not one of these: it
+;; stops the task in needs-input, as it always did.
+;;
+;; The hold is worked out from the task's own record -- `:retry-at',
+;; `:retry-attempts', `:retry-since' and `:stall' -- so a restart keeps
+;; it, and it ends by itself: the scheduler's hold timer is armed for
+;; `:retry-at' (`harness-tasks--arm-hold-timer') and starts the task when
+;; it passes.  A turn that ends any other way clears them, and so does a
+;; start.
+
+(defun harness-tasks--stall-hold (task)
+  "Return the stall hold on TASK, or nil while its next try is not due.
+The task's own record is the hold: a task a stalled turn parked has
+`:retry-at' (when its next try is due), `:retry-attempts' (how many
+tries it has had) and `:stall' (what ended its turn, as text).  Nil for
+a task that is not waiting, and once the time has come -- the scheduler
+then starts it as it starts any queued task."
+  (let ((at (plist-get task :retry-at)))
+    (when (and (numberp at)
+               (harness-tasks--queued-p task)
+               (> at (float-time)))
+      (list :kind 'stalled
+            :reason (or (plist-get task :stall) "a transient failure ended its turn")
+            :until at
+            :guess t
+            :items (list (list :key (format "try %d of %d"
+                                            (or (plist-get task :retry-attempts) 1)
+                                            (or (harness-tasks--stall-bound task) 0))))))))
+
+(defun harness-tasks--stall-delay (attempts)
+  "Return the seconds to wait before try ATTEMPTS of a stalled task.
+The first try waits `harness-tasks-stall-retry-delay' and each one after
+it twice as long, up to `harness-tasks-stall-retry-max-delay'."
+  (let ((delay (* (max 0 harness-tasks-stall-retry-delay)
+                  (expt 2 (max 0 (1- attempts))))))
+    (min (max 0 harness-tasks-stall-retry-max-delay) delay)))
+
+(defun harness-tasks--turn-end (task)
+  "Return what TASK's session recorded of how its last turn ended, or nil.
+The agent writes it as `:last-turn' on the session's runtime when the
+turn ends (`harness-agent--end'): its `:reason', its `:error', the
+failure's `:kind' and when it happened."
+  (let ((sid (plist-get task :session)))
+    (and sid (harness-method-exists-p 'session/runtime)
+         (ignore-errors (harness-call 'session/runtime sid :last-turn :get)))))
+
+(defun harness-tasks--turn-end-reason (task)
+  "Return a short line saying what ended TASK's last turn, or nil.
+It is the failure the session recorded when the turn ended
+\(`harness-tasks--turn-end'), never the whole of a provider's answer: the
+first line, cut, which is what a card and a hint can hold."
+  (let ((error (plist-get (harness-tasks--turn-end task) :error)))
+    (and (stringp error) (not (string-empty-p (string-trim error)))
+         (harness-first-line (string-trim error) 300))))
+
+(defun harness-tasks--transient-turn-p (task)
+  "Non-nil when TASK's last turn ended on a failure a retry may get past.
+That is what the shared retry layer reads a failure as
+\(`harness-retry-kind'), asked of the turn the session recorded, plus the
+catalogue's own failures: a catalogue that could not be read, or one
+whose reading the policy no longer admits, is the same bad minute as a
+connection that reset, and the task's next turn reads it again."
+  (let* ((turn (harness-tasks--turn-end task))
+         (kind (let ((k (plist-get turn :kind))) (and k (intern (format "%s" k)))))
+         (error (plist-get turn :error)))
+    (and (eq (plist-get turn :reason) 'error)
+         (or (memq kind '(transport rate-limit process))
+             (memq kind '(catalogue-unavailable catalogue-stale))
+             (and (fboundp 'harness-retry-failure-kind)
+                  (memq (harness-retry-failure-kind turn)
+                        '(transport rate-limit process)))
+             ;; A stall that reached the turn as text alone: a request
+             ;; that timed out, a connection that failed, a catalogue that
+             ;; could not be read.
+             (and (stringp error)
+                  (harness-retry-transient-p error))
+             (and (stringp error)
+                  (string-match-p "catalogue" (downcase error)))))))
+
+(defun harness-tasks--stall-bound (task)
+  "Return the most tries a stalled TASK may have, from the shared bounds.
+`harness-retry-max-attempts' is the most times one request is tried
+again, so a task is tried again that many times; a task that has been
+trying for longer than `harness-retry-max-seconds' -- measured from its
+first stalled turn (`:retry-since') -- has none left.  Nil when the
+retry module is not loaded: a harness without it does not retry, and the
+stall stops the task as any other error does."
+  (when (boundp 'harness-retry-max-attempts)
+    (let ((most (max 0 (or harness-retry-max-attempts 0)))
+          (since (plist-get task :retry-since))
+          (seconds (and (boundp 'harness-retry-max-seconds) harness-retry-max-seconds)))
+      (if (and (numberp seconds) (numberp since)
+               (>= (- (float-time) since) seconds))
+          0
+        most))))
+
+(defun harness-tasks--stall-try (task)
+  "Return the stall hold that tries TASK again, or nil when its bound is spent.
+The wait doubles with each try and is bounded by
+`harness-tasks-stall-retry-max-delay'; the count and the clock are the
+shared retry layer's (`harness-tasks--stall-bound').  A task whose bound
+is spent is not held: it stops in needs-input, and its session is told
+why (`harness-tasks--stall-exhausted-hint')."
+  (let* ((tries (1+ (or (plist-get task :retry-attempts) 0)))
+         (most (harness-tasks--stall-bound task)))
+    (when (and most (< (or (plist-get task :retry-attempts) 0) most))
+      (let ((at (+ (float-time) (harness-tasks--stall-delay tries))))
+        (list :kind 'stalled
+              :reason (format "%s; try %d of %d"
+                              (or (harness-tasks--turn-end-reason task) "a transient failure")
+                              tries most)
+              :until at
+              :guess t
+              :items (list (list :key (format "try %d of %d" tries most))))))))
+
+(defun harness-tasks--stall-exhausted-hint (task)
+  "Return the hint saying TASK's stalled tries are spent.
+It names how many were made and the setting that bounds them, so the
+next incident is answerable from the transcript."
+  (let ((tries (or (plist-get task :retry-attempts) 0))
+        (most (or (harness-tasks--stall-bound task) 0)))
+    (format "turn ended: error — %s; stopped after %d %s (`harness-retry-max-attempts' is %d)"
+            (or (harness-tasks--turn-end-reason task) "a transient failure")
+            tries (if (= tries 1) "try" "tries") most)))
+
+(defun harness-tasks--turn-end-hint (session-id reason)
+  "Return the hint that says SESSION-ID's turn ended with REASON.
+It is what makes the next incident answerable from the transcript
+alone: the reason, and the error the session recorded with it."
+  (let* ((task (harness-tasks--by-session session-id))
+         (error (plist-get (and task (harness-tasks--turn-end task)) :error)))
+    (format "turn ended: %s%s" reason
+            (if (and (stringp error) (not (string-empty-p (string-trim error))))
+                (concat " — " (harness-first-line (string-trim error) 300))
+              ""))))
+
+(defun harness-tasks--say (session-id text)
+  "Leave TEXT as a hint on SESSION-ID, when it still exists."
+  (when (and (stringp session-id) (not (string-empty-p text))
+             (harness-method-exists-p 'session/hint)
+             (or (not (harness-method-exists-p 'session/exists-p))
+                 (ignore-errors (harness-call 'session/exists-p session-id))))
+    (ignore-errors (harness-call 'session/hint session-id text))))
 
 ;;;; Pausing
 ;;
@@ -4453,8 +4669,9 @@ It says why it waited (`harness-tasks--return-reason'):
 `harness-tasks--reclaimed-message' for one whose lender took back the
 slot it borrowed, `harness-tasks--sent-back-message' for one sent back
 from review while no slot could take it, `harness-tasks--quota-message',
-`harness-tasks--budget-message' and `harness-tasks--catalogue-message'
-for one that waited for quota, a budget or the endpoint catalogue, and
+`harness-tasks--budget-message', `harness-tasks--catalogue-message' and
+`harness-tasks--stall-message' for one that waited for quota, a budget,
+the endpoint catalogue or a stalled turn's next try, and
 `harness-tasks--paused-message' for one returned to pending by hand or
 paused."
   (pcase (harness-tasks--return-reason task)
@@ -4463,6 +4680,7 @@ paused."
     ('sent-back harness-tasks--sent-back-message)
     ('quota harness-tasks--quota-message)
     ('budget harness-tasks--budget-message)
+    ('stalled harness-tasks--stall-message)
     ('catalogue harness-tasks--catalogue-message)
     (_ harness-tasks--paused-message)))
 
@@ -5197,27 +5415,38 @@ paused task's session resumes it, as `task/start' does."
   (remhash session-id harness-tasks--plans-submitted)
   (remhash session-id harness-tasks--plan-reminders)
   (when-let* ((task (harness-tasks--by-session session-id)))
-    (remhash (plist-get task :id) harness-tasks--starting)
-    (remhash (plist-get task :id) harness-tasks--waking)
-    (cond
-     ((harness-tasks--refinement-p task)
-      (harness-tasks--set (plist-get task :id) :state 'refining :outcome nil :error nil :duplicate-of nil
-                          :archived nil))
-     ((and (eq (plist-get task :state) 'merging) (plist-get task :merge-status)) nil)
-     (t (harness-tasks--relock-worktree task)
-        (apply #'harness-tasks--set (plist-get task :id) :state 'active :outcome nil :error nil :finished nil
-               :merged nil :archived nil :returned nil :return-reason nil :preempted-by nil :paused nil
-               (append
-                (unless (eq (plist-get task :state) 'merging) (list :verified nil :verified-at nil))
-                ;; A new round is in the working phase, also when the user
-                ;; answers a task that stopped part way (`:outcome'): the
-                ;; reply is the next turn of the work, not a review aside.
-                (when (or (memq (plist-get task :state) '(review done))
-                          (plist-get task :outcome)
-                          (not (plist-get task :phase)))
-                  (list :phase harness-tasks-phase-working
-                        :cannot-continue nil :no-merge nil))
-                (when (memq (plist-get task :state) '(review done)) (list :reopened (float-time)))))))))
+    (let ((retrying (plist-get task :retry-at)))
+      (remhash (plist-get task :id) harness-tasks--starting)
+      (remhash (plist-get task :id) harness-tasks--waking)
+      (cond
+       ((harness-tasks--refinement-p task)
+        (harness-tasks--set (plist-get task :id) :state 'refining :outcome nil :error nil :duplicate-of nil
+                            :archived nil))
+       ((and (eq (plist-get task :state) 'merging) (plist-get task :merge-status)) nil)
+       (t (harness-tasks--relock-worktree task)
+          (apply #'harness-tasks--set (plist-get task :id) :state 'active :outcome nil :error nil :finished nil
+                 :merged nil :archived nil :returned nil :return-reason nil :preempted-by nil :paused nil
+                 (append
+                  ;; A turn that was not the retry of a stall starts the bound
+                  ;; over: a round of work is its own, and a task the user
+                  ;; answers is not still being retried for an old stall.
+                  ;; The try the queue starts for a stalled task keeps the
+                  ;; count and the clock -- that is what bounds the retries
+                  ;; -- and only spends the hold that waited for it.
+                  (if retrying
+                      (list :retry-at nil)
+                    (list :retry-at nil :retry-attempts nil
+                          :retry-since nil :stall nil))
+                  (unless (eq (plist-get task :state) 'merging) (list :verified nil :verified-at nil))
+                  ;; A new round is in the working phase, also when the user
+                  ;; answers a task that stopped part way (`:outcome'): the
+                  ;; reply is the next turn of the work, not a review aside.
+                  (when (or (memq (plist-get task :state) '(review done))
+                            (plist-get task :outcome)
+                            (not (plist-get task :phase)))
+                    (list :phase harness-tasks-phase-working
+                          :cannot-continue nil :no-merge nil))
+                  (when (memq (plist-get task :state) '(review done)) (list :reopened (float-time))))))))))
 
 (defun harness-tasks--outstanding (task)
   "Return what runs for TASK's session outside its own turn, or nil.
@@ -5280,7 +5509,21 @@ every provider it could run on being out, and the budget gate stopping
 the turn between two steps or before it began.  The task goes back to
 the queue, with the reason on its card (`harness-tasks--park'), instead
 of waiting for the user with the outcome `error' or `blocked', and
-starts again when the hold ends (`harness-tasks--refresh-holds')."
+starts again when the hold ends (`harness-tasks--refresh-holds').
+
+A turn a transient stall ended -- a connection that failed, a rate
+limit, a provider's process that died, a catalogue that could not be
+read -- is no verdict on the task either, and nothing about its work was
+judged.  Such a task waits in the queue for its next try
+\(`harness-tasks--stall-try'), bounded by the shared retry layer's
+`harness-retry-max-attempts' and `harness-retry-max-seconds', and starts
+again when the wait is over.  When the bound is spent it stops for the
+user with the reason recorded, and its session is told so.
+
+Whatever a turn ended for, a turn that is not a clean `end-turn' leaves
+the reason on the session (`harness-tasks--turn-end-hint'), so the next
+incident is answerable from the transcript alone, and the task records
+the error itself (`:error') for the board and `task/retry'."
   (remhash session-id harness-tasks--refine-calls)
   (remhash session-id harness-tasks--plan-reminders)
   (when-let* ((task (harness-tasks--by-session session-id)))
@@ -5332,9 +5575,42 @@ starts again when the hold ends (`harness-tasks--refresh-holds')."
              (setq parked (harness-tasks--compute-hold task)))
         (harness-tasks--park id parked)
         (setq skip t))
+       ;; A transient stall -- a connection that failed, a rate limit, a
+       ;; catalogue that could not be read -- is no verdict on the task:
+       ;; nothing about its work was judged, and the next attempt usually
+       ;; answers.  The task waits in the queue for its next try
+       ;; (`harness-tasks--stall-try') instead of stranding with the
+       ;; outcome `error' and nothing running.
+       ((and (eq reason 'error)
+             (eq (plist-get task :state) 'active)
+             (not (plist-get task :merge-status))
+             harness-tasks-stall-retries
+             (harness-tasks--transient-turn-p task))
+        (setq skip t)
+        (if (setq parked (harness-tasks--stall-try task))
+            (progn
+              ;; The transcript says how the turn ended: the park's hint
+              ;; says why the task waits, this one what stopped it, so the
+              ;; next incident is answerable from the transcript alone.
+              (harness-tasks--say session-id (harness-tasks--turn-end-hint session-id reason))
+              (harness-tasks--set id :retry-at (plist-get parked :until)
+                                  :retry-attempts (1+ (or (plist-get task :retry-attempts) 0))
+                                  :retry-since (or (plist-get task :retry-since) (float-time))
+                                  :stall (harness-tasks--turn-end-reason task))
+              (harness-tasks--park id parked))
+          ;; The bound is spent: the task stops for the user, with what
+          ;; ended its turn recorded, and its session is told why.
+          (harness-tasks--set id :state 'active :outcome 'error
+                              :error (harness-tasks--turn-end-reason task)
+                              :retry-at nil)
+          (harness-tasks--say session-id (harness-tasks--stall-exhausted-hint task))))
        ((not (eq reason 'end-turn))
+        (harness-tasks--say session-id (harness-tasks--turn-end-hint session-id reason))
         (unless (plist-get task :merge-status)
-          (harness-tasks--set id :state 'active :outcome reason)))
+          (harness-tasks--set id :state 'active :outcome reason
+                              :error (and (eq reason 'error)
+                                          (harness-tasks--turn-end-reason task))
+                              :retry-at nil :retry-since nil)))
        ((plist-get task :merge-status) nil) ; a conflict turn; merge/finished decides
        ((setq waiting (harness-tasks--outstanding task))
         (harness-tasks--set id :state 'active :waiting waiting))

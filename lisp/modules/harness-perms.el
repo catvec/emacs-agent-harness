@@ -3938,6 +3938,11 @@ honours one.  It is sent through `harness-small-ask', which adds the
                         :cwd (plist-get session :cwd) :host (plist-get session :host))
          :job (if (= n 1) "Permission judge" "Permission judge (retry)")
          :job-parent (plist-get session :id)
+         ;; The verdict decides a call SESSION is about to make, so it may
+         ;; be sent on SESSION's own pin when the catalogue cannot be read:
+         ;; a stalled bookkeeping read must not turn a verdict into "no"
+         ;; (`harness-openrouter--complete-unread').
+         :pin-from (plist-get session :id)
          :system system
          :messages (list (list :role 'user :content (list (list :type "text" :text text))))
          :tools nil
@@ -4984,6 +4989,10 @@ adds the `:on-event'."
                        :cwd (plist-get session :cwd) :host (plist-get session :host))
         :job (if (= n 1) "Permission summary" "Permission summary (retry)")
         :job-parent (plist-get session :id)
+        ;; The summary is about a prompt SESSION is about to send, so it may
+        ;; ride SESSION's pin when the catalogue cannot be read, as the
+        ;; judge's verdict does (`harness-openrouter--complete-unread').
+        :pin-from (plist-get session :id)
         :system (harness-prompt-effective 'perms-summary-system
                                           harness-perms--summary-system model)
         :messages (list (list :role 'user :content (list (list :type "text" :text text))))

@@ -955,8 +955,11 @@ so by the harness, and the task works again."
           (harness-tasks-test-wait-state id 'done))
         (should (equal sid (plist-get (harness-tasks-test-task id) :session)))
         (let ((retry (car (last (harness-tasks-test-user-nodes sid)))))
-          (should (string-match-p "stopped early: it failed with an error\\. Check where"
-                                  (plist-get retry :content)))
+          ;; The task records what ended the turn, so the retry says what it
+          ;; was, not only that there was one (`harness-tasks--stopped-how').
+          (should (string-match-p
+                   "stopped early: it failed with an error -- boom\\. Check where"
+                   (plist-get retry :content)))
           (should (equal (harness-sender-system "tasks") (harness-node-sender retry))))
         ;; Done: nothing to retry.
         (should-error (harness-call 'task/retry id))))))
@@ -8997,6 +9000,160 @@ which the app shows as they are: it keeps no rules of its own."
       ;; Dropped, with its session, as a task that never started is.
       (funcall call "task/cancel" :id id)
       (should-not (harness-call 'task/list default-directory)))))
+
+;;;; A turn that ends `error' on a transient stall is tried again
+;;
+;; The reported incident: a 600 s request timeout, a retry that timed out
+;; too, and then a catalogue read that stalled -- and the task sat `active'
+;; with the outcome `error', no live turn, no retry and no recorded reason
+;; until a person noticed.  A stall is no verdict on the task, so the task
+;; waits in the queue for its next try, bounded by the shared retry layer's
+;; knobs, and the reason it stopped is written down either way.
+
+(defconst harness-tasks-test--transport-stall
+  (list (list :type 'done :stop-reason 'error :error-kind 'transport
+              :error "request timed out after 600s"))
+  "A script of a turn a transport stall ended.")
+
+(defconst harness-tasks-test--permanent-refusal
+  (list (list :type 'done :stop-reason 'error :error-kind 'permanent
+              :error "HTTP 400: invalid_request: the prompt is malformed"))
+  "A script of a turn an identical retry cannot get past.")
+
+(ert-deftest harness-tasks-a-stalled-turn-waits-in-the-queue-and-is-tried-again ()
+  "A turn ended by a transport stall is retried, not stranded.
+The first try stalls; the task goes back to the queue with a `stalled'
+hold saying when its next try is due, instead of sitting active with the
+outcome `error' and nothing running.  The next try answers, and the task
+finishes as it would have."
+  (harness-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           (let ((try 0))
+             (lambda (_request)
+               (if (= 1 (cl-incf try))
+                   harness-tasks-test--transport-stall
+                 harness-tasks-test-script))))
+          (harness-tasks-stall-retry-delay 0.05)
+          (harness-tasks-stall-retry-max-delay 0.05)
+          id)
+      (setq id (harness-tasks-test-submit "Fix the parser"))
+      (harness-test-wait
+       (lambda () (equal "stalled" (harness-tasks-test--hold-kind id)))
+       10 "the stalled hold")
+      (let ((task (harness-tasks-test-task id)))
+        (should (eq 'pending (plist-get task :state)))
+        (should (eq 'stalled (plist-get task :return-reason)))
+        (should (eq 'stalled (plist-get (plist-get task :hold) :kind)))
+        (should (numberp (plist-get (plist-get task :hold) :until)))
+        ;; The reason the turn stopped is on the card, and it is the
+        ;; provider's own words, not a description of the shape.
+        (should (string-match-p "request timed out after 600s"
+                                (or (plist-get task :stall) "")))
+        ;; And in the transcript, so the wait is answerable from it.
+        (should (harness-tasks-test--hint-p
+                 (harness-tasks-test-session-id id)
+                 "turn ended: error — request timed out after 600s")))
+      (harness-tasks-test-wait-state id 'done)
+      ;; One try was spent, and the task is the same one: its session
+      ;; carried on where it stopped.
+      (should (equal "1" (format "%s" (or (plist-get (harness-tasks-test-task id) :retry-attempts) 0))))
+      (should (harness-tasks-test-session-id id)))))
+
+(ert-deftest harness-tasks-a-stalled-turn-is-bounded-by-the-shared-retry-knobs ()
+  "A stall that keeps failing stops the task for the user, saying why.
+`harness-retry-max-attempts' bounds the tries as it bounds a step of a
+turn; when they are spent the task stops in needs-input with the reason
+recorded, and its session is told the tries are spent rather than left to
+wonder."
+  (harness-tasks-test-with
+    (let ((harness-provider-demo-script-override (lambda (_request) harness-tasks-test--transport-stall))
+          (harness-retry-max-attempts 2)
+          (harness-tasks-stall-retry-delay 0.05)
+          (harness-tasks-stall-retry-max-delay 0.05)
+          id)
+      (setq id (harness-tasks-test-submit "Fix the parser"))
+      (harness-test-wait
+       (lambda () (eq 'needs-input (plist-get (harness-tasks-test-task id) :column)))
+       20 "the task to stop for the user")
+      (let ((task (harness-tasks-test-task id)))
+        (should (eq 'active (plist-get task :state)))
+        (should (eq 'error (plist-get task :outcome)))
+        (should (string-match-p "request timed out after 600s"
+                                (or (plist-get task :error) "")))
+        ;; The bound was spent, so no hold is left to start it again.
+        (should-not (plist-get task :retry-at)))
+      (should (harness-tasks-test--hint-p
+               (harness-tasks-test-session-id id)
+               "turn ended: error — request timed out after 600s; stopped after 2 tries")))))
+
+(ert-deftest harness-tasks-a-permanent-failure-is-not-retried ()
+  "A failure no identical request would get past stops the task at once.
+It is not a stall: the request was refused for what it was, and trying
+again would spend a turn to be refused the same way.  The task stops in
+needs-input with the reason recorded, as it always did."
+  (harness-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           (lambda (_request) harness-tasks-test--permanent-refusal))
+          (harness-tasks-stall-retry-delay 0.05)
+          id)
+      (setq id (harness-tasks-test-submit "Fix the parser"))
+      (harness-test-wait
+       (lambda () (eq 'needs-input (plist-get (harness-tasks-test-task id) :column)))
+       10 "the task to stop for the user")
+      (let ((task (harness-tasks-test-task id)))
+        (should (eq 'active (plist-get task :state)))
+        (should (eq 'error (plist-get task :outcome)))
+        (should-not (plist-get task :retry-at))
+        (should-not (plist-get task :retry-attempts))
+        (should (string-match-p "invalid_request" (or (plist-get task :error) "")))))))
+
+(ert-deftest harness-tasks-a-stalled-turn-says-so-in-the-transcript ()
+  "The turn-end reason is recorded where a person can read it.
+A turn that ends `error' leaves a hint naming the reason and the first
+line of the error on its session, so the next incident is answerable from
+the transcript alone -- the reported one was not, because the text was
+kept nowhere the board or the transcript showed."
+  (harness-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           (lambda (_request)
+             (list (list :type 'done :stop-reason 'error
+                         :error "API Error: 529 Overloaded\nsecond line that is not the reason"))))
+          (harness-tasks-stall-retries nil)
+          id)
+      (setq id (harness-tasks-test-submit "Fix the parser"))
+      (harness-test-wait
+       (lambda () (eq 'needs-input (plist-get (harness-tasks-test-task id) :column)))
+       10 "the task to stop for the user")
+      (let ((sid (harness-tasks-test-session-id id)))
+        ;; The hint names the reason and the error's first line, and only
+        ;; that: a provider's whole answer is not a hint.
+        (should (harness-tasks-test--hint-p
+                 sid "turn ended: error — API Error: 529 Overloaded"))
+        (should-not (harness-tasks-test--hint-p sid "second line that is not the reason"))
+        ;; And the session's runtime says how its turn ended, for whatever
+        ;; asks next.
+        (let ((turn (harness-call 'session/runtime sid :last-turn :get)))
+          (should (eq 'error (plist-get turn :reason)))
+          (should (string-match-p "529 Overloaded" (plist-get turn :error))))))))
+
+(ert-deftest harness-tasks-a-stall-off-is-the-old-behaviour ()
+  "With `harness-tasks-stall-retries' nil a stalled turn stops the task.
+That is what the harness did before: the task waits for the user with the
+outcome `error', and the reason is still recorded."
+  (harness-tasks-test-with
+    (let ((harness-provider-demo-script-override
+           (lambda (_request) harness-tasks-test--transport-stall))
+          (harness-tasks-stall-retries nil)
+          id)
+      (setq id (harness-tasks-test-submit "Fix the parser"))
+      (harness-test-wait
+       (lambda () (eq 'needs-input (plist-get (harness-tasks-test-task id) :column)))
+       10 "the task to stop for the user")
+      (let ((task (harness-tasks-test-task id)))
+        (should (eq 'error (plist-get task :outcome)))
+        (should-not (plist-get task :retry-at))
+        (should (string-match-p "request timed out after 600s"
+                                (or (plist-get task :error) "")))))))
 
 (provide 'harness-tasks-test)
 ;;; harness-tasks-test.el ends here

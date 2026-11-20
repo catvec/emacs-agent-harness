@@ -33,8 +33,9 @@
 ;;                         Beside its count, [Queue: running] (P)
 ;;                         suspends the queue, so none starts on its own
 ;;                         until resumed.  A card says what holds its
-;;                         task back: paused (u), out of quota or over a
-;;                         hard budget, and when that ends
+;;                         task back: paused (u), out of quota, over a
+;;                         hard budget, or a stalled turn's next try,
+;;                         and when that ends
 ;;   Backlog               jotted down or written up for later: the queue
 ;;                         never starts one by itself; Q queues it, so it
 ;;                         drains like any pending task, and s starts it
@@ -152,8 +153,10 @@
 ;; waiting task of the project, a pause one.  A task whose turn stopped
 ;; because every provider it could run on was out of quota, or a hard
 ;; budget was spent, waits in Pending too, its card saying which and
-;; when it ends (the hold, `harness-ui-tasks--hold-text'); the queue
-;; starts it again once that is over, with nothing for you to do.
+;; when it ends (the hold, `harness-ui-tasks--hold-text'); so does one a
+;; transient failure stopped, retried a bounded number of times.  The
+;; queue starts each again once that is over, with nothing for you to
+;; do.
 ;; Pausing every task, and every queue, is the task slots page's (S).
 ;;
 ;; Review can be turned off (V, or `harness-tasks-require-verification'
@@ -1146,7 +1149,9 @@ waiting on you whose slot it worked in, once you answered (reclaimed);
 \"sent back from review\" for one the user sent back while no slot
 could take it; \"quota\", \"budget\" or \"catalogue\" for one whose turn
 stopped for lack of either, or for an endpoint catalogue that could not
-be read.  Each carries on where it stopped when it starts again."
+be read, and \"stalled\" for one a transient failure stopped and the
+harness is trying again.  Each carries on where it stopped when it
+starts again."
   (pcase (format "%s" (or (plist-get task :return-reason) "returned"))
     ("preempted"
      (format "pre-empted by %s"
@@ -1158,6 +1163,7 @@ be read.  Each carries on where it stopped when it starts again."
     ("quota" "quota")
     ("budget" "budget")
     ("catalogue" "catalogue")
+    ("stalled" "stalled")
     (_ "paused")))
 
 ;;;; What holds a task back
@@ -1326,7 +1332,8 @@ kind TASK has no fact of has no cell.  The kinds:
   merge     where a branch in the merge queue stands past waiting for its
             turn: \"merging now\", or \"conflict\"
   hold      what holds a waiting task back: \"paused\", \"quota · resets
-            19:00\", \"budget\" (`harness-ui-tasks--hold-fact')
+            19:00\", \"budget\", \"stalled · retry 05:12\"
+            (`harness-ui-tasks--hold-fact')
   todos     how many of its todos are done: \"3/7\"
   time      what the column says of when: queued, added, refined, ready,
             done, or for work in progress how long it has run
@@ -1337,7 +1344,8 @@ cost -- is in the tooltip of the title instead
 \(`harness-ui-tasks--figures').  Its priority is not among them: the
 arrow before the title says that (`harness-ui-tasks--priority-mark').
 A cell is dimmed (`harness-dim-face'), the hold's apart: it stands out
-while a task waits for quota, a budget or the endpoint catalogue."
+while a task waits for quota, a budget, the endpoint catalogue or a
+stalled turn's next try."
   (let* ((todos (harness-ui-tasks--todos session))
          (started (plist-get task :started))
          (cells

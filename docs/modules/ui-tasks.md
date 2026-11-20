@@ -44,8 +44,9 @@ project, one section per column, most urgent first:
                         Beside its count, [Queue: running] (P)
                         suspends the queue, so none starts on its own
                         until resumed.  A card says what holds its
-                        task back: paused (u), out of quota or over a
-                        hard budget, and when that ends
+                        task back: paused (u), out of quota, over a
+                        hard budget, or a stalled turn's next try,
+                        and when that ends
   Backlog               jotted down or written up for later: the queue
                         never starts one by itself; Q queues it, so it
                         drains like any pending task, and s starts it
@@ -163,8 +164,10 @@ is kept across a restart, and is not the queue's: P suspends every
 waiting task of the project, a pause one.  A task whose turn stopped
 because every provider it could run on was out of quota, or a hard
 budget was spent, waits in Pending too, its card saying which and
-when it ends (the hold, `harness-ui-tasks--hold-text`); the queue
-starts it again once that is over, with nothing for you to do.
+when it ends (the hold, `harness-ui-tasks--hold-text`); so does one a
+transient failure stopped, retried a bounded number of times.  The
+queue starts each again once that is over, with nothing for you to
+do.
 Pausing every task, and every queue, is the task slots page's (S).
 
 Review can be turned off (V, or `harness-tasks-require-verification`
