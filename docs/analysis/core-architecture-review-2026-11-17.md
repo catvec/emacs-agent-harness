@@ -30,13 +30,19 @@ healthy **when the server is idle** (42 ms connect, 41 ms reconnect, flat to 12
 streaming sessions).
 
 That bench still did not reproduce the reported symptoms, so I stopped benching
-and looked at the live harness instead. That found two defects, both measured,
-both in §3.5: **the listener's accept queue is five deep** (`:server t`), which
-makes a busy harness unreachable and hangs a connect for ~2 minutes — found live,
-reproduced deterministically, fixed, and under test; and **the request prefix
-diverges at the harness's own settings checkpoint**, so every step re-sends up to
-1.4 MB and the provider caches nothing — measured in the live log at 711 misses
-of 100% of the context in one buffer, not yet fixed.
+and looked at the live harness instead. That found the causes, both measured, both
+in §3.5: **the listener's accept queue is five deep** (`:server t`), which makes a
+busy harness unreachable and hangs a connect for ~2 minutes — found live,
+reproduced deterministically, fixed, and under test; and **every tool call waits
+out a 30-second permission judge that then gives no verdict**, so the call is
+denied and the turn loses minutes of wall clock — 10 timeouts in 20 seconds in the
+live log. The first is Emacs-shaped and would not exist in Go or on BEAM; the
+second would follow the code to any runtime.
+
+Along the way I read the live log's `replay: … missed on 100%` lines as cache
+misses and was wrong: `:ratio` is the share **reused**, so that line reports a
+99.96% hit. The cache is fine; the log line is inverted. That correction is in
+§3.5 too, because a log that misleads its own author will mislead the next one.
 
 The reviewability findings — the bus is closed, the layers hold, the method set
 is stable, `:requires` is unverified — stand on static evidence, are reproducible,
@@ -696,61 +702,83 @@ now guard it: one reads the kernel's backlog off the live socket and asserts it
 is not 5, the other scans the tree for any listener left on `:server t`. The
 first **fails on the old code** (`(>= 5 512)` is false) and passes on the new.
 
-#### Defect 2 — every request re-sends the whole conversation, and the provider never caches it
+#### Defect 2 — every tool call waits out a 30-second judge that then gives no verdict
 
-The live log, from the same session, shows requests whose bodies reach **1.4 MB**
-and a prefix that **diverges on nearly every request**:
+This one I got wrong first, and the correction is worth keeping. The live log is
+full of lines like `replay: … missed on 100% of 237436 tokens`, and I read them as
+cache misses. **They are not.** `harness-session.el:4035` computes
+`:ratio` as `cache-read / previous` — the share **reused** — and
+`harness-replay.el:1291` prints that number after the words "missed on". So a
+perfect cache hit logs as "missed on 100%", and the response lines prove it is a
+hit: `prompt=237672 cache-read=237568` is **99.96% served from cache**. The cache
+is working; the log line is inverted. (Filed below as a separate finding.)
+
+What the live log *does* show, and what actually costs minutes, is the permission
+judge:
 
 ```
-request  session=a8bdb70a  chunks=180  bytes=1426712  prefix=diverged
-         preserved=1  at=1:settings  expected-cold=settings-change
-request  session=d439155a  chunks=402  bytes=946835   prefix=appended
-         preserved=15 at=399:message/396 expected-cold=warm
+03:51:22.149 WARN [server] perms: auto judge timed out for bash
+03:51:22.150 WARN [server] perms: auto judge timed out for bash
+03:51:22.150 WARN [server] perms: auto judge timed out for bash
+03:51:25.059 WARN [server] perms: auto judge timed out for bash
+03:51:40.362 WARN [server] perms: auto judge timed out for bash
+… 10 timeouts in 20 seconds …
 ```
 
-`bytes` is the serialized request body (`harness-provider-diagnostics.el:445`);
-at four bytes per token, 1.4 MB is ~356k tokens, which matches the
-`prompt=237672`/`cache-read=237568` pairs in the response lines. The `at=1:settings`
-field is the diagnosis: the prefix stops matching at **checkpoint 1, the request's
-own settings object**, on the very first message. Everything after it is re-sent
-fresh, so the provider has nothing to reuse.
+`harness-perms--auto-timeout` is **30 seconds** (`harness-perms.el:409`), and it is
+spent **per tool call**, not per turn. When it expires the judge settles with the
+ask decision carrying `:no-verdict` (`:4016-4022`), and in a non-interactive
+session the next stage **denies the call**
+(`harness-perms--unapproved`, `:4415-4420`). So each tool call costs a full 30 s of
+wall clock and then fails. A turn that wants five tools spends **2.5 minutes
+waiting** before its work even starts, and the work then does not happen. That is
+"a single message takes five minutes", with the mechanism in the log and the
+constants in the code.
 
-In this one log buffer: **1,695 request lines**, **711 `replay: … missed on 100%
-of N tokens` lines**, the largest miss **238,017 tokens**, and the misses arrive
-at ~15 per minute. `harness-replay.el:1263-1276` records such a miss and
-deliberately does nothing about it, on the reasoning that "eviction, retention and
-routing are [the provider's]". That reasoning holds for a provider miss after
-identical bytes. It does not hold here: the bytes are **not** identical, the
-divergence is at the harness's own settings checkpoint, and the module that could
-say so is the one that notices.
+Why the judge times out is the next question, and the log answers it too: the
+judge's own model calls are in the same log at 1,200–6,800 prompt tokens each,
+running concurrently with every other session's. The judge is a real model call
+with a 30 s budget on a machine at load average 10–15, so under load it simply
+does not answer in time — and the harness then denies the user's work rather than
+proceeding.
 
-I have not fixed this one. It is a different defect from Defect 1, in a different
-module, and fixing it means finding what mutates the settings object between two
-requests of the same session — which is a separate investigation with its own
-reproduction. What I can say is that it is measured, it is in the harness's
-control, and it is the reason a message that should cost a few hundred cached
-tokens costs a quarter of a million fresh ones.
+This is a design defect, not a tuning one: **a safety check that denies the user's
+work when it is slow converts load into lost work.** The fix is to make the
+timeout fall back to what the mode would do without a judge (ask, or allow under
+an explicit policy) instead of denying, and to make the judge's budget a function
+of whether anyone can be asked. I have not changed it: it is a policy decision
+about what the harness may do unattended, and it should be yours.
+
+#### A finding, not a defect: the cache-miss log line is inverted
+
+`harness-replay.el:1291` logs `(round (* 100 ratio))` as "missed on N%", where
+`:ratio` is the share **reused** (`harness-session.el:4035`,
+`harness-cache.el:456` treats a *high* ratio as healthy). Every reader of that log
+— me included, for most of this investigation — concludes the cache is failing
+when it is working at 99.96%. It costs nothing to fix and it cost me a wrong
+conclusion, which is the argument for fixing it.
 
 #### What this means for the re-architecture
 
-Both defects are **Emacs-shaped**, and neither is about Lisp's speed:
+Defect 1 is **Emacs-shaped**; Defect 2 is not, and that distinction matters:
 
 - Defect 1 exists because Emacs's single event loop is the only thing that can
   `accept`, so any work it is doing stops every client from connecting — and
   because the API's default is 5. On BEAM each acceptor is its own process and
   the listen backlog is a socket option nobody sets to 5; on Go the accept loop
   is a goroutine. **Neither runtime would have this bug.**
-- Defect 2 exists because the prompt is rebuilt as a JSON object per request and
-  its components are compared field by field in Lisp, with the settings object
-  first. A rewrite that keeps a conversation as an append-only structure and a
-  provider request as a projection of it would not re-serialize 1.4 MB per step.
+- Defect 2 would follow the code to any runtime. A 30 s budget that denies on
+  expiry is a policy, and a port would port it. **Rewriting the harness would not
+  fix it**, which is the single most useful thing this investigation found about
+  the rewrite question: the worst user-visible failure here is not the language.
 
 The earlier hypothesis in this section — the `harness-acp-remote` 60-second
 refusal ladder and the 2/5/15/30/60 listener retry ladder — is real code and a
 real risk for a phone with a stale secret, but it is **not** the explanation for
 the local Emacs client's minutes, because the local client does not go through
 that module at all (`harness-acp-remote` defaults to nil). Defect 1 explains both
-the local client and the phone, with one mechanism.
+the local client and the phone, with one mechanism; Defect 2 explains the rest of
+the wait.
 
 ---
 
@@ -853,28 +881,31 @@ through `harness-acp-remote` at all. They are:
 - **the listener's accept queue, five deep** (`:server t`), which makes a busy
   harness unreachable and hangs a connect for ~2 minutes on the kernel's SYN
   retransmits — **found live on your harness, fixed, and now under test**;
-- **a request prefix that diverges at the harness's own settings checkpoint**, so
-  every step re-sends up to 1.4 MB and the provider caches nothing — **measured in
-  your live log, not yet fixed**.
+- **a 30-second permission judge that denies on timeout**, so every tool call
+  waits out the budget and then fails — **10 timeouts in 20 seconds in the live
+  log; not fixed, because what to do unattended is your call**.
 
 So, in order:
 
-1. **Fix the request-prefix divergence (days).** This is the live, unfixed cause of
-   minutes per message: 711 misses of 100% of the context, largest 238k tokens, at
-   ~15/minute in one log buffer. Find what mutates the settings object between two
-   requests of one session (§3.5, Defect 2). It is in the harness, not the
-   provider, because the divergence is at checkpoint 1, before any conversation
-   content.
+1. **Decide what a slow judge does (hours).** This is the live, unfixed cause of
+   minutes per message: `harness-perms--auto-timeout` is 30 s per tool call
+   (`harness-perms.el:409`), and on expiry a non-interactive session **denies**
+   (`:4415-4420`). A safety check that loses the user's work when it is slow turns
+   load into lost work. Falling back to ask — or to the mode's own policy — rather
+   than deny is the fix; which one is a policy decision, so I left it to you.
 2. **Watch the accept queue in production (hours).** The fix is in, but the defect
    was invisible for as long as it was because client connect/disconnect logged at
    `debug` and the default level is `info`. Those now log at `info` with a reason.
    Consider an alert when `Recv-Q` on the listener approaches the backlog.
-3. **Make the filter-chain policy fail-closed by default (hours).** `424dbdf`
+3. **Fix the inverted cache-miss log line (minutes).** `harness-replay.el:1291`
+   prints the *reused* share as "missed on". It cost me a wrong conclusion in this
+   very report; it will cost the next reader one too.
+4. **Make the filter-chain policy fail-closed by default (hours).** `424dbdf`
    shows the fail-open default put five holes in the jail, and the fix is opt-in
    per chain. Invert the default and make the "only adds" chains opt *out*. Also
    pull the 18 `permission/decide` priorities into one shared constant list, so
    the effective policy is readable in one place instead of nine.
-4. **Turn the scanner into assertions (days).** The bus is already closed, the
+5. **Turn the scanner into assertions (days).** The bus is already closed, the
    layers already hold, and `docs/modules/` already renders the graph; what is
    missing is that nothing *checks* any of it. Add the five checks in the
    Appendix as tests, then fix the one that fails: the 60 modules whose
@@ -882,25 +913,27 @@ So, in order:
    readable from the declarations alone. The accept-queue fix is the model: one
    test reads the kernel's socket, one scans the tree, and the bug cannot come
    back silently.
-5. **Fix the two protocol defects that lose data** (§2.2 g/h): a per-session
+6. **Fix the two protocol defects that lose data** (§2.2 g/h): a per-session
    sequence number with `session/subscribe(since:)`, and flow control in the
    protocol instead of a 32 MiB hard close. Encode-once fanout is a nice cleanup
    and cheap, but the encode is only ~0.024 ms per token (§2.2f) — do it because
    it is cheap, not because it is the wall.
-6. **Make streaming incremental (hours).** Send the delta and let the client
+7. **Make streaming incremental (hours).** Send the delta and let the client
    concatenate, instead of re-`concat`ing the whole answer and re-merging it into
    the node on every chunk (§3.5). It is the one measured cost that grows with
    answer length rather than session count, it is the same fix in any language,
    and it is small — unlike the rewrite it is often cited to justify.
-7. **Then** decide on the rewrite. The driver should be *accept and event-loop
+8. **Then** decide on the rewrite. The driver should be *accept and event-loop
    coupling, long-blocking handlers, and transcript memory*, not aggregate
    throughput — the end-to-end bench (§3.5) puts the local path at 42 ms to
    connect and flat to 12 streaming sessions when the server is idle. The
    accept-queue defect is the clearest argument *for* another runtime in this
    whole report, and it is also the cheapest one to fix here (a constant), which
    is the honest tension: the architecture is not what failed, the runtime's
-   defaults were. And not reviewability, which step 4 largely solves. Taste is a
-   legitimate reason to prefer Go, but it is not evidence the Elisp is wrong.
+   defaults were. And the worst user-visible failure, the judge, is **not**
+   runtime-shaped at all — a port would keep it. Not reviewability, which step 5
+   largely solves. Taste is a legitimate reason to prefer Go, but it is not
+   evidence the Elisp is wrong.
 
 If you do rewrite, **extract rather than replace**, and start with the part whose
 boundary is already clean: the ACP edge. That is a small service with a fixed
@@ -969,16 +1002,19 @@ a scaling limit:
   of 5 and `established=0`, reproduced deterministically, fixed at all five
   listeners, and now under test. It explains both the local Emacs client and the
   phone, with one mechanism.
-- **the request prefix diverges at the harness's own settings checkpoint**, so
-  every step re-sends up to 1.4 MB and the provider caches nothing — 711 misses of
-  100% of the context in one log buffer, largest 238k tokens. Measured, not yet
-  fixed.
+- **a 30-second permission judge that denies on timeout** — `harness-perms--auto-timeout`
+  is 30 s **per tool call** (`harness-perms.el:409`), and when it expires a
+  non-interactive session denies the call (`:4415-4420`). The live log shows **10
+  timeouts in 20 seconds**, so a turn that wants five tools spends 2.5 minutes
+  waiting and then loses the work. That is the "minutes per message".
 
 My earlier answer here — that the symptoms were on the remote WebSocket path and
 its 5-refusals-to-60-seconds lockout — was **wrong**, and worth naming as wrong:
 the local Emacs client does not go through `harness-acp-remote` at all (it
-defaults to nil), so that module cannot explain its minutes. What the report can
-say with evidence:
+defaults to nil), so that module cannot explain its minutes. I also read the live
+log's `replay: … missed on 100%` lines as cache misses; `:ratio` is the share
+**reused**, so those lines report 99.96% hits. The cache was never the problem.
+What the report can say with evidence:
 
 - *Files and stores*: already at 482 worktrees, coping.
 - *Tasks*: one global in-memory table and one whole-file save — fine at tens,

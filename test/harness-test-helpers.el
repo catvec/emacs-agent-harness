@@ -65,6 +65,21 @@ lisp/modules, with `harness-test-load-module'."
 (require 'harness-core)
 (require 'harness-util)
 
+;; A suite loads its modules from this checkout, but `harness-directory' is
+;; wherever harness.el was loaded from -- straight.el's clone, when the
+;; package is installed (`harness--source-directory').  A module's file is
+;; then outside the directories the harness counts as its own
+;; (`harness--own-module-directories'), so `harness-module-plugin-p' calls
+;; every module a project's plugin and `harness-tools--in-scope-p' withholds
+;; its tools from every session: `tools/list' offered three of sixteen, and
+;; a suite that asserts a tool is there failed for a reason that had nothing
+;; to do with what it tested.  The checkout's module directories are the
+;; harness's own here, which is what they are.
+(setq harness-extra-module-directories
+      (append (mapcar (lambda (d) (expand-file-name d harness-test-root))
+                      '("lisp/modules" "lisp/ui"))
+              harness-extra-module-directories))
+
 (defvar harness-test-state-root (file-name-as-directory (make-temp-file "harness-test-state-" t))
   "State directory of the whole test run.
 Nothing a run writes outside `harness-test-with-temp-state' -- compiled
