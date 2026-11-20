@@ -4,7 +4,7 @@ Loading /home/noah/documents/ai/emacs-agent-harness/.worktrees/task-implement-fr
 === the freeform board, driven through the agent's own tools ===
 
 === 1. the grammar, before anything is drawn
-  schema 1 · 6 shapes · 20 operations · 3 themes
+  schema 1 · 6 shapes · 28 operations · 3 themes
   units: x right, y down, angles clockwise degrees
   no search, no ranking, no lifecycle: an agent reads, decides and edits
 

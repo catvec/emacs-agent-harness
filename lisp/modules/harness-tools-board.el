@@ -4,10 +4,13 @@
 
 ;;; Commentary:
 
-;; Six tools, the grammar of harness-board.el turned into what an agent can
-;; call.  They are not a separate model of the board: each is one bus
-;; method of the board module, and each answer is that method's answer.
+;; The board tools, the grammar of harness-board.el turned into what an
+;; agent can call.  They are not a separate model of the board: each is one
+;; bus method of the board module, and each answer is that method's answer.
 ;;
+;;   board.list       board/list     the boards there are, with the id every
+;;                                   other tool names
+;;   board.create     board/create   a new empty board, in a project
 ;;   scene.read       board/get      the revision, the selection, every
 ;;                                   object's exact geometry and text, its
 ;;                                   local frame and anchors, its resources
@@ -26,13 +29,22 @@
 ;;   board.pin        board/pin      a revision kept as a delivered artifact,
 ;;                                   with its landing diagram, which later
 ;;                                   edits cannot rewrite
+;;   board.pins       board/pins     the artifacts a board delivered, or one
+;;                                   of them as the document it kept
 ;;   board.discuss    board/discuss  a thread of the task's own review,
 ;;                                   anchored to one place at one revision
+;;   board.discussions board/discussions  the threads on a board, and whether
+;;                                   the drawing moved since each was written
+;;   board.delete     board/delete   a board removed with its client state
 ;;
 ;; There is no search tool, no candidate ranking and no lifecycle: an agent
 ;; reads, decides and edits, and a person decides what the board means.
 ;; Editing a board never creates a task and never approves code; a task is
 ;; made only when the person asks for one.
+;;
+;; The module also carries the skill that explains all of this to an agent
+;; (`harness-tools-board-skill-directory'): the skills module lists it
+;; exactly while this module is ready.
 
 ;;; Code:
 
@@ -46,6 +58,10 @@
 (declare-function harness-board-svg "harness-board-svg" (board &optional diagram title))
 (declare-function harness-board-load "harness-board-store" (id))
 (declare-function harness-board--truthy "harness-board" (value))
+(declare-function harness-board-new-id "harness-board" (prefix))
+(declare-function harness-links-board-url "harness-links" (board &optional diagram object &rest keys))
+(declare-function harness-skills-add-module-directory "harness-skills" (module dir &optional origin within))
+(defvar harness-directory)
 
 (defun harness-tools-board--call (method &rest args)
   "Call board bus METHOD with ARGS, or say the board module is not loaded."
@@ -110,6 +126,39 @@
     (harness-tool-error
      (format "%s: %s" (or kind 'refused) message)
      :meta (list :board-error (or kind 'unknown)))))
+
+(defun harness-tools-board--input-board (input)
+  "Return the board INPUT names, or nil."
+  (or (plist-get input :board) (plist-get input :boardId)))
+
+(defun harness-tools-board--need-board (input what)
+  "Return the board INPUT names, or refuse the call of WHAT without one."
+  (let ((board (harness-tools-board--input-board input)))
+    (unless (and (stringp board) (not (string-blank-p board)))
+      (error "%s needs a board: the id board.list returns" what))
+    board))
+
+(defun harness-tools-board--project (input ctx)
+  "Return the project INPUT names, the calling session's project by default.
+An empty name means no project, which is what a board of every project's
+work is; the caller's own project is the answer when it names none."
+  (let ((named (plist-get input :project)))
+    (cond
+     ((and (stringp named) (string-blank-p named)) nil)
+     ((stringp named) (file-name-as-directory (expand-file-name named)))
+     ((null named)
+      (let ((cwd (or (plist-get ctx :cwd) default-directory)))
+        (and (harness-method-exists-p 'project/root)
+             (ignore-errors
+               (file-name-as-directory
+                (expand-file-name (harness-call 'project/root cwd)))))))
+     (t nil))))
+
+(defun harness-tools-board--link (board)
+  "Return the harness link to BOARD, or its id when links are not loaded."
+  (if (fboundp 'harness-links-board-url)
+      (harness-links-board-url board)
+    board))
 
 (defun harness-tools-board--scene-svg (board-id diagram)
   "Return the SVG rendering of BOARD-ID's DIAGRAM, or nil.
@@ -291,6 +340,123 @@ observed, declared, proposed or unknown."
   :subject (lambda (input) (or (plist-get input :board) (plist-get input :boardId)))
   :handler #'harness-tools-board--read)
 
+;;;; board.list
+
+(defun harness-tools-board--list (input ctx)
+  "Handler of the board.list tool: the boards there are."
+  (let ((project (harness-tools-board--project input ctx))
+        (all (and (harness-board--truthy (plist-get input :all)) t)))
+    (condition-case err
+        (let ((boards (append (harness-tools-board--call
+                               'board/list
+                               (append (and project (list :project project))
+                                       (and all (list :all t))))
+                              nil)))
+          (harness-tool-ok (harness-tools-board--list-text boards project all)
+                           :meta (list :project project
+                                       :boards (length boards))))
+      (harness-board-error (harness-tools-board--error err)))))
+
+(defun harness-tools-board--list-text (boards project all)
+  "Return BOARDS, as `board/list' reads them, as text for a model.
+PROJECT and ALL say which boards were asked for, so an empty answer
+names what it left out rather than reading as an empty harness."
+  (if (null boards)
+      (format "No boards%s.\nA board is made with board.create, and its id is what every other board tool names.\n"
+              (cond (all "")
+                    (project (format " in %s" project))
+                    (t " on this machine")))
+    (concat
+     (format "%d board%s%s\n\n"
+             (length boards) (if (= 1 (length boards)) "" "s")
+             (cond (all " · every project")
+                   (project (format " · %s" project))
+                   (t "")))
+     (mapconcat #'harness-tools-board--board-line boards "\n")
+     "\n\nRead one with scene.read, naming its id.")))
+
+(defun harness-tools-board--board-line (board)
+  "Return BOARD, a `board/list' entry, as one line of text."
+  (format "· %s · %s\n  %s%s · revision %s · %s objects in %s diagram%s · updated %s"
+          (plist-get board :id)
+          (or (plist-get board :name) "")
+          (or (plist-get board :theme) "no theme")
+          (if-let* ((project (plist-get board :project)))
+              (format " · %s" project) "")
+          (or (plist-get board :revision) 0)
+          (or (plist-get board :objects) 0)
+          (or (plist-get board :diagrams) 0)
+          (if (= 1 (or (plist-get board :diagrams) 0)) "" "s")
+          (or (and (plist-get board :updated)
+                   (harness-relative-time (plist-get board :updated)))
+              "never")))
+
+(harness-define-tool "board.list"
+  :label "List boards"
+  :description "List the freeform boards the harness keeps, newest first, with the id every other board tool names: the board's name, its theme, its revision, how many objects and diagrams it holds, its project and when it last changed. A board of the calling session's project is listed by default; name a project to list another's, or all to list every board. A board is made with board.create, and read with scene.read."
+  :schema '(:type "object"
+            :properties (:project (:type "string" :description "The project whose boards to list; the calling session's own by default. An empty name lists every board, as all does.")
+                         :all (:type "boolean" :description "List every board, whatever its project.")))
+  :kind 'read
+  :coalescable t
+  :handler #'harness-tools-board--list)
+
+;;;; board.create
+
+(defun harness-tools-board--create (input ctx)
+  "Handler of the board.create tool: make a board."
+  (let* ((name (or (plist-get input :name) (plist-get input :title)))
+         (id (or (plist-get input :board) (plist-get input :id)
+                 (and (stringp name) (not (string-blank-p name))
+                      (harness-board-new-id "b"))))
+         (project (harness-tools-board--project input ctx))
+         (theme (harness-tools-board--string (plist-get input :theme)))
+         (writers (append (plist-get input :writers) nil)))
+    (unless (and (stringp id) (not (string-blank-p id)))
+      (error "board.create needs a name, or an id to make the board with"))
+    (condition-case err
+        (let* ((document (harness-tools-board--call
+                          'board/create id (or name id)
+                          (append (and project (list :project project))
+                                  (and theme (list :theme theme))
+                                  (and writers (list :writers writers)))))
+               (board (plist-get document :id)))
+          (harness-tool-ok
+           (concat
+            (format "Made board %s · %s%s%s\n"
+                    board (or (plist-get document :name) "")
+                    (if project (format " · %s" project) " · no project")
+                    (format " · theme %s" (or (plist-get document :theme) "")))
+            (format "It has one empty diagram, %s, and revision %s.\n"
+                    (or (plist-get (plist-get document :diagram) :id) "d-overview")
+                    (or (plist-get document :revision) 0))
+            (format "Draw on it with scene.edit, then patch.commit; read it with scene.read %s.\n"
+                    board)
+            (format "Board link: %s" (harness-tools-board--link board)))
+           :meta (list :board board
+                       :name (plist-get document :name)
+                       :project (plist-get document :project)
+                       :theme (plist-get document :theme)
+                       :revision (plist-get document :revision)
+                       :diagram (plist-get (plist-get document :diagram) :id)
+                       :link (harness-tools-board--link board))))
+      (harness-board-error (harness-tools-board--error err)))))
+
+(harness-define-tool "board.create"
+  :label "Create board"
+  :description "Make a new, empty freeform board and return its id, its diagram and its link: one diagram with no objects, at revision 0, ready for scene.edit. A board is a freeform place to think -- notes, ink, shapes and diagrams -- not a task and not a review: making one creates no task and approves no code. A board is grouped with the calling session's project unless a project is named, or unless the project is left empty for one that belongs to no project. An id already in use is refused rather than emptied; board.list says which ids there are."
+  :schema '(:type "object"
+            :properties (:name (:type "string" :description "What the board is called, for people.")
+                         :id (:type "string" :description "The board's id: letters, digits and .:- . A fresh one is made from the name when left out.")
+                         :project (:type "string" :description "The project the board belongs to; the calling session's own by default. An empty name makes a board of no project.")
+                         :theme (:type "string" :description "The theme to wear; electric-commons by default. grammar.describe lists them.")
+                         :writers (:type "array" :items (:type "string")
+                                   :description "The sessions that may edit it; every session by default."))
+            :required ("name"))
+  :kind 'write
+  :subject (lambda (input) (or (plist-get input :name) (plist-get input :id)))
+  :handler #'harness-tools-board--create)
+
 ;;;; grammar.describe
 
 (defun harness-tools-board--grammar (_input _ctx)
@@ -400,12 +566,15 @@ observed, declared, proposed or unknown."
                                                     :parent (:type "string")
                                                     :childAnchor (:type "string")
                                                     :parentAnchor (:type "string")
+                                                    :child-anchor (:type "string")
+                                                    :parent-anchor (:type "string")
                                                     :angle (:type "number")
                                                     :scale (:type "number")
                                                     :mirror (:type "boolean")
                                                     :text (:type "string")
                                                     :name (:type "string")
                                                     :role (:type "string")
+                                                    :locked (:type "boolean")
                                                     :x (:type "number")
                                                     :y (:type "number")
                                                     :dx (:type "number")
@@ -423,12 +592,18 @@ observed, declared, proposed or unknown."
                                                     :resources (:type "array" :items (:type "object"))
                                                     :task (:type "string")
                                                     :members (:type "array" :items (:type "string"))
+                                                    :selection (:type "array" :items (:type "string"))
+                                                    :portals (:type "array" :items (:type "object"))
+                                                    :viewport (:type "object")
+                                                    :theme (:type "string")
+                                                    :newId (:type "string")
+                                                    :new-id (:type "string")
                                                     :from (:type "object")
                                                     :to (:type "object")
                                                     :label (:type "string")
                                                     :z (:type "number")
-                                                    :on (:type "boolean")
-                                                    :diagram (:type "string")))
+                                                    :on (:type "boolean"))
+                                       :description "One operation: its op name, the ids it names and the fields that operation takes, as grammar.describe lists them.")
                                :description "The operations, in the order they apply; each validated against the document as the ones before it leave it."))
             :required ("board" "ops"))
   :kind 'write
@@ -461,9 +636,14 @@ observed, declared, proposed or unknown."
 
 (harness-define-tool "patch.preview"
   :label "Preview board patch"
-  :description "Render the exact operation batch without changing anything, and report what it would do: the patch and its content hash, the objects it creates and moves and by how much, text that would overflow, references that would break, and constraint failures. Use it when the drawing matters; the caller decides the next edit."
+  :description "Render the exact operation batch without changing anything, and report what it would do: the patch and its content hash, the objects it creates and moves and by how much, text that would overflow, references that would break, and constraint failures. Use it when the drawing matters; the caller decides the next edit. Nothing is written, and no revision is made."
   :schema '(:type "object"
-            :properties (:board (:type "string"))
+            :properties (:board (:type "string" :description "The board id.")
+                         :diagram (:type "string" :description "The diagram the operations default to.")
+                         :scope (:type "array" :items (:type "string")
+                                 :description "The object ids this batch may touch.")
+                         :ops (:type "array" :items (:type "object")
+                               :description "The operations, in the order they apply, as scene.edit takes them."))
             :required ("board" "ops"))
   :kind 'read
   :coalescable t
@@ -520,7 +700,16 @@ observed, declared, proposed or unknown."
   :label "Commit board patch"
   :description "Apply a validated patch to a board as one atomic revision. Name the patch id and content hash that patch.preview or scene.edit returned, and the revision you read: if the board moved since, the whole batch is refused as stale-revision rather than applied over somebody else's work. Revalidation happens against the current document before anything is written. Pass an idempotencyKey so a retried call after a lost answer commits once: a key used before answers what it answered then."
   :schema '(:type "object"
-            :properties (:board (:type "string"))
+            :properties (:board (:type "string" :description "The board id.")
+                         :patch (:type "string" :description "The patch id scene.edit or patch.preview returned.")
+                         :hash (:type "string" :description "The content hash that patch came with.")
+                         :revision (:type "number" :description "The revision the batch was made against, which is the revision you read.")
+                         :ops (:type "array" :items (:type "object")
+                               :description "The operations again, when the patch id is not to hand: they are revalidated whole before anything is written.")
+                         :diagram (:type "string" :description "The diagram the operations default to.")
+                         :scope (:type "array" :items (:type "string")
+                                 :description "The object ids the batch may touch.")
+                         :idempotencyKey (:type "string" :description "A key for this batch: a retried call with the same key commits once and answers what it answered then."))
             :required ("board" "revision"))
   :kind 'write
   :subject (lambda (input) (or (plist-get input :board) (plist-get input :boardId)))
@@ -581,7 +770,9 @@ observed, declared, proposed or unknown."
   :label "Undo board edit"
   :description "Take back the newest commit of a board, or the one you name, as a compensating edit built from the preimages that commit kept. An object somebody else changed since is left as it is and reported as a conflict: undo never rewrites another writer's work. With dryRun, return the operations without committing them."
   :schema '(:type "object"
-            :properties (:board (:type "string"))
+            :properties (:board (:type "string" :description "The board id.")
+                         :revision (:type "number" :description "The commit to take back; the newest by default.")
+                         :dryRun (:type "boolean" :description "Return the operations without committing them."))
             :required ("board"))
   :kind 'write
   :subject (lambda (input) (or (plist-get input :board) (plist-get input :boardId)))
@@ -650,6 +841,186 @@ observed, declared, proposed or unknown."
   :subject (lambda (input) (or (plist-get input :board) (plist-get input :boardId)))
   :handler #'harness-tools-board--pin)
 
+;;;; board.pins
+
+(defun harness-tools-board--pins (input _ctx)
+  "Handler of the board.pins tool: the artifacts a board delivered."
+  (let ((board (harness-tools-board--need-board input "board.pins"))
+        (pin (harness-tools-board--string (plist-get input :pin)))
+        (task (harness-tools-board--string (plist-get input :task))))
+    (condition-case err
+        (let ((answer (harness-tools-board--call
+                       'board/pins board
+                       (append (and pin (list :pin pin))
+                               (and task (list :task task))))))
+          (if pin
+              (harness-tool-ok
+               (harness-tools-board--pin-document-text board answer)
+               :meta (list :board board
+                           :pin (plist-get (plist-get answer :pin) :id)
+                           :revision (plist-get (plist-get answer :pin) :revision))
+               :images (let ((image (plist-get answer :image)))
+                         (and (stringp image) (list image))))
+            (let ((pins (append answer nil)))
+              (harness-tool-ok (harness-tools-board--pins-text board pins)
+                               :meta (list :board board :pins (length pins))))))
+      (harness-board-error (harness-tools-board--error err)))))
+
+(defun harness-tools-board--pins-text (board pins)
+  "Return PINS, the artifacts of BOARD, as text for a model."
+  (if (null pins)
+      (format "No pinned revision of %s.\nboard.pin keeps one, with its landing diagram, as a task's delivered drawing.\n"
+              board)
+    (concat
+     (format "%d pinned revision%s of %s, newest first\n\n"
+             (length pins) (if (= 1 (length pins)) "" "s") board)
+     (mapconcat #'harness-tools-board--pin-line pins "\n")
+     "\n\nName one with pin to read the document it kept.")))
+
+(defun harness-tools-board--pin-line (pin)
+  "Return PIN, a `board/pins' entry, as one line of text."
+  (let ((objects (or (plist-get pin :objects) 0)))
+    (format "· %s · %s · revision %s in %s · %s object%s\n  %s\n  artifact: %s\n  board now: %s"
+            (plist-get pin :id)
+            (or (plist-get pin :title) "untitled")
+            (or (plist-get pin :revision) 0)
+            (or (plist-get pin :diagram) "its first diagram")
+            objects
+            (if (= 1 objects) "" "s")
+            (mapconcat #'identity
+                       (delq nil
+                             (list (if-let* ((task (plist-get pin :task)))
+                                       (format "task %s" task)
+                                     "no task")
+                                   (and (plist-get pin :created)
+                                        (harness-relative-time
+                                         (float-time (plist-get pin :created))))))
+                       " · ")
+            (or (plist-get pin :target) "")
+            (or (plist-get pin :current) ""))))
+
+(defun harness-tools-board--pin-document-text (board answer)
+  "Return the pinned document of BOARD in ANSWER as text for a model.
+It is the drawing as it was pinned, read from the snapshot rather than
+from the board: an edit since cannot reach it."
+  (let ((pin (plist-get answer :pin))
+        (document (plist-get answer :document))
+        (objects (or (plist-get (plist-get answer :pin) :objects) 0)))
+    (concat
+     (format "Pin %s · %s · revision %s of %s · %s object%s\n"
+             (plist-get pin :id) (or (plist-get pin :title) "untitled")
+             (plist-get pin :revision) board objects
+             (if (= 1 objects) "" "s"))
+     (format "Artifact: %s\nCurrent board: %s\n"
+             (or (plist-get pin :target) "") (or (plist-get pin :current) ""))
+     (if (and (plist-get pin :revision)
+              (plist-get document :revision)
+              (not (equal (plist-get pin :revision) (plist-get document :revision))))
+         "The snapshot says its own revision; it is the artifact, not the board.\n"
+       "")
+     (harness-tools-board--scene-text document))))
+
+(harness-define-tool "board.pins"
+  :label "Read pinned revisions"
+  :description "Read the revisions a board delivered as artifacts, newest first: each pin's id, its title, the task it was delivered for, the revision it kept, its landing diagram and how many objects it holds, with the artifact's link kept apart from the board as it goes on. Name one pin to read the document it kept, exactly as it was pinned, with a picture: an edit since cannot reach it. board.pin makes one."
+  :schema '(:type "object"
+            :properties (:board (:type "string" :description "The board id, as board.list returns it.")
+                         :pin (:type "string" :description "One pin to read, as a document, with its picture.")
+                         :task (:type "string" :description "Keep the pins one task delivered."))
+            :required ("board"))
+  :kind 'read
+  :coalescable t
+  :subject (lambda (input) (or (plist-get input :board) (plist-get input :boardId)))
+  :handler #'harness-tools-board--pins)
+
+;;;; board.discussions
+
+(defun harness-tools-board--discussions (input _ctx)
+  "Handler of the board.discussions tool: the threads on a board."
+  (let ((board (harness-tools-board--need-board input "board.discussions"))
+        (task (harness-tools-board--string (plist-get input :task)))
+        (object (or (plist-get input :object) (plist-get input :objectId))))
+    (condition-case err
+        (let ((threads (append (harness-tools-board--call
+                                'board/discussions board
+                                (append (and task (list :task task))
+                                        (and object (list :object object))))
+                               nil)))
+          (harness-tool-ok (harness-tools-board--discussions-text board threads)
+                           :meta (list :board board :threads (length threads))))
+      (harness-board-error (harness-tools-board--error err)))))
+
+(defun harness-tools-board--discussions-text (board threads)
+  "Return THREADS, the discussions of BOARD, as text for a model."
+  (if (null threads)
+      (format "No discussion on %s.\nboard.discuss starts one on a node, a connector or the diagram.\n"
+              board)
+    (concat
+     (format "%d discussion%s on %s\n\n"
+             (length threads) (if (= 1 (length threads)) "" "s") board)
+     (mapconcat #'harness-tools-board--discussion-line threads "\n")
+     "\n\nThe thread is the task's review's own: it is replied to and resolved there.")))
+
+(defun harness-tools-board--discussion-line (thread)
+  "Return THREAD, a `board/discussions' entry, as one line of text."
+  (format "· %s · %s · on %s%s · written at revision %s%s · %s comment%s%s"
+          (plist-get thread :id) (or (plist-get thread :status) "open")
+          (or (plist-get thread :name) "the diagram")
+          (if-let* ((diagram (plist-get thread :diagram)))
+              (format " in %s" diagram) "")
+          (or (plist-get thread :revision) 0)
+          (cond ((plist-get thread :gone) " · the object is gone")
+                ((plist-get thread :stale) " · the drawing has moved since")
+                (t ""))
+          (or (plist-get thread :comments) 0)
+          (if (= 1 (or (plist-get thread :comments) 0)) "" "s")
+          (if-let* ((task (plist-get thread :task))) (format " · task %s" task) "")))
+
+(harness-define-tool "board.discussions"
+  :label "Read board discussions"
+  :description "Read the discussions on a board, newest first: each thread's id and status, the place it is anchored to, the revision it was written against and whether the drawing has moved since, or the object it names is gone, how many comments it holds and the task whose review holds it. The threads are the review's own, so they are read, replied to and resolved there. board.discuss starts or answers one."
+  :schema '(:type "object"
+            :properties (:board (:type "string" :description "The board id, as board.list returns it.")
+                         :task (:type "string" :description "Keep the threads of one task's review.")
+                         :object (:type "string" :description "Keep the threads on one object."))
+            :required ("board"))
+  :kind 'read
+  :coalescable t
+  :subject (lambda (input) (or (plist-get input :board) (plist-get input :boardId)))
+  :handler #'harness-tools-board--discussions)
+
+;;;; board.delete
+
+(defun harness-tools-board--delete (input _ctx)
+  "Handler of the board.delete tool: remove a board."
+  (let ((board (harness-tools-board--need-board input "board.delete"))
+        (force (and (harness-board--truthy (plist-get input :force)) t)))
+    (condition-case err
+        (let* ((answer (harness-tools-board--call
+                        'board/delete board (list :force force)))
+               (pins (if (consp answer) (plist-get answer :pins) 0)))
+          (harness-tool-ok
+           (concat
+            (format "Deleted board %s, and the client state navigation kept for it.\n" board)
+            (if pins
+                (format "Its %d pinned revision%s went with it: an artifact names the board it came from.\n"
+                        pins (if (= 1 pins) "" "s"))
+              "It had no pinned revision.\n")
+            "The board is gone for good: no revision records this, and history.undo has nothing to take back.\n")
+           :meta (list :board board :deleted t :pins pins)))
+      (harness-board-error (harness-tools-board--error err)))))
+
+(harness-define-tool "board.delete"
+  :label "Delete board"
+  :description "Delete a board and the client state navigation kept for it. A board a task delivered a pinned revision of is refused unless force is set, and then its pins go with it: an artifact names the board it came from. Deleting is not an edit -- nothing of the board is left to undo and no revision records it -- so use it for a board made by mistake, not to take back a drawing: history.undo takes back a commit."
+  :schema '(:type "object"
+            :properties (:board (:type "string" :description "The board id, as board.list returns it.")
+                         :force (:type "boolean" :description "Delete a board a task delivered, with its pinned revisions."))
+            :required ("board"))
+  :kind 'write
+  :subject (lambda (input) (or (plist-get input :board) (plist-get input :boardId)))
+  :handler #'harness-tools-board--delete)
+
 ;;;; board.discuss
 
 (defun harness-tools-board--discuss (input ctx)
@@ -702,9 +1073,48 @@ observed, declared, proposed or unknown."
   :subject (lambda (input) (or (plist-get input :board) (plist-get input :boardId)))
   :handler #'harness-tools-board--discuss)
 
+;;;; The skill this module brings
+
+;; The board is a place an agent works in through nine tools, and the
+;; order they are used in is not obvious from any one description: read
+;; the grammar, make a board, read it, propose an edit, preview it,
+;; commit it, undo it, pin what was delivered, discuss a place.  So the
+;; module carries a skill that says how, and the skills module lists it
+;; exactly while this module is ready.
+
+(defcustom harness-tools-board-skill-directory nil
+  "Where the skill the board tools bring is kept, or nil for the harness's own.
+nil means the `skills' directory of the harness tree this module was
+loaded from (`harness-directory'), which holds the `freeform-board'
+skill.  A directory holding skills is what to name, not one skill's own
+directory: every skill under it is listed."
+  :type '(choice (const :tag "The harness's own skills" nil) directory)
+  :group 'harness)
+
+(defun harness-tools-board--skill-directory ()
+  "Return the directory of skills the board tools bring, or nil.
+It is `harness-tools-board-skill-directory' when set, else the `skills'
+directory of the harness tree, when that tree is known and the directory
+is there.  A harness that loads this module without `harness-directory'
+simply brings no skill, rather than guessing where one is."
+  (or (and (stringp harness-tools-board-skill-directory)
+           (not (string-blank-p harness-tools-board-skill-directory))
+           (file-name-as-directory
+            (expand-file-name harness-tools-board-skill-directory)))
+      (and (stringp harness-directory)
+           (let ((dir (expand-file-name "skills" harness-directory)))
+             (and (file-directory-p dir) (file-name-as-directory dir))))))
+
+(defun harness-tools-board--init ()
+  "Have the skills module list this module's skill while this module is ready."
+  (with-eval-after-load 'harness-skills
+    (when-let* ((dir (harness-tools-board--skill-directory)))
+      (harness-skills-add-module-directory 'tools-board dir "harness" harness-directory))))
+
 (harness-define-module 'tools-board
-  :doc "The board tools an agent works with: scene.read, grammar.describe, scene.edit, patch.preview, patch.commit, history.undo, board.pin and board.discuss."
-  :requires '(board-store tools))
+  :doc "The board tools an agent works with: board.list, board.create, scene.read, grammar.describe, scene.edit, patch.preview, patch.commit, history.undo, board.pin, board.pins, board.discuss, board.discussions and board.delete, and the skill that explains them."
+  :requires '(board-store tools)
+  :init #'harness-tools-board--init)
 
 (provide 'harness-tools-board)
 ;;; harness-tools-board.el ends here

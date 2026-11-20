@@ -113,6 +113,26 @@
     (should-not (harness-board-load "b-fixture"))
     (should-not (file-exists-p (harness-board--views-path "b-fixture")))))
 
+(ert-deftest harness-board-store-delete-keeps-the-artifact-a-task-delivered ()
+  "A board a task pinned a revision of is refused: the pin names its board."
+  (harness-test-with-temp-state
+    (harness-board-store-test--make)
+    (let* ((pin (harness-call 'board/pin "b-fixture" (list :task "t-1")))
+           (path (harness-board--pin-path (plist-get pin :id))))
+      (should (file-exists-p path))
+      (should (eq 'precondition
+                  (harness-board-store-test--refusal
+                   (lambda () (harness-call 'board/delete "b-fixture")))))
+      ;; The board and the artifact are both still there.
+      (should (harness-board-load "b-fixture"))
+      (should (file-exists-p path))
+      ;; Naming the force deletes the board with the artifact it delivered.
+      (let ((answer (harness-call 'board/delete "b-fixture" (list :force t))))
+        (should (equal 1 (plist-get answer :pins)))
+        (should (plist-get answer :deleted)))
+      (should-not (harness-board-load "b-fixture"))
+      (should-not (file-exists-p path)))))
+
 ;;;; Reading a scene
 
 (ert-deftest harness-board-store-get-reads-a-diagram-as-a-client-draws-it ()
@@ -577,8 +597,10 @@ A board is one feature: a module that needs another starts after it, and
             (ert-info ((symbol-name method))
               (should (harness-method-exists-p method))))
           ;; And every tool.
-          (dolist (name '("scene.read" "grammar.describe" "scene.edit"
-                          "patch.preview" "patch.commit" "history.undo"))
+          (dolist (name '("board.list" "board.create" "scene.read" "grammar.describe"
+                          "scene.edit" "patch.preview" "patch.commit" "history.undo"
+                          "board.pin" "board.pins" "board.discuss" "board.discussions"
+                          "board.delete"))
             (ert-info (name)
               (should (harness-tool-get name)))))
       (harness-test-reset-bus)

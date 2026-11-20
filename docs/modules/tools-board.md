@@ -2,7 +2,7 @@
 
 # tools-board
 
-The board tools an agent works with: scene.read, grammar.describe, scene.edit, patch.preview, patch.commit, history.undo, board.pin and board.discuss.
+The board tools an agent works with: board.list, board.create, scene.read, grammar.describe, scene.edit, patch.preview, patch.commit, history.undo, board.pin, board.pins, board.discuss, board.discussions and board.delete, and the skill that explains them.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-tools-board.el](../../lisp/modules/harness-tools-board.el)
@@ -11,10 +11,13 @@ The board tools an agent works with: scene.read, grammar.describe, scene.edit, p
 
 ## About
 
-Six tools, the grammar of harness-board.el turned into what an agent can
-call.  They are not a separate model of the board: each is one bus
-method of the board module, and each answer is that method's answer.
+The board tools, the grammar of harness-board.el turned into what an
+agent can call.  They are not a separate model of the board: each is one
+bus method of the board module, and each answer is that method's answer.
 
+  board.list       board/list     the boards there are, with the id every
+                                  other tool names
+  board.create     board/create   a new empty board, in a project
   scene.read       board/get      the revision, the selection, every
                                   object's exact geometry and text, its
                                   local frame and anchors, its resources
@@ -33,31 +36,50 @@ method of the board module, and each answer is that method's answer.
   board.pin        board/pin      a revision kept as a delivered artifact,
                                   with its landing diagram, which later
                                   edits cannot rewrite
+  board.pins       board/pins     the artifacts a board delivered, or one
+                                  of them as the document it kept
   board.discuss    board/discuss  a thread of the task's own review,
                                   anchored to one place at one revision
+  board.discussions board/discussions  the threads on a board, and whether
+                                  the drawing moved since each was written
+  board.delete     board/delete   a board removed with its client state
 
 There is no search tool, no candidate ranking and no lifecycle: an agent
 reads, decides and edits, and a person decides what the board means.
 Editing a board never creates a task and never approves code; a task is
 made only when the person asks for one.
 
+The module also carries the skill that explains all of this to an agent
+(`harness-tools-board-skill-directory`): the skills module lists it
+exactly while this module is ready.
+
 ## Provides
 
 ### Tools
 
+- `board.create` — Make a new, empty freeform board and return its id, its diagram and its link: one diagram with no objects, at revision 0, ready for scene.edit. A board is a freeform place to think -- notes, ink, shapes and diagrams -- not a task and not a review: making one creates no task and approves no code. A board is grouped with the calling session's project unless a project is named, or unless the project is left empty for one that belongs to no project. An id already in use is refused rather than emptied; board.list says which ids there are.
+- `board.delete` — Delete a board and the client state navigation kept for it. A board a task delivered a pinned revision of is refused unless force is set, and then its pins go with it: an artifact names the board it came from. Deleting is not an edit -- nothing of the board is left to undo and no revision records it -- so use it for a board made by mistake, not to take back a drawing: history.undo takes back a commit.
 - `board.discuss` — Start or answer a discussion on one place of a board: a node, a connector or the diagram itself. The thread is a native thread of the task's review, so it is replied to, resolved and read there like any other; it keeps the board, the diagram, the object and the revision it was written against, so the anchor survives a move or a rename and a drawing that has changed since says so. Resolving the thread, accepting a change to the drawing and approving code stay three separate actions.
+- `board.discussions` — Read the discussions on a board, newest first: each thread's id and status, the place it is anchored to, the revision it was written against and whether the drawing has moved since, or the object it names is gone, how many comments it holds and the task whose review holds it. The threads are the review's own, so they are read, replied to and resolved there. board.discuss starts or answers one.
+- `board.list` — List the freeform boards the harness keeps, newest first, with the id every other board tool names: the board's name, its theme, its revision, how many objects and diagrams it holds, its project and when it last changed. A board of the calling session's project is listed by default; name a project to list another's, or all to list every board. A board is made with board.create, and read with scene.read.
 - `board.pin` — Pin a board's current revision as a task's delivered architecture, with its landing diagram. The pin keeps its own copy of the drawing, so later edits cannot rewrite what was handed in; the answer names the artifact's link and, separately, the board as it goes on. Use it when a task's explanation is a drawing. It neither accepts the drawing nor approves any code, and resolving a discussion stays a separate action.
+- `board.pins` — Read the revisions a board delivered as artifacts, newest first: each pin's id, its title, the task it was delivered for, the revision it kept, its landing diagram and how many objects it holds, with the artifact's link kept apart from the board as it goes on. Name one pin to read the document it kept, exactly as it was pinned, with a picture: an edit since cannot reach it. board.pin makes one.
 - `grammar.describe` — Read the board grammar: the shape kinds and their fields, the operations a patch may apply, the style keys and colour roles, the themes, the resource kinds, the evidence roles, the units and limits, and the distinct ways an operation is refused. Every board and theme is built from exactly these; there is no renderer-only primitive and no other edit path.
 - `history.undo` — Take back the newest commit of a board, or the one you name, as a compensating edit built from the preimages that commit kept. An object somebody else changed since is left as it is and reported as a conflict: undo never rewrites another writer's work. With dryRun, return the operations without committing them.
 - `patch.commit` — Apply a validated patch to a board as one atomic revision. Name the patch id and content hash that patch.preview or scene.edit returned, and the revision you read: if the board moved since, the whole batch is refused as stale-revision rather than applied over somebody else's work. Revalidation happens against the current document before anything is written. Pass an idempotencyKey so a retried call after a lost answer commits once: a key used before answers what it answered then.
-- `patch.preview` — Render the exact operation batch without changing anything, and report what it would do: the patch and its content hash, the objects it creates and moves and by how much, text that would overflow, references that would break, and constraint failures. Use it when the drawing matters; the caller decides the next edit.
+- `patch.preview` — Render the exact operation batch without changing anything, and report what it would do: the patch and its content hash, the objects it creates and moves and by how much, text that would overflow, references that would break, and constraint failures. Use it when the drawing matters; the caller decides the next edit. Nothing is written, and no revision is made.
 - `scene.edit` — Apply an ordered batch of explicit operations to a board and return the validated patch: the expanded operations, the ids it creates and changes, the preimages it would replace, and diagnostics. Nothing is committed: patch.commit applies this exact patch. Hard constraints (a locked object, the scope, a movement budget) refuse the whole batch and name a distinct error kind; soft findings (text overflow, an object moving far, an overlap nobody declared) are warnings and the batch still stands. Overlap is allowed unless you ask otherwise. Editing a board never creates a task and never approves code.
 - `scene.read` — Read a freeform board: the revision, the diagram's viewport and selection, every object with its exact geometry, text, local frame and anchors, its resource links with the state each resolved to, and the objects near a selection. Nearby is geometry only: it never implies that objects relate architecturally. A drawing states what its roles say -- observed, declared, proposed or unknown.
+
+### Options
+
+- `harness-tools-board-skill-directory` — Where the skill the board tools bring is kept, or nil for the harness's own.
 
 ## Uses
 
 ### Methods it calls
 
 - `board/get` ([board-store](board-store.md))
+- `project/root` ([project](project.md)), when it is loaded
 - `task/for-session` ([tasks](tasks.md)), when it is loaded
 

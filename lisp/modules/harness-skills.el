@@ -189,6 +189,62 @@ It is the one a client that serves its skills advertises
 (defvar harness-skills--cache (make-hash-table :test 'equal)
   "Directory -> (STAMP . SKILLS).  STAMP is the directory and file mtimes.")
 
+;;;; Skills a module brings
+
+;; A module may carry a skill that explains it, and the listing must
+;; follow the module: listed exactly while the module is ready, gone when
+;; it is disabled, back when it is enabled again.  So a module registers
+;; its skills directory once, from its own init, and the listing filters
+;; the registry by `harness-module-ready-p' on every call rather than
+;; keeping a copy.  A user's skill of the same name still wins: a module's
+;; entry is a global one, listed after the user's own directories.
+
+(defvar harness-skills-module-directories nil
+  "Skills directories the modules bring, in the order they registered.
+Each entry is a plist: `:module' names the module that brought it,
+`:dir' is a directory holding skills, `:origin' what the listing calls
+it and `:within' the directory it belongs to, for the containment check
+`skills/directories' makes.  See `harness-skills-add-module-directory'.")
+
+(defun harness-skills-add-module-directory (module dir &optional origin within)
+  "Have MODULE bring the skills under DIR, listed while MODULE is ready.
+ORIGIN names where the skills come from, \"harness\" by default, and
+WITHIN is the directory DIR belongs to: a skill that leads out of it
+once symbolic links are resolved is not treated as a skill directory of
+the harness's own (see `skills/directories').  Registering DIR again for
+the same MODULE replaces what it brought before, so a module reloaded or
+reconfigured lists one copy of its skills."
+  (let ((dir (file-name-as-directory (expand-file-name dir))))
+    (setq harness-skills-module-directories
+          (cons (list :module module :dir dir
+                      :origin (or origin harness-skills-owner)
+                      :within within)
+                (cl-remove-if (lambda (entry)
+                                (or (eq (plist-get entry :module) module)
+                                    (equal (plist-get entry :dir) dir)))
+                              harness-skills-module-directories)))
+    dir))
+
+(defun harness-skills-remove-module-directory (module)
+  "Stop listing the skills MODULE brought.
+A module that is disabled already stops listing them, since a listing
+keeps only the directories of the modules that are ready; this forgets
+the registration itself."
+  (setq harness-skills-module-directories
+        (cl-remove-if (lambda (entry) (eq (plist-get entry :module) module))
+                      harness-skills-module-directories)))
+
+(defun harness-skills--module-entries ()
+  "Return the ready modules' skills directories, as `harness-skills--entries' does.
+A module's directory is a global one, after the user's own, so a user's
+skill of the same name shadows it and a project's does too."
+  (cl-loop for entry in (reverse harness-skills-module-directories)
+           when (and (harness-module-ready-p (plist-get entry :module))
+                     (file-directory-p (plist-get entry :dir)))
+           collect (list :dir (plist-get entry :dir) :source 'global
+                         :origin (or (plist-get entry :origin) harness-skills-owner)
+                         :within (plist-get entry :within))))
+
 ;;;; Directories of the harness's own skills
 
 (defun harness-skills--project-root (cwd)
@@ -296,9 +352,13 @@ left out."
               entries))))
     ;; The sort is made stable by the entry's place: a source's
     ;; directories keep the order `harness-skills-directories' gave them,
-    ;; so a plugin's newest version stays first.
+    ;; so a plugin's newest version stays first.  A ready module's skills
+    ;; come after the user's own global ones, so a skill the person wrote
+    ;; of the same name still wins.
     (let* ((rank (lambda (e) (alist-get (plist-get e :source) harness-skills--source-rank 1)))
-           (ordered (cl-loop for e in (nreverse entries) for i from 0
+           (ordered (cl-loop for e in (append (nreverse entries)
+                                              (harness-skills--module-entries))
+                             for i from 0
                              collect (cons i e)))
            (out nil) (seen nil))
       (dolist (pair (sort ordered (lambda (a b)

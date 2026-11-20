@@ -555,14 +555,31 @@ mean to one another."
                                                      (plist-get b :distance))))
                         0 (min 8 (length others))))))
 
-(harness-defmethod board/delete (id)
-  "Delete board ID and its client state."
-  (let ((board (harness-board--lookup id)))
-    (delete-file (harness-board--path (plist-get board :id)))
-    (when (file-exists-p (harness-board--views-path (plist-get board :id)))
-      (delete-file (harness-board--views-path (plist-get board :id))))
-    (harness-emit 'board/deleted (list :board (plist-get board :id)))
-    t))
+(harness-defmethod board/delete (id &optional opts)
+  "Delete board ID and its client state.
+A board whose revision a task delivered is refused (`precondition')
+rather than deleted: its pins are the artifacts that task handed in, and
+a pin names the board it came from.  OPTS `:force' deletes the board
+with its pins, and answers how many artifacts went with it."
+  (let* ((board (harness-board--lookup id))
+         (board-id (plist-get board :id))
+         (pins (harness-board--pins-of board-id)))
+    (when (and pins (not (harness-board--truthy (plist-get opts :force))))
+      (harness-board--fail
+       'precondition
+       "board %s delivered %d pinned revision%s: delete it with :force, or keep it"
+       board-id (length pins) (if (= 1 (length pins)) "" "s")))
+    (dolist (pin pins)
+      (let ((path (harness-board--pin-path (plist-get pin :id))))
+        (when (file-exists-p path)
+          (delete-file path))))
+    (delete-file (harness-board--path board-id))
+    (when (file-exists-p (harness-board--views-path board-id))
+      (delete-file (harness-board--views-path board-id)))
+    (harness-emit 'board/deleted (list :board board-id :pins (length pins)))
+    (if pins
+        (list :board board-id :deleted t :pins (length pins))
+      t)))
 
 (harness-defmethod board/grammar ()
   "Return the board grammar: shapes, operations, styles, units and limits.

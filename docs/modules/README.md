@@ -83,7 +83,7 @@ them out, so that supervisor loads only when it is named.
  ;;responses          ; OpenAI Responses API paid for by a ChatGPT plan (Sign in with ChatGPT).
  ;;system-one         ; System One decision models: typed questions and answers, as a…
  :tools
- ;;board              ; The board tools an agent works with: scene.read, grammar.describe,…
+ ;;board              ; The board tools an agent works with: board.list, board.create,…
  ;;compact            ; The compact tool: an agent compacts its own conversation, on a running…
  ;;events             ; watch_events and unwatch_events: a session watches harness events, and…
  ;;gremlin            ; Slow, hanging, noisy, lying and boundary-testing chaos tools.
@@ -201,7 +201,7 @@ them out, so that supervisor loads only when it is named.
 | [tool-slots-load](tool-slots-load.md) |  | [tool-slots](tool-slots.md) | Fewer tool slots while this machine is loaded. |
 | [tools](tools.md) | by default |  | Tool registry, permission-gated execution and context-bomb guard. |
 | [tools-agent](tools-agent.md) | by default | [tools](tools.md), [session](session.md), [agent](agent.md) | The Sub-agent tool (spawn_agent), and the Planning section of the system prompt. |
-| [tools-board](tools-board.md) |  | [board-store](board-store.md), [tools](tools.md) | The board tools an agent works with: scene.read, grammar.describe, scene.edit, patch.preview, patch.commit, history.undo, board.pin and board.discuss. |
+| [tools-board](tools-board.md) |  | [board-store](board-store.md), [tools](tools.md) | The board tools an agent works with: board.list, board.create, scene.read, grammar.describe, scene.edit, patch.preview, patch.commit, history.undo, board.pin, board.pins, board.discuss, board.discussions and board.delete, and the skill that explains them. |
 | [tools-compact](tools-compact.md) |  | [tools](tools.md), [compaction](compaction.md) | The compact tool: an agent compacts its own conversation, on a running turn by queueing it or interrupting it. |
 | [tools-computers](tools-computers.md) | by default | [computers](computers.md), [tools](tools.md) | The tools that use a computer: computer_list, computer_view, computer_windows, computer_pointer, computer_keyboard, computer_clipboard, computer_tools, computer_call and computer_use. Each names the computer it acts on, or leaves it to the session's preference, and the fixed vocabulary is what a computer's MCP server answers. |
 | [tools-emacs](tools-emacs.md) | by default | [tools](tools.md) | Bounded tools into the user's Emacs without evaluation: buffers, windows, text, symbols, traces and messages, plus harness_views and harness_open for discovering and opening harness pages. |

@@ -45,7 +45,7 @@ the agent's tools use.  `board/changed` announces every commit.
 
 - `board/commit` (id patch-id hash expected &optional opts) — Apply a validated patch to board ID atomically.
 - `board/create` (id name &optional opts) — Make a board named NAME with id ID, in the project OPTS names.
-- `board/delete` (id) — Delete board ID and its client state.
+- `board/delete` (id &optional opts) — Delete board ID and its client state.
 - `board/discuss` (id object &optional opts) — Start or answer a discussion on OBJECT of board ID, in its task's review.
 - `board/discussions` (id &optional opts) — Return the discussions of board ID: its objects' threads, newest first.
 - `board/focus` (id &optional opts) — Ask a connected client to show a place on board ID.

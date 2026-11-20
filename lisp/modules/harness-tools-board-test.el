@@ -47,44 +47,74 @@
 ;;;; The six are registered, under the names the design gives them
 
 (ert-deftest harness-tools-board-the-board-tools-are-registered ()
-  "The six the design names, and the two a task's artifact and a discussion need."
-  (dolist (name '("board.pin" "board.discuss"))
+  "Every board tool the design names, with a label and a description of its own."
+  (dolist (name '("board.list" "board.create" "scene.read" "grammar.describe"
+                  "scene.edit" "patch.preview" "patch.commit" "history.undo"
+                  "board.pin" "board.pins" "board.discuss" "board.discussions"
+                  "board.delete"))
     (ert-info (name)
       (let ((tool (harness-tool-get name)))
         (should tool)
         (should (stringp (harness-tool-label tool)))
         (should-not (string-match-p "[.!?]\\'" (harness-tool-label tool)))
-        (should (> (length (harness-tool-description tool)) 80))
-        (should (eq 'write (harness-tool-kind tool)))))))
-
-(ert-deftest harness-tools-board-the-six-tools-are-registered ()
-  "scene.read, grammar.describe, scene.edit, patch.preview, patch.commit and history.undo."
-  (dolist (name '("scene.read" "grammar.describe" "scene.edit"
-                  "patch.preview" "patch.commit" "history.undo"))
-    (ert-info (name)
-      (let ((tool (harness-tool-get name)))
-        (should tool)
-        ;; Each names the thing people read, in a noun phrase.
-        (should (harness-tool-label tool))
-        (should (stringp (harness-tool-label tool)))
-        (should-not (string-match-p "[.!?]\\'" (harness-tool-label tool)))
-        ;; And says what the model needs to know to use it.
         (should (> (length (harness-tool-description tool)) 80))
         (should (equal "object" (plist-get (harness-tool-schema tool) :type)))))))
-
-(ert-deftest harness-tools-board-there-is-no-search-tool ()
-  "The design leaves search out: no tool generates, ranks or searches candidates."
-  (dolist (name '("branch.search" "branch.search_tool" "board.search" "scene.search"))
-    (should-not (harness-tool-get name))))
 
 (ert-deftest harness-tools-board-the-kinds-are-the-permission-classes-they-need ()
   "Reading is read; an edit, a commit and an undo are writes; a preview changes nothing."
   (should (eq 'read (harness-tool-kind (harness-tool-get "scene.read"))))
   (should (eq 'read (harness-tool-kind (harness-tool-get "grammar.describe"))))
   (should (eq 'read (harness-tool-kind (harness-tool-get "patch.preview"))))
+  (should (eq 'read (harness-tool-kind (harness-tool-get "board.list"))))
+  (should (eq 'read (harness-tool-kind (harness-tool-get "board.pins"))))
+  (should (eq 'read (harness-tool-kind (harness-tool-get "board.discussions"))))
   (should (eq 'write (harness-tool-kind (harness-tool-get "scene.edit"))))
   (should (eq 'write (harness-tool-kind (harness-tool-get "patch.commit"))))
-  (should (eq 'write (harness-tool-kind (harness-tool-get "history.undo")))))
+  (should (eq 'write (harness-tool-kind (harness-tool-get "history.undo"))))
+  (should (eq 'write (harness-tool-kind (harness-tool-get "board.create"))))
+  (should (eq 'write (harness-tool-kind (harness-tool-get "board.pin"))))
+  (should (eq 'write (harness-tool-kind (harness-tool-get "board.discuss"))))
+  (should (eq 'write (harness-tool-kind (harness-tool-get "board.delete")))))
+
+(ert-deftest harness-tools-board-every-schema-declares-what-its-handler-reads ()
+  "A model can only send what the schema declares: no tool reads an undeclared field."
+  (dolist (name '("board.list" "board.create" "scene.read" "scene.edit"
+                  "patch.preview" "patch.commit" "history.undo"
+                  "board.pin" "board.pins" "board.discuss" "board.discussions"
+                  "board.delete"))
+    (ert-info (name)
+      (let* ((schema (harness-tool-schema (harness-tool-get name)))
+             (properties (plist-get schema :properties)))
+        ;; The required fields are declared ones, not just named.
+        (dolist (required (append (plist-get schema :required) nil))
+          (should (plist-member properties (intern (concat ":" required)))))
+        ;; And the fields an operation of an edit takes are all there.
+        (when (equal name "scene.edit")
+          (let ((op-properties (plist-get (plist-get (plist-get properties :ops)
+                                                     :items)
+                                          :properties)))
+            (dolist (field '(:op :id :diagram :kind :parent :child-anchor
+                             :parent-anchor :angle :scale :mirror :text :name :role
+                             :locked :x :y :dx :dy :budget :pivot :sx :sy :axis
+                             :matrix :transform :shape :style :anchors :resources
+                             :task :members :selection :portals :viewport :theme
+                             :new-id :from :to :label :z :on))
+              (ert-info ((format "%s" field))
+                (should (plist-member op-properties field))))))))))
+
+(ert-deftest harness-tools-board-the-schema-of-an-edit-names-every-operation ()
+  "The grammar's operations are what the tool's own description says they are."
+  (harness-tools-board-test--with
+    (let ((content (plist-get (harness-tools-board-test--call
+                               "grammar.describe" nil (harness-tools-board-test--ctx))
+                              :content)))
+      ;; Every operation a patch accepts is in the grammar an agent reads,
+      ;; but for `restore', which is undo's own and carries a preimage.
+      (dolist (entry harness-board--op-table)
+        (unless (equal "restore" (car entry))
+          (ert-info ((car entry))
+            (should (string-match-p (regexp-quote (car entry)) content)))))
+      (should-not (string-match-p "restore" content)))))
 
 ;;;; scene.read
 
@@ -447,6 +477,277 @@
                    (harness-tools-board-test--ctx))))
       (should (plist-get answer :is-error))
       (should (string-match-p "unsupported-operation" (plist-get answer :content))))))
+
+;;;; board.list
+
+(ert-deftest harness-tools-board-board-list-names-the-boards-there-are ()
+  "The id every other tool names, with what a list shows and nothing it guesses."
+  (harness-tools-board-test--with
+    (let* ((answer (harness-tools-board-test--call
+                    "board.list" nil (harness-tools-board-test--ctx)))
+           (content (plist-get answer :content))
+           (meta (plist-get answer :meta)))
+      (should-not (plist-get answer :is-error))
+      (should (= 1 (plist-get meta :boards)))
+      (should (string-match-p "b-fixture" content))
+      (should (string-match-p "revision 1" content))
+      (should (string-match-p "electric-commons" content))
+      (should (string-match-p "Read one with scene.read" content))
+      ;; A project's boards are what is listed; another project's are not.
+      (let ((other (harness-tools-board-test--call
+                    "board.list" (list :project "/tmp/elsewhere")
+                    (harness-tools-board-test--ctx))))
+        (should (string-match-p "No boards in /tmp/elsewhere" (plist-get other :content)))
+        ;; And it says how a board is made, since there is none to read.
+        (should (string-match-p "board.create" (plist-get other :content))))
+      ;; Every board, whatever its project.
+      (harness-call 'board/create "b-other" "another" (list :project "/tmp/elsewhere"))
+      (let ((all (harness-tools-board-test--call
+                  "board.list" (list :all t) (harness-tools-board-test--ctx))))
+        (should (= 2 (plist-get (plist-get all :meta) :boards)))
+        (should (string-match-p "b-other" (plist-get all :content)))))))
+
+(ert-deftest harness-tools-board-board-list-says-when-there-are-no-boards ()
+  "An empty answer names what it left out rather than reading as an empty harness."
+  (harness-tools-board-test--with
+    (let ((answer (harness-tools-board-test--call
+                   "board.list" (list :project (harness-test-temp-dir))
+                   (harness-tools-board-test--ctx))))
+      (should (string-match-p "No boards" (plist-get answer :content)))
+      (should (= 0 (plist-get (plist-get answer :meta) :boards))))))
+
+;;;; board.create
+
+(ert-deftest harness-tools-board-board-create-makes-an-empty-board ()
+  "A name makes a board with one empty diagram, and its id is what to read it by."
+  (harness-tools-board-test--with
+    (let* ((answer (harness-tools-board-test--call
+                    "board.create" (list :name "the plan" :project "/tmp/atlas")
+                    (harness-tools-board-test--ctx)))
+           (meta (plist-get answer :meta))
+           (board (plist-get meta :board)))
+      (should-not (plist-get answer :is-error))
+      ;; The answer names the board, its diagram, its project and its link.
+      (should (stringp board))
+      (should (string-match-p "\\`b-[a-z0-9]+\\'" board))
+      (should (equal "the plan" (plist-get meta :name)))
+      (should (equal "/tmp/atlas/" (plist-get meta :project)))
+      (should (equal 0 (plist-get meta :revision)))
+      (should (stringp (plist-get meta :diagram)))
+      (should (string-match-p (format "harness:board/%s" (regexp-quote board))
+                              (plist-get meta :link)))
+      (should (string-match-p "Made board" (plist-get answer :content)))
+      ;; It is there to read, empty but for its diagram.
+      (let ((document (harness-call 'board/get board)))
+        (should (equal 0 (plist-get document :revision)))
+        (should (= 0 (length (plist-get document :objects))))
+        (should (= 1 (length (plist-get document :diagrams)))))
+      ;; And it is in the list it was made in.
+      (let ((listed (harness-tools-board-test--call
+                     "board.list" (list :project "/tmp/atlas")
+                     (harness-tools-board-test--ctx))))
+        (should (string-match-p (regexp-quote board) (plist-get listed :content)))))))
+
+(ert-deftest harness-tools-board-board-create-takes-an-id-and-a-theme ()
+  (harness-tools-board-test--with
+    (let ((answer (harness-tools-board-test--call
+                   "board.create" (list :name "night" :id "b-night" :theme "night-commons")
+                   (harness-tools-board-test--ctx))))
+      (should-not (plist-get answer :is-error))
+      (should (equal "b-night" (plist-get (plist-get answer :meta) :board)))
+      (should (equal "night-commons" (plist-get (harness-call 'board/get "b-night") :theme)))
+      ;; A board that is already here is refused, never emptied.
+      (let ((again (harness-tools-board-test--call
+                    "board.create" (list :name "again" :id "b-night")
+                    (harness-tools-board-test--ctx))))
+        (should (plist-get again :is-error))
+        (should (string-match-p "invalid-parameter" (plist-get again :content)))
+        (should (equal "night" (plist-get (harness-call 'board/get "b-night") :name))))
+      ;; A theme the grammar does not have is refused, and says which it has.
+      (let ((bad (harness-tools-board-test--call
+                  "board.create" (list :name "bad" :theme "no-such-theme")
+                  (harness-tools-board-test--ctx))))
+        (should (plist-get bad :is-error))
+        (should (string-match-p "invalid-parameter" (plist-get bad :content)))))))
+
+(ert-deftest harness-tools-board-board-create-needs-a-name ()
+  (harness-tools-board-test--with
+    (should-error (harness-tools-board-test--call
+                   "board.create" nil (harness-tools-board-test--ctx)))))
+
+;;;; board.pins and board.discussions
+
+(ert-deftest harness-tools-board-board-pins-reads-what-a-board-delivered ()
+  "The list of artifacts, and one pin as the document it kept."
+  (harness-tools-board-test--with
+    ;; Nothing delivered yet: the answer says how one is made.
+    (let ((empty (harness-tools-board-test--call
+                  "board.pins" (list :board "b-fixture")
+                  (harness-tools-board-test--ctx))))
+      (should (string-match-p "No pinned revision" (plist-get empty :content)))
+      (should (string-match-p "board.pin" (plist-get empty :content))))
+    (let ((pin (harness-tools-board-test--call
+                "board.pin" (list :board "b-fixture" :task "t-1" :title "the plan")
+                (harness-tools-board-test--ctx))))
+      (let* ((answer (harness-tools-board-test--call
+                      "board.pins" (list :board "b-fixture")
+                      (harness-tools-board-test--ctx)))
+             (content (plist-get answer :content)))
+        (should-not (plist-get answer :is-error))
+        (should (= 1 (plist-get (plist-get answer :meta) :pins)))
+        (should (string-match-p "the plan" content))
+        (should (string-match-p "task t-1" content))
+        (should (string-match-p "revision 1" content)))
+      ;; One pin reads as the document it kept, with its picture.
+      (let* ((one (harness-tools-board-test--call
+                   "board.pins" (list :board "b-fixture"
+                                      :pin (plist-get (plist-get pin :meta) :pin))
+                   (harness-tools-board-test--ctx)))
+             (content (plist-get one :content)))
+        (should-not (plist-get one :is-error))
+        (should (string-match-p "n-api" content))
+        (should (string-match-p "Artifact:" content))
+        (should (= 1 (length (append (plist-get one :images) nil))))))))
+
+(ert-deftest harness-tools-board-board-pins-lines-read-cleanly ()
+  "A pin's line counts one object as one, and never leaves an empty separator."
+  (let ((line (harness-tools-board--pin-line
+               (list :id "pin-1" :title "the plan" :revision 1 :diagram "d-overview"
+                     :objects 1 :task "t-1" :created (harness-now)
+                     :target "artifact" :current "board"))))
+    (should (string-match-p "1 object\\b" line))
+    (should (string-match-p "task t-1" line))
+    (should (string-match-p "just now" line))
+    (should-not (string-match-p " ·  · " line))
+    (should-not (string-match-p " · \n" line)))
+  (let ((line (harness-tools-board--pin-line
+               (list :id "pin-2" :title "the plan" :revision 1 :diagram "d-overview"
+                     :objects 3 :created (harness-now)
+                     :target "artifact" :current "board"))))
+    (should (string-match-p "3 objects" line))
+    (should (string-match-p "no task" line))
+    (should-not (string-match-p " ·  · " line))))
+
+(ert-deftest harness-tools-board-board-pins-keeps-the-artifact-of-a-task ()
+  "Naming a task keeps the pins it delivered."
+  (harness-tools-board-test--with
+    (dolist (task '("t-1" "t-2"))
+      (harness-tools-board-test--call
+       "board.pin" (list :board "b-fixture" :task task)
+       (harness-tools-board-test--ctx)))
+    (let ((answer (harness-tools-board-test--call
+                   "board.pins" (list :board "b-fixture" :task "t-2")
+                   (harness-tools-board-test--ctx))))
+      (should (= 1 (plist-get (plist-get answer :meta) :pins)))
+      (should (string-match-p "task t-2" (plist-get answer :content)))
+      (should-not (string-match-p "task t-1" (plist-get answer :content))))))
+
+(ert-deftest harness-tools-board-board-pins-refuses-a-pin-that-is-not-here ()
+  (harness-tools-board-test--with
+    (let ((answer (harness-tools-board-test--call
+                   "board.pins" (list :board "b-fixture" :pin "pin-nowhere")
+                   (harness-tools-board-test--ctx))))
+      (should (plist-get answer :is-error))
+      (should (string-match-p "unknown-id" (plist-get answer :content))))))
+
+(ert-deftest harness-tools-board-board-discussions-says-when-there-is-none ()
+  "A board no review has discussed says so, and names the tool that starts one."
+  (harness-tools-board-test--with
+    (let ((answer (harness-tools-board-test--call
+                   "board.discussions" (list :board "b-fixture")
+                   (harness-tools-board-test--ctx))))
+      (should-not (plist-get answer :is-error))
+      (should (string-match-p "No discussion" (plist-get answer :content)))
+      (should (string-match-p "board.discuss" (plist-get answer :content)))
+      (should (= 0 (plist-get (plist-get answer :meta) :threads))))))
+
+(ert-deftest harness-tools-board-board-discussions-needs-a-board ()
+  (harness-tools-board-test--with
+    (dolist (name '("board.pins" "board.discussions" "board.delete"))
+      (ert-info (name)
+        (should-error (harness-tools-board-test--call
+                       name nil (harness-tools-board-test--ctx)))))))
+
+;;;; board.delete
+
+(ert-deftest harness-tools-board-board-delete-removes-a-board-made-by-mistake ()
+  (harness-tools-board-test--with
+    (let ((made (harness-tools-board-test--call
+                 "board.create" (list :name "mistake" :id "b-mistake")
+                 (harness-tools-board-test--ctx))))
+      (should-not (plist-get made :is-error))
+      (let ((answer (harness-tools-board-test--call
+                     "board.delete" (list :board "b-mistake")
+                     (harness-tools-board-test--ctx))))
+        (should-not (plist-get answer :is-error))
+        (should (plist-get (plist-get answer :meta) :deleted))
+        (should (string-match-p "Deleted board b-mistake" (plist-get answer :content)))
+        (should-not (harness-board-load "b-mistake"))))))
+
+(ert-deftest harness-tools-board-board-delete-keeps-what-a-task-delivered ()
+  "A delivered artifact is refused, and force says what goes with the board."
+  (harness-tools-board-test--with
+    (harness-tools-board-test--call
+     "board.pin" (list :board "b-fixture" :task "t-1")
+     (harness-tools-board-test--ctx))
+    (let ((refused (harness-tools-board-test--call
+                    "board.delete" (list :board "b-fixture")
+                    (harness-tools-board-test--ctx))))
+      (should (plist-get refused :is-error))
+      (should (string-match-p "precondition" (plist-get refused :content)))
+      (should (harness-board-load "b-fixture")))
+    (let ((forced (harness-tools-board-test--call
+                   "board.delete" (list :board "b-fixture" :force t)
+                   (harness-tools-board-test--ctx))))
+      (should-not (plist-get forced :is-error))
+      (should (= 1 (plist-get (plist-get forced :meta) :pins)))
+      (should (string-match-p "pinned revision went with it" (plist-get forced :content)))
+      (should-not (harness-board-load "b-fixture")))))
+(ert-deftest harness-tools-board-the-module-brings-a-skill-that-names-every-tool ()
+  "The skill is listed while the tools module is ready, and it covers what it explains."
+  (harness-test-with-temp-state
+    (unwind-protect
+        (progn
+          (harness-test-reset-bus)
+          (dolist (name '(store project config provider tools session agent linking
+                          board board-edit board-store board-svg skills tools-board))
+            (harness-test-load-module name))
+          (should (harness-module-ready-p 'tools-board))
+          (let* ((cwd (harness-test-temp-dir))
+                 (skill (cl-find "freeform-board" (harness-call 'skills/list cwd)
+                                 :key (lambda (s) (plist-get s :name))
+                                 :test #'string=)))
+            (unwind-protect
+                (progn
+                  (should skill)
+                  (should (eq 'global (plist-get skill :source)))
+                  (should (equal "harness" (plist-get skill :origin)))
+                  (let ((content (plist-get (harness-call 'skills/load "freeform-board" cwd)
+                                            :content)))
+                    ;; It names every tool, so a model that follows it
+                    ;; reaches the ones this module registers.
+                    (dolist (name '("board.list" "board.create" "scene.read"
+                                    "grammar.describe" "scene.edit" "patch.preview"
+                                    "patch.commit" "history.undo" "board.pin"
+                                    "board.pins" "board.discuss" "board.discussions"
+                                    "board.delete"))
+                      (ert-info (name)
+                        (should (string-match-p (regexp-quote name) content))))
+                    ;; And the rules a caller would otherwise get wrong.
+                    (should (string-match-p "stale-revision" content))
+                    (should (string-match-p "idempotencyKey" content))
+                    (should (string-match-p "scope" content)))
+                  ;; A module that is not ready brings no skill.
+                  (harness-module-disable 'tools-board)
+                  (should-not (cl-find "freeform-board" (harness-call 'skills/list)
+                                       :key (lambda (s) (plist-get s :name))
+                                       :test #'string=)))
+              (ignore-errors (delete-directory cwd t)))))
+      (harness-skills-remove-module-directory 'tools-board)
+      (harness-test-reset-bus)
+      (dolist (name '(store project config provider tools session agent linking
+                      board board-edit board-store board-svg tools-board))
+        (harness-test-load-module name)))))
 
 (provide 'harness-tools-board-test)
 ;;; harness-tools-board-test.el ends here

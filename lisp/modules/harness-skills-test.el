@@ -451,5 +451,120 @@ without approval."
         (should-not (plist-get r :is-error))
         (should (string-search "\n\nnotes\n" (plist-get r :content)))))))
 
+;;;; The skills a module brings
+
+(defun harness-skills-test--module (bundle)
+  "Register module `test-bundle' and have it bring the skills in BUNDLE."
+  (harness-define-module 'test-bundle
+    :doc "A module with a skill of its own."
+    :init (lambda () nil))
+  (harness-skills-add-module-directory 'test-bundle bundle "harness" bundle))
+
+(defun harness-skills-test--names (cwd)
+  "Return the names `skills/list' answers for CWD."
+  (mapcar (lambda (s) (plist-get s :name)) (harness-call 'skills/list cwd)))
+
+(ert-deftest harness-skills-a-ready-module-brings-its-skills ()
+  "A module's skill is listed while the module is ready, and gone when it is not."
+  (harness-skills-test-with-skills
+    (let ((bundle (harness-test-temp-dir)))
+      (unwind-protect
+          (progn
+            (harness-skills-test--write-skill
+             bundle "board-notes"
+             "---\nname: board-notes\ndescription: How to draw on the board.\n---\nDraw.\n")
+            (harness-skills-test--module bundle)
+            ;; A module that is not ready brings nothing: registering a
+            ;; directory is not listing a skill.
+            (should-not (member "board-notes" (harness-skills-test--names cwd)))
+            (harness-module-start 'test-bundle)
+            (let ((skill (cl-find "board-notes" (harness-call 'skills/list cwd)
+                                  :key (lambda (s) (plist-get s :name)) :test #'string=)))
+              (should skill)
+              (should (eq 'global (plist-get skill :source)))
+              (should (equal "harness" (plist-get skill :origin)))
+              (should (equal "Draw.\n"
+                             (plist-get (harness-call 'skills/load "board-notes" cwd)
+                                        :content))))
+            ;; A module that stops being ready stops bringing its skill,
+            ;; and starts bringing it again when it is ready once more.
+            (harness-module-disable 'test-bundle)
+            (should-not (member "board-notes" (harness-skills-test--names cwd)))
+            (setf (harness-module-state (gethash 'test-bundle harness--modules)) 'registered)
+            (harness-module-start 'test-bundle)
+            (should (member "board-notes" (harness-skills-test--names cwd)))
+            ;; Registering the same directory again lists one copy.
+            (harness-skills-add-module-directory 'test-bundle bundle "harness" bundle)
+            (should (= 1 (cl-count "board-notes" (harness-skills-test--names cwd)
+                                   :test #'string=)))
+            ;; Forgetting the registration lists nothing, ready or not.
+            (harness-skills-remove-module-directory 'test-bundle)
+            (should-not (member "board-notes" (harness-skills-test--names cwd))))
+        (harness-skills-remove-module-directory 'test-bundle)
+        (ignore-errors (delete-directory bundle t))))))
+
+(ert-deftest harness-skills-a-users-skill-shadows-a-modules ()
+  "A module's skill is a global one, listed after the user's own: the person wins."
+  (harness-skills-test-with-skills
+    (let ((bundle (harness-test-temp-dir)))
+      (unwind-protect
+          (progn
+            (harness-skills-test--write-skill
+             bundle "commit" "---\ndescription: the module's own\n---\nmodule body\n")
+            (harness-skills-test--module bundle)
+            (harness-module-start 'test-bundle)
+            (let ((skill (cl-find "commit" (harness-call 'skills/list cwd)
+                                  :key (lambda (s) (plist-get s :name)) :test #'string=)))
+              (should (equal "Write a conventional commit message from the staged diff."
+                             (plist-get skill :description)))
+              ;; The module's copy is still there, shadowed, and says so.
+              (let ((all (harness-skills--local-all cwd)))
+                (should (= 2 (cl-count "commit"
+                                       (mapcar (lambda (s) (plist-get s :name)) all)
+                                       :test #'string=)))
+                (should (cl-some (lambda (s) (and (equal "commit" (plist-get s :name))
+                                                  (plist-get s :shadowed-by)))
+                                 all)))))
+        (harness-skills-remove-module-directory 'test-bundle)
+        (ignore-errors (delete-directory bundle t))))))
+
+(ert-deftest harness-skills-a-modules-directory-is-listed-for-reading ()
+  "The skills directory a module brings is one `skills/directories' reports."
+  (harness-skills-test-with-skills
+    (let ((bundle (harness-test-temp-dir)))
+      (unwind-protect
+          (progn
+            (harness-skills-test--write-skill bundle "board-notes" "Draw.\n")
+            (harness-skills-test--module bundle)
+            (harness-module-start 'test-bundle)
+            (let ((entry (cl-find (file-name-as-directory (expand-file-name bundle))
+                                  (harness-call 'skills/directories cwd)
+                                  :key (lambda (e) (plist-get e :dir)) :test #'equal)))
+              (should entry)
+              (should (eq 'global (plist-get entry :source)))
+              (should (plist-get entry :contained))
+              ;; A skill linked in from outside the module's own directory
+              ;; is read, but is not one of the harness's own directories:
+              ;; a link committed to a module cannot open the rest of the disk.
+              (let ((outside (harness-test-temp-dir)))
+                (unwind-protect
+                    (progn
+                      (harness-skills-test--write-skill outside "linked-in" "Out.\n")
+                      (make-symbolic-link
+                       (directory-file-name
+                        (file-name-as-directory (expand-file-name "linked-in" outside)))
+                       (expand-file-name "linked-in" bundle))
+                      (harness-call 'skills/refresh)
+                      (let ((linked (cl-find
+                                     (file-name-as-directory
+                                      (expand-file-name "linked-in" bundle))
+                                     (harness-call 'skills/directories cwd)
+                                     :key (lambda (e) (plist-get e :dir)) :test #'equal)))
+                        (should linked)
+                        (should-not (plist-get linked :contained))))
+                  (ignore-errors (delete-directory outside t))))))
+        (harness-skills-remove-module-directory 'test-bundle)
+        (ignore-errors (delete-directory bundle t))))))
+
 (provide 'harness-skills-test)
 ;;; harness-skills-test.el ends here

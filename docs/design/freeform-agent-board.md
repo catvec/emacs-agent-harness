@@ -141,7 +141,14 @@ it, so a create followed by a transform of that create works.
 | `diagram.portals` | `diagram`, `portals` | the whole list of drill-downs, replaced |
 | `select` | `diagram`, `selection` | the selection navigation stores; it makes no revision of its own when a client writes it |
 | `viewport` | `diagram`, `viewport` | the viewport navigation stores |
+| `set-theme` | `theme` | the palette the whole board wears |
+| `set-board-name` | `name` | what the board is called |
 | `detach` | `id`, `diagram`, `new-id` | a copy of the view as an object of its own (an instance made independent) |
+
+`restore` is the one operation a patch accepts that the grammar does not
+list: it carries the preimage of a commit and is undo's own, so no caller
+should fabricate one.  Every other operation is in `grammar.describe`,
+and a test holds the two lists together.
 
 Two rules matter and are tested:
 
@@ -211,6 +218,8 @@ Intentional overlap is allowed unless an op declares `avoid`.
 
 | Tool | Bus method | Contract |
 | --- | --- | --- |
+| `board.list` | `board/list` | the boards there are, newest first, with the id every other tool names |
+| `board.create` | `board/create` | a new empty board in a project, with its diagram and its link |
 | `scene.read` | `board/get` | revision, selection, exact geometry/text, anchors, resources with state, nearby objects, optional SVG |
 | `grammar.describe` | `board/grammar` | shape kinds, operations, style keys, units, limits, themes |
 | `scene.edit` | `board/patch` | ordered ops → validated patch, expanded ops, created/changed ids, preimages, diagnostics |
@@ -218,10 +227,34 @@ Intentional overlap is allowed unless an op declares `avoid`.
 | `patch.commit` | `board/commit` | atomic apply with read set and idempotency key |
 | `history.undo` | `board/undo` | compensating edit from preimages, conflicts reported |
 | `board.pin` | `board/pin` | the revision as a delivered artifact, with its landing diagram; later edits cannot rewrite it |
+| `board.pins` | `board/pins` | the artifacts a board delivered, or one of them as the document it kept |
 | `board.discuss` | `board/discuss` | a thread of the task's own review, anchored to one place at one revision |
+| `board.discussions` | `board/discussions` | the threads on a board, and whether the drawing has moved since each |
+| `board.delete` | `board/delete` | a board removed with its client state; a delivered artifact refuses it |
 
 The tools carry the calling session, so a board whose `writers` do not
 include it answers `permission`.
+
+An agent that has no board id yet starts with `board.list` and
+`board.create`; there is no other way to a board, which is why both are
+tools and not only bus methods a client calls.  `board.delete` is for a
+board made by mistake, and it refuses a board a task delivered a pin of
+unless `force` says the artifact goes with it: a pin names the board it
+came from, so it is not left pointing at nothing.
+
+### The skill
+
+The tools are the whole of what an agent can do with a board, but not
+the order to do it in: read the grammar, make a board, read it, propose
+an edit, preview it, commit it, undo it, pin what was delivered, discuss
+a place.  So the module carries a skill, `skills/freeform-board/SKILL.md`
+in the harness's own tree, which says that order, the units, the
+refusals and the traps (the read set, a patch that is not a commit, the
+idempotency key, `scope`).  It is registered with the skills module from
+`tools-board`'s own init, and listed exactly while `tools-board` is
+ready: a harness that disabled the board tools lists no board skill, and
+a skill the person wrote of the same name shadows it, since a module's
+skill is a global one listed after the user's own.
 
 ## Links and integrations
 

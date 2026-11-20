@@ -166,9 +166,19 @@ proximity alone asserts no architectural meaning.")
     (relate . "precise resource links")
     (layer . "the order in a diagram")
     (detach . "one view made an object of its own")
-    (delete . "an object, its views and its relationships"))
+    (delete . "an object, its views and its relationships")
+    (set-theme . "the palette the whole board wears")
+    (set-board-name . "what the board is called")
+    (diagram.add . "another diagram on the board")
+    (diagram.parent . "the diagram a diagram is walked into from")
+    (diagram.portals . "every portal of a diagram, replaced whole")
+    (diagram.portal . "one portal added or taken away: a place to walk into")
+    (select . "what a diagram has selected, which changes no drawing")
+    (viewport . "where a diagram is looked at from, which changes no drawing"))
   "The operations `scene.edit' accepts, and what each does.
-`harness-board-grammar' is the schema an agent reads.")
+This is what `board/grammar' answers with, so an agent reads the same list
+an edit is held to; `restore' is undo's own and is not here, since it
+carries the preimage of a commit rather than an edit of its own.")
 
 (defconst harness-board-error-kinds
   '((invalid-parameter . "a number or a field an operation cannot use")

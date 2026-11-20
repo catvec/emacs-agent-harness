@@ -885,9 +885,10 @@ twice changes nothing, so a retried edit is harmless."
 A function name is called with (BOARD OP).  `create', `group', `detach',
 `connect' and `attach' answer a (:board/:ops/:created) plist; the others
 answer the document the operation leaves.  A keyword names one of the
-document and view fields in `harness-board--field-ops'.  The first twenty
-are the grammar's own (`harness-board-op-kinds'); the rest are what a
-client and undo need, so that neither writes a board document directly.")
+document and view fields in `harness-board--field-ops'.  Every operation
+but `restore' is the grammar's own (`harness-board-op-kinds'), which is
+what an agent reads; `restore' is undo's alone, since it carries a
+commit's preimage and no caller should fabricate one.")
 
 (defconst harness-board--field-ops
   '((theme . :theme) (board-name . :name) (diagram-add . :diagram.add)
