@@ -4934,6 +4934,102 @@ for minutes must not keep every board from loading."
         (should-not harness-ui--bulk-active)
         (should-not harness-ui--bulk-stall-timer)))))
 
+;;;; Hooks an older version left behind
+
+(defvar harness-ui-test--retired-hook nil
+  "The hook the retire tests put their entries in.")
+
+(defun harness-ui-test--retired () nil)
+(defun harness-ui-test--replacement () nil)
+(defun harness-ui-test--other () nil)
+
+(defmacro harness-ui-test-with-retired (retired &rest body)
+  "Run BODY with `harness-ui-retired-hooks' RETIRED, and the hook empty after."
+  (declare (indent 1))
+  `(let ((harness-ui-retired-hooks ,retired))
+     (unwind-protect (progn ,@body)
+       (set-default 'harness-ui-test--retired-hook nil)
+       (dolist (buffer (buffer-list))
+         (with-current-buffer buffer
+           (when (local-variable-p 'harness-ui-test--retired-hook)
+             (kill-local-variable 'harness-ui-test--retired-hook)))))))
+
+(ert-deftest harness-ui-retire-hooks-takes-out-only-its-own-entries ()
+  "The entry a version replaced goes, and nothing else does.
+The hook keeps the function that replaced it, an unrelated module's
+function, and a function of the reader's own; it is never emptied."
+  (harness-ui-test-with-retired '((harness-ui-test--retired-hook harness-ui-test--retired))
+    (set-default 'harness-ui-test--retired-hook
+                 (list #'harness-ui-test--other #'harness-ui-test--retired
+                       #'harness-ui-test--replacement))
+    (should (equal '((harness-ui-test--retired-hook harness-ui-test--retired))
+                   (harness-ui-retire-hooks)))
+    (should (equal (list #'harness-ui-test--other #'harness-ui-test--replacement)
+                   (default-value 'harness-ui-test--retired-hook)))
+    ;; Called again, as every reload does, there is nothing to take out.
+    (should-not (harness-ui-retire-hooks))
+    (should (equal (list #'harness-ui-test--other #'harness-ui-test--replacement)
+                   (default-value 'harness-ui-test--retired-hook)))))
+
+(ert-deftest harness-ui-retire-hooks-takes-them-out-of-a-buffer-of-its-own ()
+  "A chat's panel is its own: the entry goes from the buffer's value too.
+A buffer left with nothing but the `t' that runs the default value too
+gets no value of its own, and one that holds other functions keeps
+them."
+  (harness-ui-test-with-retired '((harness-ui-test--retired-hook harness-ui-test--retired))
+    (set-default 'harness-ui-test--retired-hook (list #'harness-ui-test--replacement))
+    (with-temp-buffer
+      (add-hook 'harness-ui-test--retired-hook #'harness-ui-test--retired 90 t)
+      (should (equal '(t harness-ui-test--retired) (buffer-local-value 'harness-ui-test--retired-hook (current-buffer))))
+      (should (harness-ui-retire-hooks))
+      (should-not (local-variable-p 'harness-ui-test--retired-hook))
+      (should (equal (list #'harness-ui-test--replacement)
+                     (buffer-local-value 'harness-ui-test--retired-hook (current-buffer)))))
+    (with-temp-buffer
+      (add-hook 'harness-ui-test--retired-hook #'harness-ui-test--other 90 t)
+      (add-hook 'harness-ui-test--retired-hook #'harness-ui-test--retired 90 t)
+      (should (harness-ui-retire-hooks))
+      (should (local-variable-p 'harness-ui-test--retired-hook))
+      (should (equal '(t harness-ui-test--other)
+                     (buffer-local-value 'harness-ui-test--retired-hook (current-buffer)))))))
+
+(ert-deftest harness-ui-retire-hooks-takes-a-buffer-only-hook-out-too ()
+  "A hook a buffer holds and nothing else has no default value to take from.
+Its entry goes from the buffer's value, and nothing signals."
+  (harness-ui-test-with-retired '((harness-ui-test--buffer-only-hook harness-ui-test--retired))
+    (should-not (boundp 'harness-ui-test--buffer-only-hook))
+    (with-temp-buffer
+      (setq-local harness-ui-test--buffer-only-hook
+                  (list #'harness-ui-test--other #'harness-ui-test--retired))
+      (should (boundp 'harness-ui-test--buffer-only-hook))
+      (should-not (default-boundp 'harness-ui-test--buffer-only-hook))
+      (should (harness-ui-retire-hooks))
+      (should (equal (list #'harness-ui-test--other)
+                     (buffer-local-value 'harness-ui-test--buffer-only-hook (current-buffer))))
+      (should-not (default-boundp 'harness-ui-test--buffer-only-hook)))))
+
+(ert-deftest harness-ui-retire-hooks-leaves-a-hook-this-emacs-lacks ()
+  "A hook the version that dropped the function dropped too is no hook here.
+Taking its entry out would make it a variable again, which nothing runs;
+the pair is left as it is, and so is a hook nothing added to."
+  (harness-ui-test-with-retired '((harness-ui-test--no-such-hook harness-ui-test--retired))
+    (should-not (boundp 'harness-ui-test--no-such-hook))
+    (should-not (harness-ui-retire-hooks))
+    (should-not (boundp 'harness-ui-test--no-such-hook)))
+  (harness-ui-test-with-retired '((harness-ui-test--retired-hook harness-ui-test--retired))
+    (set-default 'harness-ui-test--retired-hook (list #'harness-ui-test--other))
+    (should-not (harness-ui-retire-hooks))
+    (should (boundp 'harness-ui-test--retired-hook))
+    (should (equal (list #'harness-ui-test--other) (default-value 'harness-ui-test--retired-hook)))))
+
+(ert-deftest harness-ui-retire-hooks-holds-pairs-of-a-hook-and-a-function ()
+  "A pair names a hook and a function, and the module's own add to it.
+The table is empty until a module that renamed a function adds its
+pair, which it does as its file loads (`harness-ui-retired-hooks')."
+  (should (listp harness-ui-retired-hooks))
+  (dolist (pair harness-ui-retired-hooks)
+    (should (consp pair))
+    (should (and (symbolp (car pair)) (symbolp (cadr pair))))))
 
 (provide 'harness-ui-test)
 ;;; harness-ui-test.el ends here

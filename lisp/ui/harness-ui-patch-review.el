@@ -527,6 +527,7 @@
 (defvar change-review-ui--redraw-function)
 (defvar change-review-ui--details)
 (defvar change-review-ui--fold-gutter-at-left)
+(defvar harness-ui-retired-hooks)
 (defvar harness-ui-review-pending-functions)
 (defvar harness-ui-popout--max-height)
 (defvar harness-ui-popout-window-parameters)
@@ -8637,6 +8638,14 @@ makes the review again."
   :requires '(ui ui-report ui-review)
   :init #'harness-ui-patch-review--init
   :shutdown #'harness-ui-patch-review--shutdown)
+
+;; What this module put on `harness-ui-review-changes-functions' before
+;; 8a3e503, when the changes went under the session's banner: a harness
+;; updated in place kept the entry, and the function it names is no
+;; longer defined here.  It goes at the next start or reload
+;; (`harness-ui-retired-hooks').
+(add-to-list 'harness-ui-retired-hooks
+             '(harness-ui-review-changes-functions harness-ui-patch-review--banner-panel))
 
 (provide 'harness-ui-patch-review)
 ;;; harness-ui-patch-review.el ends here

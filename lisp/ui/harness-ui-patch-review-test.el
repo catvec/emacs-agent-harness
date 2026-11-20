@@ -8358,5 +8358,39 @@ the threads' few controls above the threads, not the library's line of keys."
         (should (equal (concat "Thread outside selected file: " id) (error-message-string error)))
         (should-not (harness-ui-patch-review--r-ediff review))))))
 
+;;;; Upgrading a harness that a reload left the old changes in
+
+(ert-deftest harness-ui-patch-review-upgrade-takes-out-its-renamed-changes ()
+  "A harness updated in place draws the changes of a review again.
+Before 8a3e503 this module put `harness-ui-patch-review--banner-panel' on
+`harness-ui-review-changes-functions', under the session's banner; the
+version that draws them in the hand_in call defines it no more, so the
+entry a reload kept named nothing.  This file names the pair, and the
+reload's INIT takes it out of the hook, and out of a chat's own value,
+leaving every other function there."
+  (let ((pair '(harness-ui-review-changes-functions harness-ui-patch-review--banner-panel))
+        (other (lambda (_task) "Changes of another module\n")))
+    (should (member pair harness-ui-retired-hooks))
+    (should-not (fboundp (cadr pair)))
+    (let ((hook (car pair))
+          (function (cadr pair)))
+      (unwind-protect
+          (progn
+            (add-hook hook other)
+            (add-hook hook function t)
+            (with-temp-buffer
+              (add-hook hook function 90 t)
+              (harness-ui-retire-hooks)
+              (should-not (memq function (default-value hook)))
+              (should-not (local-variable-p hook))
+              ;; What the module draws the changes with stays, and the
+              ;; reader's own function does.
+              (should (memq other (default-value hook)))
+              (should (memq #'harness-ui-patch-review--chat-changes (default-value hook)))
+              ;; A reload runs it again, and there is nothing left to take out.
+              (should-not (harness-ui-retire-hooks))))
+        (remove-hook hook other)
+        (remove-hook hook function)))))
+
 (provide 'harness-ui-patch-review-test)
 ;;; harness-ui-patch-review-test.el ends here

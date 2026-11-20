@@ -412,6 +412,24 @@ code that drops a command a keymap binds rebinds or clears the key at
 top level (`keymap-unset`; the `defvar` does not run again), or every
 reload leaves it dangling.
 
+A hook's value is such a leftover: the reload replaces a file's
+definitions, not what the hook's variable holds, so the entry an older
+version's INIT added stays beside the one the new INIT adds.  The
+`remove-hook` that takes it out has to run in the version that loads
+next, which is why the module that renamed the function names the pair
+in `harness-ui-retired-hooks` at the top level of its file (see
+ui-review and ui-patch-review).  The UI's INIT, which every start and
+reload runs, takes each pair out with `harness-ui-retire-hooks`, from the
+hook's default value and from the value of every live buffer that holds
+one of its own; only the pairs named go, so no hook is emptied and no
+other module's entry is touched.  It is what an updated harness draws
+with: 8a3e503 moved the review from the session's banner into the
+`hand_in` call and renamed what drew it, and a harness reloaded in place
+kept `harness-ui-review--panel` among the chat's panels, which no
+version defines, so every chat said a panel of its session could not be
+drawn until Emacs restarted.  The three entries are out at the next
+reload now, and the review draws again.
+
 ## Which modules load
 
 Out of the box the harness loads its core, `harness-core-modules`:

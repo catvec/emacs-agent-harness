@@ -8321,6 +8321,98 @@ buffer's commands come after them, as its modes list them in their
 (define-key harness-ui-map (vector harness-ui--menu-key) #'harness-ui-menu)
 (harness-ui--install-keys)
 
+;;;; Hooks an older version left behind
+;;
+;; A reload replaces a file's definitions, not the values of the hooks
+;; its INIT added to: a hook is a variable, and the entry an older
+;; version put there stays beside the one the new INIT puts there.  The
+;; reload unbinds a function the new version no longer defines
+;; (`harness--reload-snapshot'), so such an entry names nothing, and the
+;; hook that runs it reports `void-function' in place of what it draws.
+;; A harness updated in place drew the review with no review in it: the
+;; functions it added to the chat's panels, the hand_in folds and the
+;; review's changes were renamed or dropped, and every chat said a panel
+;; of its session could not be drawn, until Emacs restarted or the
+;; reader took the entries out by hand.
+;;
+;; So a version that renames or drops a function its INIT adds to a hook
+;; names the pair below, and `harness-ui-retire-hooks' takes it out at
+;; every start and reload, which runs this module's INIT again.  A module
+;; names its own pairs, at the top level of its file, so that this
+;; module needs to know nothing of the modules that use its hooks: each
+;; adds what it replaced to `harness-ui-retired-hooks' as it loads, and
+;; the INIT here takes them all out before anything draws.  Only the
+;; pairs named there go: a hook keeps its other functions, and one this
+;; Emacs has no value for, a hook the new version dropped, is left
+;; alone.  A hook is no place to guess: emptying one, or removing what
+;; it does not name, would take the user's and the modules' functions
+;; with it.
+
+(defvar harness-ui-retired-hooks nil
+  "Hook entries a later version of the harness replaced, to take out.
+Each is (HOOK FUNCTION): FUNCTION is a name an older version's INIT
+added to HOOK, which the version that replaced it no longer defines.
+A module that renames or drops such a function adds its pair here at
+the top level of its file; `harness-ui-retire-hooks' takes each out of
+HOOK's default value and out of the value every live buffer holds for
+it, a chat's panel being its own.  A hook an older version defined and
+this one dropped is left as it is, no code running it any more.
+
+It exists for the review, which 8a3e503 moved from the session's banner
+into the hand_in call of the transcript and renamed for what it draws:
+the three entries a harness updated in place kept are what the review's
+modules name as they load.")
+
+(defun harness-ui--hook-without (value function)
+  "Return VALUE, a hook's, without FUNCTION as one of its entries.
+VALUE is returned as it is when FUNCTION is not one of them, and a hook
+whose value is FUNCTION alone becomes nil."
+  (cond ((eq value function) nil)
+        ((and (consp value) (memq function value))
+         (delq function (copy-sequence value)))
+        (t value)))
+
+(defun harness-ui-retire-hooks ()
+  "Take the entries of `harness-ui-retired-hooks' out of their hooks.
+Each goes from its hook's default value and from the value of every live
+buffer that holds one of its own, so a harness updated in place draws
+again without a restart.  A buffer's value that is left with nothing but
+the `t' that runs the default value too gets none of its own: it is the
+default value it shows, as a buffer that never added one does.  A hook
+this Emacs has no value for is left alone, and so is every entry but the
+ones named.  Safe to call again, which a reload does: an entry already
+gone is no entry.  Return the (HOOK FUNCTION) pairs that were taken out."
+  (let ((gone nil))
+    (dolist (pair harness-ui-retired-hooks)
+      (let ((hook (car pair))
+            (function (cadr pair)))
+        (when (and hook function (boundp hook))
+          ;; A hook may be a buffer's alone, which has no default value.
+          (when (default-boundp hook)
+            (let ((value (default-value hook))
+                  (without (harness-ui--hook-without (default-value hook) function)))
+              (unless (eq value without)
+                (set-default hook without)
+                (push pair gone))))
+          (dolist (buffer (buffer-list))
+            (when (buffer-live-p buffer)
+              (with-current-buffer buffer
+                (when (local-variable-p hook)
+                  (let ((value (symbol-value hook))
+                        (without (harness-ui--hook-without (symbol-value hook) function)))
+                    (unless (eq value without)
+                      (if (equal without '(t))
+                          (kill-local-variable hook)
+                        (set hook without))
+                      (push pair gone))))))))))
+    (setq gone (delete-dups (nreverse gone)))
+    (when gone
+      (harness-log 'info "hooks: took out %d entr%s an older version left behind: %s"
+                   (length gone) (if (cdr gone) "ies" "y")
+                   (mapconcat (lambda (pair) (format "%s of %s" (cadr pair) (car pair)))
+                              gone ", ")))
+    gone))
+
 ;;;; Module
 
 (defun harness-ui--on-reloaded ()
@@ -8338,6 +8430,10 @@ as the user has it: connecting again would replace the connection, and
 the answers it waits for with it."
   (add-hook 'kill-emacs-hook #'harness-ui--stop-server)
   (add-hook 'harness-corporate-mode-change-hook #'harness-ui--corporate-mode-changed)
+  ;; An entry a version before this one left in a hook names a function
+  ;; this one may no longer define: it goes before anything draws
+  ;; (`harness-ui-retired-hooks').
+  (harness-ui-retire-hooks)
   ;; A click on a macOS notification this Emacs no longer knows (one it
   ;; showed before a restart) lists the sessions waiting for you.
   (unless harness-notifications-desktop-unknown-click-function

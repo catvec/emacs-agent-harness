@@ -699,5 +699,13 @@ report popout draws the review where the report is read."
   :requires '(ui ui-tasks ui-report)
   :init #'harness-ui-review--init)
 
+;; What this file's review drew before 8a3e503, when it was the session's
+;; banner: a harness updated in place kept the entries in the hooks, and
+;; the functions they name are no longer defined here.  They go at the
+;; next start or reload (`harness-ui-retired-hooks').
+(add-to-list 'harness-ui-retired-hooks '(harness-chat-panel-functions harness-ui-review--panel))
+(add-to-list 'harness-ui-retired-hooks
+             '(harness-chat-hand-in-fold-functions harness-ui-review--hand-in-folded-p))
+
 (provide 'harness-ui-review)
 ;;; harness-ui-review.el ends here

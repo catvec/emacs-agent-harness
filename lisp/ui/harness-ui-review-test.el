@@ -1477,5 +1477,87 @@ task.  The tooltips say the act too, in the same words."
               (should help)
               (should (string-search (cadr pair) (format "%s" help))))))))))
 
+;;;; Upgrading a harness that a reload left the old review in
+
+(defvar harness-ui-review-test--retired
+  '((harness-chat-panel-functions harness-ui-review--panel)
+    (harness-chat-hand-in-fold-functions harness-ui-review--hand-in-folded-p))
+  "What this file's review put in the hooks before 8a3e503, which renamed it.
+A harness updated in place kept each: the reload unbinds what the new
+version no longer defines, not the values the hooks hold.  The patch
+review's third is its own, and its suite holds it.")
+
+(ert-deftest harness-ui-review-upgrade-repairs-the-hooks-an-older-version-left ()
+  "A harness updated in place draws its review again without a restart.
+The version before 8a3e503 added `harness-ui-review--panel' to the
+chat's panels and `harness-ui-review--hand-in-folded-p' to the hand_in
+folds; the version that replaced them defines neither, so a hook that
+still names one reports it undefined and the chat says a panel of its
+session could not be drawn.  The reload's INIT takes exactly those out
+-- of the default value and of a chat's own -- and leaves every other
+function where it was, so the review draws again."
+  (harness-ui-review-test-with
+    (let ((chat (harness-ui-review-test--open-session sid)))
+      (harness-ui-review-test--wait-report chat)
+      ;; Each module names what it replaced, as its file loads.
+      (dolist (pair harness-ui-review-test--retired)
+        (should (member pair harness-ui-retired-hooks)))
+      ;; The state an update to 03551fd4 found: the version before it
+      ;; defined the two, the reload unbound what the new one lacks, and
+      ;; the hooks kept their entries beside the new version's own.
+      (unwind-protect
+          (progn
+            (fset 'harness-ui-review--panel (lambda () nil))
+            (fset 'harness-ui-review--hand-in-folded-p (lambda (_block _result) nil))
+            (dolist (pair harness-ui-review-test--retired)
+              (add-hook (car pair) (cadr pair) t))
+            (with-current-buffer chat
+              (add-hook 'harness-chat-panel-functions #'harness-ui-review--panel 90 t))
+            (dolist (pair harness-ui-review-test--retired)
+              (fmakunbound (cadr pair)))
+            (harness-ui-review-test--upgrade-repaired chat))
+        (dolist (pair harness-ui-review-test--retired)
+          (when (fboundp (cadr pair)) (fmakunbound (cadr pair))))))))
+
+(defun harness-ui-review-test--upgrade-repaired (chat)
+  "Check that CHAT's review is drawn again once the old entries are out.
+CHAT holds the entries a version before 8a3e503 left, whose functions
+are unbound: it says a panel could not be drawn.  What a reload runs
+twice takes them out and leaves the rest, and the review draws again."
+  (let ((unrelated (lambda (_task) "Changes of another module\n")))
+    (add-hook 'harness-ui-review-changes-functions unrelated)
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (funcall harness-compose-redraw-function)
+            (should (string-search "A panel of this session could not be drawn"
+                                   (harness-ui-review-test--tail chat))))
+          ;; What a reload runs, twice: the repair is idempotent.
+          (harness-modules-init)
+          (harness-modules-init)
+          (dolist (pair harness-ui-review-test--retired)
+            (should-not (memq (cadr pair) (default-value (car pair)))))
+          (with-current-buffer chat
+            (should-not (memq 'harness-ui-review--panel harness-chat-panel-functions)))
+          ;; Nothing else went: the new version's function, another
+          ;; module's, and the reader's own.
+          (should (memq #'harness-ui-review--chat-panel (default-value 'harness-chat-panel-functions)))
+          (should (memq #'harness-ui-tasks--backlog-panel (default-value 'harness-chat-panel-functions)))
+          (should (memq unrelated (default-value 'harness-ui-review-changes-functions)))
+          ;; The review draws again, in the hand_in call of the round, with
+          ;; its report and the buttons that decide the work.
+          (with-current-buffer chat
+            (harness-chat-refresh-hand-ins)
+            (funcall harness-compose-redraw-function)
+            (should-not (string-search "could not be drawn" (harness-ui-review-test--tail chat))))
+          (harness-ui-review-test--wait-report chat)
+          (let ((review (harness-ui-review-test--review chat)))
+            (should (string-search "Ready for review" review))
+            (should (string-search "Fix the flaky test" review))
+            (should (string-search "[Verify]  C-c C-v" review))
+            (should (string-search "[Send back]  C-c C-x" review))
+            (should (string-search "Changes of another module" review))))
+      (remove-hook 'harness-ui-review-changes-functions unrelated))))
+
 (provide 'harness-ui-review-test)
 ;;; harness-ui-review-test.el ends here
