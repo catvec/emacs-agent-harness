@@ -247,7 +247,7 @@ harness should stop a turn for."
   (member (format "%s" name) harness-replay-prompt-fields))
 
 (defconst harness-replay-frozen-reset-reasons
-  '(compaction system tools model route redaction images-pruned
+  '(compaction system tools model route redaction images-pruned field-dropped
     adapter-version storage-failure too-large no-session)
   "Why a frozen body stops applying, as the reason a reset records.
 Each is a change of what the model is sent, or of a store that could not
@@ -255,10 +255,11 @@ hold it, never an unexplained one: `compaction' a conversation replaced,
 `system' the prompt, `tools' the schema, `model' the model or its
 settings, `route' the endpoint or the account, `redaction' a secret taken
 out, `images-pruned' pictures dropped from the history by
-`harness-agent-history-images', `adapter-version' another serialization,
-`storage-failure' a body that could not be written, `too-large' one over
-`harness-replay-frozen-max-bytes', and `no-session' a request that names
-no session.")
+`harness-agent-history-images', `field-dropped' a prompt field the body
+kept that this request no longer sends at all, `adapter-version' another
+serialization, `storage-failure' a body that could not be written,
+`too-large' one over `harness-replay-frozen-max-bytes', and `no-session' a
+request that names no session.")
 
 (defconst harness-replay--frozen-separator ","
   "What goes between two components of a body: the JSON comma.")
@@ -361,6 +362,22 @@ The fragments are text because pieces are themselves stored inside JSON."
                                  harness-replay--frozen-separator)
                       "}"))
     (_ "null")))
+
+(defun harness-replay--dropped-prompt-fields (old new)
+  "Return the names of the prompt fields OLD has that NEW does not.
+OLD and NEW are the prompt objects of two bodies.  A field that is gone
+is not the prompt's text changing: it is the request no longer sending a
+component the provider already read -- the tool schema a session no
+longer has, the reasoning effort of a thinking level that went nil -- and
+`harness-replay--piece-diff' reports it as the bare path, which a refusal
+prints as \"body\".  A caller can explain that with a recorded reset, as
+it cannot explain a field whose bytes changed."
+  (let ((news (harness-replay--piece-fields new)))
+    (cl-loop for field in (harness-replay--piece-fields old)
+             for name = (harness-replay--field-name field)
+             unless (cl-find name news :key #'harness-replay--field-name
+                             :test #'equal)
+             collect name)))
 
 (defun harness-replay--prompt-only (piece)
   "Return PIECE, a body, with only the fields that are the prompt.
@@ -693,6 +710,22 @@ that were encoded fresh as metadata."
             :reset (and old (plist-get old :reset))
             :metadata metadata))
      (divergence
+      ;; A prompt field that is gone is a component the provider read and
+      ;; this request no longer sends.  Nothing else can explain it: no
+      ;; setting announces it (a thinking level that went nil, a session
+      ;; whose tool list emptied), and the boundary check would refuse
+      ;; every request this session ever makes again, because the frozen
+      ;; body is only rewritten by a request that is sent.  It is recorded
+      ;; here, with the field named, so the next request is built fresh
+      ;; instead.  A field whose bytes changed is left to the refusal: that
+      ;; is a rebuild the harness cannot account for, and it must not go
+      ;; out.
+      (let ((dropped (harness-replay--dropped-prompt-fields kept prompt)))
+        (when dropped
+          (harness-call 'replay/frozen-reset
+                        id 'field-dropped
+                        (format "no longer sent: %s"
+                                (mapconcat #'identity dropped ", ")))))
       (list :body prompt :text (harness-replay--piece-text piece) :spliced nil
             :generation (plist-get old :generation)
             :reset 'diverged :divergence divergence

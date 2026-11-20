@@ -1410,5 +1410,34 @@ the module was initialised and gave init a docstring of their own."
     (should (functionp (symbol-function 'harness-replay--init)))
     (should (string-prefix-p "Subscribe" (documentation 'harness-replay--init)))))
 
+(ert-deftest harness-replay-a-prompt-field-that-is-gone-is-recorded-not-refused ()
+  "A prompt field the request no longer sends at all records a reset.
+A session whose thinking level went nil stops sending the `reasoning'
+field the provider already read, and one whose tool list emptied stops
+sending `tools'.  No setting announces either, so the boundary check saw
+a body whose field count changed, named it `body', and refused it -- and
+because the frozen body is only rewritten by a request that is sent, the
+refusal repeated for every request the session made, forever.  A field
+that is gone is recorded as the reset it is; a field whose bytes changed
+is still refused, since that is a rebuild nothing accounts for."
+  (harness-replay-test-with
+    (let* ((id (harness-replay-test-session))
+           (messages (list (harness-replay-test--message "hi")))
+           (with-reasoning (harness-replay-test--body messages :reasoning '(:effort "max"))))
+      (harness-replay-seam-keep (list :model "m" :session (list :id id))
+                                "m" "route" with-reasoning)
+      (should (> (plist-get (harness-call 'replay/frozen-status id) :bytes) 0))
+      ;; The request without the field: sent, not refused.
+      (let ((seam (harness-replay-test--seam id messages)))
+        (should-not (cdr seam))
+        (should-not (string-match-p "reasoning" (car seam))))
+      ;; And it says why the body stopped applying.
+      (should (equal (plist-get (harness-call 'replay/frozen-status id) :reset)
+                     "field-dropped"))
+      ;; A field whose bytes changed is still a mutation: nothing is sent.
+      (harness-replay-test--keep id messages)
+      (should (cdr (harness-replay-test--seam
+                    id (list (harness-replay-test--message "HI"))))))))
+
 (provide 'harness-replay-test)
 ;;; harness-replay-test.el ends here
