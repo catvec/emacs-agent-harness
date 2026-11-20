@@ -187,7 +187,9 @@ Five things end a job, and each holds when the others do not:
    pre-empted (`harness-tools-jobs--stop-outstanding`), and
    `task/cancelled`, which `task/cancel` emits for a task at work.  Only
    the session's own jobs stop, so a pause ends its own work and no other
-   task's.
+   task's.  The command a paused turn was waiting on is not a job: it is
+   the turn's own tool call, and it stops with the turn, through
+   `agent/tool-canceller` (`agent/cancel` asks each running call).
 6. **The runtime going idle.**  A job is a run of the session's runtime,
    and a runtime is kept only while something of the session is in it: a
    command in flight, or a process the session left.  A job of the runtime

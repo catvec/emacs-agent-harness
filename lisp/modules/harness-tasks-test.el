@@ -62,6 +62,12 @@
 (declare-function harness-acp-set-handler "harness-acp")
 (declare-function harness-acp-request "harness-acp")
 (declare-function harness-acp--drop-client "harness-acp")
+(declare-function harness-sandbox-detect "harness-sandbox")
+(declare-function harness-sandbox-session-sandbox "harness-sandbox-session" (session-id))
+(declare-function harness-sandbox-session-live-runs "harness-sandbox-session" (runtime))
+(declare-function harness-sandbox-session-sandboxes "harness-sandbox-session")
+(declare-function harness-sandbox-session--stop "harness-sandbox-session" (runtime &optional reason failure))
+(defvar harness-sandbox-session--runtimes)
 
 (defconst harness-tasks-test-script
   '((:type text :delta "Working on it.") (:type done :stop-reason end-turn)))
@@ -8577,6 +8583,52 @@ free and however often the queue looks; resume lets the queue start it."
           (should-not (plist-get task :paused)))
         (harness-tasks-test-wait-state id 'done)
         (should (harness-tasks-test--said sid harness-tasks--paused-message))))))
+
+(ert-deftest harness-tasks-pause-stops-the-tool-the-task-was-running ()
+  "Pausing a task stops the command its turn was waiting on.
+A turn held up by a tool that takes minutes is the case the pause is
+for: the task goes back to the queue at once, and the command it was
+waiting on stops with it, rather than running on with no turn to read
+its result.  It ends in the session's shared sandbox as a cancellation,
+which is what the call records."
+  (harness-tasks-test-with
+    (dolist (m '(perms readonly access sandbox sandbox-session tools-shell))
+      (harness-test-load-module m))
+    (harness-sandbox-detect)
+    (skip-unless (executable-find "bwrap"))
+    (skip-unless (eq 'bwrap (plist-get (harness-call 'sandbox/status) :backend)))
+    (let* ((harness-agent--cancel-grace 0.05)
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "long-1" :name "bash" :input (:command "sleep 60" :timeout 90))
+              (:type done :stop-reason end-turn)))
+           (id (harness-tasks-test-submit "a long one"))
+           (sid (harness-tasks-test-session-id id)))
+      (unwind-protect
+          (progn
+            (harness-test-wait (lambda () (harness-tasks-test--node
+                                           sid (lambda (n) (eq (plist-get n :kind) 'tool-call))))
+                               20 "the bash call")
+            (let ((runtime (harness-sandbox-session-sandbox sid)))
+              (should runtime)
+              (should (= 1 (length (harness-sandbox-session-live-runs runtime)))))
+            (should (eq 'pending (plist-get (harness-call 'task/pause id) :state)))
+            (harness-tasks-test-wait-state id 'pending)
+            (harness-test-wait (lambda () (not (harness-call 'agent/running sid))) 30 "the turn to stop")
+            ;; The command went with the turn: nothing of it runs now.
+            (harness-test-wait
+             (lambda ()
+               (let ((runtime (harness-sandbox-session-sandbox sid)))
+                 (or (null runtime) (null (harness-sandbox-session-live-runs runtime)))))
+             30 "the command to stop")
+            (let ((node (harness-tasks-test--node
+                         sid (lambda (n) (eq (plist-get n :kind) 'tool-result)))))
+              (should node)
+              (should (eq 'cancelled (plist-get (plist-get node :meta) :exit)))
+              (should (string-search "stopped after cancellation request" (plist-get node :output)))))
+        ;; The test's own runtime goes, and every other it left behind.
+        (dolist (runtime (harness-sandbox-session-sandboxes))
+          (harness-sandbox-session--stop runtime "a test ended"))
+        (clrhash harness-sandbox-session--runtimes)))))
 
 (ert-deftest harness-tasks-pause-survives-a-restart ()
   "A paused task is still paused when the harness starts again.

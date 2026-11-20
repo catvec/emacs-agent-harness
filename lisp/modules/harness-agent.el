@@ -2964,12 +2964,42 @@ a running turn, the queued messages would steer it."
 
 ;;;; Cancel and queue
 
+(defun harness-agent--cancel-tools (turn)
+  "Ask TURN's running tool calls to stop, and stop those that can.
+The `agent/tool-canceller' filter is asked for each call, as
+`agent/voice-control' asks it: the first handler that returns a function
+has captured that exact execution, and the function is called.  A tool
+that can be stopped -- a `bash' command in the session's shared sandbox
+-- ends here rather than at its own timeout, which is what a paused task
+needs: its turn stops at once, and the command it was waiting on stops
+with it instead of running on for minutes with nothing watching it.  A
+tool with no canceller is left to finish, as before, and its result is
+dropped with the turn.  Never signals: a canceller that fails is logged,
+and the turn still ends."
+  (let ((sid (harness-agent-turn-session-id turn))
+        (token (plist-get (harness-agent--control-turn turn) :turn-id))
+        ;; Copied: a canceller may settle its call, and with it this list.
+        (calls (copy-sequence (gethash (harness-agent-turn-session-id turn) harness-agent--calls))))
+    (dolist (call calls)
+      (let ((call-id (car call)))
+        ;; The filter skips a handler that signals, as every sync filter does.
+        (when-let* ((cancel (harness-run-filter 'agent/tool-canceller nil sid token call-id)))
+          (condition-case err
+              (funcall cancel)
+            (error (harness-log 'warn "agent: cancelling tool %s of %s failed: %s"
+                                call-id sid (harness-error-short-message err)))))))))
+
 (harness-defmethod agent/cancel (session-id &optional turn-id)
   "Cancel the running turn of SESSION-ID, if any.
 With TURN-ID, cancel only the turn with that `agent/activity' token;
 a completed or replaced turn is left alone.  Return non-nil only when
-the request targets the current turn.  This cancels the model loop,
-not arbitrary tools or background work; see `agent/voice-control'.
+the request targets the current turn.  This cancels the model loop, and
+asks the turn's running tool calls to stop (`agent/tool-canceller'): a
+`bash' command in the session's shared sandbox ends with the turn, not
+at its own timeout.  What no tool offers to stop runs on, as it did
+before, and its result is dropped with the turn; background work a
+session started outside its turn is `agent/voice-control''s and
+`agent/stop-outstanding''s.
 `agent/cancelling' tells whatever holds a turn up before it starts, a
 gate asking the user say, to let it go: the turn then ends as soon as
 its gate settles, rather than after the grace period."
@@ -2984,6 +3014,11 @@ its gate settles, rather than after the grace period."
         (harness-emit 'agent/cancelling session-id)
         (let ((cancel (plist-get (harness-agent-turn-handle turn) :cancel)))
           (when cancel (ignore-errors (funcall cancel))))
+        ;; After the provider's own cancel, so a synchronous
+        ;; acknowledgement that ends this turn has already done so: the
+        ;; calls below belong to the turn that was cancelled, never to a
+        ;; turn that started meanwhile.
+        (harness-agent--cancel-tools turn)
         (run-at-time harness-agent--cancel-grace nil
                      (lambda () (when (eq (gethash session-id harness-agent--turns) turn)
                                   (harness-agent--finalize-live turn)

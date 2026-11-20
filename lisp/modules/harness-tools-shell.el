@@ -203,7 +203,11 @@ run remote commands so."
 ;;;; bash
 
 (defconst harness-tools-shell--voice-cancel-reason "explicit voice cancellation"
-  "The reason a voice control gives the shared-run cancellation contract.")
+  "The reason the shared-run cancellation contract is asked to stop a run.
+Its name is the contract's first user, a voice control; `agent/cancel'
+asks the same way for a cancelled turn -- a paused task, a `C-c C-k' --
+so a run ended this way is no timeout: the tool's result says it was
+cancelled.")
 
 (defvar harness-tools-shell--cancellable-runs (make-hash-table :test 'equal)
   "(SESSION-ID TURN-ID CALL-ID) -> the exact shared bash run.

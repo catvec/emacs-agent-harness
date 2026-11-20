@@ -1463,8 +1463,10 @@ hover text is (`harness-ui-one-line')."
          (figures (and task (harness-ignore-errors-logged "making the tooltip of a card"
                               (with-current-buffer object
                                 (harness-ui-tasks--figures task)))))
+         ;; A card at work keeps [Pause] itself, so the hint names only
+         ;; what stays in its menu (`harness-ui-tasks--action-buttons').
          (hint (if (and task (eq (harness-ui-tasks--column task) 'active))
-                   "Open the session; right-click for actions (u pause, k stop)"
+                   "Open the session; right-click for actions (k stop)"
                  "Open the session")))
     (harness-ui-one-line
      (string-join (cons hint figures) (concat " " harness-ui-tasks--dot " ")))))
@@ -1973,7 +1975,14 @@ See `harness-ui-pending-first'."
 A task whose session waits on a request gets the buttons every view
 offers for it, the session list too (`harness-ui-pending-view-actions'):
 [Allow] and [Deny], or [Answer…], here followed by the board's own
-\[Reply], an answer typed in the compose box."
+\[Reply], an answer typed in the compose box.
+
+A task at work gets [Pause] beside [Steer], and never [Stop]: a turn
+held up by a tool that takes minutes is what Pause is for, and it must
+be one click away rather than in the card's menu, while stopping the
+task outright is a destructive one that stays in the menu.  Pause keeps
+the session, branch and worktree, so the task carries on where it
+stopped (`harness-ui-tasks-pause')."
   (let* ((id (plist-get task :id))
          (sid (plist-get task :session))
          (button (lambda (a)
@@ -1995,8 +2004,9 @@ offers for it, the session list too (`harness-ui-pending-view-actions'):
                (take 2 (cl-remove-if
                         (lambda (action)
                           (or (eq (cadr action) 'harness-ui-tasks-open)
+                              ;; Stop stays in the menu; Pause is a card button.
                               (and (eq (harness-ui-tasks--column task) 'active)
-                                   (memq (cadr action) '(harness-ui-tasks-pause harness-ui-tasks-cancel)))))
+                                   (eq (cadr action) 'harness-ui-tasks-cancel))))
                         (harness-ui-tasks--actions task t)))))
      " ")))
 

@@ -5294,7 +5294,18 @@ decisions.
   that a gate holding the turn before it starts (the cowboy module's
   question) lets it go: the turn then ends `cancelled` as soon as its
   `agent/before-turn` chain settles, with no "Turn not started" hint,
-  rather than after the grace period of a provider's cancel.
+  rather than after the grace period of a provider's cancel.  It also
+  asks the turn's running tool calls to stop: each call's
+  `agent/tool-canceller` filter, which `agent/voice-control` uses too, may
+  return a function that ends that exact execution
+  (`harness-agent--cancel-tools`).  A `bash` command in the session's
+  shared sandbox ends there, so a pause or a `C-c C-k` does not leave a
+  command running for its own timeout with no turn to read its result;
+  the call records the cancellation ("exit: stopped after cancellation
+  request").  A tool with no canceller runs on, as it always did, and its
+  result is dropped with the turn.  Background work a session started
+  outside its turn is not a tool call: `agent/stop-outstanding` stops
+  that.
 - `agent/note-activity SESSION-ID ACTIVITY &optional RUNNING` —
   announces ACTIVITY (an `agent/activity` value, `(:phase compacting)`
   say, with a `:detail` when there is more to say) for a turn still
@@ -8446,15 +8457,20 @@ priority).
 - Pausing.  `task/pause ID` is the board's Pause, and it sticks: a task at
   work is returned to pending as `task/return-to-pending` returns it (a
   task still starting gives its slot up as a pre-empted one does) and
-  marked `:paused`; a task waiting for a slot is marked where it is.  A
-  paused task is held (`paused`): the scheduler never starts it, however
-  many slots are free, and a message through `task/prompt` is kept for its
-  start.  `task/resume ID` clears the mark and runs the scheduler;
-  `task/start` and a turn the user starts in the task's session
-  (`harness-tasks--on-turn-started`) clear it too.  The pause is written at
-  once (`harness-tasks-flush`), not with the next save, so a restart that
-  follows a crash still finds it.  `harness-resilience` does not touch a
-  task's session (`harness-resilience--owner`: "task mode"), and
+  marked `:paused`; a task waiting for a slot is marked where it is.  The
+  turn it stops takes its tool calls with it: `agent/cancel` asks each
+  running call whether it can be stopped (`agent/tool-canceller`, see
+  agent), so a `bash` command in the session's shared sandbox ends with
+  the pause rather than at its own timeout, and its result records the
+  cancellation.  A paused task is held (`paused`): the scheduler never
+  starts it, however many slots are free, and a message through
+  `task/prompt` is kept for its start.  `task/resume ID` clears the mark
+  and runs the scheduler; `task/start` and a turn the user starts in the
+  task's session (`harness-tasks--on-turn-started`) clear it too.  The
+  pause is written at once (`harness-tasks-flush`), not with the next
+  save, so a restart that follows a crash still finds it.
+  `harness-resilience` does not touch a task's session
+  (`harness-resilience--owner`: "task mode"), and
   `harness-tasks--recover` picks up only tasks that are `active` with no
   outcome, which a paused task is not: after a restart the work that was
   under way carries on and a paused task does not, nor does the
@@ -15292,7 +15308,10 @@ work goes back to Pending and stays there, a waiting one is held where it
 is (`harness-ui-tasks--pausable-p`).  The first action of a paused card is
 [Resume] (`U`, `harness-ui-tasks-resume`, `_harness/task/resume`), then
 [Start]; a waiting card has Pause in its menu, after the actions that
-keep the two buttons it shows.  A reply to a held task says that it is
+keep the two buttons it shows.  A card at work shows [Steer] and
+[Pause] -- a turn held up by a tool that takes minutes is what Pause is
+for, so it is one click away -- and keeps [Stop] in its menu, the
+destructive action it is.  A reply to a held task says that it is
 kept for its start.  The task's session shows the same state on its
 settings line, with the same three buttons and the same requests (see
 Chat buffer), so the queue is answerable without the board.

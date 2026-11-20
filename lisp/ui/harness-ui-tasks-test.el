@@ -5811,7 +5811,7 @@ That is `harness-ui-tasks-test--columns' of a buffer of its own."
   "A working task in the main tree with todos done and a time, titled NAME.
 Its title is `harness-ui-tasks-test--long-name' unless NAME is given.  It
 has every fact a working card has but the rare ones, and its buttons are
-\[Steer].  Its session is in the cache; return the task."
+\[Steer] and [Pause].  Its session is in the cache; return the task."
   (let ((id (or id "t-col-long")))
     (puthash (concat "s-" id)
              (list :id (concat "s-" id) :name (or name harness-ui-tasks-test--long-name) :status "running"
@@ -6058,10 +6058,11 @@ left out, so is the session's when the task has none."
         ;; one line (an archived task is not on the board: this one is not).
         (setq harness-ui-tasks--tasks (list (plist-put (copy-sequence busy) :archived nil) idle))
         (harness-ui-tasks--render t)
-        (should (equal (concat "Open the session; right-click for actions (u pause, k stop) · main tree · 1/3 todos done · started 12m ago"
+        ;; The card keeps [Pause] itself, so the menu hint names only [Stop].
+        (should (equal (concat "Open the session; right-click for actions (k stop) · main tree · 1/3 todos done · started 12m ago"
                                " · context 12.4k/200k · 3.4k out · 48 tok/s avg · cost $0.012")
                        (harness-ui-tasks-test--title-help board "Count the tokens")))
-        (should (equal "Open the session; right-click for actions (u pause, k stop) · started 1m ago" (harness-ui-tasks-test--title-help board "Wait for it")))
+        (should (equal "Open the session; right-click for actions (k stop) · started 1m ago" (harness-ui-tasks-test--title-help board "Wait for it")))
         ;; What a plan pays for reads as the plan, not as a cost.
         (puthash "s-col-busy" (plist-put (copy-sequence (gethash "s-col-busy" harness-ui--sessions))
                                          :usage (list :context 12300 :last-output 100 :output 3400 :cost 0.0
@@ -7175,8 +7176,11 @@ is not paused, with a message that says what the card is."
           (harness-ui-tasks--send `(reply . ,(car case)) "hello" "hello" nil)
           (should (equal (cdr case) (car harness-ui-tasks-test--said-messages))))))))
 
-(ert-deftest harness-ui-tasks-working-controls-stay-in-menu ()
-  "Working cards keep their stop and pause commands without persistent buttons."
+(ert-deftest harness-ui-tasks-working-card-keeps-pause ()
+  "A working card offers [Steer] and [Pause], and keeps [Stop] in its menu.
+A turn held up by a tool that takes minutes is what Pause is for, so it
+is one click away on the card; stopping the task outright is
+destructive, and stays in the card's menu with its key."
   (harness-ui-tasks-test-with
     (let ((tasks (harness-ui-tasks-test--working-pair)))
       (dolist (width '(40 140))
@@ -7185,8 +7189,8 @@ is not paused, with a message that says what the card is."
         (dolist (task tasks)
           (let ((buttons (substring-no-properties (harness-ui-tasks--card-buttons task)))
                 (actions (harness-ui-tasks--actions task)))
-            (should (string-search "[Steer]" buttons))
-            (should-not (string-search "[Pause]" buttons))
+            ;; The exact copy: two verbs, in this order, and no third.
+            (should (equal "[Steer] [Pause]" (string-trim buttons)))
             (should-not (string-search "[Stop]" buttons))
             (should (equal (cadr (assoc "Pause" actions)) 'harness-ui-tasks-pause))
             (should (equal (cadr (assoc "Stop" actions)) 'harness-ui-tasks-cancel))))))))

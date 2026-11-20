@@ -1642,6 +1642,56 @@ permission chain and shell tool handler run normally."
           (should (eq 'cancelled (plist-get (plist-get node :meta) :exit))))
         (should (= 0 (hash-table-count harness-tools-shell--cancellable-runs)))))))
 
+(ert-deftest harness-agent-cancel-stops-the-running-tool-call ()
+  "Cancelling a turn stops its running bash run, not only the model loop.
+The task board pauses a task through `agent/cancel', and a turn waiting
+on a command that takes minutes must not leave the command running: the
+run ends with the turn, and the call records that it was stopped, not
+that it reached its timeout."
+  (harness-agent-test-with-shared-bash
+    (let* ((id (harness-agent-test-session))
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "long-1" :name "bash" :input (:command "sleep 600"))
+              (:type done :stop-reason end-turn)))
+           (p (harness-call 'agent/prompt id "fixture")))
+      (harness-test-wait (lambda () runs))
+      (should (harness-call 'agent/running id))
+      (should (harness-call 'agent/cancel id))
+      ;; The run was asked to stop, once, and for that call alone.
+      (should (eq (car runs) (car killed)))
+      (should (= 1 (length killed)))
+      (should (plist-get (car killed) :cancelled))
+      ;; The turn still ends `cancelled', as before.
+      (harness-agent-test-finish-run (car runs) t)
+      (should (eq 'cancelled (plist-get (harness-test-await p) :stop-reason)))
+      (let ((node (cl-find 'tool-result (harness-call 'session/nodes id)
+                           :key (lambda (n) (plist-get n :kind)))))
+        (should (equal "fixture output\nexit: stopped after cancellation request" (plist-get node :output)))
+        (should (eq 'cancelled (plist-get (plist-get node :meta) :exit))))
+      ;; Nothing is left for a later turn to cancel by mistake.
+      (should (= 0 (hash-table-count harness-tools-shell--cancellable-runs))))))
+
+(ert-deftest harness-agent-cancel-leaves-a-tool-without-a-canceller-running ()
+  "A tool that offers no canceller runs on; only the model loop stops.
+Cancellation is a request to each call, and a tool that cannot be
+stopped is not an error: the turn ends without it, and its result is
+dropped with the turn."
+  (harness-agent-test-with
+    (let* ((id (harness-agent-test-session))
+           (work (harness-make-promise))
+           (started nil)
+           (harness-provider-demo-script-override
+            '((:type tool-call :id "custom-1" :name "custom" :input nil)
+              (:type done :stop-reason end-turn))))
+      (harness-define-tool "custom" :label "Custom" :description "fixture" :kind 'exec
+                           :handler (lambda (_input _ctx) (setq started t) work))
+      (let ((p (harness-call 'agent/prompt id "fixture")))
+        (harness-test-wait (lambda () started))
+        (should (harness-call 'agent/cancel id))
+        (should (eq 'cancelled (plist-get (harness-test-await p) :stop-reason)))
+        ;; Its work is nobody's to stop here: it goes on, as it did before.
+        (should-not (harness-promise-settled-p work))))))
+
 (ert-deftest harness-agent-voice-control-completed-call ()
   "A returned tool is already completed, not cancellable or rolled back."
   (harness-agent-test-with
