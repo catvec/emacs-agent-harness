@@ -727,5 +727,61 @@ neighbours answer as before."
           (should (= -32601 (plist-get e :code))))
         (should-not harness-acp--calling-client)))))
 
+;;;; The accept queue
+
+(defun harness-acp-tcp-test-listen-backlog (port)
+  "Return (RECV-Q . BACKLOG) of the kernel's socket listening on PORT, or nil.
+The pair is read from `ss', which reports the queue of connections the
+kernel has accepted and Emacs has not, and the length that queue may
+grow to.  A backlog of 5 is Emacs's own default (`:server t'), and it is
+what a busy event loop overflows: the connections past it are not
+refused but left waiting, so a client hangs for the kernel's SYN
+retransmits and then fails, and every attempt after that waits again."
+  (with-temp-buffer
+    (when (eq 0 (ignore-errors (call-process "ss" nil t nil "-ltn")))
+      (goto-char (point-min))
+      ;; `ss' prints State, Recv-Q, Send-Q, Local Address, Peer Address, so
+      ;; the two queue numbers come before the address that names the port.
+      (when (re-search-forward (format "LISTEN\\s-+\\([0-9]+\\)\\s-+\\([0-9]+\\)\\s-+\\S-*:%d\\s-+" port)
+                               nil t)
+        (cons (string-to-number (match-string 1))
+              (string-to-number (match-string 2)))))))
+
+(ert-deftest harness-acp-tcp-the-accept-queue-is-deeper-than-emacs-default ()
+  "The listener queues more than Emacs's default five pending connections.
+Five is not a queue but a race.  A client whose SYN arrives while the
+event loop is busy is left in a queue that is already full, and the
+kernel retransmits its SYN for about two minutes before the connect
+fails: that is a client that cannot connect in under a minute and takes
+minutes to reconnect, on a harness that is merely busy.  The queue is
+what `harness-listen-backlog' is for, and every listener the harness
+serves clients from takes it."
+  (harness-acp-tcp-test-with
+    (let ((q (harness-acp-tcp-test-listen-backlog port)))
+      (unless q
+        (ert-skip "ss cannot report the socket's queue here"))
+      (should (>= (cdr q) harness-listen-backlog))
+      (should (> (cdr q) 5)))))
+
+(ert-deftest harness-acp-tcp-every-listener-takes-the-deep-queue ()
+  "No listener in the tree is left on Emacs's default five.
+A listener written later with `:server t' reintroduces the hang this
+module's queue was made deep to avoid, and it is invisible: the server
+starts, binds, and looks healthy while its queue is one connection
+deep.  The five listeners here serve ACP on this machine and to other
+devices, the Claude plugin, the ChatGPT plan callback and the
+workspace box's port probe."
+  (let ((root (expand-file-name "lisp" harness-test-root))
+        (found 0))
+    (dolist (file (directory-files-recursively root "\\.el\\'"))
+      (unless (string-match-p "-test\\.el\\'" file)
+        (with-temp-buffer
+          (insert-file-contents file)
+          (goto-char (point-min))
+          (while (re-search-forward ":server\\s-+\\([^ \t\n)]+\\)" nil t)
+            (cl-incf found)
+            (should-not (equal (match-string 1) "t"))))))
+    (should (> found 0))))
+
 (provide 'harness-acp-tcp-test)
 ;;; harness-acp-tcp-test.el ends here

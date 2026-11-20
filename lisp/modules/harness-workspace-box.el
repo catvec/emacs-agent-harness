@@ -317,7 +317,8 @@ TIMEOUT defaults to `harness-workspace-box-exec-timeout'."
   "Return non-nil when 127.0.0.1:PORT can be bound."
   (condition-case nil
       (let ((server (make-network-process :name "harness-box-port"
-                                          :server t :host "127.0.0.1"
+                                          :server harness-listen-backlog
+                                          :host "127.0.0.1"
                                           :service port :family 'ipv4
                                           :noquery t :coding 'binary)))
         (delete-process server)

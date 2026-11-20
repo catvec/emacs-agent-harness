@@ -480,7 +480,8 @@ MCP line it sends is delivered."
 Return the port."
   (unless (process-live-p harness-claude-plugin--server)
     (setq harness-claude-plugin--server
-          (make-network-process :name "harness-claude-plugin" :server t
+          (make-network-process :name "harness-claude-plugin"
+                                :server harness-listen-backlog
                                 :family 'ipv4 :host "127.0.0.1" :service t
                                 :coding 'utf-8-unix :noquery t
                                 :filter #'harness-claude-plugin--filter

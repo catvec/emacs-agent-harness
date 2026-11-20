@@ -2063,7 +2063,8 @@ The sign-ins nobody finished are forgotten as well."
   (harness-acp-remote--refuse-in-corporate-mode)
   (harness-acp-remote--load-sessions)
   (setq harness-acp-remote--server
-        (make-network-process :name "harness-acp-remote" :server t
+        (make-network-process :name "harness-acp-remote"
+                              :server harness-listen-backlog
                               :host harness-acp-remote-host :service harness-acp-remote-port
                               :coding 'binary :noquery t
                               :filter #'harness-acp-remote--filter

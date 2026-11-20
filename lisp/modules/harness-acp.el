@@ -629,7 +629,7 @@ many chunks bring it."
              (funcall writer client (harness-json-encode msg))
            (error
             (harness-log 'warn "acp: send to a %s client failed: %s" kind (harness-error-message err))
-            (harness-acp--drop-client client))))))))
+            (harness-acp--drop-client client "send failed"))))))))
 
 (defun harness-acp--client-write (client proc line)
   "Queue LINE to PROC, CLIENT's socket, without holding dispatch open.
@@ -639,7 +639,7 @@ a busy or vanished client cannot block delivery to the others."
       (harness-process-send-async proc line)
     (error
      (harness-log 'warn "acp: send to %s failed: %s" (process-name proc) (harness-error-message err))
-     (harness-acp--drop-client client))))
+     (harness-acp--drop-client client "send failed"))))
 
 (defun harness-acp--client-notify (client method params)
   "Send notification METHOD with PARAMS to CLIENT."
@@ -942,8 +942,14 @@ lisp/harness-emacs-endpoint.el for the tools.  Not callable over ACP."
            nil)
          (lambda (err) (funcall reject err) nil)))))))
 
-(defun harness-acp--drop-client (client)
-  "Forget CLIENT and fail whatever it still owed."
+(defun harness-acp--drop-client (client &optional why)
+  "Forget CLIENT and fail whatever it still owed.
+WHY says what ended it, when the caller knows: a socket that died, a
+session the device no longer has, a secret refused.  It is logged with
+the count of what is left, at `info', because a client that goes is the
+thing a person reports as \"it disconnected\" and the harness must be
+able to say when and why without the log level being turned up first.
+A drop nobody asked for -- the socket's sentinel -- is `disconnected'."
   (when (memq client harness-acp--clients)
     (setq harness-acp--clients (delq client harness-acp--clients))
     (harness-acp--detach-emacs client "The user's Emacs disconnected before it answered.")
@@ -961,7 +967,10 @@ lisp/harness-emacs-endpoint.el for the tools.  Not callable over ACP."
         (harness-process-send-cancel proc)
         (when (process-live-p proc) (delete-process proc)))
       (when conn (harness-acp--conn-shutdown conn "closed by server")))
-    (harness-log 'debug "acp: client left (%d connected)" (length harness-acp--clients))))
+    (harness-log 'info "acp: %s client left (%s); %d connected"
+                 (or (harness-acp-client-kind client) 'local)
+                 (or why "disconnected")
+                 (length harness-acp--clients))))
 
 ;;;; Server: receiving from clients
 
@@ -2093,7 +2102,7 @@ to it (see `harness-acp--question-answer')."
   (set-process-filter proc #'harness-acp--server-filter)
   (set-process-sentinel proc #'harness-acp--server-sentinel)
   (harness-acp--client-for proc)
-  (harness-log 'debug "acp: client connected (%d connected)" (length harness-acp--clients)))
+  (harness-log 'info "acp: tcp client connected (%d connected)" (length harness-acp--clients)))
 
 (defun harness-acp--server-filter (proc chunk)
   "Buffer CHUNK from client socket PROC and dispatch complete lines."
@@ -2116,7 +2125,7 @@ to it (see `harness-acp--question-answer')."
       (setq harness-acp--server nil)))
    ((not (process-live-p proc))
     (let ((client (process-get proc 'harness-acp-client)))
-      (when client (harness-acp--drop-client client))))))
+      (when client (harness-acp--drop-client client "socket closed"))))))
 
 ;;;; Other transports
 
@@ -2138,7 +2147,7 @@ request, and corporate mode refuses it."
   (let ((client (harness-acp--make-client :kind kind :process process
                                           :writer writer :remote remote)))
     (push client harness-acp--clients)
-    (harness-log 'debug "acp: %s client connected (%d connected)" kind (length harness-acp--clients))
+    (harness-log 'info "acp: %s client connected (%d connected)" kind (length harness-acp--clients))
     client))
 
 (defun harness-acp-client-receive (client text)
@@ -2187,7 +2196,8 @@ is nil, and every TCP client must authenticate with it."
             (signal 'harness-error
                     (list (format "acp: refusing to bind %s; set `harness-acp-allow-remote' (and a token) first" host))))))
         (setq harness-acp--server
-              (make-network-process :name "harness-acp-server" :server t
+              (make-network-process :name "harness-acp-server"
+                                    :server harness-listen-backlog
                                     :host host :service port
                                     :coding 'utf-8-unix :noquery t
                                     :filter #'harness-acp--server-filter

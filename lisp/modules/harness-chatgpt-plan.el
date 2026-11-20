@@ -936,7 +936,8 @@ registers or removes its provider, so a sign-in takes effect at once."
   "Start a loopback listener on 127.0.0.1 and return it.
 The port is chosen by the operating system (`:service t'), which is the
 one part of the redirect URI that may vary from attempt to attempt."
-  (make-network-process :name "chatgpt-plan-callback" :server t
+  (make-network-process :name "chatgpt-plan-callback"
+                        :server harness-listen-backlog
                         :family 'ipv4 :host "127.0.0.1" :service t
                         :coding 'utf-8-unix :noquery t
                         :filter #'harness-chatgpt-plan--listener-filter))

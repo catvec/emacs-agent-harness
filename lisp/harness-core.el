@@ -58,6 +58,22 @@ backtrace too."
   :group 'harness)
 
 (defconst harness-log-buffer-name "*harness-log*")
+
+(defconst harness-listen-backlog 512
+  "Pending connections a listener of the harness accepts, queued by the kernel.
+`make-network-process' takes this as the QLEN argument of `:server', and
+Emacs's own default is 5.  Five is not a queue but a race: a client whose
+SYN arrives while the event loop is busy -- running a turn, compacting,
+writing a transcript -- is left waiting in a queue that is already full,
+and the kernel retransmits its SYN (`tcp_syn_retries', 6 on Linux, about
+two minutes) before the connect fails.  A wedged loop therefore does not
+merely delay a client: it makes connecting to the harness hang for a
+minute and then fail, and each new attempt starts the same wait.  The
+harness serves a handful of clients and its listeners are long-lived, so
+the queue costs a few kilobytes and is made deep enough that a burst of
+reconnections -- a UI, a phone and a few sub-agents at once -- is never
+refused while the loop catches up.")
+
 (defconst harness--log-levels '((debug . 0) (info . 1) (warn . 2) (error . 3)))
 (defconst harness--log-max-lines 5000
   "Maximum number of lines kept in the log buffer.")
