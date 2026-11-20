@@ -10320,13 +10320,27 @@ into the response where it landed, read-only as the transcript is."
     ;; Only projects are listed, so the session runs in a repository.
     (let* ((cwd (harness-test-temp-dir))
            (_ (let ((default-directory cwd)) (call-process "git" nil nil nil "init" "-q")))
+           ;; The file is made before the buffer is opened, because opening
+           ;; it lists the project (`harness-compose-fetch-completions').
+           ;; A listing is a snapshot: `harness-files--start-listing' hands a
+           ;; caller the listing already in flight for that root, so a fetch
+           ;; made while the buffer's own listing still runs is answered by
+           ;; it -- and a listing that began before this file existed does
+           ;; not hold it.  Writing it first leaves no such window; written
+           ;; after the open, this test failed whenever the listing outlived
+           ;; the write, which is a loaded machine's `git ls-files' and not
+           ;; an idle one's.  (Seen in a full run as "Timed out after 40s
+           ;; waiting for files fetched".)
+           (_ (with-temp-file (expand-file-name "notes.txt" cwd) (insert "x")))
            (sid (plist-get (harness-call 'session/create :cwd cwd :model "demo:scripted") :id))
            (buf (harness-ui-chat-test-open sid)))
-      (with-temp-file (expand-file-name "notes.txt" cwd) (insert "x"))
       (with-current-buffer buf
         (setq harness-compose--files nil)
         (harness-compose-fetch-completions)
-        (harness-test-wait (lambda () harness-compose--files) 5 "files fetched")
+        ;; The file, not merely some files: an empty listing is a real
+        ;; answer, and waiting for a non-empty one would not say which.
+        (harness-test-wait (lambda () (member "notes.txt" harness-compose--files))
+                           5 "notes.txt to be listed")
         (should (member "notes.txt" harness-compose--files))
         (harness-ui-chat-test-type buf "see @not")
         (let ((capf (harness-compose-completion-at-point)))
@@ -10363,6 +10377,48 @@ into the response where it landed, read-only as the transcript is."
   (let ((all (completion-all-completions input table nil (length input))))
     (when (consp all) (setcdr (last all) nil))
     (mapcar #'substring-no-properties all)))
+
+(ert-deftest harness-ui-chat-a-listing-in-flight-is-a-snapshot ()
+  "A fetch during the box's own listing is answered by it, so make files first.
+`harness-compose-fetch-files' is called when a chat opens, and
+`harness-files--start-listing' hands a caller the listing already in
+flight for that root rather than starting another.  A test that writes
+a file after opening the buffer therefore races the listing that the
+open began: if the file is written while that listing still runs, the
+listing does not hold it, and a wait for it is answered by a snapshot
+of the directory from before the write.
+
+That race is what a full run hit -- `harness-ui-chat-completion-sources'
+failed with \"Timed out after 40s waiting for files fetched\" only when
+the machine was loaded enough for the listing to outlive the write.  The
+test writes its file before it opens the buffer now.  This pins both
+halves of that: a listing in flight does answer a later fetch (so the
+ordering matters), and the file is in the listing when it is made first."
+  (harness-ui-chat-test-with
+    (let* ((cwd (harness-test-temp-dir))
+           (_ (let ((default-directory cwd)) (call-process "git" nil nil nil "init" "-q")))
+           (_ (with-temp-file (expand-file-name "before.txt" cwd) (insert "x")))
+           (sid (plist-get (harness-call 'session/create :cwd cwd :model "demo:scripted") :id))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        ;; The box listed the project as it opened, and what it listed is
+        ;; there: the file was made before the open, so no snapshot can
+        ;; have missed it.
+        (harness-test-wait (lambda () (member "before.txt" harness-compose--files))
+                           5 "before.txt to be listed")
+        (should (member "before.txt" harness-compose--files))
+        ;; A file made while a listing is in flight is not in that listing:
+        ;; the fetch is answered by the snapshot already taken.  This is
+        ;; the race, made certain rather than left to the machine's speed.
+        (let ((in-flight (harness-make-promise)))
+          (cl-letf (((symbol-function 'harness-files-list-limited)
+                     (lambda (&rest _) in-flight)))
+            (harness-compose-fetch-files)
+            (with-temp-file (expand-file-name "during.txt" cwd) (insert "x"))
+            (harness-resolve in-flight (list "before.txt")))
+          (harness-test-wait (lambda () harness-compose--files) 5 "the snapshot to arrive")
+          (should (member "before.txt" harness-compose--files))
+          (should-not (member "during.txt" harness-compose--files)))))))
 
 (ert-deftest harness-ui-chat-completion-files-arrive-late ()
   ;; An @ token typed before the project's files are listed is offered

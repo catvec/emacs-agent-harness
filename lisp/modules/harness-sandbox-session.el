@@ -206,11 +206,19 @@ cut and dropped, so a broken supervisor cannot grow the harness's memory.")
 (defconst harness-sandbox-session--protocol 1
   "The version of the supervisor's frame protocol this module speaks.")
 
+(defconst harness-sandbox-session--heartbeat 10
+  "Seconds between the supervisor's `H' frames.
+A command that prints nothing sends no frame, and a transport that has
+gone sends none either; the heartbeat is what tells them apart.  It must
+stay well below `harness-sandbox-session--lease-seconds', which is what
+reads it: a run is ended when no frame of any kind has arrived for the
+lease, so a heartbeat at the lease would be no heartbeat at all.")
+
 (defconst harness-sandbox-session--supervisor-program
   (mapconcat
    #'identity
    '("set +e"
-     "version=$1 instance=$2 scratch=$3"
+     "version=$1 instance=$2 scratch=$3 beat=${4:-10}"
      "missing="
      "for p in timeout setsid base64 grep sed mkfifo dd tr; do"
      "  command -v \"$p\" >/dev/null 2>&1 || missing=\"$missing $p\""
@@ -323,7 +331,34 @@ cut and dropped, so a broken supervisor cannot grow the harness's memory.")
      "  done"
      "  say P \"$n\" \"$seq\""
      "}"
-     "while IFS=' ' read -r op a b c; do"
+     ;; A command that prints nothing -- a sleep, a build that is quiet, a
+     ;; clone on a slow link -- writes no frame, and a transport that has
+     ;; gone writes none either: without a heartbeat the harness cannot
+     ;; tell the two apart, and its lease ends the run as if the
+     ;; transport had.  So the loop reads with a timeout and says `H'
+     ;; when it times out.  `H' is a frame of the same pipe, and that is
+     ;; the point: it says the pipe still carries a frame from here to
+     ;; there.  If the harness has stopped reading, this write blocks, no
+     ;; `H' gets through, and the lease still sees a transport that is
+     ;; gone.
+     ;;
+     ;; The read is by line, accumulated across timeouts: a `run' line
+     ;; carries the command's script in base64 and can be longer than
+     ;; PIPE_BUF, so it may arrive in pieces, and a timeout in the middle
+     ;; of one must not throw the pieces away.
+     "line="
+     "while :; do"
+     "  IFS= read -r -t \"$beat\" chunk"
+     "  st=$?"
+     "  line=\"$line$chunk\""
+     "  if [ \"$st\" -gt 128 ]; then say H; continue; fi"
+     "  if [ \"$st\" -ne 0 ]; then break; fi"
+     "  op= a= b= c="
+     ;; A control line is split into words without expanding anything in
+     ;; it.  Globbing is not turned off for the program: `alive_of' reads
+     ;; /proc/[0-9]*/environ and needs it.
+     "  IFS=' ' read -r op a b c <<< \"$line\""
+     "  line="
      "  case \"$op\" in"
      ;; A run's directories and its `S' frame are made here, before
      ;; the next control line is read, so a `kill' that follows a `run'
@@ -678,7 +713,10 @@ one-shot command of the session gets."
   (list "bash" (expand-file-name "supervisor.sh" (plist-get runtime :dir))
         (number-to-string harness-sandbox-session--protocol)
         (plist-get runtime :instance)
-        (plist-get runtime :scratch)))
+        (plist-get runtime :scratch)
+        (number-to-string
+         (max 1 (min harness-sandbox-session--heartbeat
+                     (floor (/ harness-sandbox-session--lease-seconds 3)))))))
 
 (defun harness-sandbox-session--spawn (session-id cwd profile)
   "Start a runtime for SESSION-ID in CWD, built from PROFILE.
@@ -750,7 +788,12 @@ runtime at its next call."
              runtime (or (plist-get runtime :reason) "its runtime ended") 'failed)))
         (remhash (plist-get runtime :session) harness-sandbox-session--runtimes)
         (harness-log 'debug "sandbox: %s ended (%s)" (plist-get runtime :instance)
-                     (process-exit-status proc))))))
+                     (process-exit-status proc)))
+      ;; What a runtime held outlives the decision to end it, and this is
+      ;; where it goes: the poll ends a runtime without waiting for its
+      ;; process (`harness-sandbox-session--stop-later'), leaving its
+      ;; buffer and its scratch for the moment the process is gone.
+      (harness-sandbox-session--discard runtime))))
 
 (defun harness-sandbox-session--fail-runs (runtime reason &optional state)
   "Mark every running command of RUNTIME as ended, for REASON, as STATE.
@@ -772,7 +815,31 @@ The runs in it are marked `stopped' -- the harness ended them -- or
 `failed' when FAILURE says the runtime went of its own accord, which is
 what a job reads to say whether it was ended or it broke.  The supervisor
 is asked to quit, and the harness waits for its process to be gone: this
-answers only when the instance is, which is what makes \"stopped\" true."
+answers only when the instance is, which is what makes \"stopped\" true.
+
+A caller that must not wait on the event loop -- the poll that looks at
+every runtime ten times a second -- uses
+`harness-sandbox-session--stop-later' instead: the same end, asked for
+and finished from the sentinel."
+  (harness-sandbox-session--end runtime reason failure t))
+
+(defun harness-sandbox-session--stop-later (runtime &optional reason failure)
+  "End RUNTIME for REASON without waiting for it to go.  Return RUNTIME.
+What `harness-sandbox-session--stop' does, except that the harness does
+not wait for the supervisor's process: the state is marked, the
+supervisor is asked to quit, and the sentinel -- which runs when the
+process is gone -- finishes the end.  A supervisor that will not go is
+ended by a timer, not by a wait.
+
+This is what the poll uses.  Waiting there blocked the whole event loop,
+every session's work with it, for as long as the supervisor took to
+close: the harness's own latency records show 2-7.5 s stalls, one of 38 s
+and one of 341 s, all inside `harness-sandbox-session--poll-runtime'."
+  (harness-sandbox-session--end runtime reason failure nil))
+
+(defun harness-sandbox-session--end (runtime reason failure settle)
+  "End RUNTIME for REASON, as `harness-sandbox-session--stop' does.
+With SETTLE, wait for the supervisor's process to be gone first."
   (let ((proc (plist-get runtime :process))
         (sid (plist-get runtime :session)))
     ;; The runtime reads as ended before its process is asked to go: the
@@ -784,26 +851,53 @@ answers only when the instance is, which is what makes \"stopped\" true."
       (harness-log 'debug "sandbox: stopping %s (%s)" (plist-get runtime :instance)
                    (or reason "no reason"))
       (ignore-errors (harness-process-send proc "quit\n"))
-      (let ((deadline (+ (float-time) harness-sandbox-session--settle)))
-        (while (and (process-live-p proc) (< (float-time) deadline))
-          (accept-process-output nil 0.02)))
-      (when (process-live-p proc)
-        ;; The supervisor would not go: its own process is what the
-        ;; backend's confinement hangs on, so ending it is what ends the
-        ;; instance and everything in it.
-        (harness-log 'warn "sandbox: %s did not close, ending it" (plist-get runtime :instance))
-        (ignore-errors (delete-process proc))
+      (if (not settle)
+          ;; The sentinel finishes the end when the process goes; this is
+          ;; only the bound on a supervisor that does not.
+          (run-at-time harness-sandbox-session--settle nil
+                       (lambda ()
+                         (when (process-live-p proc)
+                           (harness-log 'warn
+                                        "sandbox: %s did not close, ending it"
+                                        (plist-get runtime :instance))
+                           (ignore-errors (delete-process proc)))))
         (let ((deadline (+ (float-time) harness-sandbox-session--settle)))
           (while (and (process-live-p proc) (< (float-time) deadline))
-            (accept-process-output nil 0.02)))))
+            (accept-process-output nil 0.02)))
+        (when (process-live-p proc)
+          ;; The supervisor would not go: its own process is what the
+          ;; backend's confinement hangs on, so ending it is what ends the
+          ;; instance and everything in it.
+          (harness-log 'warn "sandbox: %s did not close, ending it" (plist-get runtime :instance))
+          (ignore-errors (delete-process proc))
+          (let ((deadline (+ (float-time) harness-sandbox-session--settle)))
+            (while (and (process-live-p proc) (< (float-time) deadline))
+              (accept-process-output nil 0.02))))))
     (harness-sandbox-session--fail-runs runtime (or reason "its runtime stopped")
                                         (if failure 'failed 'stopped))
-    (when (eq runtime (gethash sid harness-sandbox-session--runtimes))
-      (remhash sid harness-sandbox-session--runtimes))
-    (when (buffer-live-p (plist-get runtime :buffer))
-      (kill-buffer (plist-get runtime :buffer)))
-    (ignore-errors (delete-directory (plist-get runtime :scratch) t))
+    ;; The runtime stays the session's until its process is gone.  It reads
+    ;; as `stopped', so `harness-sandbox-session-ensure' builds another one
+    ;; rather than using it -- and waits for this one, which is what keeps
+    ;; two supervisors for one session from existing at once.  The sentinel
+    ;; forgets it, and drops what it held, when the process goes.
+    (when settle
+      (when (eq runtime (gethash sid harness-sandbox-session--runtimes))
+        (remhash sid harness-sandbox-session--runtimes))
+      (harness-sandbox-session--discard runtime))
     runtime))
+
+(defun harness-sandbox-session--discard (runtime)
+  "Drop what RUNTIME holds that outlives it: its buffer and its scratch.
+Safe to call twice: the sentinel and the caller both do."
+  (when (buffer-live-p (plist-get runtime :buffer))
+    (kill-buffer (plist-get runtime :buffer)))
+  (let ((scratch (plist-get runtime :scratch)))
+    (when (and (stringp scratch) (file-exists-p scratch))
+      ;; A run's scratch is its own files: a script and two fifos.  A
+      ;; command that wrote a great deal there makes this slow, so it is
+      ;; never done twice for one runtime.
+      (setf (plist-get runtime :scratch) nil)
+      (ignore-errors (delete-directory scratch t)))))
 
 (defun harness-sandbox-session-stop-session (session-id &optional reason)
   "End the runtime of SESSION-ID, and everything in it, for REASON."
@@ -824,6 +918,10 @@ and it is serial with teardown."
      ((and runtime (memq (harness-sandbox-session-state runtime) '(running starting)))
       runtime)
      (t
+      ;; A runtime that is going -- one the poll ended without waiting --
+      ;; is waited for here, the one admission point, so nothing is
+      ;; submitted into an instance that is being destroyed and no second
+      ;; supervisor is started for the same session.
       (when runtime (harness-sandbox-session--stop runtime "it had ended"))
       (let ((problem (harness-sandbox-session-problem ctx session-cwd)))
         (when problem (signal 'harness-error (list problem)))
@@ -866,6 +964,12 @@ believed until it is a frame of this protocol."
       ("E" (harness-sandbox-session--output runtime token (nth 2 parts) :stderr))
       ("X" (harness-sandbox-session--ended runtime token (nth 2 parts) (nth 3 parts)))
       ("P" (harness-sandbox-session--counted runtime token (nth 2 parts)))
+      ;; The supervisor's heartbeat: no output to carry, only the word
+      ;; that the transport still carries frames.  `:checked' is what the
+      ;; lease reads, and the filter has already moved it; this frame
+      ;; exists so that a quiet command's silence is not taken for a
+      ;; transport that has gone.
+      ("H" nil)
       ("D" (setf (plist-get runtime :state) 'stopped))
       ((or "S" "") nil)
       (_
@@ -1105,7 +1209,7 @@ once `harness-sandbox-session-idle-seconds' is up."
                harness-sandbox-session--ready-seconds)
             (progn
               (harness-log 'warn "sandbox: %s never said it was up" (plist-get runtime :instance))
-              (harness-sandbox-session--stop runtime "its runtime did not start" t))
+              (harness-sandbox-session--stop-later runtime "its runtime did not start" t))
           (setq keep t))))
      ((and live (> (- now (or (plist-get runtime :checked) now))
                    harness-sandbox-session--lease-seconds))
@@ -1117,7 +1221,7 @@ once `harness-sandbox-session-idle-seconds' is up."
                    (harness-tools-count-phrase (length live) "command"))
       (harness-sandbox-session--fail-runs
        runtime "its output stopped reaching the harness" 'failed)
-      (harness-sandbox-session--stop runtime "its output stopped reaching the harness" t)
+      (harness-sandbox-session--stop-later runtime "its output stopped reaching the harness" t)
       (setq keep nil))
      (live
       (dolist (run live)
@@ -1161,7 +1265,7 @@ once `harness-sandbox-session-idle-seconds' is up."
              ((>= (- now (plist-get runtime :idle-since)) idle)
               (harness-log 'debug "sandbox: %s has nothing in it; ending it"
                            (plist-get runtime :instance))
-              (harness-sandbox-session--stop runtime "nothing of the session was left in it")
+              (harness-sandbox-session--stop-later runtime "nothing of the session was left in it")
               (setq keep nil))
              (t (setq keep t)))))))))
     keep))
@@ -1228,7 +1332,12 @@ why it cannot start."
                      :log (harness-sandbox-session--log (plist-get runtime :dir) token)
                      :logged 0
                      :script (harness-sandbox-session--script cwd command)))))
-    (setf (plist-get runtime :idle-since) nil)
+    (setf (plist-get runtime :idle-since) nil
+          ;; The lease measures silence since the last frame, and a run
+          ;; that has just started has sent none yet: without this, a run
+          ;; started into a runtime that has been quiet for a while would
+          ;; be ended at its first look for silence that came before it.
+          (plist-get runtime :checked) (float-time))
     ;; A command is starting: a count asked for before it is no answer to
     ;; what the runtime holds now.
     (harness-sandbox-session--bump-epoch runtime)

@@ -192,7 +192,13 @@ the recorder depend on their names or implementation."
 (defun harness-latency-flush ()
   "Flush the bounded queue to this Emacs's rotating local file.
 Never signal or log a write failure.  Failed writes keep the bounded
-queue for the next tick; they never forward diagnostics over ACP."
+queue for the next tick; they never forward diagnostics over ACP.
+
+This runs from a timer, so anything it signals is reported as a harness
+error with a full stack trace, which is far more expensive than the
+write it failed to do -- and it did so on every tick, for a directory
+that was already there.  So the directory is asked for only when it is
+missing (`harness-latency--ensure-directory'), and that cannot signal."
   (when (and harness-latency--records (not harness-latency--busy))
     (let ((harness-latency--busy t))
       (condition-case nil
@@ -204,7 +210,7 @@ queue for the next tick; they never forward diagnostics over ACP."
                                  (mapconcat #'prin1-to-string records "\n") "\n"))
                    (coding-system-for-write 'utf-8-unix)
                    (write-region-inhibit-fsync t))
-              (make-directory (file-name-directory file) t)
+              (harness-latency--ensure-directory (file-name-directory file))
               (when (> (+ (or (file-attribute-size (file-attributes file)) 0)
                           (string-bytes text)) harness-latency--max-bytes)
                 (when (file-exists-p file) (rename-file file (concat file ".1") t)))
@@ -212,6 +218,13 @@ queue for the next tick; they never forward diagnostics over ACP."
               (set-file-modes file #o600)
               (setq harness-latency--records nil harness-latency--dropped 0)))
         (error nil)))))
+
+(defun harness-latency--ensure-directory (dir)
+  "Make DIR when it is not a directory yet, and never signal.
+`make-directory' is asked only for a directory that is missing, so the
+ordinary tick does no work and no `file-already-exists' is signalled."
+  (when (and (stringp dir) (not (file-directory-p dir)))
+    (condition-case nil (make-directory dir t) (error nil))))
 
 (defun harness-latency--tick ()
   "Observe loop gaps and yielding slow boundaries, then flush diagnostics."

@@ -101,6 +101,28 @@
         (harness-latency-flush))
       (should (= 1 (length harness-latency--records))))))
 
+(ert-deftest harness-latency-flush-never-asks-for-a-directory-that-is-there ()
+  "The flush runs every second from a timer, so it must not signal.
+`make-directory' on an existing directory signals `file-already-exists'
+where `file-directory-p' says it is not one (a state this harness met on
+the machine it runs on), and every such signal is reported with a full
+stack trace: 490 reports in 26 minutes, from a flush that had nothing to
+do.  The flush asks for the directory only when it is missing."
+  (harness-latency-test--with-recorder
+    (let ((asked nil))
+      (cl-letf (((symbol-function 'make-directory)
+                 (lambda (&rest _) (setq asked t) (error "must not be asked"))))
+        (harness-latency--record '(:kind flush))
+        (harness-latency-flush))
+      (should-not asked)
+      (should (file-exists-p (harness-latency-file))))
+    ;; And a missing directory is made, without the flush signalling.
+    (let ((harness-state-directory (expand-file-name "missing/deeper/"
+                                                     harness-state-directory)))
+      (harness-latency--record '(:kind flush))
+      (harness-latency-flush)
+      (should (file-exists-p (harness-latency-file))))))
+
 (ert-deftest harness-latency-gaps-gc-and-redisplay-are-distinct ()
   (harness-latency-test--with-recorder
     (let ((harness-latency--last-tick (- (float-time) 10))

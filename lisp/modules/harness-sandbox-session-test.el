@@ -170,6 +170,51 @@ is its own, and the sandbox runs the next one as before."
       (should (string-search "still-here" (plist-get next :stdout))))
     (should (eq 'running (harness-sandbox-session-state (harness-sandbox-session-sandbox sid))))))
 
+(ert-deftest harness-sandbox-session-a-quiet-command-outlives-the-lease ()
+  "A command that prints nothing is not a transport that has gone.
+The lease ends a run whose frames stopped arriving, because silence is
+what a pipe nobody reads looks like.  But a command that prints nothing
+-- a sleep, a build that is quiet, a clone on a slow link -- writes no
+frame either, and it was ended at the lease as if its transport had
+gone: 119 of 311 runs in 12.4 hours of this harness's own use, 1031
+minutes of work thrown away.  The supervisor says `H' while it waits, so
+the harness can tell the two apart, and this holds the run past the
+lease."
+  (harness-sandbox-session-test-with-bwrap
+    (let ((harness-sandbox-session--lease-seconds 2)
+          (beat (expand-file-name "quiet-beat.txt" root)))
+      ;; A run that prints nothing for longer than the lease, then ends
+      ;; on its own.  Its silence must not end it.
+      (let ((result (harness-sandbox-session-test-run
+                     ctx
+                     (format "sleep 5; echo quiet-survived > %s; echo done"
+                             (shell-quote-argument beat))
+                     30)))
+        (should (eql 0 (plist-get result :exit)))
+        (should (string-search "done" (plist-get result :stdout)))
+        (should (file-exists-p beat)))
+      ;; And the sandbox is still the one it was, not one rebuilt after a
+      ;; teardown: a quiet command is not a reason to lose a session's work.
+      (should (harness-sandbox-session-sandbox sid)))))
+
+(ert-deftest harness-sandbox-session-a-transport-that-is-gone-is-still-ended ()
+  "Silence with no heartbeat still ends the run.
+The lease must keep working: it is what ends a run whose supervisor has
+died, whose pipe nobody reads.  A heartbeat is a frame of that same pipe,
+so a run whose frames never come is ended as before."
+  (harness-sandbox-session-test-with-bwrap
+    (let ((harness-sandbox-session--lease-seconds 1)
+          (run (harness-sandbox-session-start-run ctx root "sleep 60" :seconds 120)))
+      ;; Take the heartbeat away, as a supervisor that is gone would, and
+      ;; make the run's last frame old: the next look must end it.
+      (setf (plist-get run :started) (- (float-time) 30))
+      (let ((runtime (harness-sandbox-session-sandbox sid)))
+        (setf (plist-get runtime :checked) (- (float-time) 30))
+        (should (harness-sandbox-session--poll-runtime runtime)))
+      (harness-test-wait (lambda () (not (eq (harness-sandbox-session-run-state run) 'running)))
+                         15 "the run to be ended")
+      (should-not (eq 'running (harness-sandbox-session-run-state run))))))
+
 (ert-deftest harness-sandbox-session-a-kill-ends-one-command-only ()
   "Killing a running command ends it and its group, and leaves the rest alone.
 A command that keeps printing is killed, nothing it started in its own
@@ -500,11 +545,21 @@ counted, and it keeps the runtime alive."
                          15 "the supervisor to start the command")
       ;; Every process of the run carries its token before it is cancelled --
       ;; the shell, the `setsid' child and the sleeps -- so cancelling can
-      ;; find them all rather than guess at a process group.
-      (let ((tagged (harness-sandbox-session-test-run
-                     ctx (format "grep -lzx 'HARNESS_RUN=%s' /proc/[0-9]*/environ 2>/dev/null | wc -l"
-                                 token) 30)))
-        (should (>= (string-to-number (string-trim (plist-get tagged :stdout))) 3)))
+      ;; find them all rather than guess at a process group.  The supervisor
+      ;; accepting the run is not the same moment as its processes existing:
+      ;; it says `S' as it starts them, and the `setsid' child has to be
+      ;; forked and exec'd before it carries the token.  Counting once here
+      ;; read 0 or 2 rather than 3 when the machine was busy -- the run was
+      ;; accepted and its processes were a moment behind -- so the count is
+      ;; waited for, which is what the assertion is about.
+      (let ((count-tagged
+             (lambda ()
+               (let ((tagged (harness-sandbox-session-test-run
+                              ctx (format "grep -lzx 'HARNESS_RUN=%s' /proc/[0-9]*/environ 2>/dev/null | wc -l"
+                                          token) 30)))
+                 (string-to-number (string-trim (plist-get tagged :stdout)))))))
+        (harness-test-wait (lambda () (>= (funcall count-tagged) 3))
+                           20 "every process of the run to carry its token"))
       (harness-sandbox-session-kill-run run)
       (let ((result (harness-test-await (harness-sandbox-session-wait run) 60)))
         (should (eq 'stopped (plist-get result :state)))
@@ -541,11 +596,22 @@ processes, and report zero afterwards while the foreign process lives."
          (process-environment (copy-sequence process-environment))
          supervisor owned foreign)
     (cl-labels ((frame (regexp)
+                  ;; The supervisor says `H' while it waits for a control
+                  ;; line, which is what keeps a quiet command's silence
+                  ;; from reading as a transport that has gone.  This test
+                  ;; reads the protocol as the harness does, so a
+                  ;; heartbeat is skipped rather than mistaken for the
+                  ;; frame it is waiting for.  The frames are read as
+                  ;; lines rather than by searching the buffer: a search
+                  ;; that can match nothing advances point not at all, so
+                  ;; a line-oriented regexp finds the empty end of the
+                  ;; buffer for ever and never lets the wait read the
+                  ;; supervisor's output.
                   (with-current-buffer frames
-                    (save-excursion
-                      (goto-char (point-min))
-                      (when (re-search-forward regexp nil t)
-                        (match-string-no-properties 0)))))
+                    (cl-find-if (lambda (line)
+                                  (and (not (equal line "H"))
+                                       (string-match-p regexp line)))
+                                (split-string (buffer-string) "\n"))))
                 (await-frame (regexp)
                   (harness-test-wait (lambda () (frame regexp)) 15 regexp)))
       (unwind-protect
@@ -575,8 +641,10 @@ processes, and report zero afterwards while the foreign process lives."
             (should (process-live-p foreign))
             ;; Start a real command with that token before cancelling it:
             ;; the daemon and command must go, not the foreign bystander.
+            ;; The command may run for two minutes: the test ends it with
+            ;; `kill', and its own timeout must not get there first.
             (process-send-string
-             supervisor (format "run %s 5 %s\n" token
+             supervisor (format "run %s 120 %s\n" token
                                 (base64-encode-string "printf 'ready\\n'; exec sleep 120" t)))
             (await-frame (format "^O %s " token))
             (process-send-string supervisor (format "kill %s\n" token))
@@ -598,6 +666,62 @@ processes, and report zero afterwards while the foreign process lives."
           (when (and proc (process-live-p proc)) (delete-process proc)))
         (kill-buffer frames)
         (delete-directory scratch t)))))
+
+(ert-deftest harness-sandbox-session-the-poll-does-not-wait-for-a-runtime-to-go ()
+  "Looking at the runtimes never waits on one, so the loop keeps running.
+`harness-sandbox-session--stop' answers only when the supervisor's
+process is gone, and the poll runs ten times a second: every teardown
+blocked the harness's whole event loop, every session's work with it.
+The harness's own latency records show 2-7.5 s stalls there, one of 38 s
+and one of 341 s.  The poll asks for the end and returns; the sentinel
+finishes it -- including when the supervisor will not go, which is what
+this makes it do.
+
+The poll is what is driven here, not `--stop-later' on its own: a test
+that called the non-waiting function directly would pass with the poll
+still blocking, which is the defect.  A supervisor that will not take
+`quit' is the worst case, and it is what the settle bound is for."
+  (harness-sandbox-session-test-with-bwrap
+    (let* ((harness-sandbox-session-idle-seconds 0)
+           ;; Long enough that a blocking stop would be obvious, short
+           ;; enough that the timer ending the supervisor still runs well
+           ;; inside the harness's own 60-second sandbox lease.
+           (harness-sandbox-session--settle 12)
+           (runtime (harness-sandbox-session-ensure ctx root))
+           (proc (plist-get runtime :process))
+           ;; The runtime has nothing in flight, so the poll's next look
+           ;; is the one that ends it.  It has already been asked and has
+           ;; answered that it holds nothing, which is what the idle
+           ;; branch decides on.
+           (start nil))
+      (should (process-live-p proc))
+      (harness-test-wait (lambda () (integerp (plist-get runtime :owned)))
+                         15 "the supervisor's count of what it holds")
+      (setf (plist-get runtime :owned) 0
+            (plist-get runtime :asked) (float-time)
+            (plist-get runtime :idle-since) (- (float-time) 5)
+            (plist-get runtime :checked) (float-time))
+      (cl-letf (((symbol-function 'harness-process-send) #'ignore))
+        (setq start (float-time))
+        ;; One look at the runtime: this is the call the timer makes ten
+        ;; times a second, with every session waiting behind it.
+        (should-not (harness-sandbox-session--poll-runtime runtime))
+        (should (< (- (float-time) start) 5)))
+      ;; It asked for the end and returned; the supervisor is still there,
+      ;; because nothing waited for it.
+      (should (process-live-p proc))
+      (should (eq 'stopped (plist-get runtime :state)))
+      ;; The bound is the timer's, not the caller's: it ends a supervisor
+      ;; that would not go, and the sentinel drops what it held.
+      (harness-test-wait (lambda () (not (process-live-p proc))) 30 "the supervisor to be ended")
+      (should-not (process-live-p proc))
+      (harness-test-wait (lambda () (null (plist-get runtime :scratch)))
+                         15 "the scratch to be dropped")
+      (should-not (file-exists-p (expand-file-name "runs/" (plist-get runtime :dir))))
+      ;; The session gets another runtime at its next call.
+      (should (string-search "again"
+                             (plist-get (harness-sandbox-session-test-run ctx "echo again" 30)
+                                        :stdout))))))
 
 (ert-deftest harness-sandbox-session-a-runtime-goes-when-nothing-needs-it ()
   "A runtime with nothing in it is destroyed, and the next call builds another.

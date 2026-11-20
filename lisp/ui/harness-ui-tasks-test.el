@@ -224,6 +224,44 @@ session's, and a `+` or `-` on a card goes through its `priority/set'."
       (and (re-search-forward regexp harness-ui-tasks--list-end t)
            (get-text-property (match-beginning 0) 'help-echo)))))
 
+(defun harness-ui-tasks-test--key-unchanged (before)
+  "Return non-nil when the board key still reads as BEFORE, but for the tick.
+`harness-ui-tasks--board-key' carries `(truncate (float-time) 5)', which
+is there so the board is drawn again every five seconds.  A test that
+reads a key, does something that must not change it, and reads it again
+therefore failed whenever a five-second boundary fell between the two
+readings -- seen once in a full run as `359002659' against `359002660',
+and about one run in five by the arithmetic.  The tick is not something
+a card shows, which is what these comparisons are about, so it is taken
+out of both readings.  The clock is not frozen for the comparison: the
+waits between the readings run on it, and a stopped clock would stop
+them too.
+
+The tick is found by reading the key once now and once at a clock five
+seconds later, and seeing which element moved, rather than by its
+position: a key whose shape changed would otherwise have this compare
+the wrong element and pass whatever happened."
+  (let* ((real (symbol-function 'float-time))
+         (tick (let ((early (harness-ui-tasks--board-key))
+                     (late (cl-letf (((symbol-function 'float-time)
+                                      (lambda (&optional time)
+                                        (if time (funcall real time)
+                                          (+ 5.0 (funcall real))))))
+                             (harness-ui-tasks--board-key)))
+                     (i 0) found)
+                 (while (and (not found) (< i (length early)))
+                   (unless (equal (nth i early) (nth i late)) (setq found i))
+                   (setq i (1+ i)))
+                 found)))
+    (when (null tick)
+      (error "The board key has no clock in it: `harness-ui-tasks-test--key-unchanged' would compare nothing"))
+    (let ((strip (lambda (value)
+                   (let ((copy (copy-sequence value)))
+                     (when (nthcdr tick copy) (setcar (nthcdr tick copy) :the-tick))
+                     copy))))
+      (equal (funcall strip before)
+             (funcall strip (harness-ui-tasks--board-key))))))
+
 (defun harness-ui-tasks-test--title-help (board title)
   "The tooltip of the card on BOARD that says TITLE, as hovering over its title asks.
 Emacs calls the `help-echo' function of the text with the window, the
@@ -277,7 +315,7 @@ is asked for."
                                 (list :rate 61.0 :output 610 :seconds 10.0 :calls 1
                                       :at (float-time) :model "demo:scripted"))
                   (harness-test-wait (lambda () (harness-ui-session-rate sid)) 5 "the rate")
-                  (should (equal key (harness-ui-tasks--board-key)))))))
+                  (should (harness-ui-tasks-test--key-unchanged key))))))
         (dolist (task (harness-call 'task/list default-directory))
           (harness-call 'task/cancel (plist-get task :id)))))))
 
@@ -314,7 +352,7 @@ it once was every half second."
                 (should-not (string-match-p " out\\b\\|/[0-9.]+[kM]\\b" (harness-ui-tasks-test--board-text board)))
                 (let ((key (harness-ui-tasks--board-key)))
                   (harness-ui--store-live sid '(:context 2610 :output 810 :estimated 0))
-                  (should (equal key (harness-ui-tasks--board-key)))))))
+                  (should (harness-ui-tasks-test--key-unchanged key))))))
         (dolist (task (harness-call 'task/list default-directory))
           (harness-call 'task/cancel (plist-get task :id)))))))
 
@@ -343,19 +381,19 @@ session do change it, and the harness's own internal sessions do not."
         (harness-ui-cache-session (list :id "b" :name "second" :status "idle" :updated 300.0
                                         :usage (list :output 5)))
         (harness-ui-cache-session (list :id "a" :name "first" :status "idle" :updated 400.0))
-        (should (equal key (harness-ui-tasks--board-key)))
+        (should (harness-ui-tasks-test--key-unchanged key))
         ;; The internal records come and go with every model call.
         (harness-ui-cache-session (list :id "judge" :kind "internal" :status "running" :updated 500.0))
-        (should (equal key (harness-ui-tasks--board-key)))
+        (should (harness-ui-tasks-test--key-unchanged key))
         ;; What a card shows does change it.
         (harness-ui-cache-session (list :id "a" :name "first" :status "running" :updated 600.0))
-        (should-not (equal key (harness-ui-tasks--board-key)))
+        (should-not (harness-ui-tasks-test--key-unchanged key))
         (setq key (harness-ui-tasks--board-key))
         (harness-ui-cache-session (list :id "a" :name "renamed" :status "running" :updated 700.0))
-        (should-not (equal key (harness-ui-tasks--board-key)))
+        (should-not (harness-ui-tasks-test--key-unchanged key))
         (setq key (harness-ui-tasks--board-key))
         (harness-ui-cache-session (list :id "c" :name "third" :status "idle" :updated 800.0))
-        (should-not (equal key (harness-ui-tasks--board-key)))))))
+        (should-not (harness-ui-tasks-test--key-unchanged key))))))
 
 (ert-deftest harness-ui-tasks-leaves-a-board-nobody-looks-at-alone ()
   "A board no window shows is neither drawn nor reloaded as sessions and events come.
@@ -3844,7 +3882,7 @@ board as drawn then: the next one has nothing to redraw."
             (should (= 1 asked))))
         ;; The board was drawn once for it: what it depends on, with the
         ;; section closed, is what was drawn, so no redraw follows.
-        (should (equal harness-ui-tasks--drawn-key (harness-ui-tasks--board-key)))))))
+        (should (harness-ui-tasks-test--key-unchanged harness-ui-tasks--drawn-key))))))
 
 (ert-deftest harness-ui-tasks-open-section-closes-in-a-window-too-small-to-cap ()
   "Nothing is capped in a window with no room to speak of, so nothing needs opening.
@@ -4050,7 +4088,7 @@ measured, and the card reads the new thing."
                       (harness-ui-cache-session
                        (list :id "s-figures" :name "A task that was renamed"
                              :status "inactive" :usage (list :cost 2.0 :list-cost 2.0)))
-                      (should (equal key (harness-ui-tasks--board-key))))
+                      (should (harness-ui-tasks-test--key-unchanged key)))
                     (should (zerop measured)))))))
         (set-frame-height nil 25)))))
 
@@ -6056,13 +6094,13 @@ card."
           (harness-ui--store-live "s-col-busy" '(:context 95000 :output 9500 :estimated 100))
           (harness-ui--store-rate "s-col-busy" (list :rate 99.0 :output 900 :seconds 9.0 :calls 2
                                                     :at (float-time) :model "demo:scripted"))
-          (should (equal key (harness-ui-tasks--board-key)))
+          (should (harness-ui-tasks-test--key-unchanged key))
           (puthash "s-col-busy" (plist-put (copy-sequence session) :todos
                                            (list (list :status "done" :text "Read it")
                                                  (list :status "done" :text "Write it")
                                                  (list :status "in-progress" :text "Check it")))
                    harness-ui--sessions)
-          (should-not (equal key (harness-ui-tasks--board-key))))))
+          (should-not (harness-ui-tasks-test--key-unchanged key)))))
     ;; No hook of the board hears of them either.
     (should-not (cl-some (lambda (hook)
                            (cl-some (lambda (fn) (and (symbolp fn) (string-prefix-p "harness-ui-tasks" (symbol-name fn))))
