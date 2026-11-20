@@ -616,6 +616,7 @@ keep saying a running service is missing."
           (insert " · " (propertize reason 'face 'harness-failure-face)))
         (insert "\n")))
     (harness-voice--insert-pipeline)
+    (harness-voice--insert-pipe-lines)
     (harness-voice--insert-stt-model)
     (harness-voice--insert-output-voice)
     (harness-voice--insert-audio)
@@ -639,6 +640,26 @@ keep saying a running service is missing."
                          'help-echo "Voice options")
              (lambda () (customize-group 'harness-voice)))
             "\n")))
+
+(defun harness-voice--insert-pipe-lines ()
+  "Insert the voice pipe's own lines: the stage table and every marker.
+This is the only place the call's measurements can be read: the call's
+control draws the stages and says nothing, and it has no way into these
+lines.  A call with no markers -- or no call at all -- says so, rather
+than drawing nothing."
+  (when (boundp 'harness-voice-live--pipeline)
+    (let* ((pipeline (and (buffer-live-p harness-voice-live--transcript)
+                          harness-voice-live--pipeline))
+           (width (max 40 (- (window-width) 4)))
+           (table (and pipeline
+                       (harness-voice-pipeline-lines pipeline width)))
+           (markers (and pipeline
+                         (harness-voice-pipeline-details pipeline))))
+      (insert "\n" (propertize "Pipe" 'face 'harness-label-face) "  ")
+      (if table
+          (dolist (line (append table markers))
+            (insert (propertize line 'face 'harness-dim-face) "\n"))
+        (insert (propertize "No markers yet" 'face 'harness-dim-face) "\n")))))
 
 (defun harness-voice--audio-line ()
   "Return the setup line naming the backend voice records and plays through.

@@ -84,6 +84,7 @@ class VoiceSegment {
     this.turnId,
     this.revision = 0,
     this.seen = 0,
+    this.endedAt,
   });
 
   /// The backend's stable id for this utterance.
@@ -114,6 +115,10 @@ class VoiceSegment {
   /// A monotonic ticket, so the view can tell an update from a rebuild.
   final int seen;
 
+  /// When the segment reached a terminal stage, so a blip that stopped is
+  /// drawn where it stopped and then clears.  Null while it is still moving.
+  final DateTime? endedAt;
+
   VoiceSegment copyWith({
     VoicePipelineStage? stage,
     Duration? duration,
@@ -124,6 +129,7 @@ class VoiceSegment {
     String? turnId,
     int? revision,
     int? seen,
+    DateTime? endedAt,
   }) => VoiceSegment(
     id: id,
     stage: stage ?? this.stage,
@@ -136,6 +142,7 @@ class VoiceSegment {
     turnId: turnId ?? this.turnId,
     revision: revision ?? this.revision,
     seen: seen ?? this.seen,
+    endedAt: endedAt ?? this.endedAt,
   );
 
   bool get isDropped => stage == VoicePipelineStage.dropped;
@@ -261,6 +268,7 @@ class VoiceReply {
     this.text,
     this.turnId,
     this.detail,
+    this.endedAt,
   });
 
   final String id;
@@ -274,13 +282,22 @@ class VoiceReply {
   final String? turnId;
   final String? detail;
 
-  VoiceReply copyWith({VoiceReplyStage? stage, String? detail}) => VoiceReply(
+  /// When the speaker ended it: a dropped, interrupted or spoken reply stays
+  /// on the ribbon for a moment and then clears where it stopped.
+  final DateTime? endedAt;
+
+  VoiceReply copyWith({
+    VoiceReplyStage? stage,
+    String? detail,
+    DateTime? endedAt,
+  }) => VoiceReply(
     id: id,
     stage: stage ?? this.stage,
     generation: generation,
     text: text,
     turnId: turnId,
     detail: detail ?? this.detail,
+    endedAt: endedAt ?? this.endedAt,
   );
 }
 
@@ -737,6 +754,7 @@ class VoicePipelineTracker {
         drop: drop,
         detail: detail,
         seen: _tick,
+        endedAt: _clock(),
       ),
     );
     _dropped++;
@@ -812,6 +830,7 @@ class VoicePipelineTracker {
           drop: drop,
           detail: detail,
           seen: _tick,
+          endedAt: _clock(),
         ),
       );
       _dropped++;
@@ -831,6 +850,7 @@ class VoicePipelineTracker {
         drop: drop,
         detail: detail,
         seen: _tick,
+        endedAt: _clock(),
       ),
     );
     _dropped++;
@@ -853,6 +873,7 @@ class VoicePipelineTracker {
           generation: _generation,
           detail: detail,
           seen: _tick,
+          endedAt: _clock(),
         ),
       );
       _trimSegments();
@@ -868,6 +889,7 @@ class VoicePipelineTracker {
         stage: VoicePipelineStage.failed,
         detail: detail,
         seen: _tick,
+        endedAt: _clock(),
       ),
     );
     _changed();
@@ -944,7 +966,11 @@ class VoicePipelineTracker {
       final segment = _segment(segmentId);
       if (segment == null || segment.stage.terminal) continue;
       _replaceSegment(
-        segment.copyWith(stage: VoicePipelineStage.answered, seen: _tick),
+        segment.copyWith(
+          stage: VoicePipelineStage.answered,
+          seen: _tick,
+          endedAt: _clock(),
+        ),
       );
     }
     _changed();
@@ -1150,7 +1176,11 @@ class VoicePipelineTracker {
     if (index < 0) return;
     final reply = _replies[index];
     if (reply.stage == stage) return;
-    _replies[index] = reply.copyWith(stage: stage, detail: detail);
+    _replies[index] = reply.copyWith(
+      stage: stage,
+      detail: detail,
+      endedAt: stage.terminal ? _clock() : null,
+    );
     _changed();
   }
 

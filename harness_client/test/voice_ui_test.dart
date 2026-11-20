@@ -9,10 +9,12 @@ import 'package:harness_client/src/ui/adaptive/platform_style.dart';
 import 'package:harness_client/src/ui/screens/voice_screen.dart';
 import 'package:harness_client/src/ui/theme/harness_theme.dart';
 import 'package:harness_client/src/ui/widgets/message_composer.dart';
+import 'package:harness_client/src/ui/widgets/voice_pipeline.dart';
 import 'package:harness_client/src/ui/widgets/voice_settings_sheet.dart';
 import 'package:harness_client/src/voice/voice_backend.dart';
 import 'package:harness_client/src/voice/voice_models.dart';
 import 'package:harness_client/src/voice/voice_output.dart';
+import 'package:harness_client/src/voice/voice_pipeline.dart';
 import 'package:harness_client/src/voice/voice_settings.dart';
 
 import 'support/voice_fakes.dart';
@@ -302,6 +304,101 @@ void main() {
     expect(find.text('Speak replies'), findsOneWidget);
     expect(find.text('Save'), findsOneWidget);
     expect(find.text('Cancel'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('the settings sheet is the only way to the pipe lines', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(430, 1500);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final pipeline = VoicePipelineSnapshot(
+      generation: 1,
+      input: VoiceInputState.live,
+      level: 0.42,
+      levelSeen: true,
+      levelAt: DateTime(2026, 11, 9, 12),
+      speechActive: false,
+      segments: const [
+        VoiceSegment(
+          id: 'u-1',
+          stage: VoicePipelineStage.transcribed,
+          generation: 1,
+          duration: Duration(milliseconds: 1400),
+          text: 'open the merge queue',
+        ),
+        VoiceSegment(
+          id: 'r-1',
+          stage: VoicePipelineStage.dropped,
+          generation: 1,
+          duration: Duration(milliseconds: 80),
+          drop: VoiceSegmentDrop.tooShort,
+        ),
+      ],
+      turns: const [],
+      replies: const [],
+      accepted: 1,
+      dropped: 1,
+      spoken: 0,
+      playing: false,
+    );
+    await tester.pumpWidget(
+      _app(
+        Scaffold(
+          body: SingleChildScrollView(
+            child: VoiceSettingsSheet(
+              settings: const VoiceSettings(),
+              harnessAddress: 'ws://192.168.1.5:9999/acp',
+              catalogue: FakeVoiceCatalogue(
+                voices: _voices,
+                rateRange: _range,
+              ),
+              pipeline: pipeline,
+            ),
+          ),
+        ),
+      ),
+    );
+    // The pipe's own lines are here, by id, stage and measurement.
+    expect(find.text('PIPELINE'), findsOneWidget);
+    expect(
+      find.text('u-1 · transcribed · 1.4s · "open the merge queue"'),
+      findsOneWidget,
+    );
+    expect(find.text('r-1 · dropped · 80ms · too short'), findsOneWidget);
+    // And the sheet carries no drawn pipe of its own.
+    expect(find.byType(VoicePipelineView), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a sheet with no call says the pipe has no markers yet', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(430, 1500);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      _app(
+        Scaffold(
+          body: SingleChildScrollView(
+            child: VoiceSettingsSheet(
+              settings: const VoiceSettings(),
+              harnessAddress: 'ws://192.168.1.5:9999/acp',
+              catalogue: FakeVoiceCatalogue(
+                voices: _voices,
+                rateRange: _range,
+              ),
+              pipeline: VoicePipelineSnapshot.empty,
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(find.text('PIPELINE'), findsOneWidget);
+    expect(find.text('No markers yet'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

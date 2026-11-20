@@ -483,6 +483,25 @@ this machine's player, so the speaker stays local."
     (should-not harness-voice--release-mode)
     (should-not harness-ui-voice-test--notifications)))
 
+(ert-deftest harness-ui-voice-a-command-that-exits-first-keeps-its-result ()
+  "A command reaped before its input is written is not an error.
+A transcriber can exit before the EOF reaches it; the write then
+raised `Process ... not running', which replaced the result the
+sentinel produced with that message."
+  (harness-ui-voice-test-with
+    (let ((job (harness-voice--new-job)) signalled)
+      (cl-letf* ((real (symbol-function 'make-process))
+                 ((symbol-function 'make-process)
+                  (lambda (&rest args)
+                    ;; The child is reaped before `harness-voice--run' returns.
+                    (let ((process (apply real (plist-put args :sentinel #'ignore))))
+                      (while (process-live-p process) (accept-process-output process 0.01))
+                      process))))
+        (condition-case err (harness-voice--run job 'transcribing '("true") "words")
+          (error (setq signalled (error-message-string err)))))
+      (should-not signalled)
+      (should (eq job harness-voice--job)))))
+
 (ert-deftest harness-ui-voice-new-empty-compose-target-recovers-the-transcript ()
   "An empty new reply is not the empty task draft captured by the recorder."
   (harness-ui-voice-test-with

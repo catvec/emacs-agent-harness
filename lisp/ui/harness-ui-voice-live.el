@@ -39,6 +39,7 @@
 (require 'harness-ui-compose)
 (require 'harness-ui-voice-conversation)
 (require 'harness-ui-voice-pipeline)
+(require 'harness-ui-voice-ribbon)
 (require 'harness-ui-voice-turn)
 (require 'harness-ui-voice-recovery)
 
@@ -309,6 +310,11 @@ state is what the sidecar reported.")
   "Timer that redraws the meter when its last level goes stale, or nil.")
 (defvar harness-voice-live--pipeline-controls-at nil
   "Time the compose line was last redrawn for a level, or nil.")
+(defvar harness-voice-live--ribbon-timer nil
+  "Timer that warbles a waiting blip, or nil.
+It runs only while the transcript is shown and something on the ribbon
+waits.  Nothing on the ribbon advances on it: the frames are the same
+stage drawn twice, and `harness-voice-live-motion' nil stops them.")
 (defvar harness-voice-live--utterance nil
   "The segment id the captions now arriving belong to, or nil.")
 (defvar harness-voice-live--utterance-done nil
@@ -987,13 +993,10 @@ chat's box does."
 
 (defvar-local harness-voice-live--pipeline-end nil
   "Marker at the end of the pipeline block in the transcript buffer.")
-(defvar-local harness-voice-live--pipeline-details nil
-  "Non-nil when the transcript shows every marker of the pipeline.")
 
 (defun harness-voice-live--input ()
   "Return the input the selected provider reads: `mic' or `camera'."
   (if (harness-voice-provider-camera-p) 'camera 'mic))
-
 (defun harness-voice-live--pipeline-generation ()
   "Return the generation of the pipeline this session feeds."
   (harness-voice-pipeline-generation harness-voice-live--pipeline))
@@ -1034,35 +1037,60 @@ which is the meter's rate, not the transcript's."
   (when (buffer-live-p harness-voice-live--transcript)
     (with-current-buffer harness-voice-live--transcript
       (when (get-buffer-window (current-buffer) t)
-        (harness-voice-live--pipeline-draw)))))
+        (harness-voice-live--pipeline-draw)
+        (harness-voice-live--ribbon-schedule)))))
+
+(defun harness-voice-live--ribbon-schedule ()
+  "Wake for the ribbon's next change of its own, or not at all.
+A waiting blip warbles and a dropped one clears; nothing else moves
+without an event, and a hidden transcript runs no timer at all."
+  (when (timerp harness-voice-live--ribbon-timer)
+    (cancel-timer harness-voice-live--ribbon-timer)
+    (setq harness-voice-live--ribbon-timer nil))
+  (when (and (buffer-live-p harness-voice-live--transcript)
+             (get-buffer-window harness-voice-live--transcript t))
+    (let ((next (let ((harness-voice-ribbon-motion harness-voice-live-motion))
+                  (harness-voice-ribbon-next-change harness-voice-live--pipeline))))
+      (when next
+        (setq harness-voice-live--ribbon-timer
+              (run-at-time (max 0.02 (- next (float-time))) nil
+                           #'harness-voice-live--ribbon-tick))))))
+
+(defun harness-voice-live--ribbon-tick ()
+  "Draw the ribbon's next frame, and wait for the one after it."
+  (setq harness-voice-live--ribbon-timer nil)
+  (when (and (buffer-live-p harness-voice-live--transcript)
+             (get-buffer-window harness-voice-live--transcript t))
+    (with-current-buffer harness-voice-live--transcript
+      (harness-voice-live--pipeline-draw)
+      (harness-voice-live--ribbon-schedule))))
 
 (defun harness-voice-live-pipeline-details ()
-  "Show or hide every marker of the voice pipeline."
+  "Show the voice pipe's markers in the voice settings.
+The call's control draws the stages and says nothing; this is the only
+way to its ids and measurements, and it opens the settings buffer where
+the pipe's lines are listed."
   (interactive)
-  (let ((buffer (if (buffer-live-p harness-voice-live--transcript)
-                    harness-voice-live--transcript
-                  (current-buffer))))
-    (with-current-buffer buffer
-      (setq harness-voice-live--pipeline-details
-            (not harness-voice-live--pipeline-details))
-      (harness-voice-live--pipeline-draw))))
+  (harness-voice-setup))
 
 (defun harness-voice-live--pipeline-block (width)
-  "Return the pipeline block's lines for a window WIDTH wide."
-  (append
-   (harness-voice-pipeline-block harness-voice-live--pipeline width)
-   (when harness-voice-live--pending
-     (list (harness-voice-live--pending-line width)))
-   (list (harness-ui-action-button
-          (if harness-voice-live--pipeline-details "[Hide details]" "[Show details]")
-          #'harness-voice-live-pipeline-details
-          :help "show the pipeline details"))
-   (when harness-voice-live--pipeline-details
-     (append (list "")
-             (list (propertize "Pipeline details" 'face 'harness-label-face))
-             (harness-voice-pipeline-details harness-voice-live--pipeline)))
-   (list harness-voice-live--transcript-rule)))
-
+  "Return the pipeline block's lines for a window WIDTH wide.
+The ribbon leads, and it is the whole block: one continuous bar with the
+runs of bars where they really are, and a narrow window gets the same runs
+on the compact badge.  There is no heading, no stage key, no legend, no
+status line and no way into the details here: the stages are told apart by
+the shapes and faces of their bars, and every id and measurement lives in
+the voice settings (`harness-voice-setup').  A draft the recovery held
+back is the session's own words, so it is drawn under the ribbon."
+  ;; One motion setting for the surface: `harness-voice-live-motion' nil
+  ;; stops the stage's spinner and the ribbon's warble alike, and both keep
+  ;; every word.
+  (let ((harness-voice-ribbon-motion harness-voice-live-motion))
+    (append
+     (harness-voice-ribbon-block harness-voice-live--pipeline width)
+     (when harness-voice-live--pending
+       (list (harness-voice-live--pending-line width)))
+     (list harness-voice-live--transcript-rule))))
 (defun harness-voice-live--pipeline-draw ()
   "Draw the pipeline block at the top of the transcript buffer."
   (when (buffer-live-p harness-voice-live--transcript)
@@ -1340,10 +1368,12 @@ local pipeline, the fixture or a custom sidecar."
     (cancel-timer harness-voice-live--pipeline-timer))
   (when (timerp harness-voice-live--pipeline-stale-timer)
     (cancel-timer harness-voice-live--pipeline-stale-timer))
-  (setq harness-voice-live--pipeline-timer nil
-        harness-voice-live--timer nil
+  (when (timerp harness-voice-live--ribbon-timer)
+    (cancel-timer harness-voice-live--ribbon-timer))
+  (setq harness-voice-live--timer nil
         harness-voice-live--pipeline-timer nil
         harness-voice-live--pipeline-stale-timer nil
+        harness-voice-live--ribbon-timer nil
         harness-voice-live--stage-timer nil
         harness-voice-live--stage nil
         harness-voice-live--stage-since nil)

@@ -1955,7 +1955,9 @@ a speech server answers with no audio at all."
     (harness-voice-live--handle (list :event "assistant_delta" :text "Ready." :final t))
     (harness-voice-live--handle (list :event "backchannel" :text "mm-hmm"))
     (let ((text (harness-ui-voice-live-test--transcript)))
-      (should (string-prefix-p "Pipeline\n" text))
+      ;; The block opens with the pipe itself, not with a heading.
+      (should (string-match-p "\\`[▁▂▃▄▅▆▇█ ]*\n" text))
+      (should-not (string-search "Pipeline\n" text))
       (should (string-search "─" text))
       (should (string-search "You · " text))
       (should (string-search "  Hello" text))
@@ -2216,13 +2218,18 @@ a speech server answers with no audio at all."
                      (plist-get (harness-voice-pipeline--segment pipeline "u-2") :reason)))
       (should (harness-voice-pipeline-level-seen pipeline)))
     (let ((strip (harness-ui-voice-live-test--strip)))
-      (dolist (word '("Pipeline" "Input" "Filter" "Words" "Turn" "Speaker"
-                      "Mic · live" "1 accepted" "1 dropped" "≡ transcribed"))
-        (should (string-search word strip)))
-      (should (string-search "Level · " strip)))))
+      ;; The strip draws the pipe and says nothing about it: no stage key, no
+      ;; count, no status line.  The levels and the bursts are bars.
+      (dolist (word '("Pipeline" "Audio" "Speech" "Words" "Processing"
+                      "Audio out" "Dropped" "Failed" "Mic · live"
+                      "1 accepted" "1 dropped" "Level · " "u-1" "u-2"))
+        (should-not (string-search word strip)))
+      (should (string-match-p "[▁▂▃▄▅▆▇█]" strip))
+      ;; A lost burst is a run of its own, in the drop tone's outline.
+      (should (string-search "╌" strip)))))
 
-(ert-deftest harness-ui-voice-live-pipeline-details-and-motion ()
-  "The details toggle lists every marker; motion off keeps every fact."
+(ert-deftest harness-ui-voice-live-pipeline-details-live-in-the-settings ()
+  "The strip has no way into the markers; the voice settings list them."
   (harness-ui-voice-live-test-with
     (let ((pipeline (harness-ui-voice-live-test--pipeline)))
       (harness-voice-live--pipeline-bump 'live)
@@ -2233,15 +2240,20 @@ a speech server answers with no audio at all."
              :reason "too short"))
       (harness-voice-live--pipeline-turn-sent "d-1")
       (let ((strip (harness-ui-voice-live-test--strip)))
-        (should (string-search "[Show details]" strip))
-        (should-not (string-search "u-2 · dropped" strip)))
-      (with-current-buffer harness-voice-live--transcript
-        (harness-voice-live-pipeline-details))
-      (let ((strip (harness-ui-voice-live-test--strip)))
-        (should (string-search "[Hide details]" strip))
-        (should (string-search "Pipeline details" strip))
-        (should (string-search "u-2 · dropped · 80ms · too short" strip))
-        (should (string-search "d-1 · working" strip)))
+        ;; Nothing on the strip is a way into the markers, and no marker's
+        ;; words are drawn there either.
+        (dolist (word '("[Pipeline details]" "[Hide details]" "[Show details]"
+                        "Pipeline details" "u-1 · " "u-2 · dropped"
+                        "d-1 · working"))
+          (should-not (string-search word strip)))
+        (should (string-match-p "[▁▂▃▄▅▆▇█╌]" strip)))
+      ;; The settings buffer is where a marker's own words are read.
+      (with-temp-buffer
+        (harness-voice--insert-pipe-lines)
+        (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+          (should (string-search "Pipe" text))
+          (should (string-search "u-2 · dropped · 80ms · too short" text))
+          (should (string-search "d-1 · working" text))))
       (should (equal 'too-short
                      (plist-get (harness-voice-pipeline--segment pipeline "u-2") :reason))))
     ;; The busy stage's spinner is motion; with it off the stage still
@@ -2272,14 +2284,22 @@ a speech server answers with no audio at all."
     (should (equal "Level · no data"
                    (harness-voice-pipeline-level-label
                     (harness-ui-voice-live-test--pipeline))))
-    (should (string-search "Mic · muted" (harness-ui-voice-live-test--strip)))
+    ;; Muting closes the meter: the strip draws no input run at all, and
+    ;; says nothing in words either way.
+    (let ((strip (harness-ui-voice-live-test--strip)))
+      (dolist (word '("Mic · muted" "Mic · ended" "1 accepted" "Dropped"))
+        (should-not (string-search word strip))))
     (harness-voice-live-stop)
     (should (eq 'ended (harness-voice-pipeline-capture
                         (harness-ui-voice-live-test--pipeline))))
     (let ((strip (harness-ui-voice-live-test--strip)))
-      (should (string-search "Mic · ended" strip))
-      ;; The bursts stay as the last true picture of the session.
-      (should (string-search "1 accepted" strip)))))
+      (dolist (word '("Mic · ended" "1 accepted"))
+        (should-not (string-search word strip)))
+      ;; The bursts stay as the last true picture of the session: the mute
+      ;; cancelled the draft, so its run is drawn as the loss it was, in the
+      ;; band it had reached, and the kept burst's own run is still there.
+      (should (string-match-p "[▁▂▃▄▅▆▇█╌]" strip))
+      (should (string-search "╌" strip)))))
 
 (ert-deftest harness-ui-voice-live-pipeline-handoff-is-not-playback ()
   "Commentary handed to the sidecar is handed; speaking needs its event."

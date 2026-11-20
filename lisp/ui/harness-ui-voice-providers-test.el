@@ -219,6 +219,8 @@
                                "\n"
                                "Pipeline  ○ not checked  [Start]\n"
                                "\n"
+                               "Pipe  No markers yet\n"
+                               "\n"
                                "Output voice  Voice catalogue unavailable"
                                "  [Select]\n"
                                "\n"

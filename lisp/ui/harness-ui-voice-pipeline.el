@@ -123,6 +123,33 @@ or a turn already answered.")
   ["▁" "▂" "▃" "▄" "▅" "▆" "▇"]
   "The partial blocks a VU bar is made of, shortest first.")
 
+(defconst harness-voice-pipeline-bands
+  '((input "Audio" "Microphone level before the speech filter")
+    (speech "Speech" "Speech kept for transcription")
+    (words "Words" "Speech to text")
+    (turn "Processing" "Agent work")
+    (speaker "Audio out" "Playback"))
+  "The pipe's five stages, left to right, with their words.
+A stage's position is its place in the pipe, never how long a burst spent
+there.  These are the words the ribbon's marks are named by, in the
+clients and in the details table alike.")
+
+(defconst harness-voice-pipeline--stage-band
+  '((accepted . speech) (transcribing . words) (transcribed . words)
+    (in-turn . turn) (answered . turn))
+  "The band a kept burst is drawn in at each stage.
+A drop or a failure is drawn in the band it had reached, which the model
+records as `:from'.")
+
+(defun harness-voice-pipeline-stage-band (stage &optional from)
+  "Return the band STAGE is drawn in, or FROM's when STAGE is terminal.
+FROM is the band a burst had reached when the pipe ended it: a dropped
+or failed burst is drawn where it stopped, so the ribbon shows where the
+pipe lost it instead of moving it onwards."
+  (or (alist-get stage harness-voice-pipeline--stage-band)
+      (and (memq from (mapcar #'car harness-voice-pipeline-bands)) from)
+      'speech))
+
 (defun harness-voice-pipeline--stage-label (stage)
   "Return the word for segment STAGE."
   (pcase stage
@@ -363,7 +390,12 @@ marking an older source in-turn or answered must not count a new burst."
 ARGS is a plist of :seconds, :reason, :text, :at and :generation.  A
 kept burst moves forward only: a late or duplicate event changes
 nothing and is counted in `harness-voice-pipeline-ignored'.  A terminal
-stage is never left."
+stage is never left.
+
+A burst's `:from' records the band it had reached when the pipe ended
+it, so a dropped or failed burst is drawn where it stopped rather than
+at a step it never took.  `:ended' is the time it reached a terminal
+stage, which is how long a dropped blip stays on the ribbon."
   (when (and (stringp id) (not (string-empty-p id))
              (harness-voice-pipeline--current p (plist-get args :generation)))
     (let* ((now (or (plist-get args :at) (float-time)))
@@ -377,7 +409,11 @@ stage is never left."
           (progn
             (harness-voice-pipeline--put-segment
              p id (list :id id :stage stage :seconds seconds :reason reason
-                        :text text :at now))
+                        :text text :at now
+                        :from (and (memq stage '(accepted transcribing transcribed
+                                                         in-turn answered))
+                                   (harness-voice-pipeline-stage-band stage))
+                        :ended (and (memq stage '(dropped failed)) now)))
             ;; A burst first seen past the filter was kept by it: the
             ;; accept event is only missing, not untrue.  A failed one was
             ;; not counted as kept, and a dropped one is its own count.
@@ -393,14 +429,20 @@ stage is never left."
            ((eq stage 'dropped)
             ;; The path ended a burst it had kept: it stays a real
             ;; measurement of what was lost, with its own reason.
-            (setf (plist-get existing :stage) 'dropped
+            (setf (plist-get existing :from)
+                  (or (plist-get existing :from) (harness-voice-pipeline-stage-band current))
+                  (plist-get existing :stage) 'dropped
                   (plist-get existing :reason) (or reason 'cancelled)
+                  (plist-get existing :ended) now
                   (plist-get existing :seconds) (or seconds (plist-get existing :seconds)))
             (harness-voice-pipeline--count-segment p id nil)
             (harness-voice-pipeline--changed p))
            ((eq stage 'failed)
-            (setf (plist-get existing :stage) 'failed
-                  (plist-get existing :reason) (or reason 'failed))
+            (setf (plist-get existing :from)
+                  (or (plist-get existing :from) (harness-voice-pipeline-stage-band current))
+                  (plist-get existing :stage) 'failed
+                  (plist-get existing :reason) (or reason 'failed)
+                  (plist-get existing :ended) now)
             (harness-voice-pipeline--changed p))
            ((<= (or (alist-get stage harness-voice-pipeline--stage-rank) 0)
                 (or (alist-get current harness-voice-pipeline--stage-rank) 0))
@@ -408,7 +450,10 @@ stage is never left."
             ;; where it really is, and stays there.
             (cl-incf (harness-voice-pipeline-ignored p)))
            (t
-            (setf (plist-get existing :stage) stage)
+            (setf (plist-get existing :stage) stage
+                  ;; The band it has reached is where a later drop or failure
+                  ;; will be drawn: a loss stays where the pipe lost it.
+                  (plist-get existing :from) (harness-voice-pipeline-stage-band stage))
             (when seconds (setf (plist-get existing :seconds) seconds))
             (when text (setf (plist-get existing :text) text))
             (harness-voice-pipeline--changed p)))
@@ -503,7 +548,11 @@ event cannot send it back to working."
   "Record that reply ID is in STAGE in P.
 ARGS is a plist of :turn, :text, :detail, :at and :generation.  Ready,
 held, handed and speaking are distinct facts, and a terminal stage is
-never left: a late playback event cannot resurrect a reply."
+never left: a late playback event cannot resurrect a reply.
+
+`:from' records the reply stage it was at when the speaker ended it, and
+`:ended' when it did, so the ribbon can show a held or interrupted reply
+where it really was instead of at a step it never reached."
   (when (and (stringp id) (not (string-empty-p id))
              (harness-voice-pipeline--current p (plist-get args :generation)))
     (let* ((now (or (plist-get args :at) (float-time)))
@@ -515,7 +564,11 @@ never left: a late playback event cannot resurrect a reply."
           (progn
             (harness-voice-pipeline--put-reply
              p id (list :id id :stage stage :turn turn :text text
-                        :detail detail :at now))
+                        :detail detail :at now
+                        :from (and (memq stage harness-voice-pipeline--reply-terminal)
+                                   'ready)
+                        :ended (and (memq stage harness-voice-pipeline--reply-terminal)
+                                    now)))
             (harness-voice-pipeline--changed p))
         (let ((current (plist-get existing :stage)))
           (cond
@@ -530,6 +583,10 @@ never left: a late playback event cannot resurrect a reply."
             (cl-incf (harness-voice-pipeline-ignored p)))
            (t
             (setf (plist-get existing :stage) stage)
+            (when (memq stage harness-voice-pipeline--reply-terminal)
+              (setf (plist-get existing :from)
+                    (or (plist-get existing :from) current)
+                    (plist-get existing :ended) now))
             (when turn (setf (plist-get existing :turn) turn))
             (when text (setf (plist-get existing :text) text))
             (when detail (setf (plist-get existing :detail) detail))
@@ -801,9 +858,10 @@ a word; the glyph is a mark, never the only signal."
          (replies (length (plist-get turn :replies)))
          (columns
           (list
-           (list "Input" (if (eq (harness-voice-pipeline-input p) 'camera)
-                          "Mouth motion before the speech gate"
-                        "Microphone level before the speech filter")
+           (list (if (eq (harness-voice-pipeline-input p) 'camera) "Motion" "Audio")
+                 (if (eq (harness-voice-pipeline-input p) 'camera)
+                     "Mouth motion before the speech gate"
+                   "Microphone level before the speech filter")
                  (list (concat (propertize (harness-voice-pipeline-meter p 8 now)
                                            'face 'harness-success-face)
                                " " (harness-voice-pipeline--word
@@ -811,7 +869,10 @@ a word; the glyph is a mark, never the only signal."
                                     'harness-label-face))
                        (harness-voice-pipeline--word
                         (harness-voice-pipeline-capture-label p) 'harness-dim-face)))
-           (list "Filter" "Speech kept for transcription"
+           (list (if (eq (harness-voice-pipeline-input p) 'camera) "Mouth" "Speech")
+                 (if (eq (harness-voice-pipeline-input p) 'camera)
+                     "Mouth motion kept for transcription"
+                   "Speech kept for transcription")
                  (delq nil
                        (list (and gate (harness-voice-pipeline--word
                                         (concat "● " gate) 'harness-caution-face))
@@ -823,7 +884,7 @@ a word; the glyph is a mark, never the only signal."
                                    (format "× %d dropped" dropped) 'harness-dim-face)))))
            (list "Words" "Speech to text"
                  (harness-voice-pipeline--words-column segment))
-           (list "Turn" "Agent work"
+           (list "Processing" "Agent work"
                  (delq nil
                        (list (when turn
                                (harness-voice-pipeline--word
@@ -847,7 +908,7 @@ a word; the glyph is a mark, never the only signal."
                                    (format "%d %s" replies
                                            (if (= 1 replies) "reply" "replies"))
                                    'harness-dim-face)))))
-           (list "Speaker" "Playback"
+           (list "Audio out" "Playback"
                  (list (harness-voice-pipeline--word
                         (pcase output
                           ('speaking "▷ speaking") ('held "‖ held")

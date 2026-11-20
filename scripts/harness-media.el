@@ -3522,6 +3522,10 @@ those words, unchanged."
                    (:event "user_delta" :final t :utterance 1
                            :text "Uh, add a comment, um, to TokenBucket.take about its refill and retry behavior.")
                    (:event "segment" :state "transcribed" :id "u-1")
+                   ;; A second burst the filter kept and has not yet handed on:
+                   ;; two real segments in the pipe at once, which is what the
+                   ;; picture is for.
+                   (:event "segment" :state "accepted" :id "u-3" :seconds 0.9)
                    (:event "delegation" :id "d-1"
                            :text "Uh, add a comment, um, to TokenBucket.take about its refill and retry behavior.")))
     (harness-voice-live--handle event))
@@ -3655,10 +3659,11 @@ microphone was opened -- and the picture is of the real drawing."
     (harness-media--capture "voice-pipeline")))
 
 (defun harness-media-shot-voice-pipeline-details ()
-  "The voice pipeline with every marker listed.
-The same scripted session as `harness-media-shot-voice-pipeline', the
-details control open: each burst by its id, stage, measured length and
-drop reason, then the turn and the reply."
+  "The voice settings' pipe section: every marker, by its own words.
+The same scripted session as `harness-media-shot-voice-pipeline', read
+where the measurements live.  The call's control draws the pipe and says
+nothing, so this is the only way to a marker's id, stage, measured length
+and drop reason -- the voice settings, not a control on the pipe."
   (harness-media--reset-layout)
   (let ((harness-voice-provider 'fixture)
         (harness-voice-live--buffer nil)
@@ -3674,11 +3679,84 @@ drop reason, then the turn and the reply."
        (harness-media--voice-pipeline-session)
        (switch-to-buffer harness-voice-live--transcript))
      #'harness-media--voice-pipeline-fresh)
-    (with-current-buffer harness-voice-live--transcript
-      (setq harness-voice-live--pipeline-details t))
-    (harness-media--voice-pipeline-fresh)
-    (harness-media--voice-pipeline-frame)
+    (harness-voice-setup)
+    (harness-media--fit (harness-media--text-lines (selected-window)))
+    (harness-media--settle 0.5)
     (harness-media--capture "voice-pipeline-details")))
+
+(defun harness-media--voice-ribbon-fresh (&optional width)
+  "Redraw the scripted session's ribbon, at WIDTH columns when given."
+  (setq harness-voice-live--stage 'speaking
+        harness-voice-live--stage-since nil
+        harness-voice-live--state 'speaking)
+  (setq harness-voice-live--pipeline-controls-at nil)
+  (harness-voice-live--pipeline-level 0.56)
+  (if width
+      (let ((window (get-buffer-window harness-voice-live--transcript t)))
+        (when window (set-window-buffer window harness-voice-live--transcript))
+        (with-current-buffer harness-voice-live--transcript
+          (let ((inhibit-read-only t)
+                (buffer-undo-list t)
+                (harness-voice-pipeline-width width))
+            (goto-char (point-min))
+            (delete-region (point-min) (marker-position harness-voice-live--pipeline-end))
+            (insert (string-join
+                     (append (harness-voice-live--pipeline-block width) (list ""))
+                     "\n"))
+            (set-marker harness-voice-live--pipeline-end (point))
+            (force-mode-line-update t))))
+    (harness-voice-live--pipeline-draw)))
+
+(defun harness-media-shot-voice-ribbon ()
+  "The voice pipe as one continuous ribbon, in a full-size window.
+The blips are where their own events put them: the microphone's bars, the
+burst the filter dropped, the burst it kept and sent, and the reply the
+speaker is playing.  The events are scripted through the live handlers --
+no microphone was opened -- and the picture is of the real drawing."
+  (harness-media--reset-layout)
+  (let ((harness-voice-provider 'fixture)
+        (harness-voice-live--buffer nil)
+        (harness-voice-live--session "media-live")
+        (harness-voice-live--turn-id "d-1")
+        (harness-voice-live--state 'speaking)
+        (harness-voice-live--stage 'speaking)
+        (harness-voice-live--muted nil)
+        (harness-voice-live--working nil)
+        (harness-voice-live--transcript nil))
+    (harness-media--view
+     (lambda ()
+       (harness-media--voice-pipeline-session)
+       (switch-to-buffer harness-voice-live--transcript))
+     #'harness-media--voice-ribbon-fresh)
+    (harness-media--voice-ribbon-fresh)
+    (harness-media--voice-pipeline-frame)
+    (harness-media--capture "voice-ribbon")))
+
+(defun harness-media-shot-voice-ribbon-compact ()
+  "The same blips around the compact ring, in a narrow window.
+The transcript at a narrow width draws the ribbon as a ring: twelve
+o'clock is the microphone, then speech, words, processing and the audio
+out, clockwise.  It is the same events as the full-size picture."
+  (harness-media--reset-layout)
+  (let ((harness-voice-provider 'fixture)
+        (harness-voice-live--buffer nil)
+        (harness-voice-live--session "media-live")
+        (harness-voice-live--turn-id "d-1")
+        (harness-voice-live--state 'speaking)
+        (harness-voice-live--stage 'speaking)
+        (harness-voice-live--muted nil)
+        (harness-voice-live--working nil)
+        (harness-voice-live--transcript nil))
+    (harness-media--view
+     (lambda ()
+       (harness-media--voice-pipeline-session)
+       (switch-to-buffer harness-voice-live--transcript))
+     #'harness-media--voice-ribbon-fresh)
+    (set-frame-width nil 44)
+    (harness-media--settle 0.6)
+    (harness-media--voice-ribbon-fresh 40)
+    (harness-media--voice-pipeline-frame)
+    (harness-media--capture "voice-ribbon-compact")))
 
 (defun harness-media-shot-voice-pipeline-compose ()
   "The pipeline's compact line under a live voice chat's controls.
@@ -5150,6 +5228,8 @@ names."
     ("voice" . harness-media-shot-voice)
     ("voice-setup" . harness-media-shot-voice-setup)
     ("voice-pipeline" . harness-media-shot-voice-pipeline)
+    ("voice-ribbon" . harness-media-shot-voice-ribbon)
+    ("voice-ribbon-compact" . harness-media-shot-voice-ribbon-compact)
     ("voice-pipeline-details" . harness-media-shot-voice-pipeline-details)
     ("voice-pipeline-compose" . harness-media-shot-voice-pipeline-compose)
     ("voice-routing" . harness-media-shot-voice-routing)

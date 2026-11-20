@@ -361,8 +361,15 @@ gone."
         (run-at-time (if (eq phase 'recording) harness-voice-recording-limit
                        harness-voice-process-timeout) nil #'harness-voice--timeout job))
   (unless (eq phase 'recording)
-    (when input (process-send-string (harness-voice--job-process job) input))
-    (process-send-eof (harness-voice--job-process job))))
+    ;; A fast command can exit before its input or EOF is written, and its
+    ;; sentinel then finishes the job.  Writing to it afterwards would raise
+    ;; a process error that replaced the result the sentinel produced, so
+    ;; each write is best-effort: the sentinel, not the write, decides.
+    (let ((process (harness-voice--job-process job)))
+      (when (and input (process-live-p process))
+        (ignore-errors (process-send-string process input)))
+      (when (process-live-p process)
+        (ignore-errors (process-send-eof process))))))
 
 (defun harness-voice--new-job ()
   "Create a private audio job belonging to this buffer."

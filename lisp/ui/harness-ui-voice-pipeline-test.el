@@ -479,7 +479,7 @@ meter can be read as the measurement it is."
     (harness-voice-pipeline-turn pipeline "d-1" 'working '(:segment "u-1"))
     (harness-voice-pipeline-reply pipeline "n-1" 'handed)
     (let ((strip (harness-ui-voice-pipeline-test--lines pipeline)))
-      (dolist (word '("Input" "Filter" "Words" "Turn" "Speaker"
+      (dolist (word '("Audio" "Speech" "Words" "Processing" "Audio out"
                       "Level · 56%" "Mic · live" "Speech · heard"
                       "● 1 accepted" "≡ transcribed · 1.4s" "⋯ working"
                       "1 utterance" "→ handed"))
@@ -489,7 +489,7 @@ meter can be read as the measurement it is."
       ;; Every column heading says what its data is.
       (let ((headings (harness-voice-pipeline-columns
                        pipeline harness-ui-voice-pipeline-test--now)))
-        (should (equal '("Input" "Filter" "Words" "Turn" "Speaker")
+        (should (equal '("Audio" "Speech" "Words" "Processing" "Audio out")
                        (mapcar #'car headings)))
         (should (equal "Microphone level before the speech filter"
                        (nth 1 (nth 0 headings))))
@@ -505,7 +505,7 @@ meter can be read as the measurement it is."
     (harness-voice-pipeline-segment pipeline "u-2" 'dropped '(:seconds 0.08 :reason too-short))
     (let ((strip (harness-ui-voice-pipeline-test--lines pipeline 40)))
       (should (= 5 (length (split-string strip "\n"))))
-      (dolist (word '("Input · " "Filter · " "Words · " "Turn · " "Speaker · "
+      (dolist (word '("Audio · " "Speech · " "Words · " "Processing · " "Audio out · "
                       "1 accepted" "1 dropped"))
         (should (string-search word strip))))))
 

@@ -29,7 +29,8 @@ final _now = DateTime(2026, 11, 7, 12, 4);
 
 /// A pipe in the middle of a conversation: one burst the filter dropped, one
 /// it kept, one being transcribed, one whose turn was answered, and a reply
-/// the speaker is playing.
+/// the speaker is playing.  Every stage has a mark at once, which is what the
+/// control is for.
 VoicePipelineSnapshot _flow() => VoicePipelineSnapshot(
   generation: 1,
   input: VoiceInputState.live,
@@ -177,19 +178,50 @@ Future<void> _write(
   });
 }
 
+/// What the control may never draw: a stage word, a count, a status line or
+/// the way into the details.
+const _banned = [
+  'Pipeline',
+  'Audio',
+  'Speech',
+  'Words',
+  'Processing',
+  'Audio out',
+  'Dropped',
+  'Failed',
+  'accepted',
+  'dropped',
+  'Mic ·',
+  'Level ·',
+  'Turn ·',
+  'Voice ·',
+  'Pipeline details',
+  'No segments yet',
+];
+
+void _nothingSaid(WidgetTester tester) {
+  for (final word in _banned) {
+    expect(find.text(word), findsNothing, reason: '$word is not drawn');
+    expect(find.textContaining(word), findsNothing, reason: '$word is not drawn');
+  }
+  expect(find.byTooltip('Pipeline details'), findsNothing);
+  expect(find.byKey(const Key('voice-pipeline-details')), findsNothing);
+}
+
 Future<void> main() async {
   TestWidgetsFlutterBinding.ensureInitialized();
   final shots = Platform.environment['HARNESS_SHOTS'];
   final real = await loadRealFonts();
+  final suffix = real ? '' : '-ahem';
 
   testWidgets('draws the pipe in flow', (tester) async {
-    await _size(tester, 720, 190);
+    await _size(tester, 720, 110);
     final boundary = GlobalKey();
     await tester.pumpWidget(
       RepaintBoundary(
         key: boundary,
         child: _app(
-          size: const Size(720, 190),
+          size: const Size(720, 110),
           child: _panel(
             VoicePipelineView(snapshot: _flow(), clock: () => _now),
           ),
@@ -197,71 +229,92 @@ Future<void> main() async {
       ),
     );
     expect(tester.takeException(), isNull);
-    expect(find.text('Pipeline'), findsOneWidget);
+    _nothingSaid(tester);
+    expect(find.byKey(const Key('voice-pipeline-ribbon')), findsOneWidget);
     if (shots != null) {
-      await _write(
-        tester,
-        boundary,
-        '$shots/voice-pipeline-flow${real ? '' : '-ahem'}.png',
-      );
+      await _write(tester, boundary, '$shots/voice-pipeline-flow$suffix.png');
     }
   });
 
-  testWidgets('draws the compact presentation a buddy shows', (tester) async {
-    await _size(tester, 320, 96);
+  testWidgets('draws the pipe in a narrow panel', (tester) async {
+    await _size(tester, 320, 90);
     final boundary = GlobalKey();
     await tester.pumpWidget(
       RepaintBoundary(
         key: boundary,
         child: _app(
-          size: const Size(320, 96),
+          size: const Size(320, 90),
           child: _panel(
-            VoicePipelineView(
-              snapshot: _flow(),
-              compact: true,
-              clock: () => _now,
+            VoicePipelineView(snapshot: _flow(), clock: () => _now),
+          ),
+        ),
+      ),
+    );
+    expect(tester.takeException(), isNull);
+    _nothingSaid(tester);
+    expect(find.byKey(const Key('voice-pipeline-ribbon')), findsOneWidget);
+    if (shots != null) {
+      await _write(
+        tester,
+        boundary,
+        '$shots/voice-pipeline-narrow$suffix.png',
+      );
+    }
+  });
+
+  testWidgets('draws the compact presentation a buddy shows', (tester) async {
+    await _size(tester, 200, 150);
+    final boundary = GlobalKey();
+    await tester.pumpWidget(
+      RepaintBoundary(
+        key: boundary,
+        child: _app(
+          size: const Size(200, 150),
+          child: _panel(
+            Center(
+              child: VoicePipelineView(
+                snapshot: _flow(),
+                compact: true,
+                clock: () => _now,
+              ),
             ),
           ),
         ),
       ),
     );
     expect(tester.takeException(), isNull);
-    expect(
-      find.text(
-        'Mic · live · 4 accepted · 1 dropped · Turn · done · Voice · speaking',
-      ),
-      findsOneWidget,
-    );
+    _nothingSaid(tester);
+    expect(find.byKey(const Key('voice-pipeline-ring')), findsOneWidget);
     if (shots != null) {
       await _write(
         tester,
         boundary,
-        '$shots/voice-pipeline-compact${real ? '' : '-ahem'}.png',
+        '$shots/voice-pipeline-compact$suffix.png',
       );
     }
   });
 
   testWidgets('draws a held reply with the microphone muted', (tester) async {
-    await _size(tester, 720, 190);
+    await _size(tester, 720, 110);
     final boundary = GlobalKey();
     await tester.pumpWidget(
       RepaintBoundary(
         key: boundary,
         child: _app(
-          size: const Size(720, 190),
+          size: const Size(720, 110),
           child: _panel(
             VoicePipelineView(snapshot: _held(), clock: () => _now),
           ),
         ),
       ),
     );
-    expect(find.textContaining('Voice · held'), findsWidgets);
     expect(tester.takeException(), isNull);
+    _nothingSaid(tester);
     if (shots != null) {
       await _write(
         tester,
         boundary,
-        '$shots/voice-pipeline-held${real ? '' : '-ahem'}.png',
+        '$shots/voice-pipeline-held$suffix.png',
       );
     }
   });
@@ -269,46 +322,41 @@ Future<void> main() async {
   testWidgets('reduced motion shows the same facts, without movement', (
     tester,
   ) async {
-    await _size(tester, 720, 190);
+    await _size(tester, 720, 110);
     final boundary = GlobalKey();
-    final snapshot = _flow();
     await tester.pumpWidget(
       RepaintBoundary(
         key: boundary,
         child: _app(
-          size: const Size(720, 190),
+          size: const Size(720, 110),
           child: _panel(
             MediaQuery(
               data: const MediaQueryData(disableAnimations: true),
-              child: VoicePipelineView(snapshot: snapshot, clock: () => _now),
+              child: VoicePipelineView(snapshot: _flow(), clock: () => _now),
             ),
           ),
         ),
       ),
     );
-    expect(
-      find.text(snapshot.summary(_now)),
-      findsOneWidget,
-      reason: 'a still pipe says everything the moving one says',
-    );
     expect(tester.takeException(), isNull);
+    _nothingSaid(tester);
     if (shots != null) {
       await _write(
         tester,
         boundary,
-        '$shots/voice-pipeline-reduced-motion${real ? '' : '-ahem'}.png',
+        '$shots/voice-pipeline-reduced-motion$suffix.png',
       );
     }
   });
 
   testWidgets('draws the pipe at large text', (tester) async {
-    await _size(tester, 390, 420);
+    await _size(tester, 390, 160);
     final boundary = GlobalKey();
     await tester.pumpWidget(
       RepaintBoundary(
         key: boundary,
         child: _app(
-          size: const Size(390, 420),
+          size: const Size(390, 160),
           scale: 2,
           child: _panel(
             Align(
@@ -320,11 +368,17 @@ Future<void> main() async {
       ),
     );
     expect(tester.takeException(), isNull);
+    _nothingSaid(tester);
+    expect(
+      find.byKey(const Key('voice-pipeline-ribbon')),
+      findsOneWidget,
+      reason: 'large text keeps the pill, never a ring',
+    );
     if (shots != null) {
       await _write(
         tester,
         boundary,
-        '$shots/voice-pipeline-large-text${real ? '' : '-ahem'}.png',
+        '$shots/voice-pipeline-large-text$suffix.png',
       );
     }
   });
@@ -379,7 +433,7 @@ Future<void> main() async {
       await _write(
         tester,
         boundary,
-        '$shots/voice-pipeline-screen${real ? '' : '-ahem'}.png',
+        '$shots/voice-pipeline-screen$suffix.png',
       );
     }
     await tester.pumpWidget(const SizedBox.shrink());

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../../services/voice_output_io.dart';
 import '../../voice/voice_audition.dart';
 import '../../voice/voice_output.dart';
+import '../../voice/voice_pipeline.dart';
 import '../../voice/voice_settings.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../theme/harness_theme.dart';
@@ -27,6 +28,7 @@ Future<VoiceSettings?> showVoiceSettingsSheet(
   required String harnessAddress,
   VoiceOutputCatalogue? catalogue,
   VoiceAuditionEngine Function(VoiceSettings settings)? engineFactory,
+  VoicePipelineSnapshot? pipeline,
 }) {
   return showHarnessSheet<VoiceSettings>(
     context: context,
@@ -35,6 +37,7 @@ Future<VoiceSettings?> showVoiceSettingsSheet(
       harnessAddress: harnessAddress,
       catalogue: catalogue,
       engineFactory: engineFactory,
+      pipeline: pipeline,
     ),
   );
 }
@@ -54,10 +57,15 @@ class VoiceSettingsSheet extends StatefulWidget {
     required this.harnessAddress,
     this.catalogue,
     this.engineFactory,
+    this.pipeline,
   });
 
   final VoiceSettings settings;
   final String harnessAddress;
+
+  /// The live pipe's state, when the sheet is opened from a call: its lines
+  /// are the only place the ids and measurements of the call can be read.
+  final VoicePipelineSnapshot? pipeline;
 
   /// The device's voice catalogue; the platform's own when nothing else is
   /// given.
@@ -480,6 +488,32 @@ class _VoiceSettingsSheetState extends State<VoiceSettingsSheet> {
     return typed.clamp(min, max);
   }
 
+  /// The live pipe's own lines: each marker by its id, stage, measured
+  /// length and reason.  This is the only way in to them -- the call's
+  /// control draws the stages and says nothing -- so the section is always
+  /// here, and says so plainly when the call has no markers yet.
+  List<Widget> _pipelineSection(BuildContext context) {
+    final pipeline = widget.pipeline;
+    if (pipeline == null) return const [];
+    final lines = pipeline.details;
+    return [
+      const HarnessSectionHeader(label: 'Pipeline'),
+      if (lines.isEmpty)
+        Text('No markers yet', style: HarnessText.caption(context))
+      else
+        for (final line in lines)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text(
+              line,
+              key: ValueKey('voice-pipeline-detail-$line'),
+              style: HarnessText.mono(context).copyWith(fontSize: 11),
+            ),
+          ),
+      const SizedBox(height: HarnessSpace.lg),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -524,6 +558,7 @@ class _VoiceSettingsSheetState extends State<VoiceSettingsSheet> {
             const HarnessSectionHeader(label: 'Output'),
             _speakRepliesRow(context, clip),
             ..._outputVoiceSection(context, clip),
+            ..._pipelineSection(context),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.only(top: HarnessSpace.sm),

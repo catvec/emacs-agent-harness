@@ -12,20 +12,62 @@ A marker appears when the capture path kept a burst, moves when the stage it
 waits on reports, and stops where it really stopped.  When a stage is silent
 the screen says which stage it is waiting on, in words.
 
+The strip is drawn as **one continuous ribbon**: its position is the stage,
+never elapsed time, and the same blips go round a **compact ring** on a narrow
+surface.  [The voice ribbon design](design/voice-ribbon.md) is the page about
+that drawing -- the five bands, the shapes, the warble, the ring and the
+platform surfaces -- and this page keeps the event table both forms read from.
+The five labelled columns are still drawn, as the details view.
+
 ## The screen
 
-Left to right, as the person asked for it:
+One bar, its stages left to right, and nothing else: no heading, no labels
+row, no legend and no summary line.  The shapes and colours of the bars say
+the stages, and every word lives in the tooltips, the screen-reader nodes and
+the voice settings.
 
 ```text
-Pipeline
-Input              Filter                 Words                    Turn                 Speaker
-▂▄▆█ level         × dropped · too short  ⋯ transcribing · 2.0s    ✓ answered · 3.0s    🔊 speaking
-Mic · live         ● accepted · 1.4s      ≡ transcribed · 1.0s
-Level · -18 dBFS   ◌ heard
-Mic · live · Level · -18 dBFS · Speech · heard · 4 accepted · 1 dropped · Turn · done · Voice · speaking
+▃▄▄▅▅▆▅▅▄▄▃▄▅▅▆▇█▇▆▅▅▄▁▁▁▁▁▁▁▁▁▁▁ ≡≡≡≡≡≡≡≡≡≡≡ ▏▏▏▏▏▏▏▏▏▏▏
 ```
 
-- **Input** — the microphone's level *before* the speech filter, drawn as bars
+A compact surface -- a collapsed buddy, a mini view, a narrow window -- gets
+the same bars around a ring, twelve o'clock first and clockwise.  It carries
+no key and no words either:
+
+```text
+   ▄▅▅▆▇▇▇▆▅▅▄
+ ▄▄           ▄▄
+▄▄             ▄▄
+ ▄▄           ▄▄
+   ▄▄▄▄▄▄▄▄▄▄▄
+```
+
+The stages the bar draws, and what each is fed by:
+
+| Band | Word | The event | What it carries |
+| --- | --- | --- | --- |
+| `Audio` | the microphone before the filter | the sidecar's `level` event, or `VoiceLevelEvent` | `0..1`, and `Level · no data` when there is none |
+| `Speech` | the speech the filter kept | `segment state=accepted`, or a drop with its reason | the burst's id and length |
+| `Words` | speech to text | `transcribing` / `transcribed` | the same id, the text in the details |
+| `Processing` | the agent turn | `in-turn` / `answered` | the same id, the turn in the details |
+| `Audio out` | playback | `ready` / `held` / `handed` / `speaking` / `spoken` / `interrupted` | the reply's id |
+
+The five-column table is still drawn, in the **voice settings**: it is the
+form that names every stage in its own heading and every marker by id, and it
+is the only way to those words -- the call's control has no link to it.
+
+```text
+Pipe  Audio              Speech         Words          Processing     Audio out
+▁▁▁▁▁▁▁▁ Level · -5 dBFS ● 1 accepted ≡ in turn     ✓ done         ▷ speaking
+Mic · live         × 1 dropped    1 utterance
+                                   1 reply
+u-2 · dropped · 80ms · too short
+u-1 · in turn · "Uh, add a comment, um, to TokenBucket.take abou..."
+d-1 · done · 1 utterance · 1 reply
+n-1 · speaking · d-1 · "Refill and retry are documented on TokenBucket..."
+```
+
+- **Audio** — the microphone's level *before* the speech filter, drawn as bars
   and a level in dBFS on a −60…0 dB scale, beside the capture state (`Mic ·
   live`, `Mic · muted`, …).  The scale is a display choice, not a change to
   the audio: `harness-voice-pipeline-level-floor` names the bottom of it.  The
@@ -33,21 +75,21 @@ Mic · live · Level · -18 dBFS · Speech · heard · 4 accepted · 1 dropped �
   value beside it, so the raw measurement stays in the pipeline details.  No
   level is not silence: without telemetry the meter says `Level · no data` and
   the bars stay unlit.
-- **Filter** — the speech gate (`heard` while it hears speech) and the bursts
+- **Speech** — the speech gate (`heard` while it hears speech) and the bursts
   it did **not** keep, with the reason (`too short`, `no words`,
   `retargeted`, `failed`).
   A burst that survives enters here and moves right.
 - **Words** — speech to text: `transcribing`, `transcribed`, with a partial
   transcript replacing the text of the same marker.
-- **Turn** — the agent turn the words were sent in: `in turn`, then `answered`.
-- **Speaker** — the output: `silent`, `ready`, `held`, `handed`, `speaking`,
+- **Processing** — the agent turn the words were sent in: `in turn`, then `answered`.
+- **Audio out** — the output: `silent`, `ready`, `held`, `handed`, `speaking`,
   `interrupted`, `failed`.  `handed` means the provider was given the text;
   `speaking` means its player is playing.  The two are never merged.
 
-The summary line under the columns carries every fact in text, and the details
-toggle (`Pipeline details`, Enter or Space on the focused strip) lists each
-marker by its id and stage.  A screen reader gets the summary, then each stage
-and each marker.
+The table and the marker lines under it are the whole of the words: they are
+in the voice settings (`harness-voice-setup` in Emacs, the settings sheet in
+Flutter), and the call's control draws no part of them.  A screen reader gets
+the pipe as one node, then each mark by its own words.
 
 ## Where each stage's data comes from
 
@@ -132,8 +174,7 @@ A desktop buddy shows the same pipe without a second implementation:
 ```dart
 VoicePipelineView(
   snapshot: controller.pipelineState, // VoicePipelineSnapshot
-  compact: true,                      // one row and one summary line
-  heading: false,                     // the buddy names its own panel
+  compact: true,                      // the same bars around a ring
 )
 ```
 
@@ -141,9 +182,10 @@ VoicePipelineView(
   controller owns (`VoiceController.pipeline`, `VoiceController.pipelineState`).
   A buddy that drives its own controller feeds the same tracker from the same
   backend events; it must not advance stages itself.
-- `compact: true` is one row of bars, markers and the speaker icon plus
-  `shortSummary`; the same facts as the wide strip, and no less: the summary
-  always carries the capture state, the counts, the turn and the speaker.
+- `compact: true` draws the same blips around the ring; the same facts as
+  the wide ribbon, and no less.  The ring carries no key and no words: a
+  reader hears `VoicePipelineSnapshot.summary`, and each mark is a node of
+  its own.
 - The strings in `VoicePipelineSnapshot.summary`, `shortSummary` and `details`
   are the ones the widget draws; a buddy that needs different wording reads
   the fields and words them itself, it does not change the stages' names.
@@ -160,8 +202,8 @@ exactly (`test/voice_pipeline_widget_test.dart`, `test/voice_pipeline_test.dart`
 
 | Where | The words |
 | --- | --- |
-| heading | `Pipeline` |
-| stage headers (tooltips) | `Input` (*Microphone level before the speech filter*), `Filter` (*Speech kept for transcription*), `Words` (*Speech to text*), `Turn` (*Agent work*), `Speaker` (*Playback*) |
+| band tooltips | `Audio` (*Microphone level before the speech filter*), `Speech` (*Speech kept for transcription*), `Words` (*Speech to text*), `Processing` (*Agent work*), `Audio out` (*Playback*) -- on the bars, and nowhere drawn |
+| no heading, no legend | the control says no stage word, no key and no count: `Pipeline`, `Audio`, `Speech`, `Words`, `Processing`, `Audio out`, `Dropped`, `Failed`, `1 accepted`, `Mic · live` and `Level · 56%` are all absent from it |
 | capture | `Mic · live`, `Mic · muted`, `Mic · paused`, `Mic · off`, `Mic · connecting`, `Mic · failed`, `Mic · disconnected`, `Mic · ended` |
 | level | `Level · -18 dBFS` on a −60…0 dB scale, `Level · no data` |
 | gate | `heard` (*Speech gate · speech heard*), and `Speech · heard` in the summary |
@@ -171,7 +213,7 @@ exactly (`test/voice_pipeline_widget_test.dart`, `test/voice_pipeline_test.dart`
 | why a burst stopped, in the details | `muted`, `paused`, `interrupted`, `ended`, `restart`, `context` (a reply folded into the next prompt) |
 | turn | `Turn · working`, `Turn · replied`, `Turn · done`, `Turn · failed` |
 | speaker | `Voice · silent`, `Voice · ready`, `Voice · held`, `Voice · handed`, `Voice · speaking`, `Voice · interrupted`, `Voice · failed` |
-| details | `Pipeline details`, `No segments yet`, `1 utterance`, `2 replies` |
+| the settings' pipe lines | `Pipe`, `No markers yet`, `1 utterance`, `2 replies` |
 | backend problem | the backend's own label, e.g. `Microphone permission denied` (data, not new copy) |
 
 A pipeline that reads a camera rather than a microphone says so, and
@@ -196,26 +238,22 @@ Emacs runs the live voice through a sidecar that owns the microphone
 (`ui-voice-live`), so the pipeline is drawn from the sidecar's own events
 rather than from a provider's captions.  It appears in two places:
 
-- **The transcript** (`*harness voice*`, **Transcript**): the wide strip
-  above the transcript, the summary line and `[Pipeline details]`; `d` does
-  the same from the keyboard.
+- **The transcript** (`*harness voice*`, **Transcript**): the ribbon
+  above the transcript, and nothing else -- no heading, no stage key, no
+  legend, no summary and no way into the markers.  `d` opens the voice
+  settings, where the pipe's own lines are listed.
 - **A live chat** (quick voice chat, or any compose box with live voice
   active): one compact line under the voice controls, fitted to the window.
   The speaker and the turn are kept longest; the meter and the counts leave
   first, ending in the `…` that shows what was cut.
 
-![The voice pipeline in the Emacs voice transcript](media/voice-pipeline.png)
-![The same strip with every marker listed](media/voice-pipeline-details.png)
+![The voice ribbon in the Emacs voice transcript](media/voice-ribbon.png)
+![The same blips around the compact ring, in a narrow window](media/voice-ribbon-compact.png)
+![The details table with every marker listed](media/voice-pipeline-details.png)
 ![The compact line under a live voice chat](media/voice-pipeline-compose.png)
 
 ```text
-Pipeline
-Input                     Filter            Words          Turn         Speaker
-████▃··· Level · -18 dBFS ● 1 accepted      ≡ in turn      ✓ done       ▷ speaking
-Mic · live                × 1 dropped                      1 utterance
-                                                           1 reply
-Mic · live · Level · -18 dBFS · 1 accepted · 1 dropped · Turn · done · Speaker · speaking
-[Pipeline details]
+▃▄▅▅▆▅▅▄▃▄▅▅▆▇█▇▆▅▅▄▁▁▁▁▁▁▁▁▁▁▁≡≡≡≡≡≡≡≡≡≡≡▏▏▏▏▏▏▏▏▏▏▏
 ```
 
 Every stage carries the event it comes from:
@@ -239,15 +277,22 @@ The words are the client's, with one difference: the speaker says
 line already names the provider (`Voice · Local pipeline`).
 
 **The contract for other Emacs surfaces.** `harness-voice-pipeline` is a
-plain state model and `harness-voice-pipeline-short-summary` and
-`harness-voice-pipeline-compact-line` draw from it without a second tracker,
-so the mode line or the desktop buddy can host the same facts; a host that
-feeds its own events feeds the same model, and must not advance it itself.
+plain state model; `harness-voice-ribbon` draws it as the linear ribbon or the
+compact ring (`harness-voice-ribbon-line` picks the one that fits a width), and
+`harness-voice-pipeline-short-summary` and
+`harness-voice-pipeline-compact-line` still draw the one-line form without a
+second tracker, so the mode line or the desktop buddy can host the same facts.
+A host that feeds its own events feeds the same model, and must not advance it
+itself.  `harness-voice-ribbon-next-change` says when the drawing changes by
+itself, so a host arms one timer instead of running a clock.
 
-**Accessibility.** Every fact is text: the strip, the summary and the details
-are plain buffer text, so a screen reader reads them and they can be copied.
-The glyphs (`▷`, `●`, `×`, `✓`) are marks; the word beside each says the same
-thing, and colour is never the only cue.  Nothing on the strip runs on a clock:
+**Accessibility.** The words are in the tooltips, the screen reader's nodes
+and the voice settings, and every glyph is distinguishable without its
+colour: a hump of blocks, a square-cut bar, a segmented bar, paired fine bars,
+an outline of dots.  A stage with nothing in it draws nothing and keeps only
+its place in the order, so a handoff moves a mark into it rather than sliding
+the ribbon along.  The control draws no prose of its own, and
+`harness-voice-ribbon-motion` nil leaves every word and position in place.  Nothing on the strip runs on a clock:
 it redraws when an event arrives, and a stage that has not reported says it is
 waiting.  The meter moves with the sound because that is the measurement
 itself; it stops when the level does, and a stale level says `no data`.  The
@@ -296,16 +341,19 @@ it while the stage's word and elapsed time stay.
 | `lib/src/voice/clip_voice_backend.dart` | ids at acceptance, segment events at the real decisions, playback events around the engine |
 | `lib/src/voice/live_voice_backend.dart`, `live_protocol.dart` | provider ids, segment events, playback from the provider's events, `handed` instead of `speaking` |
 | `lib/src/voice/voice_controller.dart` | owns the tracker, guards the backend epoch, feeds turns, replies and drops from its own decisions |
-| `lib/src/ui/widgets/voice_pipeline.dart` | the wide and compact presentations, reduced motion, details, semantics |
-| `lib/src/ui/screens/voice_screen.dart` | shows the strip between the status and the transcript |
-| `test/voice_pipeline_test.dart`, `test/voice_pipeline_widget_test.dart`, `test/voice_pipeline_screenshots_test.dart` | the state machine, the words, the pictures |
+| `lib/src/voice/voice_ribbon.dart` | the ribbon model: bands, forms, blips, the linear and polar geometry, the warble and linger timing |
+| `lib/src/ui/widgets/voice_ribbon.dart` | the linear bar and the compact ring, their shapes, reduced motion and semantics |
+| `lib/src/ui/widgets/voice_pipeline.dart` | hosts the ribbon: linear for a wide surface, polar for a compact one; the summary, the meter and the details |
+| `lib/src/ui/screens/voice_screen.dart` | shows the pipe between the status and the transcript |
+| `test/voice_pipeline_test.dart`, `test/voice_ribbon_test.dart`, `test/voice_pipeline_widget_test.dart`, `test/voice_pipeline_screenshots_test.dart` | the state machine, the ribbon's model and both geometries, the words, the pictures |
 | `test/voice_live_backend_test.dart` | the live path now asserts handed-then-playing |
-| `lisp/ui/harness-ui-voice-pipeline.el` | the Emacs model and drawing: capture, level, segments, turns, replies, generations, summary, wide and compact strips |
+| `lisp/ui/harness-ui-voice-pipeline.el` | the Emacs model: capture, level, segments, turns, replies, generations, the band a loss stopped in, the summary and the details table |
+| `lisp/ui/harness-ui-voice-ribbon.el` | the Emacs drawing: the blips, the linear character-cell ribbon, the compact ring, the warble and linger timing, the words |
 | `lisp/ui/harness-ui-voice-live.el` | feeds the model from the sidecar protocol and draws it in the transcript and under the controls; `harness-voice-live-motion` |
 | `scripts/harness_voice_sidecar.py` | `LevelMeter`, `announce_level`, `announce_segment`, and the measured `cancel` event |
 | `scripts/harness-voice-live-gpt`, `scripts/harness-voice-live-unmute` | the level before the gate and the kept/dropped/failed bursts at the real decisions |
 | `scripts/harness-voice-live-fixture` | the scripted demo's levels, kept and dropped bursts |
-| `lisp/ui/harness-ui-voice-pipeline-test.el`, `lisp/ui/harness-ui-voice-live-test.el`, `test/harness-voice-gate-test.py` | the Emacs model, the protocol wiring and the sidecar's telemetry |
+| `lisp/ui/harness-ui-voice-ribbon-test.el`, `lisp/ui/harness-ui-voice-pipeline-test.el`, `lisp/ui/harness-ui-voice-live-test.el`, `test/harness-voice-gate-test.py` | the Emacs drawing, the model, the protocol wiring and the sidecar's telemetry |
 
 ## Verification
 
@@ -313,17 +361,21 @@ it while the stage's word and elapsed time stay.
 cd harness_client
 eval "$(bash tool/client_toolchain.sh | grep '^export')"   # the pinned Flutter
 flutter analyze                                            # no issues
-flutter test test/voice_pipeline_test.dart test/voice_pipeline_widget_test.dart
+flutter test test/voice_pipeline_test.dart test/voice_ribbon_test.dart \
+               test/voice_pipeline_widget_test.dart
 HARNESS_SHOTS=… flutter test test/voice_pipeline_screenshots_test.dart
 
 # the Emacs surface and the sidecar it reads
-scripts/test.sh lisp/ui/harness-ui-voice-pipeline-test.el lisp/ui/harness-ui-voice-live-test.el
+scripts/test.sh lisp/ui/harness-ui-voice-ribbon-test.el \
+                lisp/ui/harness-ui-voice-pipeline-test.el \
+                lisp/ui/harness-ui-voice-live-test.el
 python3 test/harness-voice-gate-test.py
 scripts/lint.sh
 ```
 
-The Emacs pictures are taken by `scripts/media.sh voice-pipeline
-voice-pipeline-details voice-pipeline-compose` (see `docs/screenshots.md`).
+The Emacs pictures are taken by `scripts/media.sh voice-ribbon
+voice-ribbon-compact voice-pipeline-details voice-pipeline-compose` (see
+`docs/screenshots.md`).
 They are fixtures too: the events are the sidecar protocol's own, fed through
 the real handlers, but no microphone was opened and no speech service was
 called.  A real session (a `live` provider, `M-x harness-voice`) reports its

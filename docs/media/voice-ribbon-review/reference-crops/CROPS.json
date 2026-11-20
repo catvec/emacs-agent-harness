@@ -1,0 +1,251 @@
+{
+  "bar-language": {
+    "file": "bar-language.png",
+    "sha256": "1d79c8f555d16c120cde2b0b8785c701084c2ea72365dd369d6d211b219f7372",
+    "size": [
+      1468,
+      92
+    ],
+    "source": "voice-pipeline-all-bars.png",
+    "source_box": [
+      66,
+      267,
+      1534,
+      359
+    ],
+    "source_sha256": "2aa1fb276be477687887b0f7ee5922b08977ef7272da188a7c34758b1f83bf8f",
+    "what": "The six approved stage shapes"
+  },
+  "buddy-audio": {
+    "file": "buddy-audio.png",
+    "sha256": "5d69528b721adee9a09f42b07dd43d0832c9ed171e997b9e941a8d5b0b82d8ed",
+    "size": [
+      125,
+      145
+    ],
+    "source": "voice-buddy-state-concept.png",
+    "source_box": [
+      168,
+      301,
+      293,
+      446
+    ],
+    "source_sha256": "63263a502cc3dac8f8920722656118e87012510f66b6eeade2abd1cac0233337",
+    "what": "Approved compact badge: audio"
+  },
+  "buddy-drop": {
+    "file": "buddy-drop.png",
+    "sha256": "39d2d494645370e0aa295678cb87f8a7f2460cb0f1eb066c33e116d9c4966e64",
+    "size": [
+      145,
+      145
+    ],
+    "source": "voice-buddy-state-concept.png",
+    "source_box": [
+      1136,
+      301,
+      1281,
+      446
+    ],
+    "source_sha256": "63263a502cc3dac8f8920722656118e87012510f66b6eeade2abd1cac0233337",
+    "what": "Approved compact badge: dropped"
+  },
+  "buddy-states": {
+    "file": "buddy-states.png",
+    "sha256": "a92154d6deb9252c6671eb61195c843eac306bc850475ab61a4827dcb70d9c96",
+    "size": [
+      1125,
+      145
+    ],
+    "source": "voice-buddy-state-concept.png",
+    "source_box": [
+      162,
+      301,
+      1287,
+      446
+    ],
+    "source_sha256": "63263a502cc3dac8f8920722656118e87012510f66b6eeade2abd1cac0233337",
+    "what": "The four approved compact states"
+  },
+  "buddy-words": {
+    "file": "buddy-words.png",
+    "sha256": "015a074f3cd48f06c790888bba08404dae197a966c6a428042d5ae15435fb99c",
+    "size": [
+      145,
+      145
+    ],
+    "source": "voice-buddy-state-concept.png",
+    "source_box": [
+      484,
+      301,
+      629,
+      446
+    ],
+    "source_sha256": "63263a502cc3dac8f8920722656118e87012510f66b6eeade2abd1cac0233337",
+    "what": "Approved compact badge: transcoding"
+  },
+  "buddy-work": {
+    "file": "buddy-work.png",
+    "sha256": "4e9ddef947df31a6cd2c6f03ebbde086cdd3aa21a738fa8190ad48ba543e7430",
+    "size": [
+      145,
+      145
+    ],
+    "source": "voice-buddy-state-concept.png",
+    "source_box": [
+      810,
+      301,
+      955,
+      446
+    ],
+    "source_sha256": "63263a502cc3dac8f8920722656118e87012510f66b6eeade2abd1cac0233337",
+    "what": "Approved compact badge: processing"
+  },
+  "client-emacs": {
+    "file": "client-emacs.png",
+    "sha256": "dc491178f149a9708722ae5a9610cc2009dd1f522b593860ed2c83bbef37ff6b",
+    "size": [
+      946,
+      116
+    ],
+    "source": "voice-pipeline-client-comparison.png",
+    "source_box": [
+      78,
+      726,
+      1024,
+      842
+    ],
+    "source_sha256": "0b83c0276cfd9276c5f673a31adbe7a13db23dc8822b2d0775f03535a75a7e69",
+    "what": "The approved Emacs ribbon"
+  },
+  "client-flutter": {
+    "file": "client-flutter.png",
+    "sha256": "3b5295221751209fe62e9f51dc4a54475a24c2d93529f3ab8d45336f1598f742",
+    "size": [
+      336,
+      74
+    ],
+    "source": "voice-pipeline-client-comparison.png",
+    "source_box": [
+      1124,
+      849,
+      1460,
+      923
+    ],
+    "source_sha256": "0b83c0276cfd9276c5f673a31adbe7a13db23dc8822b2d0775f03535a75a7e69",
+    "what": "The approved Flutter ribbon"
+  },
+  "option-a-emacs": {
+    "file": "option-a-emacs.png",
+    "sha256": "1ca44ac3171c3fdacc4370ffabaea637f4795fb7600807c463fe1026d15ae25f",
+    "size": [
+      908,
+      94
+    ],
+    "source": "voice-option-a-motion.gif",
+    "source_box": [
+      58,
+      417,
+      966,
+      511
+    ],
+    "source_sha256": "d15bd7d9ca321568e46d36fdc3aeace11b58bbef993b3054a5d792b81bc18d27",
+    "what": "The approved Emacs character-cell ribbon"
+  },
+  "option-a-motion-frames": {
+    "file": "option-a-motion-frames.png",
+    "sha256": "34051928d43913c9ba48aa12cbc8d7dce711ecb1b55e66d11315807ff48af930",
+    "size": [
+      908,
+      894
+    ],
+    "source": "voice-option-a-motion.gif",
+    "source_box": [
+      58,
+      214,
+      966,
+      308
+    ],
+    "source_frames": [
+      0,
+      26,
+      52,
+      78,
+      104,
+      130,
+      156,
+      182,
+      208
+    ],
+    "source_sha256": "d15bd7d9ca321568e46d36fdc3aeace11b58bbef993b3054a5d792b81bc18d27",
+    "what": "The approved motion, frame by frame"
+  },
+  "option-a-ribbon": {
+    "file": "option-a-ribbon.png",
+    "sha256": "d7e777ecf56578244946df231931126f4513307b7f1e7ccb8a944f2fbb07a87b",
+    "size": [
+      908,
+      94
+    ],
+    "source": "voice-option-a-motion.gif",
+    "source_box": [
+      58,
+      214,
+      966,
+      308
+    ],
+    "source_sha256": "d15bd7d9ca321568e46d36fdc3aeace11b58bbef993b3054a5d792b81bc18d27",
+    "what": "The approved continuous ribbon, one pill of bars"
+  },
+  "panel-a-ribbon": {
+    "file": "panel-a-ribbon.png",
+    "sha256": "b638808b100ca39fe8a67f3a9491ccd44ab9e30d6b959c6c77ed0fc02bd5bf4d",
+    "size": [
+      711,
+      123
+    ],
+    "source": "voice-pipeline-all-bars.png",
+    "source_box": [
+      569,
+      525,
+      1280,
+      648
+    ],
+    "source_sha256": "2aa1fb276be477687887b0f7ee5922b08977ef7272da188a7c34758b1f83bf8f",
+    "what": "Option A, one continuous ribbon"
+  },
+  "state-drop": {
+    "file": "state-drop.png",
+    "sha256": "9127614d2b96f836d2b348b0b5ac4d84aaf9f01500b7d342a2b31dc95038e8d0",
+    "size": [
+      321,
+      98
+    ],
+    "source": "voice-pipeline-all-bars.png",
+    "source_box": [
+      825,
+      1183,
+      1146,
+      1281
+    ],
+    "source_sha256": "2aa1fb276be477687887b0f7ee5922b08977ef7272da188a7c34758b1f83bf8f",
+    "what": "Approved snapshot: a confirmed dropped chunk"
+  },
+  "state-speech-words": {
+    "file": "state-speech-words.png",
+    "sha256": "dcca1d53181b23c40cb594d84e629842bdde7a24d42027c4f2ab0034ab09a8ba",
+    "size": [
+      321,
+      98
+    ],
+    "source": "voice-pipeline-all-bars.png",
+    "source_box": [
+      67,
+      1183,
+      388,
+      1281
+    ],
+    "source_sha256": "2aa1fb276be477687887b0f7ee5922b08977ef7272da188a7c34758b1f83bf8f",
+    "what": "Approved snapshot: speech to transcoding"
+  }
+}

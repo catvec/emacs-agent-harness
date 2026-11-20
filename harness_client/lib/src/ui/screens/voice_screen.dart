@@ -140,6 +140,7 @@ class _VoiceScreenState extends State<VoiceScreen> {
       context,
       settings: _controller.settings,
       harnessAddress: _controller.harnessAddress,
+      pipeline: _controller.pipelineState,
     );
     if (next == null || !mounted) return;
     await _controller.updateSettings(next);
@@ -323,11 +324,14 @@ class _VoiceScreenState extends State<VoiceScreen> {
                                         18,
                                         6,
                                       ),
+                                      // A collapsed or mini surface
+                                      // gets the ring; a full-size one keeps
+                                      // the pill at every text size.
                                       child: VoicePipelineView(
                                         snapshot: _controller.pipelineState,
                                         compact:
-                                            constraints.maxHeight < 560 ||
-                                            constraints.maxWidth < 330,
+                                            constraints.maxHeight < 420 ||
+                                            constraints.maxWidth < 300,
                                       ),
                                     ),
                                     if (_controller.pendingSpeech.isNotEmpty)
