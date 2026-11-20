@@ -1049,6 +1049,127 @@ context goes inside a single message of structured text instead."
                                    (cl-find 'compaction (harness-call 'session/nodes id)
                                             :key (lambda (n) (plist-get n :kind)))))))))
 
+(ert-deftest harness-compaction-a-cold-summary-is-not-the-conversation ()
+  "A cold or alternate-model summary neither splices nor replaces the chat.
+It has a system prompt and a message list of its own, so it is
+`:ephemeral': the replay module splices nothing into the session's frozen
+prefix for it and keeps nothing of it.  Keeping it would make the
+conversation's next real step diverge from a body it never sent."
+  (harness-compaction-test-with
+    (harness-test-load-module 'replay)
+    (harness-test-load-module 'provider-openai)
+    (let* ((id (harness-compaction-test-session))
+           (session (harness-call 'session/get id))
+           (base (harness-agent-step-request id nil nil))
+           (endpoint '(:id "test" :dialect openai))
+           (body (harness-openai--body endpoint "model" base)))
+      (harness-replay-seam-keep base "model" "route" body)
+      (let ((before (harness-call 'replay/frozen-status id)))
+        (should (> (plist-get before :bytes) 0))
+        (dolist (model '("demo:scripted" "other:model"))
+          (let* ((summary (harness-compaction--summary-request
+                           session model nil (plist-get base :messages)))
+                 (summary-body (harness-openai--body endpoint "model" summary)))
+            (should (plist-get summary :ephemeral))
+            (should-not (harness-replay-conversation-p summary))
+            (should-not (harness-replay-keeps-prefix-p summary))
+            ;; Its own prompt, not the conversation's.
+            (should-not (equal (plist-get summary :system) (plist-get base :system)))
+            ;; Nothing is spliced into it: it goes out as its adapter built it.
+            (should-not (cdr (harness-replay-seam summary "model" "route" summary-body)))
+            ;; And keeping it changes nothing that is frozen.
+            (harness-replay-seam-keep summary "model" "route" summary-body)
+            (should (equal before (harness-call 'replay/frozen-status id)))))
+        ;; The conversation's next step still splices what it sent.
+        (should-not (cdr (harness-replay-seam base "model" "route" body)))))))
+
+(ert-deftest harness-compaction-a-warm-summary-reads-the-frozen-prefix-but-never-replaces-it ()
+  "A warm summary appends its instruction; it never edits the conversation.
+The instruction goes out as a user message of its own after the
+conversation's last, so the bytes the provider already read are
+unchanged.  The request is `:replay-read-only': it splices, which is what
+reads the prompt cache, and it is never kept, so the instruction cannot
+become the prefix the conversation's next step continues from.  A frozen
+body that changed underneath it is still refused, as for any request."
+  (harness-compaction-test-with
+    (harness-test-load-module 'replay)
+    (harness-test-load-module 'provider-openai)
+    (dolist (trailing '(nil t))
+      (let* ((id (harness-compaction-test-session)))
+        (when trailing
+          ;; A compaction before a turn: the chat's last message is the user's.
+          (harness-call 'session/append id '(:kind user :content "pending question")))
+        (let* ((session (harness-call 'session/get id))
+               (base (harness-agent-step-request id nil nil))
+               (endpoint '(:id "test" :dialect openai))
+               (body (harness-openai--body endpoint "model" base))
+               (base-count (length (plist-get base :messages))))
+          (harness-replay-seam-keep base "model" "route" body)
+          (let* ((before (harness-call 'replay/frozen-status id))
+                 (summary (harness-compaction--summary-request
+                           session "demo:scripted" nil (plist-get base :messages) t))
+                 (messages (plist-get summary :messages))
+                 (summary-body (harness-openai--body endpoint "model" summary))
+                 (decision (harness-call 'replay/frozen-splice id "model" "route" summary-body)))
+            ;; One message list, not two: the request is a plist, and a second
+            ;; :messages key would make plist-get return the conversation's.
+            (should (equal (length (seq-filter (lambda (key) (eq key :messages))
+                                               (harness-plist-keys summary)))
+                           1))
+            ;; The conversation's messages are all there, as they were, and the
+            ;; instruction is one more message after them.
+            (should (= (length messages) (1+ base-count)))
+            (should (equal (butlast messages) (plist-get base :messages)))
+            (should (eq 'user (plist-get (car (last messages)) :role)))
+            ;; The instruction is sent exactly once.
+            (should (= 1 (length (seq-filter
+                                  (lambda (m)
+                                    (string-match-p
+                                     "Do not call any tool"
+                                     (mapconcat (lambda (b) (or (plist-get b :text) ""))
+                                                (plist-get m :content) "\n")))
+                                  messages))))
+            ;; It is read-only: it splices, and is not the conversation.
+            (should (plist-get summary :replay-read-only))
+            (should (harness-replay-conversation-p summary))
+            (should-not (harness-replay-keeps-prefix-p summary))
+            (should (plist-get decision :spliced))
+            (should-not (cdr (harness-replay-seam summary "model" "route" summary-body)))
+            ;; Keeping it leaves the conversation's own frozen body alone.
+            (harness-replay-seam-keep summary "model" "route" summary-body)
+            (should (equal before (harness-call 'replay/frozen-status id)))
+            ;; And the conversation's next step still splices, with no complaint.
+            (should-not (cdr (harness-replay-seam base "model" "route" body)))))))))
+
+(ert-deftest harness-compaction-a-warm-summary-is-still-refused-a-changed-prefix ()
+  "A read-only summary is no licence to rewrite the frozen prefix.
+The request may only read what was frozen: a body whose bytes changed
+under it -- a re-rendered message, say -- is refused at the transport as
+for any other request, so nothing goes out."
+  (harness-compaction-test-with
+    (harness-test-load-module 'replay)
+    (harness-test-load-module 'provider-openai)
+    (let* ((id (harness-compaction-test-session))
+           (session (harness-call 'session/get id))
+           (base (harness-agent-step-request id nil nil))
+           (endpoint '(:id "test" :dialect openai)))
+      (harness-replay-seam-keep base "model" "route" (harness-openai--body endpoint "model" base))
+      (let* ((summary (harness-compaction--summary-request
+                       session "demo:scripted" nil (plist-get base :messages) t))
+             ;; The conversation's first message, rewritten under the request.
+             (messages (plist-get summary :messages))
+             (messages (cons (list :role 'user :content "something else entirely")
+                             (cdr messages)))
+             (changed (plist-put (copy-sequence summary) :messages messages))
+             (complaint (cdr (harness-replay-seam changed "model" "route"
+                                                  (harness-openai--body endpoint "model" changed)))))
+        ;; A refusal, not silence: the guard is not weakened by the flag.
+        (should (stringp complaint))
+        (should (string-match-p "changed with no recorded reset" complaint))
+        ;; And the conversation's own body was not rewritten by the attempt.
+        (should-not (cdr (harness-replay-seam base "model" "route"
+                                             (harness-openai--body endpoint "model" base))))))))
+
 (ert-deftest harness-compaction-auto-summarises-a-warm-chat ()
   "A warm chat cache serves the automatic summary: it is the chat's next request.
 The summary's request starts as the conversation's next step would, so

@@ -52,6 +52,16 @@ would change, and drops the last request, which costs nothing: the
 next one is rendered from the redacted transcript, which the
 redaction changed anyway.
 
+Not every request that names a session is a step of its conversation,
+and what is frozen is the conversation's.  A one-off call
+(`:ephemeral`) neither splices nor is kept.  A request that only reads
+the prefix and appends material the conversation does not hold -- a
+compaction summary made from the prompt cache (`:replay-read-only`) --
+splices, because re-sending the bytes the provider read is what reads
+the cache, and is never kept, because the conversation's next step
+would diverge at what it appended.  Neither is a licence to change the
+prefix: a body whose bytes changed under it is still refused.
+
 The files are the session's, in the state directory:
 sessions/ID.responses.jsonl, one response a line, and
 sessions/ID.request.jsonl, one JSON document.  The document is read

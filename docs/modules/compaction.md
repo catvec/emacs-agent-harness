@@ -163,11 +163,18 @@ whole conversation, payloads and all, at once.
 
 A summary is made as the conversation's next step would be: the same
 model, system prompt, tools, thinking level and conversation, with the
-summarisation instruction appended as its last user message
-(`harness-compaction--prefix-request`).  A provider's prompt cache
-reads a request only as far as it starts like the one that wrote the
-cache, so the conversation is read at the cache price while the cache
-lasts; only the instruction is uncached input.  The question before
+summarisation instruction appended as a user message of its own after
+the conversation's last (`harness-compaction--prefix-request`).  A
+provider's prompt cache reads a request only as far as it starts like
+the one that wrote the cache, so the conversation is read at the cache
+price while the cache lasts; only the instruction is uncached input.
+The instruction is never merged into the conversation's last message:
+that message is bytes the provider already read, and rewriting it would
+either be refused at the transport or send a different conversation.
+The request is `:replay-read-only`, so it reads the frozen prefix and
+is never kept as it (harness-replay.el).  A summary made otherwise --
+another model, a hosted loop, a cache that lapsed -- is a one-off call
+of its own and says so with `:ephemeral`.  The question before
 an automatic compaction asks one flat list, the same the cold-cache
 question asks (`harness-compaction--ask`): Summary, Transcript,
 Fresh start, Continuation and Pause.  A summary is shown, no cache,

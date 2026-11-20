@@ -43,6 +43,16 @@
 ;; next one is rendered from the redacted transcript, which the
 ;; redaction changed anyway.
 ;;
+;; Not every request that names a session is a step of its conversation,
+;; and what is frozen is the conversation's.  A one-off call
+;; (`:ephemeral') neither splices nor is kept.  A request that only reads
+;; the prefix and appends material the conversation does not hold -- a
+;; compaction summary made from the prompt cache (`:replay-read-only') --
+;; splices, because re-sending the bytes the provider read is what reads
+;; the cache, and is never kept, because the conversation's next step
+;; would diverge at what it appended.  Neither is a licence to change the
+;; prefix: a body whose bytes changed under it is still refused.
+;;
 ;; The files are the session's, in the state directory:
 ;; sessions/ID.responses.jsonl, one response a line, and
 ;; sessions/ID.request.jsonl, one JSON document.  The document is read
@@ -870,6 +880,24 @@ the next step of the conversation has to continue, and keeping it
 would make that step diverge.  It goes out as its adapter built it."
   (not (harness-json-true-p (plist-get request :ephemeral))))
 
+(defun harness-replay-read-only-p (request)
+  "Non-nil when REQUEST may read its session's frozen prefix but never replace it.
+That is a request that sends the conversation as the next step would and
+adds material of its own that the conversation does not hold: a
+compaction summary made from the prompt cache
+\(`harness-compaction--prefix-request'), which appends the summarisation
+instruction after the conversation's last message.  It splices, because
+re-sending the bytes the provider read is what reads the cache, and it is
+never kept: the next real step would diverge at the message the
+transcript never had, exactly as it would after a cache refresh.
+
+The flag is the request's own (`:replay-read-only') and not
+`:cache-refresh', which a warmer, the admission ranking and the Claude
+provider each read for their own purposes, nor `:ephemeral', which says
+a call is not the session's conversation at all and so may not splice
+what it is not."
+  (harness-json-true-p (plist-get request :replay-read-only)))
+
 (defun harness-replay-keeps-prefix-p (request)
   "Non-nil when REQUEST may become the prefix its session continues.
 A one-off call may not (`harness-replay-conversation-p'), and neither
@@ -878,9 +906,13 @@ the conversation does not hold (harness-cache-warm.el), so keeping it
 would make the next real step diverge at that message -- refused at
 the transport, or re-rendered whole and paid for uncached.  A refresh
 still splices: it re-sends the bytes the provider read, which is what
-reads the cache, and only reads them."
+reads the cache, and only reads them.  A read-only request
+\(`harness-replay-read-only-p') is excluded for the same reason: what it
+appends is the summary's instruction, which the conversation's next step
+never sends."
   (and (harness-replay-conversation-p request)
-       (not (harness-json-true-p (plist-get request :cache-refresh)))))
+       (not (harness-json-true-p (plist-get request :cache-refresh)))
+       (not (harness-replay-read-only-p request))))
 
 (defun harness-replay-seam (request model route body)
   "Return (BODY . COMPLAINT) for the request BODY about to be sent.

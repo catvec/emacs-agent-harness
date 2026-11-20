@@ -152,11 +152,18 @@
 ;;
 ;; A summary is made as the conversation's next step would be: the same
 ;; model, system prompt, tools, thinking level and conversation, with the
-;; summarisation instruction appended as its last user message
-;; (`harness-compaction--prefix-request').  A provider's prompt cache
-;; reads a request only as far as it starts like the one that wrote the
-;; cache, so the conversation is read at the cache price while the cache
-;; lasts; only the instruction is uncached input.  The question before
+;; summarisation instruction appended as a user message of its own after
+;; the conversation's last (`harness-compaction--prefix-request').  A
+;; provider's prompt cache reads a request only as far as it starts like
+;; the one that wrote the cache, so the conversation is read at the cache
+;; price while the cache lasts; only the instruction is uncached input.
+;; The instruction is never merged into the conversation's last message:
+;; that message is bytes the provider already read, and rewriting it would
+;; either be refused at the transport or send a different conversation.
+;; The request is `:replay-read-only', so it reads the frozen prefix and
+;; is never kept as it (harness-replay.el).  A summary made otherwise --
+;; another model, a hosted loop, a cache that lapsed -- is a one-off call
+;; of its own and says so with `:ephemeral'.  The question before
 ;; an automatic compaction asks one flat list, the same the cold-cache
 ;; question asks (`harness-compaction--ask'): Summary, Transcript,
 ;; Fresh start, Continuation and Pause.  A summary is shown, no cache,
@@ -1132,21 +1139,25 @@ It starts exactly as the conversation's next step would
 \(`harness-agent-step-request'): the same model, system prompt, tools,
 thinking level, provider state and conversation, so the provider's prompt
 cache serves the conversation; the summarisation instruction is appended
-as its last user message, which is all the request adds.  MODEL is the
-summariser, the session's own."
+as one user message of its own, which is all the request adds.  MODEL is
+the summariser, the session's own.
+
+The instruction is never merged into the conversation's last user
+message.  That message is the frozen prefix the provider has already
+read, and changing it would rewrite bytes the cache holds: the summary
+would then be refused at the transport, or sent as a different
+conversation.  A message appended after it leaves every byte before it
+as it was, and the request is marked `:replay-read-only' because what it
+appends is the summary's and never the conversation's next step."
   (let* ((base (harness-agent-step-request (plist-get session :id) state nil))
-         (messages (plist-get base :messages))
-         (ask (list :type "text" :text (harness-compaction--instruction model)))
-         (last (car (last messages)))
-         (messages
-          (if (and last (eq (plist-get last :role) 'user))
-              (append (butlast messages)
-                      (list (plist-put (copy-sequence last) :content
-                                       (append (plist-get last :content) (list ask)))))
-            (append messages (list (list :role 'user :content (list ask)))))))
-    (append (harness-plist-remove base :on-event :max-tokens)
+         (ask (list :role 'user
+                    :content (list (list :type "text"
+                                         :text (harness-compaction--instruction model)))))
+         (messages (append (plist-get base :messages) (list ask))))
+    (append (harness-plist-remove base :on-event :max-tokens :messages)
             (list :messages messages
-                  :max-tokens harness-compaction--max-tokens))))
+                  :max-tokens harness-compaction--max-tokens
+                  :replay-read-only t))))
 
 (defun harness-compaction--summary-request (session model state messages &optional warm)
   "Return the one-off request that asks MODEL to summarise SESSION.
@@ -1158,10 +1169,12 @@ it reads the conversation from the prompt cache: the caller only says so
 when its own model is the session's, its provider is sent the
 conversation at every request, and the cache lasts.  Otherwise -- a
 hosted loop, another model, a cold cache -- it has a system prompt and a
-tool list of its own, which no cache of the conversation covers."
+tool list of its own, which no cache of the conversation covers, and it
+is `:ephemeral': it is not a step of the conversation, so it is neither
+spliced into the session's frozen prefix nor kept as it."
   (if warm
       (harness-compaction--prefix-request session model state)
-    (list :model model :session session
+    (list :model model :session session :ephemeral t
           :system (harness-prompt-effective 'compaction-system
                                             harness-compaction--system-prompt model)
           :messages messages :tools nil :provider-state state

@@ -4194,10 +4194,14 @@ under way; any other must not run, and costs nothing for being refused."
   "Start REQUEST, the provider's `:complete'; return a handle with `:cancel'.
 A one-off request (`:ephemeral') runs in a CLI process of its own
 \(`harness-provider-claude--complete-ephemeral'), any other in its
-session's (`harness-provider-claude--complete').  A prompt cache refresh
-\(`:cache-refresh') is refused unless the session's process serves it
-as it is (`harness-provider-claude--refresh-refusal'): the request ends
-with an error, and nothing is started."
+session's (`harness-provider-claude--complete').  A one-off request that
+brings a provider state of its own is the exception: the state names the
+conversation it reads -- a summary's fork of the session's, say -- and
+the process of its own must resume or fork that, as a side request does,
+rather than start a new conversation with the transcript alone.  A
+prompt cache refresh (`:cache-refresh') is refused unless the session's
+process serves it as it is (`harness-provider-claude--refresh-refusal'):
+the request ends with an error, and nothing is started."
   (let ((refusal (and (harness-json-true-p (plist-get request :cache-refresh))
                       (harness-provider-claude--refresh-refusal request))))
     (cond
@@ -4205,7 +4209,8 @@ with an error, and nothing is started."
       (funcall (or (plist-get request :on-event) #'ignore)
                (list :type 'done :stop-reason 'error :error (format "Cache refresh refused: %s" refusal)))
       (list :cancel #'ignore))
-     ((harness-json-true-p (plist-get request :ephemeral))
+     ((and (harness-json-true-p (plist-get request :ephemeral))
+           (not (plist-get request :provider-state)))
       (harness-provider-claude--complete-ephemeral request))
      (t (harness-provider-claude--complete request)))))
 

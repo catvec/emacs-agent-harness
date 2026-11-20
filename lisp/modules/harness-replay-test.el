@@ -1400,6 +1400,45 @@ real step would diverge at the message the transcript never had."
         (should-not (cdr next))
         (should-not (string-match-p "reply with just" (car next)))))))
 
+(ert-deftest harness-replay-a-read-only-request-reads-without-becoming-the-prefix ()
+  "A request flagged `:replay-read-only' splices and is never kept.
+A compaction summary made from the prompt cache appends its instruction
+after the conversation's last message: re-sending the frozen bytes is
+what reads the cache, so it splices, but keeping it would make the
+conversation's next step diverge at a message the transcript never had.
+The flag is the request's own, not `:cache-refresh' and not
+`:ephemeral': a read-only request is still a conversation's request."
+  (harness-replay-test-with
+    (let* ((id (harness-replay-test-session))
+           (session (list :id id))
+           (ask (lambda (messages &optional extra)
+                  (append (list :model "m" :system "S" :messages messages :stream t)
+                          extra)))
+           (hi (harness-replay-test--message "hi"))
+           (ask-message (harness-replay-test--message "summarise it")))
+      (let ((first (harness-replay-seam (list :model "m" :session session) "m" "route"
+                                        (funcall ask (list hi)))))
+        (should-not (cdr first))
+        (harness-replay-seam-keep (list :model "m" :session session) "m" "route"
+                                  (funcall ask (list hi))))
+      (let* ((request (list :model "m" :session session :replay-read-only t))
+             (body (funcall ask (list hi ask-message))))
+        (should (harness-replay-read-only-p request))
+        (should (harness-replay-conversation-p request))
+        (should-not (harness-replay-keeps-prefix-p request))
+        (let ((seam (harness-replay-seam request "m" "route" body)))
+          (should-not (cdr seam))
+          (should (string-match-p "hi" (car seam))))
+        (harness-replay-seam-keep request "m" "route" body))
+      ;; The conversation goes on from what it sent, not from the summary.
+      (let ((next (harness-replay-seam
+                   (list :model "m" :session session) "m" "route"
+                   (funcall ask (list hi (harness-replay-test--message "yo" "assistant"))))))
+        (should-not (cdr next))
+        (should-not (string-match-p "summarise it" (car next))))
+      ;; A plain request is still kept.
+      (should (harness-replay-keeps-prefix-p (list :model "m" :session session))))))
+
 (ert-deftest harness-replay-the-module-defines-its-handlers-and-inits-once ()
   "Loading the module defines its handlers, and init only subscribes.
 The handlers used to be defined inside init, which left them undefined until

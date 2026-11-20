@@ -1185,6 +1185,30 @@ none either way."
                        5 "the one-off's process to exit")
     (harness-provider-claude-close "s-mem")))
 
+(ert-deftest harness-provider-claude-a-one-off-with-its-own-state-forks-it ()
+  "A one-off request that brings a provider state reads the conversation it names.
+A compaction summary of a hosted loop is `:ephemeral' -- it is not the
+conversation's next step -- and brings a fork of the session's state.  A
+process of its own that started from the transcript alone would read a
+different conversation and answer a question the fork already holds the
+whole of, so the request runs in its session's process, on the state it
+brought, and the CLI is told to fork it."
+  (harness-provider-claude-test--setup)
+  (let* ((state (harness-test-await (harness-call 'provider/fork "claude:claude-fable-5-1"
+                                                  '(:cli-session-id "parent-123" :model "m"))))
+         (argv-file (harness-provider-claude-test--argv-file))
+         (process-environment (cons (concat "HARNESS_FAKE_CLAUDE_ARGV=" argv-file) process-environment))
+         (events (car (harness-provider-claude-test--run
+                       (harness-provider-claude-test--request
+                        "s-one-off-state" "summarise the conversation"
+                        :ephemeral t :provider-state state))))
+         (argv (plist-get (harness-provider-claude-test--read-argv argv-file) :argv)))
+    (should (eq 'end-turn (plist-get (harness-provider-claude-test--find events 'done) :stop-reason)))
+    ;; It forked the conversation it named, rather than starting a new one.
+    (should (equal "parent-123" (nth (1+ (cl-position "--resume" argv :test #'equal)) argv)))
+    (should (member "--fork-session" argv))
+    (harness-provider-claude-close "s-one-off-state")))
+
 (ert-deftest harness-provider-claude-one-off-request-ends-every-way ()
   "A one-off request's process goes however the request ends.
 Cancelled (the judge timing out), dead mid-turn, or never started: no

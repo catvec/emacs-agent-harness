@@ -137,9 +137,9 @@ request is the first after the settle.
 ## What may become the prefix: the conversation, not every request
 
 Not every request that names a session is a step of that session's
-conversation.  Two kinds are not, and both used to be spliced into the
-frozen body and then kept as it, which left the conversation's next step
-diverging from a body it never sent:
+conversation.  Three kinds are not, and all of them used to be spliced
+into the frozen body and then kept as it, which left the conversation's
+next step diverging from a body it never sent:
 
 - **One-off calls.**  An auto-name, a permission judge and a recap carry the
   session's id but their own system prompt and their own message list.  Kept
@@ -148,25 +148,52 @@ diverging from a body it never sent:
 - **A cache refresh.**  `harness-cache-warm` sends the conversation plus one
   short message the transcript does not hold, to read the cache.  Kept as the
   prefix, the next real step diverged at that message.
+- **A compaction summary made from the prompt cache.**  A warm summary is
+  the conversation's next request with the summarisation instruction
+  appended (`harness-compaction--prefix-request`), so it reads the cache.
+  The instruction is a user message of its own after the conversation's
+  last, never a rewrite of that last message: the frozen bytes must stay
+  byte for byte.  Kept as the prefix, the next real step would diverge at
+  the instruction.
 
-Both are now excluded by name, and neither loses anything it was for:
+A cold summary -- another model, a hosted loop, a cache that lapsed -- is a
+one-off call and says so with `:ephemeral`.  A warm one is a request of the
+conversation that only reads, and says so with the flag of its own,
+`:replay-read-only`: it splices, and it is never kept.  The two flags are
+separate on purpose.  `:cache-refresh` already means a warmer to the
+admission ranking, the demo provider and the Claude provider, and
+`:ephemeral` says a call is not the conversation at all, which a warm
+summary is.
 
 | Request | Spliced? | Kept as the prefix? |
 | --- | --- | --- |
 | a step of the conversation | yes | yes |
 | a cache refresh | yes -- this is what reads the cache | no |
-| a one-off call | no | no |
+| a warm compaction summary | yes -- this is what reads the cache | no |
+| a one-off call, a cold summary | no | no |
 
-`harness-replay-keeps-prefix-p` is the predicate, `replay/prefix` telemetry
-still records every request the seam sees, and the three tests are
+`harness-replay-keeps-prefix-p` is the predicate (`harness-replay-read-only-p`
+is the summary's flag), `replay/prefix` telemetry still records every request
+the seam sees, and the tests are
 `harness-replay-a-one-off-call-is-not-the-conversations-prefix`,
-`harness-replay-a-cache-refresh-reads-without-becoming-the-prefix` and
+`harness-replay-a-cache-refresh-reads-without-becoming-the-prefix`,
+`harness-replay-a-read-only-request-reads-without-becoming-the-prefix`,
+`harness-compaction-a-cold-summary-is-not-the-conversation`,
+`harness-compaction-a-warm-summary-reads-the-frozen-prefix-but-never-replaces-it`,
+`harness-compaction-a-warm-summary-is-still-refused-a-changed-prefix` and
 `harness-replay-the-module-defines-its-handlers-and-inits-once`.
 
-Both faults were latent rather than billed: no `sessions/ID.frozen.json`
+Those faults were latent rather than billed: no `sessions/ID.frozen.json`
 exists in the production state directory, so no session has yet run the
 freezing path this branch adds.  They are fixed here so that the first one
 that does cannot be charged for them.
+
+The compaction ones were found after the freezing path was in place, and
+are the same fault in a third shape: a summary that is not the
+conversation's next step was kept as its prefix.  The warm summary had a
+second one of its own -- it appended a duplicate `:messages` key to the
+request plist, so the instruction it built was never the one sent, and it
+edited the conversation's last user message, which is frozen bytes.
 
 ## Pictures are content-addressed, not vetoed
 
