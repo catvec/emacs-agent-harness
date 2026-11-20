@@ -572,14 +572,25 @@ Refuse other shapes rather than guessing where an adapter put instructions."
   (secure-hash 'sha256 (encode-coding-string text 'utf-8-unix t)))
 
 (defun harness-replay--system-transition-state (id)
-  "Read ID's frozen and actual current system, without changing either."
+  "Read ID's frozen and actual current system, without changing either.
+The current text is the one the session **settled** when it has one, not
+a prompt built again now: a prompt rebuilt from the live stores -- the
+memory index, a skills list, a granted directory -- is not what the
+session sends, and approving it would freeze a prompt the session never
+had.  A session that settled none is compared as it would be built, and
+building it must not settle it: settling announces a reset, which would
+empty the very frozen body this is reading."
   (unless (and (fboundp 'harness-agent--system-prompt)
                (harness-call 'session/exists-p id))
     (signal 'harness-error '("System transition unavailable")))
   (let* ((record (harness-replay--frozen-read id))
          (piece (harness-replay--system-piece record))
          (old (harness-json-parse (plist-get piece :bytes)))
-         (current (harness-agent--system-prompt (harness-call 'session/get id))))
+         (session (harness-call 'session/get id))
+         (settled (plist-get session :system))
+         (current (if (and (stringp settled) (not (string-empty-p settled)))
+                      settled
+                    (harness-agent--system-prompt session))))
     (unless (and (integerp (plist-get record :generation))
                  (equal (plist-get record :version) harness-replay-frozen-version)
                  (stringp current))
