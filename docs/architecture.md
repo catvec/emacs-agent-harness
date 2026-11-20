@@ -11905,11 +11905,14 @@ reader and debugger, and every hook and every variable that holds a
 function, which the child would otherwise call by itself; the user's
 value of each of those is still reachable with `harness-user-value`.  No
 step may hold the user's thread for long: a buffer's local values are
-copied within `harness-snapshot-locals-seconds', a single value within
-the deadline the buffer's copy was given, and `buffer-undo-list' is
-never copied -- it is the editing history, a chat buffer's holds its
-whole text again, and copying one took half a second of the user's
-Emacs at a time.  Its manifest says what the copy left out or cut.  The
+copied within `harness-snapshot-locals-seconds' of work -- the time the
+process ran, not the time that passed, so an Emacs the machine
+descheduled under load keeps the values it never spent its budget on --
+a single value within the deadline the buffer's copy was given, and
+`buffer-undo-list' is never copied -- it is the editing history, a chat
+buffer's holds its whole text again, and copying one took half a second
+of the user's Emacs at a time.  Its manifest says what the copy left out
+or cut.  The
 fetch has a budget of a few seconds and a copy that is not whole is used
 as it is, saying so; one copy is taken at a time and kept for a minute,
 and every session of that Emacs is given the same one (`fresh' takes

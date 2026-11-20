@@ -12329,6 +12329,255 @@ with no position to compare at."
                                            (harness-ui-chat-test-time-bar one))))))
             (when (window-live-p two) (delete-window two))))))))
 
+;;;### The stretch a folded run stands for
+
+(defun harness-ui-chat-test--group-of (buf call-id)
+  "Return the group CALL-ID is folded into in BUF, or nil."
+  (with-current-buffer buf
+    (when-let* ((block (harness-ui-chat-test-call-block buf call-id)))
+      (gethash (harness-chat-block-group block) harness-chat--groups))))
+
+(defun harness-ui-chat-test--group-line (group)
+  "Return the first line of GROUP's summary, without its properties."
+  (with-current-buffer (marker-buffer (harness-chat-group-start group))
+    (save-excursion
+      (goto-char (harness-chat-group-start group))
+      (buffer-substring-no-properties (point) (line-end-position)))))
+
+(defun harness-ui-chat-test--group-body (group)
+  "Return the whole summary text of GROUP, without its properties."
+  (with-current-buffer (marker-buffer (harness-chat-group-start group))
+    (buffer-substring-no-properties (harness-chat-group-start group)
+                                    (harness-chat-group-end group))))
+
+(defun harness-ui-chat-test--group-time-text (group)
+  "Return the time GROUP's summary shows, as (TEXT . TOOLTIP), or nil.
+TEXT is the line's words from the timestamp slot on, without properties;
+TOOLTIP is what it says under the mouse.  Nil when the summary line
+shows no time."
+  (with-current-buffer (marker-buffer (harness-chat-group-start group))
+    (save-excursion
+      (goto-char (harness-chat-group-start group))
+      (let ((end (line-end-position))
+            (at nil))
+        (while (and (null at) (< (point) end))
+          (if (string-prefix-p "Message time" (get-text-property (point) 'help-echo))
+              (setq at (point))
+            (forward-char 1)))
+        (when at
+          (cons (buffer-substring-no-properties at end)
+                (get-text-property at 'help-echo)))))))
+
+(ert-deftest harness-ui-chat-timestamps-a-collapsed-run-shows-its-stretch ()
+  "A run folded under one summary line shows the stretch of time it took.
+The summary's sender line has the one timestamp slot the transcript
+has, and it shows the earliest and the latest of the times the run
+stands for -- worked out from the times themselves, not from the order
+they were recorded in -- in the same dim face and with the whole of
+both ends in its tooltip.  The messages around it keep their own single
+timestamps."
+  (harness-ui-chat-test-with
+    (let* ((t0 (float-time (encode-time 0 0 14 2 1 2020)))
+           (early (+ t0 (* 5 60)))
+           (middle (+ t0 (* 18 60)))
+           (late (+ t0 (* 32 60)))
+           (sid (harness-ui-chat-test-session)))
+      (harness-ui-chat-test--append sid 'user "read things" t0)
+      ;; The newest call was recorded first, the earliest last: the range
+      ;; is the smallest and the largest time, not the first and the last.
+      (dolist (call `(("c1" ,late "a.el") ("c2" ,early "b.el") ("c3" ,middle "c.el")))
+        (harness-ui-chat-test--append sid 'tool-call (nth 2 call) (nth 1 call)
+                                      (list :tool "read_file" :call-id (car call)
+                                            :title (concat "Read " (nth 2 call))
+                                            :input (list :path (nth 2 call)))))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (with-current-buffer buf
+          (let* ((group (harness-ui-chat-test--group-of buf "c1"))
+                 (line (harness-ui-chat-test--group-line group))
+                 (from "2020-01-02 14:05")
+                 (to "2020-01-02 14:32")
+                 (time (harness-ui-chat-test--group-time-text group)))
+            (should group)
+            (should (equal 3 (length (harness-chat-group-members group))))
+            ;; The sender line, in the slot a single time takes: the name,
+            ;; two spaces, then the stretch, and nothing else added.
+            (should (equal (concat harness-chat-agent-label "  " from "–" to) line))
+            (should (equal (concat from "–" to) (car time)))
+            (should (equal "Message times: 2020-01-02 14:05:00–2020-01-02 14:32:00"
+                           (cdr time)))
+            (should (equal 'harness-summary-face
+                           (get-text-property
+                            (+ (marker-position (harness-chat-group-start group))
+                               (string-search from (buffer-substring-no-properties
+                                                    (marker-position (harness-chat-group-start group))
+                                                    (marker-position (harness-chat-group-end group)))))
+                            'face)))
+            ;; The message before it keeps its own single time, and says so.
+            (let* ((user (car (harness-ui-chat-test-blocks buf "user")))
+                   (user-line (harness-ui-chat-test--first-line user)))
+              (should (equal (concat harness-chat-user-label "  2020-01-02 14:00") user-line)))
+            ;; The run is the one collapsed block; opening it keeps the
+            ;; line and its stretch, and adds no time of its own to a call.
+            (harness-chat-toggle-group (harness-chat-group-id group))
+            (should (harness-chat-group-expanded group))
+            (should (equal (concat harness-chat-agent-label "  " from "–" to)
+                           (harness-ui-chat-test--group-line group)))
+            (should (string-search "[collapse]" (harness-ui-chat-test--group-body group)))
+            ;; A member carries no time of its own, opened or folded: the
+            ;; run's one slot on the summary line says when it was.
+            (should (string-search "Read b.el"
+                                   (harness-ui-chat-test--first-line
+                                    (harness-ui-chat-test-call-block buf "c2"))))
+            (should-not (string-search "14:0"
+                                       (harness-ui-chat-test--first-line
+                                        (harness-ui-chat-test-call-block buf "c2"))))
+            (harness-chat-toggle-group (harness-chat-group-id group))
+            (should-not (harness-chat-group-expanded group))
+            (should (equal (concat harness-chat-agent-label "  " from "–" to)
+                           (harness-ui-chat-test--group-line group)))
+            (should (string-search "[expand]" (harness-ui-chat-test--group-body group)))))))))
+
+(ert-deftest harness-ui-chat-timestamps-a-stretch-that-reads-alike-shows-one-time ()
+  "A run whose ends read the same shows one reading, not the time twice.
+Both ends of a run of a minute are the same clock, so the line says it
+once, as a single message's line does."
+  (harness-ui-chat-test-with
+    (let* ((t0 (float-time (encode-time 0 10 14 2 1 2020)))
+           (sid (harness-ui-chat-test-session)))
+      (dolist (call `(("c1" ,t0 "a.el") ("c2" ,(+ t0 40) "b.el")))
+        (harness-ui-chat-test--append sid 'tool-call (nth 2 call) (nth 1 call)
+                                      (list :tool "read_file" :call-id (car call)
+                                            :title (concat "Read " (nth 2 call))
+                                            :input (list :path (nth 2 call)))))
+      (let ((buf (harness-ui-chat-test-open sid)))
+        (with-current-buffer buf
+          (let* ((group (harness-ui-chat-test--group-of buf "c1"))
+                 (time (harness-ui-chat-test--group-time-text group)))
+            (should (equal "2020-01-02 14:10" (car time)))
+            (should-not (string-search "–" (harness-ui-chat-test--group-line group)))
+            ;; One time, so its tooltip is the single time's, not a range's.
+            (should (equal "Message time: 2020-01-02 14:10:00" (cdr time)))))))))
+
+(ert-deftest harness-ui-chat-timestamps-a-run-takes-the-times-it-folds ()
+  "The times of the lines a folded notice keeps are part of its run's stretch.
+A slot-change note keeps a time to each change, and a run folded over
+the note stands for them: the latest of them ends the stretch, though
+the call the note followed was earlier."
+  (harness-ui-chat-test-with
+    (let* ((t0 (float-time (encode-time 0 0 14 2 1 2020)))
+           (call (+ t0 (* 5 60)))
+           (first (+ t0 (* 9 60)))
+           (last (+ t0 (* 41 60)))
+           (sid (harness-ui-chat-test-session)))
+      (harness-ui-chat-test--append sid 'tool-call "a.el" call
+                                    (list :tool "read_file" :call-id "c1"
+                                          :title "Read a.el" :input '(:path "a.el")))
+      (let ((hint (harness-ui-chat-test--append
+                   sid 'hint "Slots changed" (+ t0 (* 10 60))
+                   (list :meta (list :fold (list :key "tool-slots-load" :title "Slots changed"
+                                                 :items (list (list :ts first :text "load 1")
+                                                              (list :ts last :text "load 2"))))))))
+        (harness-ui-chat-test--append sid 'tool-call "b.el" (+ t0 (* 20 60))
+                                      (list :tool "read_file" :call-id "c2"
+                                            :title "Read b.el" :input '(:path "b.el")))
+        (let ((buf (harness-ui-chat-test-open sid)))
+          (with-current-buffer buf
+            (let* ((group (harness-ui-chat-test--group-of buf "c1"))
+                   (members (harness-chat-group-members group))
+                   (time (harness-ui-chat-test--group-time-text group)))
+              ;; The run holds the two calls, with the notice between them.
+              (should (equal (list (harness-chat-block-id
+                                    (harness-ui-chat-test-call-block buf "c1"))
+                                   hint
+                                   (harness-chat-block-id
+                                    (harness-ui-chat-test-call-block buf "c2")))
+                             members))
+              ;; From the first call to the last change the notice kept.
+              (should (equal "2020-01-02 14:05–2020-01-02 14:41" (car time)))
+              (should (equal "Message times: 2020-01-02 14:05:00–2020-01-02 14:41:00"
+                             (cdr time))))))))))
+
+(ert-deftest harness-ui-chat-timestamps-a-run-with-no-time-shows-none ()
+  "A run whose events carry no time shows no time, not the time before it.
+A block the UI drew from a stream has no time until its node arrives;
+folded with others of its kind it stands for events whose time is
+unknown, and the sender line says nothing rather than a time it does
+not know.  One event with a time among events without one is that one
+time, drawn once."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (cl-flet ((call (id path &optional ts)
+                    (harness-chat--apply-update
+                     (list :sessionUpdate "_harness/node"
+                           :node (append (list :id id :kind "tool-call" :tool "read_file"
+                                               :call-id id :title (concat "Read " path)
+                                               :input (list :path path))
+                                         (and ts (list :ts ts)))))))
+          (call "c1" "a.el")
+          (call "c2" "b.el")
+          (let* ((group (harness-ui-chat-test--group-of buf "c1"))
+                 (line (harness-ui-chat-test--group-line group)))
+            (should group)
+            (should (= 2 (length (harness-chat-group-members group))))
+            ;; The sender line is the agent's alone: no time, no dash.
+            (should (equal harness-chat-agent-label line))
+            (should-not (harness-ui-chat-test--group-time-text group))
+            (should-not (string-search "–" line))))))))
+
+(ert-deftest harness-ui-chat-timestamps-a-run-with-one-known-time-shows-that-one ()
+  "Of a run's events, one with a time among those without is the one time shown.
+The summary line shows it once, as a single message's line does, and its
+tooltip is that one time's."
+  (harness-ui-chat-test-with
+    (let* ((t0 (float-time (encode-time 0 25 14 2 1 2020)))
+           (sid (harness-ui-chat-test-session))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (cl-flet ((call (id path &optional ts)
+                    (harness-chat--apply-update
+                     (list :sessionUpdate "_harness/node"
+                           :node (append (list :id id :kind "tool-call" :tool "read_file"
+                                               :call-id id :title (concat "Read " path)
+                                               :input (list :path path))
+                                         (and ts (list :ts ts)))))))
+          (call "c1" "a.el" t0)
+          (call "c2" "b.el")
+          (let* ((group (harness-ui-chat-test--group-of buf "c1"))
+                 (time (harness-ui-chat-test--group-time-text group)))
+            (should (equal "2020-01-02 14:25" (car time)))
+            (should (equal "Message time: 2020-01-02 14:25:00" (cdr time)))
+            (should-not (string-search "–" (harness-ui-chat-test--group-line group)))))))))
+
+(ert-deftest harness-ui-chat-timestamps-a-stretch-over-a-day-and-a-year ()
+  "A stretch that crosses a day names both days; one across a year names both.
+Each end is written as a sender line writes a time
+\(`harness-chat--time-label'), so a run from one day into the next reads
+as two, and the range's dash joins them."
+  (let* ((before-midnight (float-time (encode-time 0 58 23 2 1 2020)))
+         (after-midnight (float-time (encode-time 0 3 0 3 1 2020)))
+         (last-year (float-time (encode-time 0 30 23 31 12 2019))))
+    (should (equal "2020-01-02 23:58–2020-01-03 00:03"
+                   (harness-chat--time-range-label
+                    (harness-chat--time-range (list after-midnight before-midnight)))))
+    (should (equal "2019-12-31 23:30–2020-01-02 23:58"
+                   (harness-chat--time-range-label
+                    (harness-chat--time-range (list before-midnight last-year)))))
+    ;; The ends are the times themselves, whatever order they come in.
+    (should (equal (cons last-year before-midnight)
+                   (harness-chat--time-range (list before-midnight last-year))))
+    ;; One time known is the range of that one, which reads as one time.
+    (should (equal (cons before-midnight before-midnight)
+                   (harness-chat--time-range (list before-midnight nil))))
+    (should (equal "2020-01-02 23:58"
+                   (harness-chat--time-range-label
+                    (harness-chat--time-range (list before-midnight nil)))))
+    ;; No time known is no range, and no line.
+    (should-not (harness-chat--time-range nil))
+    (should-not (harness-chat--time-range (list nil 'not-a-time)))
+    (should-not (harness-chat--time-slot-string nil))))
+
 (provide 'harness-ui-chat-test)
 ;;; harness-ui-chat-test.el ends here
 

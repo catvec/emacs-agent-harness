@@ -16,6 +16,9 @@
 (require 'cl-lib)
 (require 'harness-snapshot)
 
+(defvar harness-snapshot-test--descheduled-last nil
+  "A buffer local the descheduled copy reaches last.")
+
 ;;;; Helpers
 
 (defun harness-snapshot-test--only (regexp)
@@ -231,7 +234,9 @@ the user's Emacs for half a second at a time."
     ;; Within the piece budget, so it is copied whole.
     (should (eq :ok (car (harness-snapshot--copy value most-positive-fixnum))))
     ;; The same value, with no time left: given up rather than walked.
-    (should (eq :big (car (harness-snapshot--copy value most-positive-fixnum (float-time)))))))
+    (should (eq :big (car (harness-snapshot--copy
+                           value most-positive-fixnum
+                           (harness-snapshot--run-seconds)))))))
 
 (ert-deftest harness-snapshot-a-buffers-locals-are-copied-within-the-time-they-may-take ()
   "A buffer whose local values are many and large has some of them cut,
@@ -255,6 +260,47 @@ Emacs on one buffer."
               (should (> (cdr locals) 0))
               (should (< (length (car locals)) harness-snapshot-locals-chars)))))
       (dolist (sym symbols) (makunbound sym))
+      (kill-buffer buffer))))
+
+(ert-deftest harness-snapshot-a-descheduled-emacs-keeps-the-locals-it-did-not-work-on ()
+  "A buffer's locals are all kept when the time that passed was not work.
+The copy is budgeted by the work it does (`harness-snapshot--run-seconds'),
+so an Emacs the machine descheduled under load, or one waiting on a slow
+disk, keeps the user's values: wall time running out while nothing was
+copied is no reason to cut them.  The budget still cuts a copy that
+spends its work, which is what keeps a buffer from holding the UI."
+  (let ((buffer (generate-new-buffer "harness-snapshot-test-descheduled")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (text-mode)
+            (insert "text")
+            (setq-local fill-column 33)
+            (setq-local tab-width 4)
+            ;; The value the copy reaches last, so the wall clock would
+            ;; have run out before it on a loaded machine.
+            (setq-local harness-snapshot-test--descheduled-last 7))
+          ;; Wall time passes inside the copy, and no work is done: the
+          ;; Emacs is descheduled, or waiting on a disk.
+          (let ((waited nil))
+            (advice-add 'harness-snapshot--value :before
+                        (lambda (&rest _)
+                          (unless waited (setq waited t) (sleep-for 0.06)))
+                        '((name . harness-snapshot-test-descheduled)))
+            (unwind-protect
+                (let ((locals (harness-snapshot--locals buffer)))
+                  (should (string-match-p "(fill-column \\. 33)" (car locals)))
+                  (should (string-match-p "(tab-width \\. 4)" (car locals)))
+                  (should (string-match-p "(harness-snapshot-test--descheduled-last \\. 7)"
+                                          (car locals)))
+                  (should (= 0 (cdr locals))))
+              (advice-remove 'harness-snapshot--value 'harness-snapshot-test-descheduled)))
+          ;; The budget is still the work: a value that costs it is cut.
+          (let ((harness-snapshot-locals-seconds 0))
+            (let ((locals (harness-snapshot--locals buffer)))
+              (should (> (cdr locals) 0))
+              (should-not (string-match-p "(harness-snapshot-test--descheduled-last \\. 7)"
+                                          (car locals))))))
       (kill-buffer buffer))))
 
 ;;;; Slices

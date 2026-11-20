@@ -119,12 +119,16 @@ A longer one is `#s(harness-user-truncated \"NAME\" SIZE)'.")
   "Most characters of buffer-local values the copy keeps for one buffer.")
 
 (defconst harness-snapshot-locals-seconds 0.025
-  "Seconds one buffer's local values may take to copy.
+  "Seconds of work one buffer's local values may take to copy.
 A local value can be large, and copying one is not interrupted: a copy
 that took half a second at a time held the user's Emacs, which is the
 UI.  What the time runs out on is counted in the buffer's `:locals-cut',
 and the manifest says so.  A slice is asked for 25 ms of work
-(`harness-snapshot-slice-seconds'), and one buffer is one step of it.")
+(`harness-snapshot-slice-seconds'), and one buffer is one step of it.
+The time is the work the copy does, not the time that passed
+(`harness-snapshot--run-seconds'): an Emacs the machine descheduled
+under load, or one waiting on a slow disk, held nobody's UI, and must
+not lose the user's values to a budget it never spent.")
 
 (defconst harness-snapshot-locals-count 300
   "Most buffer-local variables the copy keeps for one buffer.")
@@ -276,6 +280,15 @@ This reads the structure's definition, as data; it calls no accessor."
   (let ((described (harness-snapshot--describe x)))
     (record 'harness-user-object (car described) (copy-sequence (cdr described)))))
 
+(defun harness-snapshot--run-seconds ()
+  "Return the seconds of work this Emacs has done, as a float.
+`get-internal-run-time' counts the time the process ran, not the time
+that passed: a copy is budgeted by the work it does, so one the machine
+descheduled under load, or one waiting on a slow disk, does not lose the
+user's values to a budget it never spent.  A system that cannot say
+falls back to the clock, as `get-internal-run-time' itself does."
+  (float-time (get-internal-run-time)))
+
 (defun harness-snapshot--copy (value chars &optional deadline)
   "Return a plain copy of VALUE that prints in about CHARS characters or fewer.
 The answer is (:ok COPY), or (:big ESTIMATE) when VALUE is more than
@@ -297,7 +310,8 @@ by anything the user wrote."
                    size (+ size n))
              (when (or (> nodes harness-snapshot-walk-nodes)
                        (> size max-size)
-                       (and deadline (zerop (% nodes 32)) (> (float-time) deadline)))
+                       (and deadline (zerop (% nodes 32))
+                            (> (harness-snapshot--run-seconds) deadline)))
                (throw 'harness-snapshot--big (list :big size))))
            (mask ()
              (cl-incf harness-snapshot--masked)
@@ -531,7 +545,7 @@ it because the buffer has more than the copy holds of them, or because
 out: it is the editing history, a chat buffer's holds its whole text
 again, and copying it took half a second of the user's Emacs at a time."
   (let ((out nil) (chars 0) (count 0) (cut 0)
-        (deadline (+ (float-time) harness-snapshot-locals-seconds)))
+        (deadline (+ (harness-snapshot--run-seconds) harness-snapshot-locals-seconds)))
     (dolist (entry (buffer-local-variables buffer))
       (when (and (consp entry) (symbolp (car entry)))
         (let ((name (symbol-name (car entry))))
@@ -542,7 +556,7 @@ again, and copying it took half a second of the user's Emacs at a time."
                 (harness-snapshot--alias-p (car entry))))
            ((or (>= count harness-snapshot-locals-count)
                 (>= chars harness-snapshot-locals-chars)
-                (> (float-time) deadline))
+                (> (harness-snapshot--run-seconds) deadline))
             (cl-incf cut))
            (t
             (let ((pair (concat "(" (harness-snapshot--print (car entry)) " . "
@@ -724,14 +738,14 @@ and `:chars' say how far the copy has come."
                                                 harness-snapshot-slice-seconds 0.001 0.25))
              (limit (harness-snapshot--number (plist-get params :maxChars)
                                               harness-snapshot-slice-chars 1000 (* 1024 1024)))
-             (deadline (+ (float-time) seconds))
+             (deadline (+ (harness-snapshot--run-seconds) seconds))
              (chunks nil)
              (length 0))
         (setf (harness-snapshot--state-touched state) (float-time))
         (condition-case err
             (let (piece)
               (while (and (< length limit)
-                          (or (null chunks) (< (float-time) deadline))
+                          (or (null chunks) (< (harness-snapshot--run-seconds) deadline))
                           (setq piece (harness-snapshot--step state)))
                 (push piece chunks)
                 (cl-incf length (length piece))

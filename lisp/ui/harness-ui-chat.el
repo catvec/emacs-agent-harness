@@ -40,7 +40,11 @@
 ;; A sender line shows when it was sent once `harness-chat-time-group'
 ;; seconds passed since the last timestamp shown, and not before: messages
 ;; sent near each other share one timestamp, and a long turn gets another
-;; every few minutes.  A line of its own under the header
+;; every few minutes.  A block that folds several events under one line --
+;; a run of tool calls, with the thinking and the notes between them --
+;; shows the stretch they took in that same slot, earliest to latest
+;; (`harness-chat--group-time-range'), one reading when both ends read the
+;; same.  A line of its own under the header
 ;; (`harness-chat--refresh-time-bar') shows the clock of the message the
 ;; window starts on, unless that message shows its own timestamp
 ;; already, so a group's time scrolled off is still known without making
@@ -1616,6 +1620,88 @@ It is drawn small and dim, with the whole time in its tooltip."
               'face 'harness-summary-face
               'help-echo (format "Message time: %s" (harness-chat--time-full time))))
 
+;; A block that stands for several events -- a run of tool calls folded
+;; under one summary, with the thinking and slot notices between them --
+;; shows the stretch of time they took, in the one timestamp slot its
+;; sender line has: "14:05–14:32".  The times are the earliest and the
+;; latest of the events it stands for, worked out from the times
+;; themselves and not from their order, and one reading covers the
+;; stretch when both ends read the same, as a run of a minute does.
+
+(defun harness-chat--event-times (node)
+  "Return the times NODE records, as a list of floats, or nil.
+That is when it was sent, and the times of the lines of a folding hint
+it holds (`harness-node-fold'): a note of the tool slots changing
+carries the time of each change, and a block folded over the note stands
+for them too."
+  (let ((sent (harness-chat--node-time node))
+        (fold (harness-node-fold node)))
+    (append (and sent (list sent))
+            (delq nil (mapcar (lambda (item)
+                                (let ((ts (plist-get item :ts)))
+                                  (and (numberp ts) (float ts))))
+                              (plist-get fold :items))))))
+
+(defun harness-chat--time-range (times)
+  "Return the range of TIMES, as (EARLIEST . LATEST), or nil.
+The ends are the smallest and the largest of TIMES themselves, whatever
+order they come in; a time that is no number is left out, and no time
+at all is no range."
+  (let ((times (delq nil (mapcar (lambda (time) (and (numberp time) time)) times))))
+    (when times
+      (let ((earliest (apply #'min times))
+            (latest (apply #'max times)))
+        (cons earliest latest)))))
+
+(defun harness-chat--group-time-range (group)
+  "Return the range of the times the blocks of GROUP were sent, or nil.
+GROUP is a run of tool calls folded under one summary line; its range
+reaches over every member, the thinking and the slot notices between the
+calls included, and the times of the lines of a folding notice."
+  (harness-chat--time-range
+   (cl-loop for id in (harness-chat-group-members group)
+            append (let ((block (gethash id harness-chat--blocks)))
+                     (and block (harness-chat--event-times (harness-chat-block-node block)))))))
+
+(defun harness-chat--time-range-label (range)
+  "Return RANGE, a cons of two times, as the transcript writes the stretch.
+That is the label of the earliest (`harness-chat--time-label'), a dash,
+and the label of the latest: \"14:05–14:32\", or \"Nov 7 23:58–Nov 8
+00:03\" over a day's turn.  The earliest alone when both ends read the
+same, as a run of one minute does, so a range that says nothing more
+than its start is not drawn twice."
+  (let* ((earliest (car range))
+         (latest (cdr range))
+         (from (harness-chat--time-label earliest))
+         (to (harness-chat--time-label latest)))
+    (if (equal from to) from (concat from "–" to))))
+
+(defun harness-chat--time-range-string (range)
+  "Return RANGE as a sender line shows it, or nil when there is none.
+It stands in the slot a single time does, dim (`harness-summary-face'),
+and its tooltip holds the whole of both ends: the stretch is data, as a
+time is, not a label the transcript adds.  A range whose ends read the
+same is that one time, in its tooltip as on the line."
+  (when range
+    (let ((from (harness-chat--time-label (car range)))
+          (to (harness-chat--time-label (cdr range))))
+      (propertize (harness-chat--time-range-label range)
+                  'face 'harness-summary-face
+                  'help-echo (if (equal from to)
+                                 (format "Message time: %s" (harness-chat--time-full (car range)))
+                               (format "Message times: %s–%s"
+                                       (harness-chat--time-full (car range))
+                                       (harness-chat--time-full (cdr range))))))))
+
+(defun harness-chat--time-slot-string (time)
+  "Return TIME, a time or a range of them, as a sender line shows it, or nil.
+A time is `harness-chat--time-string', a range of them
+`harness-chat--time-range-string': the one slot shows whichever the
+block stands for."
+  (cond ((null time) nil)
+        ((consp time) (harness-chat--time-range-string time))
+        (t (harness-chat--time-string time))))
+
 (defun harness-chat--time-carrier-p (block)
   "Non-nil when BLOCK is drawn with a sender line that can show a timestamp.
 That is a message of the user's, the line that opens an agent turn, and
@@ -1658,9 +1744,13 @@ drawn in order."
 (defun harness-chat--sender (text face &optional time)
   "Return a sender line naming TEXT in FACE.
 TIME, when given, is shown after the name, dim and with its tooltip
-\(`harness-chat--time-string')."
+\(`harness-chat--time-string'); a range of times, as a block folded over
+several events shows, is shown in the same slot
+\(`harness-chat--time-range-string')."
   (concat (propertize text 'face face)
-          (if time (concat "  " (harness-chat--time-string time)) "")
+          (if-let* ((shown (harness-chat--time-slot-string time)))
+              (concat "  " shown)
+            "")
           "\n"))
 
 (defalias 'harness-chat--session-name #'harness-ui-session-name
@@ -1670,7 +1760,8 @@ TIME, when given, is shown after the name, dim and with its tooltip
   "Return the sender line of a message FROM sent, rather than the user.
 The harness reads \"System · SOURCE\", another session's agent
 \"Session · NAME\", NAME a session link that opens that session.
-TIME, when given, is shown after the name (`harness-chat--time-string')."
+TIME, when given, is shown after the name (`harness-chat--time-string'),
+a range of times in the same slot (`harness-chat--time-range-string')."
   (pcase-let ((`(,label . ,which)
                (pcase (harness-sender-kind from)
                  ('session
@@ -1686,7 +1777,9 @@ TIME, when given, is shown after the name (`harness-chat--time-string')."
                                  (propertize source 'face 'harness-dim-face))))))))
     (concat (propertize label 'face 'harness-system-label-face)
             (if which (concat (propertize " · " 'face 'harness-dim-face) which) "")
-            (if time (concat "  " (harness-chat--time-string time)) "")
+            (if-let* ((shown (harness-chat--time-slot-string time)))
+                (concat "  " shown)
+              "")
             "\n")))
 
 (defun harness-chat--handoff-line (handoff)
@@ -1959,7 +2052,8 @@ agent's header would stand."
 
 (defun harness-chat--agent-header (&optional time)
   "Return the sender line that opens an agent turn.
-TIME, when given, is shown after the name (`harness-chat--time-string')."
+TIME, when given, is shown after the name (`harness-chat--time-string'),
+a range of times in the same slot (`harness-chat--time-range-string')."
   (harness-chat--margin
    (harness-chat--sender harness-chat-agent-label 'harness-agent-label-face time)))
 
@@ -3575,7 +3669,10 @@ Empty when none failed or was denied; a collapsed group would hide them."
   "Return the body of the summary block of GROUP.
 It counts the calls by label, then the thinking and slot notices folded
 between them.  A run of one call names it as its header does, label and
-subject: \"1 tool call: Read file x.el\"."
+subject: \"1 tool call: Read file x.el\".  The sender line the run opens
+its turn with shows the stretch of time the run took, from the earliest
+of its events to the latest (`harness-chat--group-time-range'), in the
+one timestamp slot it has."
   (let* ((gid (harness-chat-group-id group))
          (calls (harness-chat--group-calls group))
          (names (mapcar (lambda (b) (harness-ui-tool-label (plist-get (harness-chat-block-node b) :tool)))
@@ -3590,7 +3687,9 @@ subject: \"1 tool call: Read file x.el\"."
     (setq counts (nreverse counts))
     (concat
      (if (harness-chat-block-head first)
-         (harness-chat--agent-header (harness-chat--time-to-show first))
+         (harness-chat--agent-header
+          (and (harness-chat--time-to-show first)
+               (harness-chat--group-time-range group)))
        "")
      (harness-chat--margin
       (concat (harness-chat--fold-button (not (harness-chat-group-expanded group))
@@ -4202,7 +4301,8 @@ the drawing of its calls."
 
 (defun harness-chat--group-text (group)
   "Return the summary text of GROUP followed by its separator newline.
-The summary stands for its first member: it says when that was, and
+The summary stands for the run: it says when the run was, the stretch
+of its first member to its last (`harness-chat--group-time-range'), and
 shows it on the sender line the group's turn opens with."
   (let* ((first (gethash (car (harness-chat-group-members group)) harness-chat--blocks))
          (time (and first (harness-chat-block-time first)))

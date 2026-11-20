@@ -28,10 +28,15 @@ Two pieces, one setting:
   Only a line that names a speaker carries one: the user's message line,
   the line that opens an agent turn, and the line of a message another
   session or the harness sent.  A run of coalesced tool calls stands for
-  its first call, so its summary carries that call's time on the agent
-  line it draws.  Tool calls and assistant text in the middle of a turn
-  carry none: the turn's own line already gives the context, and a time
-  on every call would be the clutter the grouping is for.
+  all of its events, so its summary carries the stretch of time they
+  took on the agent line it draws: the earliest and the latest of the
+  times it holds — the calls, the thinking between them, and the times
+  of the lines a slot-change note keeps — as `14:05–14:32`, worked out
+  from the times themselves rather than from the order they arrived in.
+  One reading when both ends read the same, and none when no event has a
+  time.  Tool calls and assistant text in the middle of a turn carry
+  none: the turn's own line already gives the context, and a time on
+  every call would be the clutter the grouping is for.
 
 - **A pinned time on a line under the header.**  The chat's header line
   already carries the session's name, where it came from and its figures;
@@ -65,8 +70,12 @@ and the last timestamp seen (`harness-chat--time-known`):
 
 Every block's text carries `harness-chat-time` as a text property, and a
 block whose sender line shows it also carries `harness-chat-time-head` on
-that first line.  A coalesced group's summary text carries its first
-member's.
+that first line.  A coalesced group's summary text carries the time of
+its first member, which is the group's place in the transcript's
+timeline; the stretch the summary shows is worked out when it is drawn
+(`harness-chat--group-time-range`), so a member that joins the run, or a
+note that grows a line, is part of it without any time being noted
+again.
 
 The time line is a window-specific overlay (`overlay-put` `window`) at
 the start of the first whole line the window shows
@@ -121,6 +130,12 @@ transcript.  It never measures the window.
   lines; and the clock alone on the pinned line, with the rule after it.
   The pinned line never shows the date.
 - Sender-line time tooltip: `Message time: 2026-11-07 14:05:12`.
+- A collapsed run's stretch, in that same sender-line slot:
+  `14:05–14:32`, or `Nov 7 23:58–Nov 8 00:03` over a day's turn — data
+  again, and one time (`14:05`) when both ends read the same.
+- A collapsed run's tooltip: `Message times:
+  2026-11-07 14:05:12–2026-11-07 14:32:40`, or `Message time: ...` when
+  both ends read the same.
 - Pinned-line time tooltip: `First message on screen: 2026-11-07 14:05:12`.
 - The setting's description is prose, as setting descriptions are.
 
@@ -128,7 +143,7 @@ No headings, buttons, empty or loading states are added.
 
 ## Tests
 
-`test/harness-ui-chat-test.el` covers, with exact rendered text:
+`lisp/ui/harness-ui-chat-test.el` covers, with exact rendered text:
 
 - messages within the interval share one timestamp, and the next group
   starts on the first message after it;
@@ -141,8 +156,17 @@ No headings, buttons, empty or loading states are added.
 - the clock/day/year forms of the sender lines and the full tooltip form;
 - the pinned line showing only the clock for a message two days old,
   where the sender line still names the day;
-- a coalesced run carrying its first call's time on the agent line, with
-  the pinned line only once that line scrolled away.
+- a coalesced run carrying the stretch of its events on the agent line --
+  earliest to latest, from the times themselves rather than their order,
+  in the one timestamp slot, with both ends in the tooltip -- one
+  reading when both ends read the same, the one known time when only one
+  event has one, and nothing when none has; the times of the lines a
+  slot-change note keeps are part of the stretch, and the day and year
+  of each end are written as a sender line writes them;
+- opening and folding the run again keeps its line and its stretch, and a
+  member call carries no time of its own;
+- a coalesced run's line, with the pinned line only once that line
+  scrolled away.
 
 `scripts/test.sh --changed` covers the suites the change touches, and the
 full `scripts/test.sh` runs before the work is handed in.

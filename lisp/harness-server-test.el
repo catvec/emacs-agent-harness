@@ -287,6 +287,11 @@ on the main Lisp thread and exit successfully, without fallback signals."
       (should (equal scheduled '((kill-emacs 0)))))))
 
 (ert-deftest harness-server-standalone-has-no-private-stop-method ()
+  "A server run on its own takes no stop method from its parent's secret.
+The child loads the whole harness, as the servers the tests around this
+one start do: its guard is the same `harness-server-test--run-child'
+timeout they give, 60 seconds, not the 10 a loaded machine could not
+meet while four suites load the harness at once."
   (pcase-let ((`(,status . ,out)
                (harness-server-test--run-child
                 '((require 'harness)
@@ -309,7 +314,7 @@ on the main Lisp thread and exit successfully, without fallback signals."
                                (princ "no private stop method\n")
                                (kill-emacs 0))))
                     (harness-server-main)))
-                10)))
+                60)))
     (should (equal status 0))
     (should (string-search "no private stop method" out))))
 

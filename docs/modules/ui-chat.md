@@ -51,7 +51,11 @@ One buffer per session, "*harness: NAME*", laid out top to bottom:
 A sender line shows when it was sent once `harness-chat-time-group`
 seconds passed since the last timestamp shown, and not before: messages
 sent near each other share one timestamp, and a long turn gets another
-every few minutes.  A line of its own under the header
+every few minutes.  A block that folds several events under one line --
+a run of tool calls, with the thinking and the notes between them --
+shows the stretch they took in that same slot, earliest to latest
+(`harness-chat--group-time-range`), one reading when both ends read the
+same.  A line of its own under the header
 (`harness-chat--refresh-time-bar`) shows the clock of the message the
 window starts on, unless that message shows its own timestamp
 already, so a group's time scrolled off is still known without making
