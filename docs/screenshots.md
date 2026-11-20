@@ -360,7 +360,7 @@ the real one, over the sessions of the run -- names the command that
 attaches a file and the session that wrote the API guide, which the
 popout then shows with the passage found in it).  The pictures type the
 query in the search's compose box and send it with the box's own
-command, `harness-quick-search-box-submit`, as `RET` does.
+command, `harness-ui-popout-submit`, as `C-c C-c` does.
 
 ## Adding or changing a picture
 

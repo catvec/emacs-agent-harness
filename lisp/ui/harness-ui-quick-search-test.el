@@ -676,7 +676,8 @@ unhooks, cancels the timer and forgets the scan."
 ;;;; The box
 
 (ert-deftest harness-ui-quick-search-ret-searches ()
-  "RET in the popout's box searches, without the minibuffer, and the line stays."
+  "RET in the popout's box searches with the popout's own send, as C-c C-c
+does; the search has no send of its own.  The line stays in the box."
   (harness-ui-quick-search-test-with
     (setq harness-ui-quick-search-test--replies '("{\"commands\":[\"harness-quick-search-test-run\"]}"))
     (let ((origin (harness-ui-quick-search-test--origin)))
@@ -690,9 +691,17 @@ unhooks, cancels the timer and forgets the scan."
           (should (harness-compose-in-p))
           (should (string-match-p "From “\\*quick search origin\\*” (harness-quick-search-test-mode) · favours commands, then sessions"
                                   (harness-ui-quick-search-test--text)))
-          (should (string-match-p "RET searches" (harness-ui-quick-search-test--text)))
+          (should (string-match-p "C-c C-c searches" (harness-ui-quick-search-test--text)))
+          ;; The box's own tooltip says what its keys are, RET included:
+          ;; it is not the usual "RET newline".
+          (should (equal "C-c C-c or RET searches, M-p and M-n bring back earlier searches, C-c C-a attaches a file or task, C-c . KEY: a key of the panel above"
+                         (get-text-property (1- harness-compose-start) 'help-echo)))
+          ;; The box sends with the popout's command, the one C-c C-c runs:
+          ;; it has no send of its own.
+          (should (eq 'harness-ui-popout-submit harness-quick-search-box-send-command))
+          (should (eq 'harness-quick-search-box-send (key-binding (kbd "RET"))))
+          (should (eq 'harness-ui-popout-submit (key-binding (kbd "C-c C-c"))))
           (insert "run the test command")
-          (should (eq 'harness-quick-search-box-submit (key-binding (kbd "RET"))))
           (cl-letf (((symbol-function 'read-from-minibuffer)
                      (lambda (&rest _) (error "The minibuffer was used")))
                     ((symbol-function 'read-string)
@@ -707,12 +716,12 @@ unhooks, cancels the timer and forgets the scan."
           (should (string-match-p "Favour commands" first))
           (should (string-match-p "run the test command" first)))
         (should (string-match-p "harness-quick-search-test-run" (harness-ui-quick-search-test--text)))
-        ;; C-c C-c sends it too, and the line stays.
+        ;; C-c C-c sends it too, by the same command, and the line stays.
         (setq harness-ui-quick-search-test--requests nil)
         (with-current-buffer popout
           (goto-char harness-compose-end)
           (insert " again")
-          (harness-ui-popout-submit)
+          (call-interactively (key-binding (kbd "C-c C-c")))
           (should (equal "run the test command again" (harness-compose-text))))
         (harness-test-wait (lambda () harness-ui-quick-search-test--requests) 5 "the second search")
         (harness-ui-quick-search-test--wait-status 'done)
@@ -720,7 +729,7 @@ unhooks, cancels the timer and forgets the scan."
         ;; Outside the box RET is the content's.
         (with-current-buffer popout
           (goto-char (point-min))
-          (should-not (eq 'harness-quick-search-box-submit (key-binding (kbd "RET")))))))))
+          (should-not (eq 'harness-quick-search-box-send (key-binding (kbd "RET")))))))))
 
 (ert-deftest harness-ui-quick-search-history-keys ()
   "The box's history keys bring back earlier searches."

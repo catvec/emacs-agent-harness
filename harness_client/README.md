@@ -1021,7 +1021,9 @@ app only draws the plan.
   older one, or with its `tasks-search` module off) says so, and offers nothing it
   cannot do.  The back arrow and the system's back close the page, and an answer
   that comes after that is dropped; so does Escape on a keyboard that has it, where
-  Return searches (Shift-Return breaks the line) and a phone's search key does the
+  the send key searches -- Return, or `C-c C-c` when the settings send a message
+  with it, and `C-c C-c` too with the harness keys on, as a conversation's box
+  has it (Shift-Return breaks the line) -- and a phone's search key does the
   same.  The lines searched are kept for the life of the app and shown again as
   *Recent*.
 
@@ -1625,7 +1627,7 @@ not take `C-c`: with only this switch on, `Ctrl+C` still copies.
 
 | Key | What it runs |
 |---|---|
-| `C-c C-c` | Send the message |
+| `C-c C-c` | Send the message, or the search's line |
 | `C-c C-k` | Stop the running turn |
 | `C-c C-a` | Attach images |
 | `C-c C-s` | Open the quick search |

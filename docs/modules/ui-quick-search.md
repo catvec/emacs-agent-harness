@@ -17,12 +17,13 @@ C-c h T / -- or / in the harness menu -- opens the quick search from
 any buffer: a popout at the bottom of the frame whose box takes a
 line in words, the way a command palette does ("how do I attach a
 file?", "where did I debug the merge queue?", "the task about the
-docs").  RET in the box sends the line, with where it was typed, to
-a quick, cheap model (`search/ask`, see harness-tasks-search.el),
-which answers with the commands, sessions and tasks the line is
-about and, when words answer it ("how do I attach a file?", "what
-does verify do?"), with the answer itself.  The line stays in the
-box, to be refined; M-p and M-n bring back earlier searches.
+docs").  C-c C-c in the box sends the line, as it sends every box,
+with where it was typed, to a quick, cheap model (`search/ask`, see
+harness-tasks-search.el), which answers with the commands, sessions
+and tasks the line is about and, when words answer it ("how do I
+attach a file?", "what does verify do?"), with the answer itself.  The
+line stays in the box, to be refined; M-p and M-n bring back earlier
+searches.
 
 Where the search opens sets what it favours, its bias: tasks on a
 task board, sessions in the session list or a conversation tree,
@@ -74,7 +75,7 @@ serve the board too, with buttons of its own.
 - `harness-quick-search` — Find a session, a command or a task, from anywhere, by saying what you want.
 - `harness-quick-search-box-next` — Put the next search in the box, or what it held before the earlier ones.
 - `harness-quick-search-box-previous` — Put the previous search in the box, from `harness-quick-search-history`.
-- `harness-quick-search-box-submit` — Send the box's line to `harness-quick-search-box-function`.
+- `harness-quick-search-box-send` — Send the box's line with the command the host sends its box with.
 
 ### Options
 

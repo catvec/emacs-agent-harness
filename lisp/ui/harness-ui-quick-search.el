@@ -6,12 +6,13 @@
 ;; any buffer: a popout at the bottom of the frame whose box takes a
 ;; line in words, the way a command palette does ("how do I attach a
 ;; file?", "where did I debug the merge queue?", "the task about the
-;; docs").  RET in the box sends the line, with where it was typed, to
-;; a quick, cheap model (`search/ask', see harness-tasks-search.el),
-;; which answers with the commands, sessions and tasks the line is
-;; about and, when words answer it ("how do I attach a file?", "what
-;; does verify do?"), with the answer itself.  The line stays in the
-;; box, to be refined; M-p and M-n bring back earlier searches.
+;; docs").  C-c C-c in the box sends the line, as it sends every box,
+;; with where it was typed, to a quick, cheap model (`search/ask', see
+;; harness-tasks-search.el), which answers with the commands, sessions
+;; and tasks the line is about and, when words answer it ("how do I
+;; attach a file?", "what does verify do?"), with the answer itself.  The
+;; line stays in the box, to be refined; M-p and M-n bring back earlier
+;; searches.
 ;;
 ;; Where the search opens sets what it favours, its bias: tasks on a
 ;; task board, sessions in the session list or a conversation tree,
@@ -624,9 +625,11 @@ the buffer the search was opened from."
 
 ;;;; The box
 
-(defvar-local harness-quick-search-box-function nil
-  "Function the search box sends its line to, with the box's text trimmed.
-`harness-quick-search-box-submit' calls it.")
+(defvar-local harness-quick-search-box-send-command nil
+  "The command that sends this buffer's box, as the host sends its own.
+`harness-ui-popout-submit' in a popout, `harness-ui-tasks-submit' on a
+board: the quick search sends no box of its own, it presses the host's
+send, which C-c C-c presses too.")
 
 (defvar-local harness-quick-search--history-index nil
   "Which entry of `harness-quick-search-history' the box shows, or nil.")
@@ -644,8 +647,10 @@ Outside the box the key does what the buffer binds it to."
 
 ;; Filled at top level, not in the `defvar', so a reload updates it.
 (let ((map harness-quick-search-box-mode-map))
+  ;; RET presses the host's send, as C-c C-c does: the search has no send
+  ;; of its own (see `harness-quick-search-box-send').
   (define-key map (kbd "RET")
-              '(menu-item "" harness-quick-search-box-submit :filter harness-quick-search--box-binding))
+              '(menu-item "" harness-quick-search-box-send :filter harness-quick-search--box-binding))
   (define-key map (kbd "M-p")
               '(menu-item "" harness-quick-search-box-previous :filter harness-quick-search--box-binding))
   (define-key map (kbd "M-n")
@@ -653,8 +658,9 @@ Outside the box the key does what the buffer binds it to."
 
 (define-minor-mode harness-quick-search-box-mode
   "Make this buffer's compose box take a search.
-In the box, \\`RET' sends its line to `harness-quick-search-box-function',
-and \\`M-p' and \\`M-n' put the earlier searches in it, from
+In the box, \\`RET' sends its line with the command the host sends its
+box with, `harness-quick-search-box-send-command' -- \\`C-c C-c' runs the
+same one -- and \\`M-p' and \\`M-n' put the earlier searches in it, from
 `harness-quick-search-history'.  Elsewhere in the buffer the keys are
 the buffer's own."
   :lighter nil
@@ -668,14 +674,16 @@ the buffer's own."
   (when (harness-compose-live-p)
     (goto-char harness-compose-end)))
 
-(defun harness-quick-search-box-submit ()
-  "Send the box's line to `harness-quick-search-box-function'."
+(defun harness-quick-search-box-send ()
+  "Send the box's line with the command the host sends its box with.
+In a popout that is `harness-ui-popout-submit', on a board
+`harness-ui-tasks-submit' -- the command \\`C-c C-c' runs there.  The
+search has no send of its own: \\`RET' in the box does this, and so does
+\\`C-c C-c', because both run the host's command."
   (interactive)
   (unless (harness-compose-live-p) (user-error "No box here"))
-  (unless harness-quick-search-box-function (user-error "This box takes no search"))
-  (setq harness-quick-search--history-index nil
-        harness-quick-search--typed nil)
-  (funcall harness-quick-search-box-function (string-trim (harness-compose-text))))
+  (unless harness-quick-search-box-send-command (user-error "This box takes no search"))
+  (call-interactively harness-quick-search-box-send-command))
 
 (defun harness-quick-search--history-step (n)
   "Put the search N entries further back in the history in the box.
@@ -1175,7 +1183,7 @@ the line asked."
     (insert (harness-quick-search--line
              (propertize (concat "  " (cdr (assoc kind harness-quick-search--examples))) 'face 'harness-hint-face))))
   (insert (harness-quick-search--line
-           (propertize "RET searches · M-p and M-n bring back earlier searches · C-g closes"
+           (propertize "C-c C-c searches · M-p and M-n bring back earlier searches · C-g closes"
                        'face 'harness-dim-face))))
 
 (defun harness-quick-search--insert-footer (state)
@@ -1332,6 +1340,10 @@ place the search was opened from suggests (`harness-quick-search-bias')."
          (popout (harness-ui-popout-show harness-quick-search--key "Quick search" #'harness-quick-search--render
                                          :compose (lambda () #'harness-quick-search--submit)
                                          :placeholder "Find a session, a command or a task…"
+                                         ;; Its box sends on RET too: say so,
+                                         ;; not the box's usual "RET newline".
+                                         :box-help (format "C-c C-c or RET searches, M-p and M-n bring back earlier searches, C-c C-a attaches a file or task, %s KEY: a key of the panel above"
+                                                           (harness-compose-panel-keys))
                                          :dir (plist-get context :project)
                                          ;; Taller while it answers in words.
                                          :max-height #'harness-quick-search--max-height)))
@@ -1341,7 +1353,7 @@ place the search was opened from suggests (`harness-quick-search-bias')."
             harness-quick-search--context context
             harness-quick-search--catalogue catalogue)
       (unless harness-quick-search-box-mode (harness-quick-search-box-mode 1))
-      (setq harness-quick-search-box-function #'harness-quick-search--search)
+      (setq harness-quick-search-box-send-command #'harness-ui-popout-submit)
       (when (or (not existing) moved)
         ;; A search of another place is not this one's: an answer still
         ;; on its way is dropped.

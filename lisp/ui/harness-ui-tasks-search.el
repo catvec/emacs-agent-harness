@@ -527,7 +527,7 @@ A box that is a search box already keeps its line."
     (setq harness-compose-attachments nil)
     (harness-ui-tasks--set-compose "" '(search)))
   (unless harness-quick-search-box-mode (harness-quick-search-box-mode 1))
-  (setq harness-quick-search-box-function #'harness-ui-tasks-search-submit)
+  (setq harness-quick-search-box-send-command #'harness-ui-tasks-submit)
   (harness-ui-tasks-search--warm)
   (goto-char harness-compose-end)
   (dolist (w (get-buffer-window-list nil nil t)) (set-window-point w (point))))
@@ -538,7 +538,7 @@ What the box held before is forgotten, and what it does is left as it
 is: `harness-ui-tasks-search-leave' gives both back instead.  The board
 calls this when the box turns to something else, a reply say."
   (when harness-quick-search-box-mode (harness-quick-search-box-mode -1))
-  (setq harness-quick-search-box-function nil
+  (setq harness-quick-search-box-send-command nil
         harness-ui-tasks-search--draft nil))
 
 (defun harness-ui-tasks-search-leave ()

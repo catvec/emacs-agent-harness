@@ -6,10 +6,13 @@ import '../../models/quick_search.dart';
 import '../../state/app_controller.dart';
 import '../../state/quick_search_catalogue.dart';
 import '../../state/quick_search_controller.dart';
+import '../../state/settings_controller.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../adaptive/layout_widgets.dart';
 import '../adaptive/platform_style.dart';
+import '../app_scope.dart';
 import '../format.dart';
+import '../harness_keys.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/markdown_view.dart';
 
@@ -50,6 +53,10 @@ class _QuickSearchScreenState extends State<QuickSearchScreen> {
   );
   final _field = TextEditingController();
   final _focus = FocusNode();
+
+  /// C-c, the harness keys' prefix, whose C sends: when the settings send
+  /// with C-c C-c (`SendKey.ctrlCctrlC`), or when the harness keys are on.
+  final _prefix = EmacsPrefix();
 
   @override
   void initState() {
@@ -120,6 +127,18 @@ class _QuickSearchScreenState extends State<QuickSearchScreen> {
   @override
   Widget build(BuildContext context) {
     final cupertino = HarnessStyle.isCupertino(context);
+    // What sends a line, as the settings send a message.  Read on each build,
+    // so a change on the settings page shows here.  C-c C-c sends the line
+    // when it is the send key, and when the harness keys are on, as the
+    // screen's key layer sends a message in a conversation: the search page
+    // is pushed above the shell's layer, so its own box answers the prefix.
+    final settings = HarnessScope.maybeSettingsOf(context);
+    final sendKey = settings?.sendKey ?? SendKey.enter;
+    final harnessKeys = settings?.harnessKeys ?? false;
+    final prefixSends = sendKey == SendKey.ctrlCctrlC || harnessKeys;
+    _prefix.commands = prefixSends
+        ? {LogicalKeyboardKey.keyC: () => _submit()}
+        : const {};
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -137,6 +156,9 @@ class _QuickSearchScreenState extends State<QuickSearchScreen> {
               _field.clear();
               _focus.requestFocus();
             },
+            sendKey: sendKey,
+            prefix: _prefix,
+            prefixSends: prefixSends,
           ),
         ),
         Expanded(
@@ -196,6 +218,9 @@ class _Header extends StatelessWidget {
     required this.onSubmit,
     required this.onClose,
     required this.onClear,
+    required this.sendKey,
+    required this.prefix,
+    required this.prefixSends,
   });
 
   final TextEditingController field;
@@ -204,6 +229,17 @@ class _Header extends StatelessWidget {
   final void Function([String? line]) onSubmit;
   final VoidCallback onClose;
   final VoidCallback onClear;
+
+  /// What sends the line, as the settings send a message: Return, or C-c C-c.
+  final SendKey sendKey;
+
+  /// The C-c prefix, whose C is the send when [prefixSends] -- when C-c C-c
+  /// is the send key, or when the harness keys are on.
+  final EmacsPrefix prefix;
+
+  /// Whether C-c C-c sends the line here: the send key is C-c C-c, or the
+  /// harness keys are on, as they send a message in a conversation.
+  final bool prefixSends;
 
   @override
   Widget build(BuildContext context) {
@@ -229,9 +265,14 @@ class _Header extends StatelessWidget {
             onPressed: onClose,
           ),
           Expanded(
-            // A keyboard that has keys, as a computer's does, searches with
-            // Return (Shift-Return breaks the line) and leaves with Escape;
-            // a phone's sends the search key instead, as the field says.
+            // The box sends as the app's message box does, by the setting
+            // that sends a message: Return, or C-c C-c (`SendKey').  A
+            // keyboard that has keys searches with the send key (Shift-Return
+            // breaks the line) and leaves with Escape; a phone's sends the
+            // search key instead, as the field says.  C-c C-c sends the query
+            // too when the harness keys are on: this page is pushed above the
+            // shell's key layer, so the box answers the prefix itself, as a
+            // conversation's box does when its screen has no layer.
             child: Focus(
               canRequestFocus: false,
               skipTraversal: true,
@@ -242,11 +283,20 @@ class _Header extends StatelessWidget {
                   onClose();
                   return KeyEventResult.handled;
                 }
-                if ((key == LogicalKeyboardKey.enter ||
-                        key == LogicalKeyboardKey.numpadEnter) &&
-                    !HardwareKeyboard.instance.isShiftPressed) {
+                final enter =
+                    key == LogicalKeyboardKey.enter ||
+                    key == LogicalKeyboardKey.numpadEnter;
+                if (enter &&
+                    !HardwareKeyboard.instance.isShiftPressed &&
+                    sendKey == SendKey.enter) {
                   if (canAsk) onSubmit();
                   return KeyEventResult.handled;
+                }
+                // The harness keys' prefix, C-c, whose C sends: the box's own
+                // when C-c C-c is the send key, and the screen's when the
+                // harness keys are on.
+                if (prefixSends) {
+                  return prefix.handle(event);
                 }
                 return KeyEventResult.ignored;
               },

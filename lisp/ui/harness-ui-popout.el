@@ -105,6 +105,10 @@ recognition; a larger one is scaled down to fit."
 (defvar-local harness-ui-popout--render nil "The function drawing the content.")
 (defvar-local harness-ui-popout--compose nil "Function returning the box's SUBMIT, or nil for no box.")
 (defvar-local harness-ui-popout--submit nil "What the box sends with, as drawn last; nil without a box.")
+(defvar-local harness-ui-popout-box-help nil
+  "What this popout's box says its keys are, or nil for the usual ones.
+A popout whose box sends differently -- the quick search's, where RET
+sends too -- says so here.")
 
 (defvar-local harness-ui-popout-empty-ok-function nil
   "A function of no arguments that says an empty box may be sent, or nil.
@@ -273,8 +277,9 @@ only the text between them, and around, is the popout's."
     (let ((start (point)))
       (harness-compose-insert-attachments)
       (put-text-property start (point) 'read-only t))
-    (harness-compose-insert nil (format "C-c C-c sends, RET newline, C-c C-a attaches a file or task, %s KEY: a key of the panel above"
-                                        (harness-compose-panel-keys)))))
+    (harness-compose-insert nil (or harness-ui-popout-box-help
+                                     (format "C-c C-c sends, RET newline, C-c C-a attaches a file or task, %s KEY: a key of the panel above"
+                                             (harness-compose-panel-keys))))))
 
 (defun harness-ui-popout--forget-box ()
   "Drop the box's overlays and markers: this draw has no box."
@@ -525,6 +530,9 @@ PROPS:\\<harness-ui-popout-mode-map>
                     \\[harness-ui-popout-submit] empties the box and calls
                     SUBMIT with what it held, the popout buffer current.
   :placeholder HINT the empty box's hint, a string or a function.
+  :box-help HELP    what the box says its keys are, for a box that sends
+                    as another does: the quick search's box says RET
+                    sends too.
   :dir DIR          the project directory of the box (@ completion).
   :max-height FRACTION
                     the height its window grows to at most, as a
@@ -561,6 +569,7 @@ PROPS:\\<harness-ui-popout-mode-map>
             harness-ui-popout--render render
             harness-ui-popout--compose (plist-get props :compose)
             harness-ui-popout--placeholder (plist-get props :placeholder)
+            harness-ui-popout-box-help (plist-get props :box-help)
             harness-ui-popout--dir (plist-get props :dir)
             harness-ui-popout--max-height (plist-get props :max-height)
             harness-ui-popout--parent (and (not (equal parent key)) parent)

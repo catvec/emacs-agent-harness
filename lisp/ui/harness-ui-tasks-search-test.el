@@ -49,7 +49,7 @@
 (defvar harness-compose--placeholder)
 (defvar harness-quick-search-history)
 (defvar harness-quick-search-box-mode)
-(defvar harness-quick-search-box-function)
+(defvar harness-quick-search-box-send-command)
 (declare-function harness-tasks "harness-ui-tasks")
 (declare-function harness-ui-tasks--render "harness-ui-tasks")
 (declare-function harness-ui-tasks--header "harness-ui-tasks")
@@ -64,7 +64,7 @@
 (declare-function harness-compose-add-attachment "harness-ui-compose")
 (declare-function harness-ui-level-icon "harness-ui")
 (declare-function harness-quick-search "harness-ui-quick-search")
-(declare-function harness-quick-search-box-submit "harness-ui-quick-search")
+(declare-function harness-quick-search-box-send "harness-ui-quick-search")
 (declare-function harness-quick-search--reset-scan "harness-ui-quick-search")
 (declare-function harness-ui-visit-session "harness-ui")
 (declare-function harness-ui-chat-goto-node "harness-ui-chat")
@@ -484,7 +484,8 @@ match.  / under the harness prefix stays the quick search's."
         ;; A search box: empty, point in it, its own label and placeholder.
         (should (equal '(search) harness-ui-tasks--target))
         (should harness-quick-search-box-mode)
-        (should (eq harness-quick-search-box-function #'harness-ui-tasks-search-submit))
+        ;; The box sends with the board's own send, the one C-c C-c runs.
+        (should (eq harness-quick-search-box-send-command #'harness-ui-tasks-submit))
         (should (harness-compose-in-p))
         (should (equal "" (harness-compose-text)))
         (should (string-match-p "Search tasks, sessions and commands" (harness-ui-tasks-search-test--label board)))
@@ -492,7 +493,7 @@ match.  / under the harness prefix stays the quick search's."
                                 (harness-ui-tasks-search-test--placeholder board)))
         ;; RET in the box searches the line.
         (insert "flaky test")
-        (should (eq (key-binding (kbd "RET")) #'harness-quick-search-box-submit))
+        (should (eq (key-binding (kbd "RET")) #'harness-quick-search-box-send))
         (call-interactively (key-binding (kbd "RET")))
         ;; The box is a task's again, and holds what it held.
         (should-not harness-ui-tasks--target)

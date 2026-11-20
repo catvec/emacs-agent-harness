@@ -15529,10 +15529,14 @@ Quick search (`harness-ui-quick-search`, `C-c h T /` anywhere but on a
 board, `/` in the Tools group of the menu, `harness-quick-search`): a popout
 (`harness-ui-popout`, KEY `(quick-search)`) at the bottom of the frame,
 opened from any buffer, whose shared compose box takes the line to
-search (`harness-quick-search-box-mode`: `RET` in the box calls
-`harness-quick-search-box-function` with the trimmed text, `M-p`/`M-n`
-walk `harness-quick-search-history`, and outside the box the keys are the
-buffer's own; `C-c C-c` sends too).  The line stays in the box.  It goes
+search (`harness-quick-search-box-mode`: `C-c C-c` sends it, as it sends
+every box, with the host's own command -- the popout's
+`harness-ui-popout-submit`, the board's `harness-ui-tasks-submit`, which
+the search presses too and which hands the line on with the trimmed
+text; the search has no send of its own; `RET` in the box presses that
+same command, `M-p`/`M-n` walk `harness-quick-search-history`, and
+outside the box the keys are the buffer's own).  The line stays in the
+box.  It goes
 to `_harness/search/ask` with `:context` (`harness-quick-search-context`:
 the view of the buffer the popout was opened from -- board, chat,
 session list, conversation tree, settings or other -- its title and mode,

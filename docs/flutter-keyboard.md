@@ -70,7 +70,7 @@ has. The prefix is `C-c`; the command key has Control.
 
 | Key | The harness function | Where |
 | --- | --- | --- |
-| `C-c C-c` | send the message | a conversation, the workspace |
+| `C-c C-c` | send the message, or the search's line | a conversation, the workspace, the quick search |
 | `C-c C-k` | stop the running turn | a conversation, the workspace |
 | `C-c C-a` | attach images | a conversation that takes images |
 | `C-c C-s` | open the quick search | every screen of the shell, and a conversation |

@@ -7,6 +7,7 @@
 import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -116,6 +117,16 @@ String _shown(WidgetTester tester) {
   return tabs[tester
       .widget<NavigationBar>(find.byType(NavigationBar))
       .selectedIndex];
+}
+
+/// The harness keys' prefix: C-c, then the key with Control, as a person
+/// types it on a keyboard that has them.
+Future<void> _chord(WidgetTester tester, LogicalKeyboardKey key) async {
+  await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+  await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
+  await tester.sendKeyEvent(key);
+  await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+  await tester.pump();
 }
 
 Future<void> _close(WidgetTester tester) async {
@@ -343,6 +354,80 @@ void main() {
         await _settle(tester, 6);
         expect(_page, findsNothing);
         expect(find.byType(NavigationBar), findsOneWidget);
+      },
+    );
+
+    // The search box sends as the app's message box does, by the setting that
+    // sends a message: C-c C-c reaches the query where a person sends with it,
+    // and Return then writes the line it writes in Emacs.
+    testWidgets(
+      'C-c C-c searches when that is the send key, and Return breaks the line',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+        try {
+          final rig = await _rig();
+          await rig.settings.setSendKey(SendKey.ctrlCctrlC);
+          await _pump(tester, rig);
+          await _open(tester);
+          await tester.enterText(_field, 'the merge queue');
+          await tester.pump();
+          // Return is a new line now, as in a conversation's box.
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await _settle(tester, 2);
+          expect(rig.search.asks, isEmpty);
+          // C-c C-c sends the query.
+          await _chord(tester, LogicalKeyboardKey.keyC);
+          await _settle(tester, 6);
+          expect(rig.search.lastQuery, 'the merge queue');
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      },
+    );
+
+    // With the harness keys on, C-c C-c sends the line whatever the send
+    // key is, as it sends a message in a conversation: the search page is
+    // pushed above the shell's key layer, so its own box answers the prefix.
+    testWidgets('C-c C-c searches when the harness keys are on', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      try {
+        final rig = await _rig();
+        await rig.settings.setHarnessKeys(true);
+        await _pump(tester, rig);
+        await _open(tester);
+        await tester.enterText(_field, 'the merge queue');
+        await tester.pump();
+        await _chord(tester, LogicalKeyboardKey.keyC);
+        await _settle(tester, 6);
+        expect(rig.search.lastQuery, 'the merge queue');
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets(
+      'with Return as the send key, C-c C-c leaves the field alone',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+        try {
+          final rig = await _rig();
+          await _pump(tester, rig);
+          await _open(tester);
+          await tester.enterText(_field, 'the merge queue');
+          await tester.pump();
+          await _chord(tester, LogicalKeyboardKey.keyC);
+          await _settle(tester, 2);
+          expect(rig.search.asks, isEmpty, reason: 'Return sends, not C-c C-c');
+          expect(
+            tester.widget<TextField>(find.byType(TextField)).controller!.text,
+            'the merge queue',
+            reason: 'the prefix never types itself into the words',
+          );
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
       },
     );
 
