@@ -643,6 +643,28 @@ conversation again, uncached.")
                                id (harness-error-message err))
                   nil)))))
 
+(defun harness-agent-session-system (session)
+  "Return SESSION's system prompt, settling it the first time it is asked.
+A session's system prompt is read once and kept for the whole of its
+life, in its record.  Everything a request starts with -- the system
+prompt, then the tool schema, then the conversation -- is what a
+provider's prompt cache reads, so a section rebuilt from a store that
+changed would rewrite that start and cost the conversation again.  The
+stores do change while a session lives: a memory is saved, a skills
+index moves on disk, a permission grant adds a directory or a tool.
+None of that may reach the prompt, because a prompt is not where new
+information goes -- a new message is.  SESSION is a session plist; the
+prompt is settled on the session it names when that session is in
+memory, and is this value read once when it is not."
+  (let ((id (plist-get session :id))
+        (kept (plist-get session :system)))
+    (if (and (stringp kept) (not (string-empty-p kept)))
+        kept
+      (let ((prompt (harness-agent--system-prompt session)))
+        (when (and (stringp id) (harness-method-exists-p 'session/set-system))
+          (ignore-errors (harness-call 'session/set-system id prompt)))
+        prompt))))
+
 (defun harness-agent--system-prompt (session)
   "Return the system prompt for SESSION after the `agent/system-prompt' filter.
 Its Environment section is the same for every session of a project, and
@@ -653,7 +675,10 @@ value that changes -- a directory, the date -- costs the whole
 conversation again, and one that names the session's own directory is a
 prompt no fork or seed of it can share.  What the model needs to know
 about where it works it reads from `session_info', or from the tools
-themselves, which run there."
+themselves, which run there.
+
+This builds the prompt; a session sends the one it settled
+\(`harness-agent-session-system'), which is this value read once."
   (let* ((pointer (if (and (fboundp 'harness-tool-get) (harness-tool-get "session_info"))
                       " (session_info names it)"
                     ""))
@@ -1682,19 +1707,31 @@ holds the conversation itself: it is sent the newest message only.
 Nothing is changed by making it (see `harness-agent--step', which keeps
 the payload)."
   (let* ((session (harness-call 'session/get session-id))
+         ;; The prompt and the schema are settled before the session is
+         ;; read again, so that the request carries the session as it
+         ;; stands and making one changes nothing: see
+         ;; `harness-agent-session-system' and `session/set-tool-schema'.
+         ;; Both are settled once, at a session's first request, and are
+         ;; that same text and list for the rest of its life -- a store
+         ;; that changed under it must not rewrite what a provider's
+         ;; prompt cache reads.
+         (prompt (harness-agent-session-system session))
+         (_schema (and (harness-method-exists-p 'tools/list)
+                       (harness-call 'tools/list session-id)))
+         (session (harness-call 'session/get session-id))
          (model (plist-get session :model))
          (request (list :model model
                         :session session
-                        :system (harness-agent--system-prompt session)
+                        :system (or (plist-get session :system) prompt)
                         :messages (harness-agent--request-messages session)
                         :tools (if (harness-method-exists-p 'tools/list)
                                    (harness-call 'tools/list session-id) nil)
-                        ;; Tools the provider runs itself, in place of these.
-                        :builtin-tools (and (harness-method-exists-p 'tools/builtin)
-                                            (harness-call 'tools/builtin session-id))
-                        :thinking (plist-get session :thinking)
-                        :provider-state state
-                        :on-event on-event)))
+                         ;; Tools the provider runs itself, in place of these.
+                         :builtin-tools (and (harness-method-exists-p 'tools/builtin)
+                                             (harness-call 'tools/builtin session-id))
+                         :thinking (plist-get session :thinking)
+                         :provider-state state
+                         :on-event on-event)))
     (if (harness-agent--hosted-p session)
         request
       (harness-agent--replay-messages request))))

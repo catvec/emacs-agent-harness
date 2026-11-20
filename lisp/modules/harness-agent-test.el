@@ -2787,6 +2787,69 @@ cut, as the retry module and the fallback do."
 (declare-function harness-agent-step-request "harness-agent" (session-id state on-event))
 (declare-function harness-agent-last-request "harness-agent" (session-id))
 
+(ert-deftest harness-agent-a-session-settles-its-system-prompt-once ()
+  "A session sends the system prompt it settled at its first request, forever.
+Everything a request starts with is what a provider's prompt cache
+reads, so a section rebuilt from a store that changed -- a memory just
+saved, a skills index that moved, a directory granted -- would rewrite
+that start and cost the conversation again.  New information reaches the
+model in a new message, never in the prompt, so the prompt a session
+first sent is the prompt it always sends, across steps and restarts."
+  (harness-agent-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted")
+                          :id))
+           (first (harness-agent-step-request id nil #'ignore))
+           (settled (plist-get first :system)))
+      (should (stringp settled))
+      ;; Something a filter reads changes after the session began.
+      (let ((changer (lambda (prompt _session) (concat prompt "\n\n## Changed\nlater"))))
+        (harness-add-filter 'agent/system-prompt changer 5)
+        (unwind-protect
+            (progn
+              ;; The next request of the same session sends the same prompt.
+              (let ((again (harness-agent-step-request id nil #'ignore)))
+                (should (equal settled (plist-get again :system)))
+                (should-not (string-match-p "## Changed" (plist-get again :system))))
+              ;; And so does the session read back from its record, as a
+              ;; restart reads it.
+              (harness-session-flush)
+              (clrhash harness-sessions)
+              (harness-session--load-all)
+              (let* ((reloaded (harness-call 'session/get id))
+                     (request (harness-agent-step-request id nil #'ignore)))
+                (should (equal settled (plist-get reloaded :system)))
+                (should (equal settled (plist-get request :system)))))
+          (harness-remove-filter 'agent/system-prompt changer))))))
+
+(ert-deftest harness-agent-a-session-settles-its-tools-once ()
+  "A session sends the tool schema it settled at its first request, forever.
+The schema follows the system prompt in a request and a cache reads it
+too, so a tool that appears mid-session -- a permission grant, a plugin,
+a module loading late -- is not added to it: what the session may do
+that it did not know about reaches it in a message."
+  (harness-agent-test-with
+    (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :model "demo:scripted")
+                          :id))
+           (first (mapcar (lambda (spec) (format "%s" (plist-get spec :name)))
+                          (harness-call 'tools/list id))))
+      (should (member "list_dir" first))
+      (should-not (member "brand_new_tool" first))
+      (harness-define-tool "brand_new_tool" :label "New" :description "new" :kind 'read
+                           :handler (lambda (_input _ctx) "new"))
+      (let ((again (mapcar (lambda (spec) (format "%s" (plist-get spec :name)))
+                           (harness-call 'tools/list id))))
+        ;; The session settled without it, so it is not offered it.
+        (should-not (member "brand_new_tool" again))
+        (should (equal first again)))
+      ;; A session made after it exists is offered it, since it settles
+      ;; its own schema.
+      (let* ((other (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir)
+                                             :model "demo:scripted")
+                               :id))
+             (theirs (mapcar (lambda (spec) (format "%s" (plist-get spec :name)))
+                             (harness-call 'tools/list other))))
+        (should (member "brand_new_tool" theirs))))))
+
 (ert-deftest harness-agent-step-request-is-what-a-step-sends ()
   "`harness-agent-step-request' is the one place a step's request is made: what
 the provider is sent is what it returns, with the listener the step gave it,

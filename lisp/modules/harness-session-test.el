@@ -1255,9 +1255,13 @@ its transcript; one made at its parent's head goes on."
   (harness-session-test-with
     (let* ((id (plist-get (harness-call 'session/create :cwd (harness-test-temp-dir) :name "old") :id))
            (s (gethash id harness-sessions))
-           ;; Made before the last six slots: provider-node, move, ext,
-           ;; last-message, steering and compaction.
-           (old (apply #'record (cl-loop for i below (- (length s) 6) collect (aref s i))))) 
+           ;; Made by a layout that had the first of the slots added later:
+           ;; provider-node, move, ext, last-message, steering, compaction,
+           ;; system and tool-schema are the ones a record can be short of.
+           (old (apply #'record
+                       (cl-loop for i below (- (length s)
+                                               (length harness-session--upgrade-records-slots))
+                                collect (aref s i)))))
       (puthash id old harness-sessions)
       (should-error (harness-session-provider-node old))
       (should-error (harness-session-move old))
@@ -1273,6 +1277,8 @@ its transcript; one made at its parent's head goes on."
         (should-not (harness-session-ext new))
         (should-not (harness-session-last-message new))
         (should-not (harness-session-steering new))
+        (should-not (harness-session-system new))
+        (should-not (harness-session-tool-schema new))
         (should (equal "old" (plist-get (harness-call 'session/get id) :name)))
         ;; The slots are there to use.
         (harness-call 'session/set-ext id :supervisor t)

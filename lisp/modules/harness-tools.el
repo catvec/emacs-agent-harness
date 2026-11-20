@@ -1186,11 +1186,23 @@ filter `agent/builtin-tools' pick them."
 The tools SESSION-ID's provider runs itself (see `tools/builtin') are
 left out, and in corporate mode (`harness-corporate-mode') the tools of
 kind net other than web search, and ssh.  Without SESSION-ID, every
-registered tool is listed."
+registered tool is listed.
+
+For a session, the names are the ones it settled at its first request
+\(`session/set-tool-schema'): the schema follows the system prompt in a
+request, so a tool added mid-session -- a permission grant, a plugin, a
+module loading late -- would rewrite what the provider's cache reads.
+A tool a session settled without is not one it can call; what it may do
+that it did not know about reaches it in a message."
   (let* ((session (and session-id (harness-tools--session session-id)))
-         (names (harness-tools--names session))
+         (settled (and session (plist-get session :tool-schema)))
+         (names (if (consp settled)
+                    settled
+                  (harness-tools--names session)))
          (builtin (harness-tools--builtin session names))
          (names (cl-remove-if (lambda (n) (member n builtin)) names)))
+    (when (and session (not (consp settled)))
+      (ignore-errors (harness-call 'session/set-tool-schema session-id names)))
     (delq nil (mapcar (lambda (n) (let ((tool (harness-tool-get n))) (and tool (harness-tool-spec tool)))) names))))
 
 (harness-defmethod tools/builtin (session-id)

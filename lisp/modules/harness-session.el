@@ -167,10 +167,21 @@ A longer prompt is cut there, with a note saying it was.")
   ext                                   ; settings modules keep here, a plist, or nil
   last-message                          ; time of its latest user or assistant message, or nil
   steering                              ; messages the running turn has not taken yet, or nil
-  compaction)                           ; the compaction in force, as it was made, or nil
+  compaction                            ; the compaction in force, as it was made, or nil
+  system                                ; the system prompt it sends, settled once, or nil
+  tool-schema)                          ; the tool names it sends, settled once, or nil
 
 (defvar harness-sessions (make-hash-table :test 'equal)
   "Session id -> `harness-session'.")
+
+(defconst harness-session--upgrade-records-slots
+  '(provider-node move ext last-message steering compaction system tool-schema)
+  "The slots of a session a record can be short of.
+Each was added to the struct after records of that session were already
+written (`harness-session--upgrade-records'): a session read from such a
+record is copied into one whose slots keep their defaults.  A slot added
+later goes here and last in the struct, and a test that makes a record of
+an earlier layout counts them here rather than in a number.")
 
 (defun harness-session--upgrade-records ()
   "Give the sessions in memory the slots the struct gained since they were made.
@@ -193,7 +204,8 @@ defaults."
   '(:id :name :kind :project :cwd :host :worktree :model :permission-mode :thinking
     :non-interactive :allowed-dirs :status :parent-id :fork-node :created :updated :usage
     :context-window :context-window-override :context-window-limit :budget :head :queue :steering
-    :pending :todos :plan :provider-state :provider-node :cache :move :ext :last-message))
+    :pending :todos :plan :provider-state :provider-node :cache :move :ext :last-message :system
+    :tool-schema))
 
 (defconst harness-session--symbol-keys '(:kind :status :permission-mode)
   "Keys whose values are symbols in memory and strings on disk.")
@@ -394,7 +406,9 @@ provider conversation and permission state behind it."
                :compaction (harness-session--compaction s)
                :move (harness-session-move s)
                :ext (harness-session-ext s)
-               :last-message (harness-session-last-message s))))
+               :last-message (harness-session-last-message s)
+               :system (harness-session-system s)
+               :tool-schema (harness-session-tool-schema s))))
     (if lean
         (apply #'harness-plist-remove plist harness-session--lean-keys)
       plist)))
@@ -490,7 +504,14 @@ or a plist (keyword keys) of those."
           ;; sessions kept it.
           (harness-session-compaction s) (harness-session--compaction-value (plist-get pl :compaction))
           ;; Nil for a record written before sessions kept it.
-          (harness-session-last-message s) (let ((v (plist-get pl :last-message))) (and (numberp v) v)))
+          (harness-session-last-message s) (let ((v (plist-get pl :last-message))) (and (numberp v) v))
+          ;; The system prompt it sends: nil for a record written before
+          ;; sessions kept it, and for one that has not sent a request yet.
+          (harness-session-system s) (let ((v (plist-get pl :system))) (and (stringp v) v))
+          ;; The tool names it sends: nil for a record written before
+          ;; sessions kept them, and one settled at its first request.
+          (harness-session-tool-schema s) (let ((v (plist-get pl :tool-schema)))
+                                            (and (listp v) (cl-every #'stringp v) v)))
     ;; A session saved before the policy came keeps no setting it fixes.
     (harness-session--apply-policy s)
     s))
@@ -1163,6 +1184,39 @@ nothing is read from disk for it."
     (unless (equal made (harness-session-compaction s))
       (setf (harness-session-compaction s) made)
       (harness-session--touch s))))
+
+(harness-defmethod session/set-tool-schema (id names)
+  "Keep NAMES, the tool names session ID sends, settling them once; return them.
+The tool schema follows the system prompt in a request, so it is the
+same problem: a provider's cache reads it, and a tool added mid-session
+-- by a permission grant, a plugin, a module loading late -- would
+rewrite it and cost the conversation again.  NAMES is settled at the
+session's first request and is that same list for the rest of its life.
+A session that has one keeps it: this changes nothing and returns what
+it already had.  A tool a session was not offered is not one it can
+call, and new information about what it may do reaches it in a message."
+  (let ((s (harness-session--get id)))
+    (unless (consp (harness-session-tool-schema s))
+      (setf (harness-session-tool-schema s) (and (listp names) (copy-sequence names)))
+      (harness-session--touch s))
+    (harness-session-tool-schema s)))
+
+(harness-defmethod session/set-system (id prompt)
+  "Keep PROMPT as the system prompt session ID sends; return it.
+A session's system prompt is settled once, at its first request, and is
+that same text for the rest of its life (`harness-agent-session-system'):
+it is the start of everything a provider's prompt cache reads, so a
+section rebuilt from a store that changed -- a memory saved, a skills
+index that moved, a directory granted -- would rewrite that start and
+cost the conversation again.  New information reaches the model in a new
+message, not in the prompt.  A session that has one keeps it: this
+changes nothing and returns what it already had."
+  (let ((s (harness-session--get id)))
+    (unless (and (stringp (harness-session-system s))
+                 (not (string-empty-p (harness-session-system s))))
+      (setf (harness-session-system s) prompt)
+      (harness-session--touch s))
+    (harness-session-system s)))
 
 (harness-defmethod session/set-compaction (id compaction)
   "Say which compaction of session ID is the one in force, or nil for none.
