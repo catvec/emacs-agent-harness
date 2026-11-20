@@ -8604,8 +8604,8 @@ priority).
   task that has not started, stops a running turn or write-up),
   `task/delete ID &optional DELETE-SESSION` (keeps the worktree),
   `task/for-session SESSION-ID` (the task of a session, or nil, which
-  `hand_in` and the session's review banner use; the banner at the end
-  of a report popout has the task already) and
+  `hand_in` and the hand_in call of the session's review use; the banner
+  at the end of a report popout has the task already) and
   `task/hand-in ID REPORT` (record `:summary` and `:evidence` as the
   work ID handed in; the write-up tool's `:end-turn` ends its turn, which
   the review step then picks up).  A round of work whose turn ends
