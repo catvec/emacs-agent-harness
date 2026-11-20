@@ -47,8 +47,9 @@ import voice_fixtures as fixtures  # noqa: E402
 from harness_voice_sidecar import (  # noqa: E402
     AUDIO_BACKENDS, LEVEL_FLOOR_DBFS, LOCAL_RATE, FakeConnection, FakeEvents, NullAudio,
     Player, Recorder, Sidecar, SpeechDetector, Vad, audio_backend, audio_backend_names,
-    audio_backends, audio_missing_reason, level_dbfs, pcm_energy, pcm_from_wav,
-    pcm_peak, self_test_audio, wav_from_pcm,
+    audio_backends, audio_missing_reason, level_dbfs, normalised_speech,
+    pcm_energy, pcm_from_wav, pcm_peak, self_test_audio, unspoken_sentences,
+    wav_from_pcm,
 )
 
 SCRIPT = os.path.join(ROOT, "scripts", "harness-voice-live-unmute")
@@ -759,6 +760,43 @@ class SidecarGateTest(unittest.TestCase):
             rig.stop()
 
 
+class SharedDedupeTest(unittest.TestCase):
+    """"What has not been said yet" has one implementation, not one per sidecar.
+
+    The reported artifact came from the three sidecars each carrying their
+    own copy of this check: the GPT-Live one never got one, so it said
+    every streamed sentence a second time when the turn's result arrived.
+    """
+
+    pieces = ["I need to check something with you.", "Just running some tools."]
+    full = "I need to check something with you. Just running some tools. Done."
+
+    def test_the_sidecars_dedupe_through_the_one_shared_helper(self):
+        unmute_sidecar = unmute.UnmuteSidecar(
+            unmute.parse_args([SCRIPT]), events=FakeEvents(),
+            player=NullAudio(), recorder=NullAudio())
+        unmute_sidecar.commentary = list(self.pieces)
+        gpt_sidecar = gpt.GptSidecar(
+            gpt.parse_args([GPT_SCRIPT]), events=FakeEvents(),
+            connection=FakeConnection(), player=NullAudio(), recorder=NullAudio())
+        gpt_sidecar.commentary = list(self.pieces)
+        self.assertEqual(unspoken_sentences(self.full, self.pieces), "Done.")
+        self.assertEqual(unmute_sidecar._unspoken(self.full), "Done.")
+        self.assertEqual(gpt_sidecar.unspoken_result(self.full), "Done.")
+        # Accounting for a result drops the record, so this turn's words
+        # cannot suppress the next turn's.
+        self.assertEqual(gpt_sidecar.commentary, [])
+
+    def test_markup_is_flattened_the_same_way_on_both_sides(self):
+        # Emacs sends the piece with the markup stripped and the result
+        # with it intact; a sentence must still match itself.
+        self.assertEqual(normalised_speech("The **cache** is `warm`."),
+                         normalised_speech("The cache is warm."))
+        self.assertEqual(unspoken_sentences("The **cache** is warm.",
+                                            ["The cache is warm."]),
+                         "")
+
+
 class TurnHoldTest(unittest.TestCase):
     def test_base_hold_is_explicit_output_only_and_cleared_without_replay(self):
         sidecar = Sidecar(events=FakeEvents(), player=NullAudio())
@@ -1114,6 +1152,81 @@ class GptGateTest(unittest.TestCase):
         self.assertTrue(sidecar.closed)
         self.assertFalse(sidecar.turn_held)
         self.assertEqual(sidecar.player.played, b"")
+
+    def appends(self, sidecar):
+        """Return the commentary texts steered into GPT-Live, in order."""
+        return [item["text"] for item in sidecar.connection.sent
+                if item["type"] == "session.commentary.append"]
+
+    def test_a_streamed_reply_is_not_said_again_by_its_result(self):
+        """The reported artifact: every sentence was spoken twice.
+
+        Emacs streams a reply sentence by sentence as commentary, then
+        sends the turn's whole text as the result.  The sidecar appended
+        that whole text too, so the voice model was told to say every
+        sentence a second time.
+        """
+        sidecar = self.sidecar()
+        for index, piece in enumerate(["I need to check something with you.",
+                                       "Just running some tools."]):
+            sidecar.handle({"event": "commentary", "id": "n-1:%d" % index,
+                            "text": piece})
+        sidecar.handle({"event": "delegate_result", "id": "u-1",
+                        "text": "I need to check something with you. "
+                                "Just running some tools."})
+        self.assertEqual(self.appends(sidecar),
+                         ["I need to check something with you.",
+                          "Just running some tools."])
+        for phrase in ("I need to check something with you.",
+                       "Just running some tools."):
+            self.assertEqual(sum(text.count(phrase) for text in self.appends(sidecar)),
+                             1, "%r was spoken more than once" % phrase)
+
+    def test_a_result_says_only_the_sentences_commentary_did_not(self):
+        sidecar = self.sidecar()
+        sidecar.handle({"event": "commentary", "id": "n-1:0",
+                        "text": "It is done."})
+        sidecar.handle({"event": "delegate_result", "id": "u-1",
+                        "text": "It is done. The tests pass."})
+        self.assertEqual(self.appends(sidecar),
+                         ["It is done.", "The tests pass."])
+
+    def test_markup_and_whitespace_do_not_hide_an_already_spoken_sentence(self):
+        """Emacs strips markup before it sends a piece; the result keeps it."""
+        sidecar = self.sidecar()
+        sidecar.handle({"event": "commentary", "id": "n-1:0",
+                        "text": "The **cache** is warm."})
+        sidecar.handle({"event": "delegate_result", "id": "u-1",
+                        "text": "The **cache** is warm.\n\nRun `make test` next."})
+        self.assertEqual(self.appends(sidecar),
+                         ["The **cache** is warm.", "Run `make test` next."])
+
+    def test_a_new_request_starts_with_no_commentary_of_its_own(self):
+        """A previous turn's pieces must not suppress this turn's words."""
+        sidecar = self.sidecar()
+        sidecar.on_user_delta("first request")
+        sidecar.on_delegation({"delegation_id": "d-1"})
+        sidecar.handle({"event": "commentary", "id": "n-1:0", "text": "On it."})
+        sidecar.handle({"event": "delegate_result", "id": "d-1", "text": "On it."})
+        sidecar.on_user_delta("second request")
+        sidecar.on_delegation({"delegation_id": "d-2"})
+        sidecar.handle({"event": "commentary", "id": "n-2:0", "text": "On it."})
+        sidecar.handle({"event": "delegate_result", "id": "d-2", "text": "On it."})
+        self.assertEqual(self.appends(sidecar), ["On it.", "On it."])
+
+    def test_a_result_arriving_mid_speech_holds_only_the_new_sentences(self):
+        """A held result is pending context; it must not carry the words twice."""
+        sidecar = self.sidecar()
+        sidecar.handle({"event": "commentary", "id": "n-1:0",
+                        "text": "I need to check something with you."})
+        sidecar.announce_speech(True, reason="onset")
+        sidecar.handle({"event": "delegate_result", "id": "u-1",
+                        "text": "I need to check something with you. "
+                                "Just running some tools."})
+        self.assertEqual([item["text"] for item in sidecar.held],
+                         ["Just running some tools."])
+        self.assertEqual(self.appends(sidecar),
+                         ["I need to check something with you."])
 
     def test_default_instructions_cover_continuation_and_recovery(self):
         instructions = gpt.parse_args([GPT_SCRIPT]).instructions

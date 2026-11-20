@@ -187,6 +187,7 @@ class GptSidecar(Sidecar):
         self.transcript = ""
         self.hearing = False
         self.held = []
+        self.forget_commentary()
         self.speech_active = False
         self.announce_speech(False, reason="muted")
         if muted and self.player:
@@ -351,6 +352,9 @@ class GptSidecar(Sidecar):
             return
         self.delegated += 1
         self.hearing = False
+        # A new request starts a new reply: the pieces of the last one
+        # must not suppress this one's sentences.
+        self.forget_commentary()
         self.events.send("transcribing")
         self.delegation(text, delegation_id=event.get("delegation_id") or ("chatgpt-%d" % self.delegated))
 
@@ -358,8 +362,12 @@ class GptSidecar(Sidecar):
 
     def on_commentary(self, text, event=None):
         if self.gate_blocked():
+            # Held, not said.  It is not recorded either: the turn's result
+            # is the only thing that will say these words, so it must not
+            # count them as already spoken.
             self.hold(text, (event or {}).get("id"))
             return
+        self.remember_commentary(text)
         self.steer("session.commentary.append", text)
 
     def on_thinking(self, text):
@@ -377,12 +385,20 @@ class GptSidecar(Sidecar):
         if error:
             self.steer("session.thinking.append", "The backend could not finish: %s" % error)
             return
-        if self.gate_blocked():
-            self.hold(text, "result:%s" % (delegation_id or "voice"))
+        # Emacs streamed this reply sentence by sentence as commentary, so
+        # the voice model has already been told to say those words.  Only
+        # the sentences it has not been given are appended; the whole text
+        # again is heard as the same message repeated.
+        remaining = self.unspoken_result(text)
+        if not remaining:
             return
-        self.steer("session.commentary.append", text)
+        if self.gate_blocked():
+            self.hold(remaining, "result:%s" % (delegation_id or "voice"))
+            return
+        self.steer("session.commentary.append", remaining)
 
     def on_held_result(self, delegation_id, text):
+        self.forget_commentary()
         self.steer("session.thinking.append",
                    "The backend result is held while the person speaks.")
 
@@ -508,6 +524,13 @@ def self_test(args):
     appended = [e for e in sidecar.connection.sent if e.get("type") == "session.commentary.append"]
     if not appended or appended[0].get("text") != "It is in place.":
         return self_test_failed("commentary append")
+    # A reply Emacs already streamed sentence by sentence is not appended
+    # again by the turn's result: that is the same message said twice.
+    sidecar.handle({"event": "commentary", "id": "c-1", "text": "It is in place."})
+    sidecar.handle({"event": "delegate_result", "id": "dg-2", "text": "It is in place."})
+    appended = [e for e in sidecar.connection.sent if e.get("type") == "session.commentary.append"]
+    if [e.get("text") for e in appended] != ["It is in place.", "It is in place."]:
+        return self_test_failed("a streamed sentence was appended twice")
     captions = [e for e in events.sent if e.get("event") == "assistant_delta"]
     if not captions or captions[-1].get("text") != "It is in place.":
         return self_test_failed("assistant caption")

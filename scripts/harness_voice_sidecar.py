@@ -42,6 +42,7 @@ import json
 import math
 import os
 import queue
+import re
 import select
 import shutil
 import signal
@@ -133,6 +134,36 @@ def speakable(text):
     """Return TEXT when a speech server could say it, else an empty string."""
     text = text or ""
     return text if any(ch.isalnum() for ch in text) else ""
+
+
+# Emacs streams a reply to the sidecar one sentence at a time as
+# `commentary', then sends the turn's whole text as `delegate_result'.
+# A sidecar that speaks the result as it stands says every sentence a
+# second time, which is heard as the same message repeating.  These two
+# helpers are the one implementation of "what has not been said yet";
+# each sidecar used to carry its own copy and one of them never got one.
+def normalised_speech(text):
+    """Return TEXT with markup, whitespace and case flattened.
+
+    Emacs strips the markup before it sends a piece
+    (`harness-voice--speech-text'), so the reply's own sentences are
+    flattened the same way here: otherwise a sentence with `code` or
+    **bold** in it never matched the piece spoken for it and was said
+    twice.
+    """
+    text = re.sub(r"!?\[([^\]\n]+)\]\([^)]*\)", r"\1", text or "")
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"(?m)^[ \t]*[#>*-]+[ \t]*", "", text)
+    text = re.sub(r"[`*_]", "", text)
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def unspoken_sentences(text, commentary):
+    """Return the sentences of TEXT that COMMENTARY has not covered."""
+    said = normalised_speech(" ".join(commentary or ()))
+    parts = re.split(r"(?<=[.!?])\s+", (text or "").strip())
+    return " ".join(part for part in parts
+                    if part and normalised_speech(part) not in said).strip()
 
 
 #; ------------------------------------------------------------------
@@ -1549,6 +1580,11 @@ class Sidecar:
         self.closed = False
         self.held = []
         self.held_seq = 0
+        # The pieces Emacs streamed for the reply in progress.  The turn's
+        # `delegate_result' holds the same words, so a sidecar that speaks
+        # the result as it stands says them twice; `unspoken_result' is how
+        # each sidecar asks for the part that was not said yet.
+        self.commentary = []
         self.level_meter = LevelMeter()
         self.pending_acknowledgment = None
         self.delegation_id = None
@@ -1567,6 +1603,7 @@ class Sidecar:
         self.speech_active = False
         self.turn_held = False
         self.held = []
+        self.commentary = []
         self.announce()
         self.on_start()
 
@@ -1691,6 +1728,9 @@ class Sidecar:
         if self.player:
             self.player.stop()
         self.held = []
+        # The reply that was being said is over; its pieces must not
+        # suppress the sentences of the next one.
+        self.commentary = []
         self.pending_acknowledgment = None
         self.speaking = False
         fields = {"interrupt_id": request_id} if request_id is not None else {}
@@ -1718,6 +1758,29 @@ class Sidecar:
         """Non-nil while assistant audio must not start (not a mic mute)."""
         return bool(self.closed or self.muted or self.speech_active
                     or self.turn_held)
+
+    def remember_commentary(self, text):
+        """Record a streamed piece so the turn's result is not said twice."""
+        text = (text or "").strip()
+        if text:
+            self.commentary.append(text)
+
+    def unspoken_result(self, text):
+        """Return the part of the turn's result TEXT not spoken as commentary.
+
+        Emacs streams the reply sentence by sentence as `commentary' and
+        then sends the whole text as `delegate_result'.  A sidecar that
+        speaks that result as it stands repeats every sentence.  The
+        pieces are dropped here as well: the next turn starts with an
+        empty record.
+        """
+        remaining = unspoken_sentences(text, self.commentary)
+        self.commentary = []
+        return remaining
+
+    def forget_commentary(self):
+        """Drop the streamed pieces: a new turn or an interruption."""
+        self.commentary = []
 
     def set_turn_held(self, active):
         """Hold output until the client explicitly clears ACTIVE.
@@ -1922,7 +1985,14 @@ class Sidecar:
     def on_stop(self): pass
     def on_mute(self, muted): pass
     def on_turn_hold(self, active): pass
-    def on_commentary(self, text, event=None): pass
+    def on_commentary(self, text, event=None):
+        """Speak a streamed piece.  Subclasses override to actually say it.
+
+        Recording the piece is not optional: a subclass that speaks
+        commentary and forgets to record it makes its `on_result' say the
+        same sentences again when the turn's result arrives.
+        """
+        self.remember_commentary(text)
     def on_thinking(self, text): pass
     def on_result(self, delegation_id, text, error): pass
     def on_held_result(self, delegation_id, text): pass

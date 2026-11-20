@@ -357,6 +357,9 @@ The implemented loop:
 2. Assistant chunks stream back as `commentary`, sentence by sentence, with
    fenced code and markup filtered out. The turn's full text is sent as
    `delegate_result`; an announcement-only provider still produces one result.
+   Because both carry the same words, a sidecar speaks only the sentences of
+   the result that commentary has not already covered: saying the whole text
+   again is heard as the reply repeating itself.
 3. Tool calls, questions and permissions stay in the harness. The voice model
    may say that approval is needed; the user approves on screen. Spoken
    approval is not supported, as in ChatGPT Live.

@@ -45,7 +45,6 @@ import json
 import math
 import os
 import queue
-import re
 import sys
 import threading
 import time
@@ -56,8 +55,8 @@ from harness_voice_sidecar import (  # noqa: E402
     AUDIO_AUTO, CAPTURE_SECONDS, LOCAL_RATE, FakeEvents, Loop, NullAudio,
     Player, Recorder,
     Sidecar, Vad, audio_backend_names, http_json, http_multipart, log,
-    pcm_from_wav, self_test_audio, self_test_failed, self_test_ok, speakable,
-    wav_from_pcm,
+    pcm_from_wav, self_test_audio, self_test_failed, self_test_ok,
+    speakable, unspoken_sentences, wav_from_pcm,
 )
 
 DEFAULT_STT_URL = "http://127.0.0.1:8080/inference"
@@ -66,23 +65,6 @@ DEFAULT_TTS_URL = "http://127.0.0.1:8880/v1/audio/speech"
 #: The receipts a request may be answered with, in order.  They say only
 #: that the request arrived; none of them names work, progress or a result.
 ACKNOWLEDGMENT_PHRASES = ("On it", "Hmm, thinking", "Right")
-
-
-def _normal(text):
-    """Return TEXT with markup, whitespace and case flattened.
-
-    The duplicate check compares what the reply says with what the
-    commentary already spoke.  Emacs strips the markup before it sends a
-    piece (`harness-voice--speech-text'), so the reply's own sentences are
-    flattened the same way here: otherwise a sentence with `code` or
-    **bold** in it never matched the piece spoken for it and was said
-    twice.
-    """
-    text = re.sub(r"!?\[([^\]\n]+)\]\([^)]*\)", r"\1", text or "")
-    text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"(?m)^[ \t]*[#>*-]+[ \t]*", "", text)
-    text = re.sub(r"[`*_]", "", text)
-    return re.sub(r"\s+", " ", text.strip().lower())
 
 
 class UnmuteSidecar(Sidecar):
@@ -607,10 +589,7 @@ class UnmuteSidecar(Sidecar):
 
     def _unspoken(self, text):
         """Return the sentences of TEXT that commentary has not covered."""
-        said = _normal(" ".join(self.commentary))
-        parts = re.split(r"(?<=[.!?])\s+", (text or "").strip())
-        return " ".join(part for part in parts
-                        if part and _normal(part) not in said).strip()
+        return unspoken_sentences(text, self.commentary)
 
     def on_result(self, delegation_id, text, error):
         if error:
@@ -626,7 +605,7 @@ class UnmuteSidecar(Sidecar):
         self.commentary = []
 
     def on_commentary(self, text, event=None):
-        self.commentary.append(text)
+        self.remember_commentary(text)
         self.speak(text, (event or {}).get("id"))
 
     def on_delegation(self, delegation_id):
