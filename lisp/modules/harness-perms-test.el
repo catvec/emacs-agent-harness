@@ -1684,7 +1684,8 @@ widening its own permissions."
          (should (string-search part system)))
        (should-not (string-search "$defaults" system)))))
   ;; Its hard rules are all there, and writing the rules widens the agent's permissions.
-  (dolist (rule '("deleting or overwriting existing data outside the allowed roots"
+  (dolist (rule '("an act on production or on a shared service that cannot be taken back"
+                  "a\ndeploy, a release, a rollout, a database migration or a delete"
                   "force pushes, deleting remote branches" "sending secrets or private data off the machine"
                   "changing system configuration" "widening the agent's own permissions"
                   "writing autoMode rules into Claude"))
@@ -4155,35 +4156,53 @@ part of the harness keeps it denied."
          (should (string-match-p "standing rule" (plist-get d :reason))))
        (should (eq 'allow (harness-perms-test--behavior "read_file" 'read (expand-file-name "tasks.json" state))))))))
 
-(ert-deftest harness-perms-judge-is-told-inspecting-the-harness-is-ordinary ()
-  "The judge sees inspection of the harness done by other means, such
-as Emacs Lisp reading the state directory.  It is told that is ordinary
-work wherever the harness lives, where it lives, and that its
-credentials are the one exception."
+(ert-deftest harness-perms-judge-is-told-file-scope-is-not-its-question ()
+  "The judge is told that which files a call may reach is not its question.
+The jail and the sandbox decide that before the judge is asked: a call
+outside what its session may reach never reaches it, and one that does
+has been let through.  A judge that weighed paths instead denied
+ordinary work -- reading the harness's own state, a file beside the
+project -- for where it lay, which is not a judgment on the call.
+So its question carries no roots list and nothing of the harness's own
+paths, and its system prompt says never to deny a call for where a path
+lies."
   (harness-perms-test--call-with-harness
-   (lambda (repo build state)
+   (lambda (_repo _build state)
      (harness-perms-test--setup :permission-mode 'auto :non-interactive t)
-     (dolist (phrase '("inspecting the harness itself wherever it lives" "inside the allowed roots or not"
-                       "Emacs Lisp included" "acp-token and server-config.el"))
+     ;; The prompt names file scope as the jail's, not the judge's.
+     (dolist (phrase '("Which files a call may read, write or reach is not your question either"
+                       "never gets here"
+                       "never deny a\ncall for where a path lies"
+                       "read-only, read-write or not at all by the\nsandbox"))
        (should (string-search phrase harness-perms--judge-system)))
+     ;; What it weighs instead is an act that cannot be taken back.
+     (dolist (phrase '("an act on production or on a shared service that cannot be taken back"
+                       "a\ndeploy, a release, a rollout, a database migration or a delete"))
+       (should (string-search phrase harness-perms--judge-system)))
+     ;; A credential read into a tool's result still goes to the provider,
+     ;; which is a secrets question, not a path one.
+     (should (string-search "includes reading a\ncredential into a tool's result" harness-perms--judge-system))
+     ;; No path-scoped denial survives in its rules.
+     (should-not (string-search "outside the allowed roots" harness-perms--judge-system))
      (let* ((requests (harness-perms-test--scripted-judge
                        '(((:type text :delta "{\"decision\":\"allow\",\"reason\":\"inspection\"}")
                           (:type done :stop-reason end-turn)))))
             (harness-perms-auto-model "judge:x")
             (d (harness-perms-test--decide
                 (list :session harness-perms-test--session :tool "elisp" :kind 'exec
-                      :input (list :code (format "(with-temp-buffer (insert-file-contents %S) (buffer-string))"
-                                                 (expand-file-name "sessions/s1.json" state)))
+                      :input (list :code "(buffer-name)")
                       :call-id (harness-short-id))))
             (text (plist-get (car (plist-get (car (plist-get (car (funcall requests)) :messages)) :content)) :text)))
        (should (eq 'allow (plist-get d :behavior)))
-       (should (string-search "\nThe harness itself (inspecting it is ordinary work" text))
-       (should (string-search (format "- %s (its code)" build) text))
-       (should (string-search (format "- %s (its code)" (harness-perms-test--real repo)) text))
-       (should (string-search (format "- %s (its state: " state) text))
-       (should (string-search (expand-file-name "acp-token" state) text))
-       ;; The question still ends the message.
-       (should (string-match-p "\n\nIs this one call safe\\?" text))))))
+       ;; The message is the call alone: no roots list, no block of the
+       ;; harness's own directories, credentials or error details.
+       (should-not (string-search "Allowed roots" text))
+       (should-not (string-search "The harness itself" text))
+       (should-not (string-search state text))
+       (should-not (string-search "acp-token" text))
+       (should-not (string-search "server-config.el" text))
+       (should (string-search "\nWorking directory: " text))
+       (should (string-match-p "\n\nCould this one call do serious harm" text))))))
 
 (ert-deftest harness-perms-unattended-session-reads-the-harness-end-to-end ()
   "An unattended auto-mode session reads the harness with the real file

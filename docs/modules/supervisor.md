@@ -269,6 +269,7 @@ lets them carry on.
 - `session/select` ([session](session.md))
 - `session/set-ext` ([session](session.md))
 - `session/set-plan` ([session](session.md))
+- `session/set-tool-schema` ([session](session.md))
 - `session/update` ([session](session.md))
 - `session/update-node` ([session](session.md))
 - `task/for-session` ([tasks](tasks.md)), when it is loaded

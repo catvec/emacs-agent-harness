@@ -187,7 +187,9 @@ take it in.  The session list hides internal sessions unless asked.
 - `session/set-provider-state` (id state) — Replace the opaque provider state of session ID with STATE.
 - `session/set-status` (id status) — Set the status of session ID to STATUS (idle, running, blocked, inactive).
 - `session/set-steering` (id items) — Replace the messages the running turn of session ID has not taken with ITEMS.
+- `session/set-system` (id prompt) — Keep PROMPT as the system prompt session ID sends; return it.
 - `session/set-todos` (id todos) — Replace the todo list of session ID with TODOS.
+- `session/set-tool-schema` (id names) — Keep NAMES, the tool names session ID sends, settling them once; return them.
 - `session/tmp-dir` (id) — Return the temporary directory of session ID, made if missing.
 - `session/tmp-sweep` (&optional dry-run) — Delete the temporary directories of the sessions that are over; return them.
 - `session/transcript-text` (id) — Return the transcript of session ID as searchable plain text.

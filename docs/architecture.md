@@ -4278,30 +4278,31 @@ stage's label, else `gate`; the access module's judgements and the
   standing deny rule still decides; a directory prompt keeps waiting,
   because not even yolo grants a directory without the user, and so
   does a confirmation, which only the user gives.
-- The judge is a safety check, not the agent's manager.  Its prompt
-  (`harness-perms--judge-system`) has it decide one thing: whether the
-  call risks serious harm that is hard to undo.  That means destroying
-  data outside the roots, force pushes, system changes, sending secrets
-  away, or widening its own permissions.  It leans to allowing:
-  reads anywhere, edits, builds, tests, local git and scratch files
-  anywhere (temporary directories included) are ordinary work, and so
-  is inspecting the harness itself wherever it lives, with any tool,
-  Emacs Lisp included, its credentials (`acp-token`,
-  `server-config.el`) excepted: the judge sees only the inspection the
-  rules above do not already allow.  It
+- The judge is a safety check, not the agent's manager, and not the jail.
+  Its prompt (`harness-perms--judge-system`) has it decide one thing:
+  whether the call risks serious harm that is hard to undo.  That means
+  an act on production or a shared service that cannot be taken back (a
+  deploy, a release, a rollout, a migration, a delete), destroying data
+  nothing can restore, force pushes, system changes, sending secrets
+  away, or widening its own permissions.  Which files a call may read,
+  write or reach is not its question: the jail and the sandbox decide it
+  before the judge is asked, so the judge never sees the session's roots
+  and is told never to deny a call for where a path lies.  It leans to
+  allowing: reads, edits, builds, tests, local git and scratch files are
+  ordinary work, and so is inspecting the harness itself wherever it
+  lives, with any tool, Emacs Lisp included.  It
   never rules on the task, its scope, its review or the project's
   workflow, and it is given nothing to rule on them with.  The user
   message (`harness-perms--judge-text`) holds the call alone: the tool,
-  the first sentence of its description, the input, the working
-  directory, the allowed roots and where the harness lives
-  (`harness-perms--judge-harness`: its code and state directories and
-  its credential files).  The request is `:ephemeral`, so the
+  the first sentence of its description, the input and the working
+  directory, with no roots list and nothing of the harness's own paths.
+  The request is `:ephemeral`, so the
   provider brings no earlier verdicts and no project instructions
   (CLAUDE.md).  It names its job, "Permission judge" ("Permission judge
   (retry)" for the second ask), with the session asking as `:job-parent`,
   so each verdict is recorded as an internal session under it (see
   "provider").  A judge's denial carries `harness-perms-judge-deny-hint`.
-  A long input is cut (`harness-perms--judge-input-chars') and the block
+  A long input is cut (`harness-perms--judge-input-chars`) and the block
   above it says so; the judge is told to weigh what the call would do,
   never whether a value looks complete, since a cut input once read as
   the agent's own truncated edit ("the replacement string is

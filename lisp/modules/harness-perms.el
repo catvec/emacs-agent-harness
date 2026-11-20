@@ -71,13 +71,17 @@
 ;; steering message (`harness-perms--on-decided'): the user is away, so
 ;; it should find another way rather than wait.
 ;;
-;; The judge is a safety check, not the agent's manager.  It is shown
-;; one call (the tool, what it does, the input and where the agent
-;; works) and decides only whether that call risks serious harm,
-;; leaning to allow, since a needless denial stops work the user wants
-;; done.  Its request is `:ephemeral', so the provider brings no earlier
-;; verdicts and no project instructions (CLAUDE.md) along: it never
-;; rules on the task, its review or the project's workflow.
+;; The judge is a safety check, not the agent's manager, and not the
+;; jail either.  It is shown one call (the tool, what it does, the input
+;; and where the agent works) and decides only whether that call risks
+;; serious harm, leaning to allow, since a needless denial stops work the
+;; user wants done.  Which files the call may read or write is the jail's
+;; and the sandbox's to decide, and it decides it before the judge is
+;; asked: the judge is never shown the session's roots and is told never
+;; to deny a call for where a path lies.  Its request is `:ephemeral', so
+;; the provider brings no earlier verdicts and no project instructions
+;; (CLAUDE.md) along: it never rules on the task, its review or the
+;; project's workflow.
 ;;
 ;; What it does follow is what Claude Code's own auto mode follows: the
 ;; autoMode rules of Claude Code's user and managed settings (see "The
@@ -168,8 +172,9 @@
 ;; roots: writing there, or running a command there, stays jailed.  The
 ;; credentials in the state directory (`harness-perms--private-files')
 ;; are left out, since what a tool reads goes to the model's provider.
-;; The judge's prompt says the same for the calls it sees, such as Emacs
-;; Lisp that reads the state directory.  Standing rules still come
+;; The judge is told nothing of the harness's place, since a call that
+;; reaches it was already let through, and is told never to deny a call
+;; for reading the harness's own files.  Standing rules still come
 ;; first, so a user's deny rule holds.  The file emacs_find_definition
 ;; showed a definition in may be read the same way, and only that file
 ;; (see "Files the user's Emacs showed a definition in").
@@ -3583,13 +3588,12 @@ its scope or the project's workflow, and it is given nothing to rule on
 them with: `harness-perms--judge-text' describes the call alone, and the
 request is `:ephemeral', so the provider brings no earlier conversation
 and no project instructions (CLAUDE.md and the like) either.
-Inspecting the harness is ordinary work to it, as it is to the rules
-that allow it before the judge is asked (see
-`harness-perms--inspection-tools' and `harness-perms-inspection-dirs'):
-the judge only sees such inspection done by other means, such as Emacs
-Lisp, and is told where the harness lives.  The rules of Claude Code's
-auto-mode settings, which Claude Code's own auto mode follows, come
-after it (`harness-perms--judge-system-prompt').")
+Which files a call may reach is not its question either, and it is told
+so: the jail and the sandbox decide that before the judge is asked, so
+the judge never sees the session's roots and is never asked to weigh
+where a path lies.  The rules of Claude Code's auto-mode settings, which
+Claude Code's own auto mode follows, come after it
+\(`harness-perms--judge-system-prompt').")
 
 (defun harness-perms--what-it-does (description)
   "Return what a tool does: the first sentence of its DESCRIPTION.
@@ -3618,39 +3622,16 @@ LIMIT is how many characters of the JSON are shown, by default
                       " its first %d and cut the rest; the call is not missing anything):\n%s")
               (length json) limit (substring json 0 limit)))))
 
-(defun harness-perms--judge-harness ()
-  "Return the block of the judge's message that says where the harness lives.
-The judge sees inspection of the harness only when it is done by other
-means than the tools and reads the rules allow, such as Emacs Lisp;
-told where the harness is, it can tell such a call for what it is.  It
-is told the two exceptions too: the credentials, and the details of the
-harness's own errors, which `read_harness_errors' asks the user about."
-  (let ((dirs (harness-perms-inspection-dirs)))
-    (if (null dirs)
-        ""
-      (format "\nThe harness itself (inspecting it is ordinary work; reading its credentials, %s, is not%s):\n%s\n"
-              (mapconcat #'identity (harness-perms--private-paths) " and ")
-              (let ((details (and (fboundp 'harness-error-details-path)
-                                  (harness-error-details-path))))
-                (if details
-                    (format ", nor the details of its own errors, %s"
-                            (harness-abbreviate-file-name details))
-                  ""))
-              (mapconcat (lambda (e)
-                           (format "- %s (%s)" (plist-get e :dir)
-                                   (if (eq (plist-get e :source) 'state)
-                                       "its state: sessions and their transcripts, task boards, usage"
-                                     "its code")))
-                         dirs "\n")))))
-
 (defun harness-perms--judge-text (request &optional model)
   "Return the user message describing REQUEST for the judge, for MODEL.
-That is the call alone: the tool, what it does, its input, where the
-agent works and where the harness lives (`harness-perms--judge-harness').
-The input goes in as text, not bytes: the provider encodes the whole
-message as JSON again, and the bytes of non-ASCII input would make
-that fail.  MODEL's override of the registry's `perms-judge-question'
-is used."
+That is the call alone: the tool, what it does, its input and where the
+agent works.  It says nothing of the session's roots, of the paths the
+jail let through or of where the harness lives: which files a call may
+reach is the jail's and the sandbox's to decide, and a judge told to
+weigh it denied ordinary work for where it lay.  The input goes in as
+text, not bytes: the provider encodes the whole message as JSON again,
+and the bytes of non-ASCII input would make that fail.  MODEL's override
+of the registry's `perms-judge-question' is used."
   (let* ((tool (plist-get request :tool))
          (spec (and (harness-method-exists-p 'tools/get) (harness-call 'tools/get tool)))
          (session (plist-get request :session)))
@@ -3660,9 +3641,7 @@ is used."
            :kind (plist-get request :kind)
            :description (harness-perms--what-it-does (plist-get spec :description))
            :input (harness-perms--judge-input (plist-get request :input))
-           :cwd (or (plist-get session :cwd) default-directory)
-           :roots (mapconcat (lambda (r) (concat "- " r)) (harness-perms-roots session) "\n")
-           :harness (harness-perms--judge-harness))
+           :cwd (or (plist-get session :cwd) default-directory))
      model)))
 
 (defconst harness-perms-judge-deny-hint

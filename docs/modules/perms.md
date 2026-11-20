@@ -82,13 +82,17 @@ every denial in such a session, whoever made it, the agent gets a
 steering message (`harness-perms--on-decided`): the user is away, so
 it should find another way rather than wait.
 
-The judge is a safety check, not the agent's manager.  It is shown
-one call (the tool, what it does, the input and where the agent
-works) and decides only whether that call risks serious harm,
-leaning to allow, since a needless denial stops work the user wants
-done.  Its request is `:ephemeral`, so the provider brings no earlier
-verdicts and no project instructions (CLAUDE.md) along: it never
-rules on the task, its review or the project's workflow.
+The judge is a safety check, not the agent's manager, and not the
+jail either.  It is shown one call (the tool, what it does, the input
+and where the agent works) and decides only whether that call risks
+serious harm, leaning to allow, since a needless denial stops work the
+user wants done.  Which files the call may read or write is the jail's
+and the sandbox's to decide, and it decides it before the judge is
+asked: the judge is never shown the session's roots and is told never
+to deny a call for where a path lies.  Its request is `:ephemeral`, so
+the provider brings no earlier verdicts and no project instructions
+(CLAUDE.md) along: it never rules on the task, its review or the
+project's workflow.
 
 What it does follow is what Claude Code's own auto mode follows: the
 autoMode rules of Claude Code's user and managed settings (see "The
@@ -179,8 +183,9 @@ wherever they lie (`harness-perms-inspection-dirs`).  They are no
 roots: writing there, or running a command there, stays jailed.  The
 credentials in the state directory (`harness-perms--private-files`)
 are left out, since what a tool reads goes to the model's provider.
-The judge's prompt says the same for the calls it sees, such as Emacs
-Lisp that reads the state directory.  Standing rules still come
+The judge is told nothing of the harness's place, since a call that
+reaches it was already let through, and is told never to deny a call
+for reading the harness's own files.  Standing rules still come
 first, so a user's deny rule holds.  The file emacs_find_definition
 showed a definition in may be read the same way, and only that file
 (see "Files the user's Emacs showed a definition in").

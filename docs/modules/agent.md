@@ -180,6 +180,7 @@ The loop is entirely event driven: nothing here waits.
 - `session/set-provider-state` ([session](session.md))
 - `session/set-status` ([session](session.md))
 - `session/set-steering` ([session](session.md))
+- `session/set-system` ([session](session.md))
 - `session/tmp-dir` ([session](session.md))
 - `session/update-node` ([session](session.md))
 - `session/usage-add` ([session](session.md))
@@ -187,6 +188,7 @@ The loop is entirely event driven: nothing here waits.
 - `tools/builtin` ([tools](tools.md))
 - `tools/execute` ([tools](tools.md))
 - `tools/list` ([tools](tools.md))
+- `tools/settle` ([tools](tools.md))
 
 ### Events it handles
 

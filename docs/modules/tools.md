@@ -77,6 +77,7 @@ exist (`harness-tools--in-scope-p`).
 - `tools/execute-approved` (session-id call) — Run CALL (:id :name :input) for SESSION-ID with no permission check.
 - `tools/get` (name) — Return the spec of tool NAME or nil.
 - `tools/list` (&optional session-id) — Return tool specs available to SESSION-ID (or all), after `agent/tools`.
+- `tools/settle` (session-id) — Settle the tool names SESSION-ID's requests carry, and return them.
 
 ### Tools
 
@@ -117,6 +118,7 @@ exist (`harness-tools--in-scope-p`).
 - `session/exists-p` ([session](session.md)), when it is loaded
 - `session/get` ([session](session.md)), when it is loaded
 - `session/nodes` ([session](session.md))
+- `session/set-tool-schema` ([session](session.md))
 - `task/list` ([tasks](tasks.md)), when it is loaded
 
 ### Events it handles

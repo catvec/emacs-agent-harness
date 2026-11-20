@@ -425,7 +425,9 @@ process can reach:
   a known limit, below.
 - The auto-mode judge, a model, reads the command line whole and says
   whether a call looks harmful.  It is a safety check for the user, not
-  the reason a session stays inside its directories.
+  the reason a session stays inside its directories: it is told that
+  which files a call may reach is not its question, and never sees the
+  session's roots.
 - One allow is derived from a command line: a read-only cloud query
   (`gcloud ... list`, `gsutil ls`) skips the judge in auto mode and
   when the user is away.  It does so only for a command the sandbox

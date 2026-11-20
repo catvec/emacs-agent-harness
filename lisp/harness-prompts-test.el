@@ -307,7 +307,7 @@ come from the registry for the model asked."
   (harness-prompts-test-with-overrides
    "model:a"
    '((perms-judge-system . "JUDGE SYSTEM")
-     (perms-judge-question . "JUDGE {{tool}} {{kind}} {{description}} {{input}} {{cwd}} {{roots}} {{harness}}")
+     (perms-judge-question . "JUDGE {{tool}} {{kind}} {{description}} {{input}} {{cwd}}")
      (perms-summary-system . "SUMMARY SYSTEM")
      (perms-summary-question . "SUMMARY {{tool}} {{kind}} {{description}} {{cwd}} {{paths}}{{reason}} {{input}}"))
     (let* ((session (list :id "s" :cwd default-directory :model "model:a"))
