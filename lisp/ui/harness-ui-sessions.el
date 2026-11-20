@@ -2051,7 +2051,7 @@ the marks stay, so more can be given to the same sessions."
   (let* ((ids (harness-ui-sessions--targets))
          (one (null (cdr ids)))
          (level (harness-ui-priority--ask
-                 (if one "Priority: " (format "Priority for the %d marked sessions: " (length ids)))
+                 (if one "Priority" (format "Priority for the %d marked sessions" (length ids)))
                  (and one (harness-ui-session (car ids))))))
     (cond ((null level))
           ((not (member level harness-ui-priority-levels))

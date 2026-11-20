@@ -14127,7 +14127,11 @@ harness keys (`C-c h S y', `harness-set-priority') does the same without
 a click, reading the level in the minibuffer with the session's own as
 the default (`harness-ui-priority--choose', the one place the levels'
 order and prompt live, which the session list's `p' reads through too
-for its marked sessions); either way the request is
+for its marked sessions); the levels come highest first in both, and
+the level in force is the completion default rather than one of the
+candidates, since a completion UI brings the default to the top of the
+list (`vertico-preselect') and it would then show twice, out of order.
+Either way the request is
 `_harness/priority/set {sessionId, priority}', and the answer says what
 it is now ("Priority: high").  `+` and `-` in the harness keys
 (`C-c h S +', `C-c h S -', `harness-priority-raise' / `-lower') move the

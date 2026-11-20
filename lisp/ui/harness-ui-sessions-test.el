@@ -2266,7 +2266,7 @@ same sessions."
           (harness-ui-sessions-test--goto "a")
           (setq asked nil harness-ui-sessions-test--requests nil)
           (harness-ui-sessions-test--press "p")
-          (should (equal '("Priority: ") asked))
+          (should (equal '("Priority (default medium): ") asked))
           (should (equal '(("_harness/priority/set" (:sessionId "c" :priority "high")))
                          (harness-ui-sessions-test--answers))))))))
 
@@ -2977,7 +2977,7 @@ level instead."
             (should (equal "Priority: low"
                            (harness-ui-sessions-test--message
                             (lambda () (call-interactively (key-binding (kbd "p"))))))))
-          (should (equal "Priority: " asked))
+          (should (equal "Priority (default high): " asked))
           (should (equal '(("_harness/priority/set" (:sessionId "high" :priority "low")))
                          (harness-ui-sessions-test--answers))))))))
 

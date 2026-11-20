@@ -30,6 +30,15 @@ Priority column and a board's cards show the same arrow, made by
 `harness-ui-priority-arrow` -- and a click on it asks for that
 session's priority (`harness-ui-priority-click`).
 
+The levels come highest first wherever they are offered, as the
+harness serves them: in the menu a click pops up
+(`harness-ui-priority--menu-items`, the one in force greyed out) and
+in the minibuffer list (`harness-ui-priority--choose`).  A completion
+UI brings the completion default to the top of the list
+(`vertico-preselect`), so the level in force is that default and is
+not one of the candidates: offered both ways it would show twice, out
+of order, and an empty answer still keeps it.
+
 The harness keys: + raises the priority of the session in front of
 you and - lowers it, one level at a time
 (`harness-priority-raise`, `harness-priority-lower`), with C-u on

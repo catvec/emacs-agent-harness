@@ -13,6 +13,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'easymenu)
 (require 'harness-test-helpers)
 
 (defvar harness-acp-token)
@@ -163,7 +164,10 @@ the harness never sent has no segment."
         (should-not sent)))))
 
 (ert-deftest harness-ui-priority-set-asks-for-the-level ()
-  "Interactively it asks, offering the session's own level as the default."
+  "Interactively it asks, the session's own level named as the default.
+The levels it is not at are offered highest first, through the metadata
+of the collection the chooser hands `completing-read', and the level in
+force is the completion default, so an empty answer keeps it."
   (harness-ui-priority-test-with
     (let (sent asked)
       (harness-ui-priority-test-recording
@@ -176,15 +180,99 @@ the harness never sent has no segment."
           (should (equal '("Priority: low")
                          (harness-ui-priority-test-messages
                           (lambda () (call-interactively #'harness-set-priority)))))
-          (should (equal "Priority: " (car asked)))
-          ;; The levels are offered highest first, through the metadata of
-          ;; the collection the chooser hands `completing-read'.
+          (should (equal "Priority (default high): " (car asked)))
           (should (functionp (cadr asked)))
           (should (equal '(metadata (display-sort-function . identity)
                                     (cycle-sort-function . identity))
                          (funcall (cadr asked) "" nil 'metadata)))
+          ;; The levels it is not at, highest first; the level in force
+          ;; is the default, not a candidate.
+          (should (equal '("medium" "low") (funcall (cadr asked) "" nil t)))
           (should (equal "high" (nth 2 asked)))
           (should (equal '(("_harness/priority/set" (:sessionId "s1" :priority "low"))) sent))))))))
+
+(ert-deftest harness-ui-priority-levels-are-offered-in-order ()
+  "The levels are offered highest first, whatever the session's own is.
+The level in force is the completion default, so an empty answer keeps
+it, and it is not one of the candidates: a completion UI brings the
+default to the top of the list (`vertico-preselect', as the UI's does),
+so a level offered both ways would be shown twice, out of order.  What
+is offered is the whole of the menu, so it is asserted for every level a
+session may be at."
+  (harness-ui-priority-test-with
+    (dolist (case '(("high" . ("medium" "low"))
+                    ("medium" . ("high" "low"))
+                    ("low" . ("high" "medium"))))
+      (let (asked)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (prompt collection &optional _predicate _require
+                                          _initial _hist default)
+                     (setq asked (list prompt collection default))
+                     (car case))))
+          (should (equal (car case) (harness-ui-priority--choose "Priority" (car case))))
+          (should (equal (format-prompt "Priority" (car case)) (nth 0 asked)))
+          (should (equal (car case) (nth 2 asked)))
+          (should (equal (cdr case) (funcall (nth 1 asked) "" nil t)))
+          (should (equal '(metadata (display-sort-function . identity)
+                                    (cycle-sort-function . identity))
+                         (funcall (nth 1 asked) "" nil 'metadata)))))
+      ;; An empty answer keeps the level in force, as the default says.
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt _collection &rest _) "")))
+        (should (equal (car case) (harness-ui-priority--choose "Priority" (car case)))))
+      ;; The level in force is no candidate, but typing it is still a
+      ;; match -- `require-match' asks with the action `lambda' -- and a
+      ;; name no level has stays refused.
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt collection &optional predicate _require
+                                 _initial _hist _default)
+                   (should (test-completion (car case) collection predicate))
+                   (should-not (test-completion "urgent" collection predicate))
+                   (car case))))
+        (should (equal (car case) (harness-ui-priority--choose "Priority" (car case)))))
+      ;; With no level in force, as for every session at once, all three
+      ;; are offered in the same order and the prompt names no default.
+      (let (asked)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (prompt collection &rest _)
+                     (setq asked (list prompt collection))
+                     "high")))
+          (should (equal "high" (harness-ui-priority--choose "Priority" nil)))
+          (should (equal "Priority: " (nth 0 asked)))
+          (should (equal '("high" "medium" "low")
+                         (funcall (nth 1 asked) "" nil t))))))))
+
+(ert-deftest harness-ui-priority-menu-renders-the-levels ()
+  "The menu shows the levels highest first, the one in force greyed out.
+Each entry is what `popup-menu' takes -- the name it shows and a
+callback answering with the level, which is what a click returns -- so
+that choosing one sets that level; a level given as a plain string
+would be taken for a keyboard macro and fail when clicked."
+  (harness-ui-priority-test-with
+    (dolist (case '(("high" . (nil t t))
+                    ("medium" . (t nil t))
+                    ("low" . (t t nil))
+                    (nil . (t t t))))
+      (let* ((current (car case))
+             (items (harness-ui-priority--menu-items current))
+             (menu (easy-menu-create-menu "Priority" items)))
+        (should (equal '("High" "Medium" "Low")
+                       (mapcar (lambda (item) (aref item 0)) items)))
+        ;; The one in force is the only one greyed out, and none at all
+        ;; when no level is in force.
+        (should (equal (cdr case)
+                       (mapcar (lambda (item) (aref item 2)) items)))
+        ;; Each answers with its own level, which is what popup-menu
+        ;; returns and what the caller takes for the level chosen.
+        (should (equal '("high" "medium" "low")
+                       (mapcar (lambda (item) (funcall (aref item 1))) items)))
+        ;; The menu `popup-menu' makes of them shows those names in that
+        ;; order, and every one of them can be run.
+        (should (equal '("High" "Medium" "Low")
+                       (mapcar (lambda (entry) (nth 1 (cdr entry))) (cdr (cdr menu)))))
+        (should (equal '("high" "medium" "low")
+                       (mapcar (lambda (key) (funcall (lookup-key menu (vector key))))
+                               '(High Medium Low))))))))
 
 (ert-deftest harness-ui-priority-inherits-its-parents-level ()
   "A session with none of its own is at its parent's, as the harness serves it.
@@ -336,7 +424,9 @@ the levels instead (`harness-ui-priority--menu')."
 (ert-deftest harness-ui-priority-click-offers-a-menu ()
   "The arrow's click offers the levels, the one in force greyed out.
 The menu is popped up at the click, and the level chosen is the one set;
-dismissing it changes nothing."
+dismissing it changes nothing.  Its entries are `popup-menu''s own, the
+level's name shown and the callback answering with the level, so that a
+click on one sets that level."
   (harness-ui-priority-test-with
     (let (sent menu)
       (harness-ui-priority-test-recording
@@ -347,10 +437,18 @@ dismissing it changes nothing."
          (harness-ui-priority-test-chat "s1"
            (harness-ui-priority-click (list 'mouse-1 (list (selected-window) 'header-line '(0 . 0) 0)))
            (should (equal '(("_harness/priority/set" (:sessionId "s1" :priority "high"))) sent))
-           ;; The menu says what the levels are and what it is now.
+           ;; The menu says what the levels are and what it is now: the
+           ;; names highest first, the one in force the only one greyed
+           ;; out, each answering with its own level.
            (should (equal "Priority" (car (car menu))))
-           (should (equal '(("high" "High" t) ("medium" "Medium" t) ("low" "Low" nil))
-                          (mapcar (lambda (item) (append item nil)) (cdr (car menu)))))))
+           (should (equal '("High" "Medium" "Low")
+                          (mapcar (lambda (item) (aref item 0)) (cdr (car menu)))))
+           (should (equal '(t t nil)
+                          (mapcar (lambda (item) (aref item 2)) (cdr (car menu)))))
+           (should (equal '("high" "medium" "low")
+                          (mapcar (lambda (item) (funcall (aref item 1)))
+                                  (cdr (car menu)))))
+           (should (equal '(("_harness/priority/set" (:sessionId "s1" :priority "high"))) sent))))
        ;; Nothing chosen: nothing set.
        (setq sent nil)
        (cl-letf (((symbol-function 'display-popup-menus-p) (lambda (&optional _) t))

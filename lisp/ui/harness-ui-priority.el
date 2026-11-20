@@ -20,6 +20,15 @@
 ;; `harness-ui-priority-arrow' -- and a click on it asks for that
 ;; session's priority (`harness-ui-priority-click').
 ;;
+;; The levels come highest first wherever they are offered, as the
+;; harness serves them: in the menu a click pops up
+;; (`harness-ui-priority--menu-items', the one in force greyed out) and
+;; in the minibuffer list (`harness-ui-priority--choose').  A completion
+;; UI brings the completion default to the top of the list
+;; (`vertico-preselect'), so the level in force is that default and is
+;; not one of the candidates: offered both ways it would show twice, out
+;; of order, and an empty answer still keeps it.
+;;
 ;; The harness keys: + raises the priority of the session in front of
 ;; you and - lowers it, one level at a time
 ;; (`harness-priority-raise', `harness-priority-lower'), with C-u on
@@ -219,9 +228,15 @@ asking again."
 (defun harness-ui-priority--menu-items (current)
   "Return the entries of the priority menu, the level CURRENT greyed out.
 The levels come highest first, as the harness serves them, so the menu
-says both what the priority is now and what it may become."
+says both what the priority is now and what it may become.  An entry is
+`popup-menu''s own, [NAME CALLBACK ENABLE]: the level's name, which is
+what the menu shows, and a callback answering with that level, which is
+what `popup-menu' returns -- never the level as a string, which `commandp'
+takes for a keyboard macro."
   (mapcar (lambda (level)
-            (vector level (capitalize level) (not (equal level current))))
+            (vector (capitalize level)
+                    (lambda () (interactive) level)
+                    (not (equal level current))))
           (reverse harness-ui-priority-levels)))
 
 (defun harness-ui-priority--menu (session event)
@@ -238,26 +253,43 @@ chosen, or when this display cannot pop a menu up."
 
 (defun harness-ui-priority--choose (prompt &optional current)
   "Read one of `harness-ui-priority-levels' with PROMPT, highest first.
-CURRENT, the level in force, is what an empty answer takes; the levels
-are offered highest first, as the harness serves them, the one place the
-order and the prompt are known."
-  (let ((choices (reverse harness-ui-priority-levels)))
-    (car (member (completing-read
-                  prompt
+CURRENT, the level in force, is what an empty answer takes, and what the
+prompt names as the default.  It is not offered among the levels, as the
+menu greys it out too: a completion UI brings the default to the top of
+the list (`vertico-preselect', as the UI's does), so a level offered as
+both would be shown twice, out of order.  It is still a match, so that
+typing it answers it, and the levels it is not at come highest first, as
+the harness serves them -- the one place the order and the prompt are
+known."
+  (let* ((choices (cl-remove current (reverse harness-ui-priority-levels)
+                             :test #'equal))
+         (answer (completing-read
+                  (format-prompt prompt current)
                   (lambda (string pred action)
-                    (if (eq action 'metadata)
-                        '(metadata (display-sort-function . identity)
-                                   (cycle-sort-function . identity))
-                      (complete-with-action action choices string pred)))
-                  nil t nil nil current)
-                 harness-ui-priority-levels))))
+                    (cond
+                     ((eq action 'metadata)
+                      '(metadata (display-sort-function . identity)
+                                 (cycle-sort-function . identity)))
+                     ;; The level in force is no candidate, but a name
+                     ;; typed is still one of the levels:
+                     ;; `test-completion' asks with the action `lambda'.
+                     ((and (equal string current) (eq action 'lambda)) t)
+                     (t (complete-with-action action choices string pred))))
+                  nil t nil nil current)))
+    ;; `completing-read' answers the default for an empty input; one that
+    ;; does not (a stub, or a UI that hands back what was typed) keeps the
+    ;; level in force too.
+    (if (string-empty-p answer)
+        current
+      (car (member answer harness-ui-priority-levels)))))
 
 (defun harness-ui-priority--ask (prompt session &optional event)
   "Ask for a priority, offering the level of SESSION, and return it.
-PROMPT is what the prompt line says; an answer that names no level is
-returned as it is, for the caller to refuse.  With EVENT -- a click on
-an arrow (`harness-ui-priority-click') -- the possible levels are a menu
-at the click instead, and nothing chosen changes nothing."
+PROMPT is what the prompt line says, without its default or its colon,
+which `harness-ui-priority--choose' adds; an answer that names no level
+is returned as it is, for the caller to refuse.  With EVENT -- a click
+on an arrow (`harness-ui-priority-click') -- the possible levels are a
+menu at the click instead, and nothing chosen changes nothing."
   (if (and event (display-popup-menus-p))
       (harness-ui-priority--menu session event)
     (harness-ui-priority--choose prompt (and session (harness-ui-priority-level-of session)))))
@@ -306,7 +338,7 @@ default."
       (message "Priority: the harness has not sent this session yet"))
      (t
       (let ((level (or level
-                       (harness-ui-priority--ask "Priority: " (harness-ui-session target) event))))
+                       (harness-ui-priority--ask "Priority" (harness-ui-session target) event))))
         (cond ((null level) nil)
               ((not (member level harness-ui-priority-levels))
                (message "Priority is low, medium or high, not %S" level))
@@ -352,7 +384,7 @@ A session already carrying that level is left alone, and it reports how
 many changed.  A priority is a session's, so nothing of a task's own
 changes."
   (interactive)
-  (let ((level (or level (harness-ui-priority--ask "Priority for every session and task: " nil))))
+  (let ((level (or level (harness-ui-priority--ask "Priority for every session and task" nil))))
     (if (not (member level harness-ui-priority-levels))
         (message "Priority is low, medium or high, not %S" level)
       (harness-ui-call "_harness/priority/set-all"
