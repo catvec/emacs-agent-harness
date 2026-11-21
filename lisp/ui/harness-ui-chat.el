@@ -37,18 +37,19 @@
 ;;                 to the window
 ;;   mode line     status (the spinner while a turn runs), turn duration
 ;;
-;; A sender line shows when it was sent once `harness-chat-time-group'
-;; seconds passed since the last timestamp shown, and not before: messages
-;; sent near each other share one timestamp, and a long turn gets another
-;; every few minutes.  A block that folds several events under one line --
-;; a run of tool calls, with the thinking and the notes between them --
-;; shows the stretch they took in that same slot, earliest to latest
-;; (`harness-chat--group-time-range'), one reading when both ends read the
-;; same.  A line of its own under the header
+;; A sender line shows when its message was sent, at the right edge of
+;; the line so the name stays a column of its own and the times line up
+;; in another one: every message of the user's, of the agent and of the
+;; harness says when it was sent, and nothing in the middle of a turn
+;; does.  A block that folds several events under one line -- a run of
+;; tool calls, with the thinking and the notes between them -- shows the
+;; stretch they took in that same slot, earliest to latest
+;; (`harness-chat--group-time-range'), one reading when both ends read
+;; the same.  A line of its own under the header
 ;; (`harness-chat--refresh-time-bar') shows the clock of the message the
 ;; window starts on, unless that message shows its own timestamp
-;; already, so a group's time scrolled off is still known without making
-;; the header carry one more segment.
+;; already, so a message whose sender line scrolled away is still dated
+;; without making the header carry one more segment.
 ;;
 ;; The transcript is never re-rendered on a delta: every node owns a
 ;; region delimited by two markers, streaming text is appended at the
@@ -249,16 +250,10 @@ one follows the name."
 session follows, a button that opens it."
   :type 'string :group 'harness-ui-chat)
 
-(defcustom harness-chat-time-group 300
-  "Seconds that separate one timestamped group from the next.
-A sender line shows when the message under it was sent only once that
-much time passed since the last timestamp shown: messages sent near
-each other share one timestamp, and a long turn gets another every
-few minutes rather than a time on every line.  The header line shows
-the time of the message at the top of its window whatever this says,
-so a timestamp scrolled off is still known.  0 puts a time on every
-sender line."
-  :type 'integer :group 'harness-ui-chat)
+(defconst harness-chat--time-inset 1
+  "Columns a sender line's timestamp keeps from the window's right edge.
+The time ends this far in from the edge, so it never touches the fringe
+and every line's time ends in the same column.")
 
 (defface harness-chat-panel-face
   '((((background light)) :background "#d9f7fd" :extend t)
@@ -339,10 +334,6 @@ thinking between them."
 (defvar-local harness-chat--group-seq 0)
 (defvar-local harness-chat--transcript-start nil "Marker: first block.")
 (defvar-local harness-chat--transcript-end nil "Marker: after the last block.")
-(defvar-local harness-chat--time-shown nil
-  "When the last timestamp of the transcript was shown.
-Nil until one shows.  A message this long after it starts a group of
-its own and shows the time it was sent (`harness-chat-time-group').")
 (defvar-local harness-chat--time-known nil
   "When the last message with a timestamp before the end was sent.
 A block that carries none of its own -- a notice the UI drew -- stands
@@ -1582,11 +1573,13 @@ Nil while the whole message shows."
 ;;;; Timestamps
 
 ;; The transcript says when it was said without a clock on every line: a
-;; sender line shows one once `harness-chat-time-group' seconds passed
-;; since the last shown, so a turn is one timestamped group of messages,
-;; and a line of its own under the header shows the clock of the message
-;; a window starts on (`harness-chat--top-time'), so a group's timestamp
-;; can scroll away without leaving the reader without a time.
+;; sender line shows one, at the right edge of the line and out of the
+;; way of the name (`harness-chat--time-string'), so every message of
+;; the user's, of the agent and of the harness says when it was sent and
+;; the times line up in a column of their own rather than speckling the
+;; words.  A line of its own under the header shows the clock of the
+;; message a window starts on (`harness-chat--top-time'), so a message
+;; whose sender line scrolled away still says when it was sent.
 
 (defun harness-chat--node-time (node)
   "Return when NODE was sent, as a float time, or nil."
@@ -1619,6 +1612,22 @@ It is drawn small and dim, with the whole time in its tooltip."
   (propertize (harness-chat--time-label time)
               'face 'harness-summary-face
               'help-echo (format "Message time: %s" (harness-chat--time-full time))))
+
+(defun harness-chat--time-right (time)
+  "Return a space putting what follows it at the right edge of the line.
+TIME is the timestamp that follows the space, or the label it draws, as
+a range of times does (`harness-chat--time-range-label'): its width and
+`harness-chat--time-inset' decide how far in from the edge the space
+ends.  A line with no room left for it -- words longer than the window
+-- draws the space as none at all, so the time follows the words rather
+than wrapping onto a line of its own; the space before this one in the
+sender line keeps the two apart there."
+  (propertize " " 'display
+              (list 'space :align-to
+                    `(- right ,(+ harness-chat--time-inset
+                                  (string-width (if (stringp time)
+                                                    time
+                                                  (harness-chat--time-label time))))))))
 
 ;; A block that stands for several events -- a run of tool calls folded
 ;; under one summary, with the thinking and slot notices between them --
@@ -1702,6 +1711,16 @@ block stands for."
         ((consp time) (harness-chat--time-range-string time))
         (t (harness-chat--time-string time))))
 
+(defun harness-chat--time-slot-right (time)
+  "Return TIME in the sender line's slot at the right edge, or \"\".
+TIME is a time or a range of them (`harness-chat--time-slot-string'):
+the space that puts it at the right edge (`harness-chat--time-right')
+sizes itself by what it draws, and the time follows it.  A range is as
+wide as its two ends and the dash between them."
+  (if-let* ((shown (harness-chat--time-slot-string time)))
+      (concat " " (harness-chat--time-right shown) shown)
+    ""))
+
 (defun harness-chat--time-carrier-p (block)
   "Non-nil when BLOCK is drawn with a sender line that can show a timestamp.
 That is a message of the user's, the line that opens an agent turn, and
@@ -1722,46 +1741,44 @@ agent's own text in the middle of a turn has none."
   "Set BLOCK's TIME and TIME-HEAD from the transcript's timeline.
 TIME is when BLOCK was sent, or the last time known before it for a
 block the UI made without one.  TIME-HEAD is non-nil when BLOCK has a
-sender line to show TIME on and `harness-chat-time-group' seconds
-passed since the timestamp before it: messages sent near each other
-share one timestamp.  The buffer's `harness-chat--time-shown' and
-`harness-chat--time-known' follow the transcript's time as blocks are
+sender line to show TIME on: every message of the user's, of the agent
+and of the harness says when it was sent, and the block without a
+sender line -- a tool call, the agent's text in the middle of a turn --
+carries TIME for the line under the header to find.  The buffer's
+`harness-chat--time-known' follows the transcript's time as blocks are
 drawn in order."
   (let* ((sent (harness-chat--node-time (harness-chat-block-node block)))
          (time (or sent harness-chat--time-known)))
     (when sent (setq harness-chat--time-known sent))
     (setf (harness-chat-block-time block) time
           (harness-chat-block-time-head block)
-          (and sent
-               (harness-chat--time-carrier-p block)
-               (or (null harness-chat--time-shown)
-                   (>= (- sent harness-chat--time-shown) harness-chat-time-group))))
-    (when (harness-chat-block-time-head block)
-      (setq harness-chat--time-shown sent))))
+          (and sent (harness-chat--time-carrier-p block) t))))
 
 ;;;; Rendering: blocks
 
-(defun harness-chat--sender (text face &optional time)
+(defun harness-chat--sender (text face &optional time note)
   "Return a sender line naming TEXT in FACE.
-TIME, when given, is shown after the name, dim and with its tooltip
-\(`harness-chat--time-string'); a range of times, as a block folded over
-several events shows, is shown in the same slot
+NOTE, when given, follows the name, two spaces apart: the state of a
+message's delivery.  TIME, when given, is shown at the right edge of the
+line, dim and with its tooltip (`harness-chat--time-string'), so the
+name and the note stay a column of their own; a range of times, as a
+block folded over several events shows, is shown in the same slot
 \(`harness-chat--time-range-string')."
   (concat (propertize text 'face face)
-          (if-let* ((shown (harness-chat--time-slot-string time)))
-              (concat "  " shown)
-            "")
+          (if note (concat "  " note) "")
+          (harness-chat--time-slot-right time)
           "\n"))
 
 (defalias 'harness-chat--session-name #'harness-ui-session-name
   "Alias of `harness-ui-session-name'.")
 
-(defun harness-chat--from-line (from &optional time)
+(defun harness-chat--from-line (from &optional time note)
   "Return the sender line of a message FROM sent, rather than the user.
 The harness reads \"System · SOURCE\", another session's agent
 \"Session · NAME\", NAME a session link that opens that session.
-TIME, when given, is shown after the name (`harness-chat--time-string'),
-a range of times in the same slot (`harness-chat--time-range-string')."
+NOTE, when given, follows the name, two spaces apart.  TIME, when given,
+is shown at the right edge of the line (`harness-chat--time-string'), a
+range of times in the same slot (`harness-chat--time-range-string')."
   (pcase-let ((`(,label . ,which)
                (pcase (harness-sender-kind from)
                  ('session
@@ -1777,9 +1794,8 @@ a range of times in the same slot (`harness-chat--time-range-string')."
                                  (propertize source 'face 'harness-dim-face))))))))
     (concat (propertize label 'face 'harness-system-label-face)
             (if which (concat (propertize " · " 'face 'harness-dim-face) which) "")
-            (if-let* ((shown (harness-chat--time-slot-string time)))
-                (concat "  " shown)
-              "")
+            (if note (concat "  " note) "")
+            (harness-chat--time-slot-right time)
             "\n")))
 
 (defun harness-chat--handoff-line (handoff)
@@ -2028,15 +2044,6 @@ delivered\", and the tooltip says what the note means."
         (propertize "not delivered" 'face 'harness-dim-face
                     'help-echo "The turn ended before the model got this message; the next turn reads it"))))
 
-(defun harness-chat--with-note (body note)
-  "Return BODY, the text of a user message, with NOTE on its sender line.
-NOTE goes after the sender's name, two spaces apart; nil leaves BODY as
-it is."
-  (let ((end (string-search "\n" body)))
-    (if (and note end)
-        (concat (substring body 0 end) "  " note (substring body end))
-      body)))
-
 (defun harness-chat--sending-candidates ()
   "Return the ids of the user blocks that may carry a delivery note now.
 There are none while a turn goes on: the messages sent to it that it
@@ -2110,17 +2117,17 @@ be, NOTE its state, \"queued\", and its buttons
                  (let ((harness-ui-markdown-hard-breaks t))
                    (harness-chat--render-markdown (harness-chat--page block) "content")))
                 (plist-get node :blocks)))
+         (note (or note (harness-chat--delivery-note block)))
          (body (concat (if from
-                           (harness-chat--from-line from time)
-                         (harness-chat--sender harness-chat-user-label 'harness-user-label-face time))
+                           (harness-chat--from-line from time note)
+                         (harness-chat--sender harness-chat-user-label 'harness-user-label-face time note))
                        (if (string-blank-p text) "" text)
                        (harness-chat--more-line block)
                        (if handoff (harness-chat--handoff-line handoff) "")
                        (harness-chat--render-replies block face)
                        (harness-chat--blocks-string (plist-get node :blocks))
                        (or hint "")))
-         (string (harness-chat--margin (harness-chat--face (harness-chat--with-note body (or note (harness-chat--delivery-note block)))
-                                                           face)
+         (string (harness-chat--margin (harness-chat--face body face)
                                        face
                                        (if from 'harness-system-bar-face 'harness-user-bar-face))))
     string))
@@ -2162,8 +2169,9 @@ agent's header would stand."
 
 (defun harness-chat--agent-header (&optional time)
   "Return the sender line that opens an agent turn.
-TIME, when given, is shown after the name (`harness-chat--time-string'),
-a range of times in the same slot (`harness-chat--time-range-string')."
+TIME, when given, is shown at the right edge of the line
+\(`harness-chat--time-string'), a range of times in the same slot
+\(`harness-chat--time-range-string')."
   (harness-chat--margin
    (harness-chat--sender harness-chat-agent-label 'harness-agent-label-face time)))
 
@@ -4619,9 +4627,8 @@ A slot notice folded into a run continues its turn, which only the
 grouping tells: a page of history is laid out before it is grouped, so
 the reply after its notice would otherwise open a turn of its own.  The
 timestamps are worked out from the oldest block again, as blocks added
-above or dropped move the groups they fall in."
-  (setq harness-chat--time-shown nil
-        harness-chat--time-known nil)
+above or dropped move the turns they fall in."
+  (setq harness-chat--time-known nil)
   (let ((previous nil))
     (dolist (id (reverse harness-chat--order))
       (let* ((block (gethash id harness-chat--blocks))
@@ -5695,7 +5702,6 @@ and the redisplay hook drawing it signals a nil position
         harness-chat--quote-overlays nil
         harness-chat--stale nil
         harness-chat--order nil
-        harness-chat--time-shown nil
         harness-chat--time-known nil
         harness-chat--compaction-toggle-id nil
         harness-chat--unfinished nil
@@ -7362,19 +7368,20 @@ when the message there shows its own timestamp already.")
 
 (defun harness-chat--time-line (time width)
   "Return the pinned time line for TIME, fitted to WIDTH columns.
-It is the clock and a rule to the window's right edge, on a line of its
-own: the newline at its end puts it above the line it is drawn at.
-TIME's tooltip holds the whole of when it was, date and all; the header
-stays free of the date."
+It is the clock and a rule to the right edge, on a line of its own: the
+newline at its end puts it above the line it is drawn at.  The rule
+stops where a sender line's timestamp ends, so the line's right edge is
+the transcript's (`harness-chat--time-inset').  TIME's tooltip holds the
+whole of when it was, date and all; the header stays free of the date."
   (let* ((label (harness-chat--time-clock time))
          (text (concat " " (propertize label
                                        'face 'harness-summary-face
                                        'help-echo (format "First message on screen: %s"
-                                                          (harness-chat--time-full time)))
-                       " "))
-         (room (max 1 (- (or width 80) (string-width text) 1))))
+                                                          (harness-chat--time-full time)))))
+         (room (max 1 (- (or width 80) (string-width text) harness-chat--time-inset))))
     (concat text
             (propertize (make-string room ?─) 'face 'harness-dim-face)
+            (make-string harness-chat--time-inset ?\s)
             "\n")))
 
 (defun harness-chat--first-whole-line (window)

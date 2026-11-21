@@ -3652,12 +3652,16 @@ about, the change's own at the top."
       (call-interactively #'change-review-ui-toggle-status)
       (should-not (change-review-thread-open-p thread))
       (change-review-ui-flush)
-      ;; Closed, it is a line now.
-      (should (string-match-p "“What about a4\\?”"
-                              (overlay-get (cl-find-if (lambda (o) (and (overlay-get o 'after-string)
-                                                                        (string-match-p "a4" (overlay-get o 'after-string))))
-                                                       (overlays-in (point-min) (point-max)))
-                                           'after-string)))
+      ;; Closed, it is a line now.  The thread's own, found by its id: a
+      ;; thread id is a random hex string, and one of another thread's may
+      ;; well hold "a4" -- "t-a402d4f9" does -- so a card matched by the
+      ;; line it names alone would be that other thread's whenever its
+      ;; overlay comes first.
+      (let* ((id (change-review-thread-id thread))
+             (card (cl-find-if (lambda (o) (equal id (overlay-get o 'change-review-thread)))
+                               (overlays-in (point-min) (point-max)))))
+        (should card)
+        (should (string-match-p "“What about a4\\?”" (overlay-get card 'after-string))))
       ;; RET opens it to its conversation, and once it is open, RET opens
       ;; its comments' details.
       (let ((drawn (lambda ()

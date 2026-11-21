@@ -383,9 +383,10 @@ summary made for a handoff says so."
           (let ((case-fold-search nil)
                 (from (harness-ui-model-label "demo:scripted"))
                 (to (harness-ui-model-label "claude:claude-opus-5-5")))
-            (should (= 1 (how-many "^You\\(  [0-9][0-9]:[0-9][0-9]\\)?$"
+            (should (= 1 (how-many (harness-ui-chat-test-sender-regexp harness-chat-user-label)
                                    (point-min) (point-max))))
-            (should (= 1 (how-many "^System · model handoff$" (point-min) (point-max))))
+            (should (= 1 (how-many (harness-ui-chat-test-sender-regexp "System · model handoff")
+                                   (point-min) (point-max))))
             (should (= 1 (how-many (concat "^" (regexp-quote (format "%s → %s" from to))) (point-min) (point-max))))
             (should (= 1 (how-many (regexp-quote (concat "context compacted to hand over to " to))
                                    (point-min) (point-max))))))
@@ -425,9 +426,11 @@ a turn of its own, and a redraw renders the same."
                              (title (harness-ui-chat-test-find buf "Sub-agent"))
                              (link (harness-ui-chat-test-find buf "session: Merge child" title)))
                         ;; The harness's, not the agent's: the one Agent header is the reply's.
-                        (should (= 1 (how-many "^System · merge queue$" (point-min) (point-max))))
+                        (should (= 1 (how-many (harness-ui-chat-test-sender-regexp "System · merge queue")
+                                               (point-min) (point-max))))
                         (should (< (harness-ui-chat-test-find buf "Fixed it.") sender title))
-                        (should (= (if done 2 1) (how-many "^Agent$" (point-min) (point-max))))
+                        (should (= (if done 2 1) (how-many (harness-ui-chat-test-sender-regexp harness-chat-agent-label)
+                                     (point-min) (point-max))))
                         ;; Folded like any call, the link to its session in sight.
                         (should (= 1 (length (harness-ui-chat-test-blocks buf "tool-call"))))
                         (should-not (harness-ui-chat-test-blocks buf "tool-result"))
@@ -857,14 +860,16 @@ on a background and bar of its own; the user's own messages are as before."
         (with-current-buffer buf
           (let ((case-fold-search nil))
             ;; One "You", over the user's own message; the others name their
-            ;; sender.  The first message of a transcript opens a group of
-            ;; timestamps and shows when it was sent.
-            (should (= 1 (how-many "^You\\(  [0-9][0-9]:[0-9][0-9]\\)?$"
+            ;; sender.  Each line shows when its message was sent.
+            (should (= 1 (how-many (harness-ui-chat-test-sender-regexp harness-chat-user-label)
                                    (point-min) (point-max))))
-            (should (= 1 (how-many "^System · tasks$" (point-min) (point-max))))
-            (should (= 1 (how-many "^Session · Fix the parser$" (point-min) (point-max))))
+            (should (= 1 (how-many (harness-ui-chat-test-sender-regexp "System · tasks")
+                                   (point-min) (point-max))))
+            (should (= 1 (how-many (harness-ui-chat-test-sender-regexp "Session · Fix the parser")
+                                   (point-min) (point-max))))
             ;; Without a name, a session goes by its short id.
-            (should (= 1 (how-many "^Session · fedcba98$" (point-min) (point-max)))))
+            (should (= 1 (how-many (harness-ui-chat-test-sender-regexp "Session · fedcba98")
+                                   (point-min) (point-max)))))
           (let ((mine (funcall start buf "my own words"))
                 (label (funcall start buf "System · tasks"))
                 (system (funcall start buf "carry on after the restart"))
@@ -5801,6 +5806,41 @@ It is never added to the running turn."
     (let ((block (car (last (harness-ui-chat-test-blocks buf "user")))))
       (buffer-substring-no-properties (harness-chat-block-start block) (harness-chat-block-end block)))))
 
+(defconst harness-ui-chat-test-time-regexp
+  (concat "\\(?:[0-9][0-9]:[0-9][0-9]"
+          "\\|[A-Z][a-z][a-z] [0-9]+ [0-9][0-9]:[0-9][0-9]"
+          "\\|[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]\\)")
+  "A timestamp as a sender line writes it.
+That is the clock, the day and the clock, or the year, the day and the
+clock (`harness-chat--time-label').")
+
+(defun harness-ui-chat-test-sender-regexp (label)
+  "Return a regexp matching a whole sender line naming LABEL.
+The timestamp follows the name when the message has one, at the right
+edge of the line: two spaces in the text, the second one aligned there
+\(`harness-chat--time-right')."
+  (concat "^" (regexp-quote label)
+          "\\(?:  " harness-ui-chat-test-time-regexp "\\)?$"))
+
+(defun harness-ui-chat-test-find-line (buf line &optional from)
+  "Return the position after the first line of BUF after FROM that is LINE.
+LINE is a sender line, without the timestamp it may end in
+\(`harness-ui-chat-test-sender-regexp')."
+  (with-current-buffer buf
+    (save-excursion
+      (goto-char (or from (point-min)))
+      (when (re-search-forward (harness-ui-chat-test-sender-regexp line) nil t)
+        (point)))))
+
+(defun harness-ui-chat-test-sender-line (label &optional time)
+  "Return a sender line naming LABEL, with TIME at the window's right edge.
+That is how the chat draws one: the name, then a space aligned to the
+right edge, then the timestamp (`harness-chat--time-right'), and the
+newline that ends the line."
+  (concat label
+          (if time (concat " " (harness-chat--time-right time) (harness-chat--time-label time)) "")
+          "\n"))
+
 (defun harness-ui-chat-test-last-user-sender-line (buf)
   "Return the sender line of the newest user block of BUF, as it is drawn.
 That is the label, the timestamp and the note of the message's delivery,
@@ -5818,7 +5858,9 @@ up to the newline that ends the line."
 STATE is `queued' (in the queue), `waiting' (sent to a turn that has not
 taken it yet) or `not-delivered': the line is the user's label, then the
 state alone, after the grey circle for the first two; their buttons
-follow, each with its key.  A message the model has needs no state."
+follow, each with its key.  A message the model has needs no state, and
+one that waits has no time of its own: it is no message of the
+transcript yet, so its sender line carries no clock."
   (concat harness-chat-user-label "  "
           (pcase state
             ('queued (concat (harness-ui-icon 'harness-icon-caution) " queued  [send now] s  [edit] e  [delete] d"))
@@ -6067,8 +6109,9 @@ tooltip says the next turn does."
       (should (equal '("user") (harness-ui-chat-test-block-kinds buf)))
       (with-current-buffer buf (harness-chat-cancel))
       (harness-test-wait (lambda () (= 1 (harness-ui-chat-test-turns-ended sid))) 10 "the turn to end")
-      (harness-test-wait (lambda () (harness-ui-chat-test-find buf (concat unread "\nwait, stop")))
+      (harness-test-wait (lambda () (harness-ui-chat-test-find-line buf unread))
                          5 "the state not delivered")
+      (should (harness-ui-chat-test-find buf "\nwait, stop\n"))
       ;; The turn recorded the message as it ended; nothing is queued any
       ;; more: the buttons that took the message back go.
       (should (equal '("tour" "wait, stop") (harness-ui-chat-test-user-texts sid)))
@@ -6095,11 +6138,15 @@ Rendering a transcript again draws the same notes."
            (user (lambda (id text &optional meta) (list :id id :kind "user" :content text :ts 1.0 :meta meta)))
            (agent (lambda (id) (list :id id :kind "assistant" :content "Working on it." :ts 1.0)))
            (queued (harness-ui-chat-test-state-line 'waiting))
-           (unread (concat (harness-ui-chat-test-state-line 'not-delivered) "\n"))
+           (unread (harness-ui-chat-test-state-line 'not-delivered))
            (feed (lambda (node) (harness-chat--on-update sid (list :sessionUpdate "_harness/node" :node node))))
            (count (lambda (text) (harness-ui-chat-test-count buf (regexp-quote text))))
-           (plain (lambda (id text) (equal (concat harness-chat-user-label "\n" text "\n\n")
-                                           (harness-ui-chat-test-node-text buf id)))))
+           (plain (lambda (id text)
+                    ;; The nodes this test makes are all sent at the same
+                    ;; second, which their sender lines name.
+                    (equal (concat (harness-ui-chat-test-sender-line harness-chat-user-label 1.0)
+                                   text "\n\n")
+                           (harness-ui-chat-test-node-text buf id)))))
       (with-current-buffer buf
         ;; A turn runs.
         (setq harness-chat--turn-start (float-time))
@@ -6183,7 +6230,8 @@ listing it, brings it back no more: it stands in the transcript."
                                            :node (list :id "s1" :kind "user" :content "change course" :ts 3.0
                                                        :meta '(:steering t :delivered-after "p1"))))
         (should-not (funcall waiting))
-        (should (equal (concat harness-chat-user-label "\nchange course\n\n")
+        (should (equal (concat (harness-ui-chat-test-sender-line harness-chat-user-label 3.0)
+                               "change course\n\n")
                        (harness-ui-chat-test-node-text buf "s1")))
         (should (= 1 (harness-ui-chat-test-count buf "change course")))
         ;; A record older than the node lists it still: it does not come back.
@@ -9058,20 +9106,23 @@ and either change closed the groups the user had opened."
             ;; notice draws none of its own, and the summary tells of the
             ;; slot notice it keeps folded.
             (let ((case-fold-search nil))
-              (should (= 1 (how-many "^Agent$" (point-min) (point-max)))))
+              (should (= 1 (how-many (harness-ui-chat-test-sender-regexp harness-chat-agent-label)
+                                     (point-min) (point-max)))))
             (should-not (harness-chat-block-head (gethash "c2" harness-chat--blocks)))
             (should (harness-ui-chat-test-find buf "· slots changed ×2"))
             ;; A reply after the folded notice continues the same turn.
             (node '(:id "done" :kind "assistant" :content "Done."))
             (should-not (harness-chat-block-head (gethash "done" harness-chat--blocks)))
             (let ((case-fold-search nil))
-              (should (= 1 (how-many "^Agent$" (point-min) (point-max)))))
+              (should (= 1 (how-many (harness-ui-chat-test-sender-regexp harness-chat-agent-label)
+                                     (point-min) (point-max)))))
             (harness-chat--regroup-keeping-open)
             (setq g (gethash (harness-chat-block-group b) harness-chat--groups))
             (should (harness-chat-group-expanded g))
             (should (equal '("c1" "t1" "slot" "c2") (harness-chat-group-members g)))
             (let ((case-fold-search nil))
-              (should (= 1 (how-many "^Agent$" (point-min) (point-max)))))
+              (should (= 1 (how-many (harness-ui-chat-test-sender-regexp harness-chat-agent-label)
+                                     (point-min) (point-max)))))
             (harness-chat-toggle-group (harness-chat-group-id g))
             (should (invisible-p (harness-chat-block-start (gethash "slot" harness-chat--blocks))))
             (node '(:id "other" :kind "hint" :content "Important"))
@@ -9110,11 +9161,11 @@ group is expanded: the call folded after the notice draws none."
             (node '(:id "answer" :kind "assistant" :content "Done."))
             (should-not (harness-chat-block-head (gethash "answer" harness-chat--blocks)))
             (let ((case-fold-search nil))
-              (should (= 1 (how-many "^Agent\\(  [0-9][0-9]:[0-9][0-9]\\)?$"
+              (should (= 1 (how-many (harness-ui-chat-test-sender-regexp harness-chat-agent-label)
                                      (point-min) (point-max)))))
             (harness-chat-toggle-group (harness-chat-group-id g))
             (let ((case-fold-search nil))
-              (should (= 1 (how-many "^Agent\\(  [0-9][0-9]:[0-9][0-9]\\)?$"
+              (should (= 1 (how-many (harness-ui-chat-test-sender-regexp harness-chat-agent-label)
                                      (point-min) (point-max)))))
             (should (harness-ui-chat-test-find buf "· slots changed ×2"))
             (should-not (invisible-p (harness-chat-block-start (gethash "slot" harness-chat--blocks))))
@@ -9164,7 +9215,7 @@ same note updates that count, and the reply after it opens no turn."
                              5 "the reply")
           (should-not (harness-chat-block-head (gethash answer harness-chat--blocks)))
           (let ((case-fold-search nil))
-            (should (= 1 (how-many "^Agent\\(  [0-9][0-9]:[0-9][0-9]\\)?$"
+            (should (= 1 (how-many (harness-ui-chat-test-sender-regexp harness-chat-agent-label)
                                    (point-min) (point-max)))))
           ;; Opened, the group shows the notice under the calls, folded.
           (harness-chat-toggle-group (harness-chat-block-group hint))
@@ -9172,7 +9223,7 @@ same note updates that count, and the reply after it opens no turn."
           (should (harness-chat-block-collapsed hint))
           (should (harness-ui-chat-test-find buf "Slots changed due to system load (2 changes)"))
           (let ((case-fold-search nil))
-            (should (= 1 (how-many "^Agent\\(  [0-9][0-9]:[0-9][0-9]\\)?$"
+            (should (= 1 (how-many (harness-ui-chat-test-sender-regexp harness-chat-agent-label)
                                    (point-min) (point-max))))))))))
 
 (ert-deftest harness-ui-chat-groups-from-the-first-call ()
@@ -9924,7 +9975,8 @@ was marked as opening a turn until the grouping was known."
           (let ((case-fold-search nil))
             ;; The user's message opened one turn, which runs through the
             ;; calls, the notice, the reply and the call after it.
-            (should (= 1 (how-many "^Agent$" (point-min) (point-max)))))
+            (should (= 1 (how-many (harness-ui-chat-test-sender-regexp harness-chat-agent-label)
+                                     (point-min) (point-max)))))
           (should (harness-ui-chat-test-find buf "· slots changed ×2")))))))
 
 ;;;; Redraw and deletion
@@ -12057,20 +12109,21 @@ at every hour: early in the day the time is midnight's instead."
       (goto-char (harness-chat-block-start block))
       (buffer-substring-no-properties (point) (line-end-position)))))
 
-(ert-deftest harness-ui-chat-timestamps-group-messages-sent-near-each-other ()
-  "A sender line names the time its group was sent, and only the first line of it.
-Messages within `harness-chat-time-group' seconds of the timestamp
-shown before them share it: the next group starts on the first message
-that comes later than that, and its sender line, the agent's turn line
-or a message of the user's, shows the time.  The time is dim and its
-tooltip holds the whole of it."
+(ert-deftest harness-ui-chat-timestamps-every-message-says-when-it-was-sent ()
+  "Every message of the user's, of the agent and of the harness carries its time.
+A sender line shows the time of the message under it, at the right edge
+of the line: a space aligned there puts it in the same column on every
+line, so the names stay a column of their own and the times another.
+Messages seconds apart each say their own time, as a turn's messages do.
+The time is dim, and its tooltip holds the whole of it."
   (harness-ui-chat-test-with
     (let* ((now (float-time))
-           (t1 (- now 1800)) (t2 (- now 1700)) (t3 (- now 1600)) (t4 (- now 1400))
+           (t1 (- now 1800)) (t2 (- now 1796)) (t3 (- now 1794)) (t4 (- now 1700))
            (sid (harness-ui-chat-test-session))
            (b1 (harness-ui-chat-test--append sid 'user "one" t1))
            (b2 (harness-ui-chat-test--append sid 'assistant "two" t2))
-           (b3 (harness-ui-chat-test--append sid 'user "three" t3))
+           ;; The agent's own text in the middle of a turn: no sender line.
+           (b3 (harness-ui-chat-test--append sid 'assistant "three" t3))
            (b4 (harness-ui-chat-test--append sid 'user "four" t4))
            (buf (harness-ui-chat-test-open sid)))
       (with-current-buffer buf
@@ -12078,33 +12131,46 @@ tooltip holds the whole of it."
               (two (gethash b2 harness-chat--blocks))
               (three (gethash b3 harness-chat--blocks))
               (four (gethash b4 harness-chat--blocks)))
-          ;; One group from t1 through t3 (200 seconds): only t1 shows.
-          (should (equal t1 (harness-chat-block-time one)))
-          (should (harness-chat-block-time-head one))
-          (should-not (harness-chat-block-time-head two))
+          ;; Each message with a sender line shows its own time, however
+          ;; near the one before it was sent.
+          (cl-flet ((line (label time)
+                      "The sender line of the buffer: no newline ends a line."
+                      (string-remove-suffix "\n" (harness-ui-chat-test-sender-line label time))))
+            (should (equal (line harness-chat-user-label t1)
+                           (harness-ui-chat-test--first-line one)))
+            (should (equal (line harness-chat-agent-label t2)
+                           (harness-ui-chat-test--first-line two)))
+            (should (equal (line harness-chat-user-label t4)
+                           (harness-ui-chat-test--first-line four))))
+          (dolist (block (list one two four))
+            (should (harness-chat-block-time-head block)))
+          ;; The agent's text in the middle of the turn has no line of its
+          ;; own, so it shows no time; the line under the header finds its
+          ;; time when the window starts on it (`harness-chat--top-time').
           (should-not (harness-chat-block-time-head three))
-          ;; t4 is 400 seconds after t1: a group of its own.
-          (should (harness-chat-block-time-head four))
-          (should (equal (concat harness-chat-user-label "  " (harness-chat--time-label t1))
-                         (harness-ui-chat-test--first-line one)))
-          (should (equal harness-chat-agent-label (harness-ui-chat-test--first-line two)))
-          (should (equal harness-chat-user-label (harness-ui-chat-test--first-line three)))
-          (should (equal (concat harness-chat-user-label "  " (harness-chat--time-label t4))
-                         (harness-ui-chat-test--first-line four)))
-          ;; The time is dim, and says the whole of when it was in its tooltip.
+          (should (equal "three" (harness-ui-chat-test--first-line three)))
+          (should (equal t3 (harness-chat-block-time three)))
+          ;; The time is drawn at the right edge: a space aligned there
+          ;; comes before it, in the column every line's time ends in.
           (let* ((text (harness-ui-chat-test--block-text one))
-                 (pos (string-search (harness-chat--time-label t1) (substring-no-properties text))))
+                 (pos (string-search (harness-chat--time-label t1)
+                                     (substring-no-properties text))))
             (should pos)
+            (should (equal (list 'space :align-to
+                                 `(- right ,(+ harness-chat--time-inset
+                                               (string-width (harness-chat--time-label t1)))))
+                           (get-text-property (1- pos) 'display text)))
+            ;; Dim, and saying the whole of when it was in its tooltip.
             (should (memq 'harness-summary-face
                           (ensure-list (get-text-property pos 'face text))))
             (should (equal (format "Message time: %s" (harness-chat--time-full t1))
                            (get-text-property pos 'help-echo text))))
-          ;; Only the first message of the transcript is a group, so the
-          ;; others' own times do not stand beside their names.
-          (should-not (string-search (harness-chat--time-label t2)
-                                     (harness-ui-chat-test--first-line two)))
-          (should-not (string-search (harness-chat--time-label t3)
-                                     (harness-ui-chat-test--first-line three))))))))
+          ;; A line with no room for the time keeps it after its words
+          ;; rather than wrapping: the space before it is the one that
+          ;; holds the two apart.
+          (should (equal (concat harness-chat-user-label " " (harness-chat--time-right t1)
+                                 (harness-chat--time-string t1) "\n")
+                         (harness-chat--sender harness-chat-user-label 'harness-user-label-face t1))))))))
 
 (defun harness-ui-chat-test-time-bar (&optional window)
   "Return the before-string of WINDOW's pinned time line, or nil.
@@ -12116,7 +12182,9 @@ none."
 (ert-deftest harness-ui-chat-timestamps-pin-the-time-of-the-first-message-seen ()
   "A line under the header says when the first message a window shows was sent.
 It is absent when that message shows its own timestamp on the line the
-window starts on, and when no message shows."
+window starts on -- every message with a sender line does -- and when no
+message shows.  A window starting in the middle of a message, whose
+sender line scrolled away, gets the line."
   (harness-ui-chat-test-with
     (let* ((t1 (harness-ui-chat-test--earlier-today 1800))
            (t2 (harness-ui-chat-test--earlier-today 1700))
@@ -12167,13 +12235,11 @@ window starts on, and when no message shows."
               (should (eq (overlay-get ov 'window) (selected-window)))
               (should (= (overlay-start ov)
                          (harness-chat--first-whole-line (selected-window))))))
-          ;; An agent line in the same group shows no time of its own; the
-          ;; line gives the time of the message there.
+          ;; Every sender line carries its own time, so a window that starts
+          ;; on one needs no line: the time is in sight.
           (set-window-start (selected-window) start2 t)
           (funcall refresh)
-          (should (string-search (harness-chat--time-clock t2)
-                                 (harness-ui-chat-test-time-bar)))
-          ;; A group's own timestamp at the top means no line.
+          (should-not (harness-ui-chat-test-time-bar))
           (set-window-start (selected-window) start3 t)
           (funcall refresh)
           (should-not (harness-ui-chat-test-time-bar)))

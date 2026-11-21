@@ -48,18 +48,19 @@ One buffer per session, "*harness: NAME*", laid out top to bottom:
                 to the window
   mode line     status (the spinner while a turn runs), turn duration
 
-A sender line shows when it was sent once `harness-chat-time-group`
-seconds passed since the last timestamp shown, and not before: messages
-sent near each other share one timestamp, and a long turn gets another
-every few minutes.  A block that folds several events under one line --
-a run of tool calls, with the thinking and the notes between them --
-shows the stretch they took in that same slot, earliest to latest
+A sender line shows when its message was sent, at the right edge of
+the line so the name stays a column of its own and the times line up
+in another one: every message of the user's, of the agent and of the
+harness says when it was sent, and nothing in the middle of a turn
+does.  A block that folds several events under one line -- a run of
+tool calls, with the thinking and the notes between them -- shows the
+stretch they took in that same slot, earliest to latest
 (`harness-chat--group-time-range`), one reading when both ends read the
 same.  A line of its own under the header
 (`harness-chat--refresh-time-bar`) shows the clock of the message the
 window starts on, unless that message shows its own timestamp
-already, so a group's time scrolled off is still known without making
-the header carry one more segment.
+already, so a message whose sender line scrolled away is still dated
+without making the header carry one more segment.
 
 The transcript is never re-rendered on a delta: every node owns a
 region delimited by two markers, streaming text is appended at the
@@ -188,7 +189,6 @@ this file never touches a session struct.
 - `harness-chat-session-label` — Sender name shown above the messages the agent of another session sent.
 - `harness-chat-system-label` — Sender name shown above the messages the harness sent on its own.
 - `harness-chat-thread-quote-limit` — Most characters of a message a reply in a thread quotes.
-- `harness-chat-time-group` — Seconds that separate one timestamped group from the next.
 - `harness-chat-todos-collapsed` — Whether a chat's todo list starts folded to its title line.
 - `harness-chat-user-label` — Sender name shown above the user's messages.
 
