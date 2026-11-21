@@ -1,0 +1,12 @@
+{
+  "format": 1,
+  "result": "pass",
+  "kind": "full",
+  "head": "c7637357dc73b9e7db13ef79f3557f1ed3ca0466",
+  "dirty": false,
+  "files": 239,
+  "failed": [],
+  "logs": "/home/noah/documents/ai/emacs-agent-harness/.worktrees/task-provider-readiness-assessment-and-jibzilj2/scripts/.dev/test-logs",
+  "wall": 536,
+  "finished": "2026-11-20T04:30:01-0500"
+}

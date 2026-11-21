@@ -54,6 +54,12 @@ resolve.
 The short answer is the behaviour table below. Everything after it is
 the assessment as it stood, kept as the appendix.
 
+**Revision 3 (this one)** repairs one load-sensitive test the full run
+failed, and records the full suite passing on this branch for the first
+time: `scripts/test.sh` (full) at `c763735`, **239 files, 0 failed**.
+No provider request was made, no route, credential or privacy setting
+was read or changed, and the GO/NO-GO verdicts are unchanged.
+
 ## Behaviour report (2026-11-14 revision)
 
 This is the practical answer.  Each row is one behaviour, the state of the
@@ -156,11 +162,19 @@ privacy setting read or changed.
 | `demo/provider-diagnostics/demo.sh` | **exit 0**, four attempts, leak check clean; output kept in [`docs/evidence/provider-diagnostics/demo-run-2026-11-14.txt`](../evidence/provider-diagnostics/demo-run-2026-11-14.txt) |
 | `scripts/test.sh` (full) at `352ba5e` | **FAILED**, exit 1: 204 files, 2 failed — the base commit's layout failure and one stop-ordering flake that passes 44/44 alone |
 | `scripts/test.sh` (full), 2026-11-14 revision 2 | **FAILED**: all 204 suites were run, in four batches of 51 (the run exceeds one call's limit, so it is not one invocation). 3 suites failed: `test/harness-test-layout-test.el` (the branch predates `main`'s fix -- see below), `lisp/modules/harness-tools-shell-tramp-test.el` (times out at `main` too), and `lisp/ui/harness-ui-patch-review-test.el` (1 of 163, passes 163/163 when re-run alone -- a load flake) |
+| `scripts/test.sh` (full) at `c763735` (revision 3) | **PASS**: 239 files, 0 failed, 536 s, clean tree — after repairing `...-retry-rechecks-a-stale-pin`, which bounded how long `session/create` may take (see below) |
+| The repaired stale-pin test under load | **pass**: 3 consecutive suite runs clean, and 6 runs at once under `HARNESS_TEST_JOBS=6`; the same test still fails on 4 POSTs when the retry's re-read is suppressed, so the fix is a margin and not a weakening |
 
-The full suite has not passed in any run of this revision, and it is
-not reported as passing.  The last run ran all 204 suites, in four
-batches because the whole run is longer than one call may take, and
-three failed:
+The full suite has now passed on this branch.  `scripts/test.sh` (full)
+at `c763735` ran **239 files, 0 failed**, 536 s, on a clean tree
+([stamp](../evidence/provider-diagnostics/full-run-2026-11-20-stamp.json),
+[output](../evidence/provider-diagnostics/full-run-2026-11-20.out));
+`scripts/test.sh --status` reports `PASS (full, 239 suites, 0 failed)`.
+The runs below are the earlier ones, kept as they were recorded.
+
+Earlier runs of this revision did not pass, and were not reported as
+passing.  The last of them ran all 204 suites, in four batches because
+the whole run is longer than one call may take, and three failed:
 
 - `test/harness-test-layout-test.el` -- **this branch's merge base, not
   this branch.**  The test finds two suites in `test/` that its own
@@ -186,6 +200,24 @@ Every earlier full run of this revision is recorded in
 §11, the failing ones included.  The failures have been the same two
 environmental suites plus, twice, a stop-ordering flake.
 
+The one failure the revision-3 full run had was neither: it was
+`harness-provider-openrouter-transport-test`'s
+`...-retry-rechecks-a-stale-pin`, and it is repaired at `3443405`.  That
+test gives the pin a `:freshness` bound and stamps the pin's
+`:catalogue-at` when the route is built, before `session/create`; the
+gap between making the pin and dispatching is bounded by nothing the
+test controls, so a loaded machine put the **first** request outside the
+bound, the dispatch refused it as `over-max-price`, nothing was sent,
+and the wait for "trying again in" timed out.  Delaying the dispatch
+0.3 s reproduces it deterministically.  The routing code was right --
+it failed closed, which is the behaviour the policy exists for -- and
+what was wrong was a test bounding how long a session takes to be made.
+Both bounds now keep a margin on the side they are not about
+(`:freshness` 1.0 s, the retry waits 2.0 s), and the pin is restamped
+immediately before the request so the age measured is the retry's wait.
+The assertions are unchanged, and the test still catches the defect it
+guards: suppressing the re-read makes it fail on 4 POSTs instead of 1.
+
 ### What this revision changed
 
 Revision 1 (the code) is unchanged from the previous hand-in:
@@ -202,13 +234,78 @@ Revision 1 (the code) is unchanged from the previous hand-in:
 4. Tests: 12 new offline tests across the three suites plus one
    exact-copy UI test.  No request, no route change, no credential read.
 
-Revision 2 (this one) changes no Emacs Lisp at all.  It adds the second
+Revision 2 changes no Emacs Lisp at all.  It adds the second
 independent verification pass of `t-sp1j60ii`'s branch at `8df2fe1`,
 records both defects fixed, records the five-file merge conflict that
 bringing the two branches together will need, and records the full-suite
 run honestly, including the failure that is the branch's own merge base.
+
+Revision 3 (this one) repairs one test it did not write.  The full run
+on this branch failed one suite, `harness-provider-openrouter-transport-test`:
+`...-retry-rechecks-a-stale-pin` gave the pin a 0.2 s `:freshness` and
+stamped its reading when the route was built, before `session/create`,
+so the gap between making the pin and dispatching -- which nothing in
+the test bounds -- put the *first* request outside the bound on a loaded
+machine.  The dispatch then refused it as `over-max-price`, nothing was
+sent, and the wait for the retry timed out; delaying the dispatch 0.3 s
+reproduces it every time.  The routing code is right and fails closed
+as it should: what was wrong was a test bounding how long a session
+takes to be made.  The bounds now keep a margin on the side they are not
+about (`:freshness` 1.0 s, the retry waits 2.0 s) and the pin is
+restamped immediately before the request.  The assertions are unchanged
+and the test still catches the defect it guards -- suppressing the
+re-read makes it fail on 4 POSTs instead of 1.
+
+`scripts/test.sh` (full) at `c763735`: **PASS**, 239 files, 0 failed,
+536 s, clean tree
+([stamp](../evidence/provider-diagnostics/full-run-2026-11-20-stamp.json),
+[output](../evidence/provider-diagnostics/full-run-2026-11-20.out)).
+The repaired suite also passed 3 consecutive suite runs and 6 runs at
+once under `HARNESS_TEST_JOBS=6`, the load that produced the failure.
+
 Everything below is the assessment as it stood, kept as the appendix it
 now is.  Dates on its external claims are the dates they were retrieved.
+
+### A regression on `main`, found while checking this branch's merge
+
+Not this branch's, and not repaired here: reported so it is not lost.
+
+When this branch was merged with `main` (`0f99217`) in a scratch tree to
+check the merge, **7 suites failed there**, and they fail on `main`
+alone too: `harness-access`, `harness-readonly`, `harness-tools-ssh`,
+`harness-tools-jobs`, `harness-supervisor`, `harness-provider-claude`
+and `harness-ui-access`.
+
+The cause is `662ccac` ("Settle a session's system prompt and tool
+schema once").  That change is right about the prompt cache: a session's
+tool schema is settled at its first request and never rewritten, so a
+tool appearing mid-session cannot invalidate the provider's cached
+prefix.  But `tools/list` now returns the settled list **verbatim**,
+before the `agent/tools` filters run, so a tool a session *loses* is no
+longer taken off it.  `drop_access` sets the profile to `:network
+:false` and tells the person "the web tools and ssh are gone from the
+next request on", and they are not: the session keeps offering them.
+
+The fix is small and is not applied here, because it belongs to the
+change that made the regression: the settled names must still be put
+through `agent/tools`, which narrows and never widens, so settling keeps
+its guarantee (a tool the session settled without is still not added)
+while giving access up still takes tools away.  A prototype of exactly
+that made `harness-access`, `harness-tools-ssh`, `harness-ui-access`,
+`harness-tools` and `harness-agent` pass in a scratch tree.
+
+Four of the seven (`harness-readonly`, `harness-supervisor` ×2,
+`harness-tools-jobs`, `harness-provider-claude`) are a second question
+the same change raises and that is **not** a filter bug: they expect a
+tool to *appear* after the session settled, which settling now forbids
+by design -- `harness-readonly-offers-bash-only-where-the-sandbox-
+confines-it` and `harness-supervisor-bash-is-offered-only-where-the-
+sandbox-confines-it` flip `sandbox/confined-p` and expect `bash` to
+come back, and the judged-hands-on test expects the writing tools to
+return mid-session.  Whether settling should be re-decided when the
+sandbox answer or the supervisor mode changes, or those tests should
+assert the new rule, is a design decision for whoever owns `662ccac`,
+not something to settle from this task.
 
 ---
 

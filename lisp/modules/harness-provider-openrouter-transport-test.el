@@ -495,27 +495,40 @@ cache-read price over the lowered maximum, and sends nothing: one POST,
 one catalogue read, and the refusal names the component."
   (skip-unless (executable-find "curl"))
   (harness-openrouter-test-with-wire (lambda (_) 'reset)
-    (setq harness-retry-delay 0.4)
+    (setq harness-retry-delay 2.0)
     ;; The reading is fresh when the request goes out and stale when it
     ;; waits to be repeated, which is what makes the retry read again.
+    ;; Each bound keeps a margin on the side it is not about: the dispatch
+    ;; happens well inside `:freshness', and the wait before the retry is
+    ;; longer than it.  A tighter freshness would bound how long
+    ;; `session/create' may take, which is not this test's subject and is
+    ;; not true of a loaded machine.
     (setq harness-openrouter-routing
           (harness-openrouter-test-policy
-           :freshness 0.2
+           :freshness 1.0
            :max-price '(:prompt 0.15 :completion 0.60 :cache-read 0.001)))
-    (let* ((sid (harness-openrouter-test--wire-pinned-session
-                 (harness-openrouter-test--route '(:cache-read 0.0005))))
-           (promise (harness-call 'agent/prompt sid "go")))
-      (harness-openrouter-test--wire-wait-retrying sid)
-      ;; The reading the request was authorised at is no longer evidence of
-      ;; its price, so the retry reads the catalogue again -- and the price
-      ;; it finds (cache read 0.00294) is over the maximum that authorised
-      ;; the request (0.001), so nothing is sent.  The policy in force is
-      ;; the one that authorised it, unchanged: the refusal is the price.
-      (should (eq 'error (plist-get (harness-test-await promise 30) :stop-reason)))
-      (should (= 1 (harness-openrouter-test--wire-posts wire)))
-      (should (= 1 (harness-openrouter-test--wire-reads wire)))
-      (should (cl-some (lambda (h) (string-match-p "dearer than the maximum price.*cache-read 0.00294 > 0.001" h))
-                       (harness-openrouter-test--wire-hints sid))))))
+    (let* ((route (harness-openrouter-test--route '(:cache-read 0.0005)))
+           (sid (harness-openrouter-test--wire-pinned-session route)))
+      ;; `harness-openrouter-test--route' stamps the reading when it is
+      ;; built, and the pin is stored after that, so the age at dispatch
+      ;; would be the age of making the pin.  Restamp it immediately before
+      ;; the request, so the staleness this test turns on is the retry's
+      ;; wait and not the time the session took to be made.
+      (harness-call 'session/set-ext sid :openrouter-route
+                    (plist-put (copy-sequence route) :catalogue-at (float-time)))
+      (let ((promise (harness-call 'agent/prompt sid "go")))
+        (harness-openrouter-test--wire-wait-retrying sid)
+        ;; The reading the request was authorised at is no longer evidence
+        ;; of its price, so the retry reads the catalogue again -- and the
+        ;; price it finds (cache read 0.00294) is over the maximum that
+        ;; authorised the request (0.001), so nothing is sent.  The policy
+        ;; in force is the one that authorised it, unchanged: the refusal
+        ;; is the price.
+        (should (eq 'error (plist-get (harness-test-await promise 30) :stop-reason)))
+        (should (= 1 (harness-openrouter-test--wire-posts wire)))
+        (should (= 1 (harness-openrouter-test--wire-reads wire)))
+        (should (cl-some (lambda (h) (string-match-p "dearer than the maximum price.*cache-read 0.00294 > 0.001" h))
+                         (harness-openrouter-test--wire-hints sid)))))))
 
 ;;;; A failure OpenRouter's own fields say no identical request passes
 
