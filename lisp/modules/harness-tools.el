@@ -1001,10 +1001,17 @@ runs it in the tool's place (see `tools/builtin'), and either is a call
 of web_search.  Every other tool of kind net, such as web_fetch, which
 reaches any URL, is off with `harness-corporate-mode' on.")
 
-(defconst harness-tools--corporate-remote-tools '("ssh")
+(defconst harness-tools--corporate-remote-tools '("ssh" "git")
   "Tools of other kinds than net that corporate mode turns off too.
 ssh is of kind exec, since it runs commands, but it runs them on
-another machine, which carries data off this one as web_fetch does.")
+another machine, which carries data off this one as web_fetch does.
+git is of kind exec for the same reason: a push, a fetch or a clone
+carries the repository to another machine or brings it from one, which
+is what corporate mode is for.  A git call that stays on this machine
+is no different from the same command in bash, which corporate mode
+does not turn off, and the tool is turned off whole because a call
+that reaches another machine cannot be told from one that does not
+without running it.")
 
 (defconst harness-tools-corporate-hint
   "Work with the project and the tools you have; do not try to reach the network another way, such as with curl in the shell. If the task cannot be done without this tool, finish what you can and say so in your answer."

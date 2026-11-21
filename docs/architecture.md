@@ -22,7 +22,7 @@ module needs something more, add it here first.
                 provider-copilot, provider-responses
  Tool calls     mcp (the MCP host: tool servers the harness starts in the
                 session's sandbox, and the Emacs a client lends), tools,
-                tools-fs, tools-shell, tools-ssh, tools-emacs,
+                tools-fs, tools-shell, tools-ssh, tools-git, tools-emacs,
                 tools-web, tools-agent, tools-question, tools-plan, tools-todo,
                 tools-session-info, tools-sessions, tools-events, tools-notify,
                 tools-handin, tools-compact
@@ -10797,7 +10797,7 @@ The one server the harness starts itself is `fs`, declared by tools-fs: an
 `emacs --batch` that loads lisp/harness-mcp-fs.el and serves the seven file
 tools by running the handlers of tools-fs, unchanged.  See tools-fs.
 
-### tools-fs, tools-shell, tools-ssh, tools-emacs, tools-web, tools-agent, tools-question, tools-plan, tools-todo, tools-session-info, tools-sessions, tools-events, tools-notify, tools-handin, tools-compact, tools-review
+### tools-fs, tools-shell, tools-ssh, tools-git, tools-emacs, tools-web, tools-agent, tools-question, tools-plan, tools-todo, tools-session-info, tools-sessions, tools-events, tools-notify, tools-handin, tools-compact, tools-review
 
 Where the file tools run.  Each is registered with a broker
 (`harness-tools-fs--broker`) for its handler.  A call on a local path where
@@ -10837,6 +10837,7 @@ TRAMP prefixes come from the session host):
 | `grep` | Search files | pattern, path, glob, case_sensitive, max_results | read |
 | `bash` | Bash | command, timeout, cwd | exec |
 | `ssh` | SSH | host, command, cwd, timeout | exec (tools-ssh; its path is the directory it runs in on the host, or the login's home directory by name, `/ssh:HOST:~/`, when the host decides where that is: no cwd, a relative cwd) |
+| `git` | Git | command (one git command line), cwd, timeout | exec (tools-git; its path is the top of the repository it runs in, and its command line is what a command rule about `git push` matches.  It runs git itself, with no shell, `GIT_TERMINAL_PROMPT=0`, an askpass of `true`, `GIT_ALLOW_PROTOCOL=ssh:https:http:git` and `protocol.file.allow`/`protocol.ext.allow` `never`, and shows that one process the user's ssh setup -- `~/.ssh/config`, what it includes, the keys and known hosts it names, the program a `GIT_SSH_COMMAND` names, and `SSH_AUTH_SOCK` -- read-only, for the call alone, so a push over ssh works without a grant of `~/.ssh`.  A word that is no git subcommand, and a directory that is no repository, are refused before the jail is asked.  Corporate mode turns it off, as it turns off `ssh`) |
 | `elisp` | Emacs Lisp | code, timeout, snapshot (start from a copy of the user's Emacs), fresh (renew that copy) | exec (with `snapshot`: read-only, no network, refused without a sandbox) |
 | `emacs_buffers` | List buffers | filter, all | read (needs no approval: `harness-perms--inspection-tools`) |
 | `emacs_windows` | List windows | — | read (needs no approval: `harness-perms--inspection-tools`) |

@@ -8,7 +8,7 @@ Bash (asynchronous, sandboxed when available) and Emacs Lisp evaluation.
 - **Source:** [lisp/modules/harness-tools-shell.el](../../lisp/modules/harness-tools-shell.el)
 - **Loaded:** by default
 - **Requires:** [tools](tools.md)
-- **Required by:** [sandbox-session](sandbox-session.md), [tools-jobs](tools-jobs.md), [tools-ssh](tools-ssh.md)
+- **Required by:** [sandbox-session](sandbox-session.md), [tools-git](tools-git.md), [tools-jobs](tools-jobs.md), [tools-ssh](tools-ssh.md)
 
 ## About
 
