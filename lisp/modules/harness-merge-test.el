@@ -131,6 +131,83 @@ Those are tool uses, tool results and the text a stray result becomes."
     (should (null (harness-call 'merge/queue parent)))
     (should (null (harness-call 'merge/status child)))))
 
+(ert-deftest harness-merge-a-session-that-lost-its-worktree-merges-from-the-tasks ()
+  "A session whose record lost its worktree still merges its branch.
+A task's session record is written by whatever reads it, and one written
+before a restart -- or by a version that did not keep `:worktree' for a
+session that ran in its task's worktree -- hydrates with the directory it
+works in but without the worktree it belongs to.  The queue used to
+refuse it outright, so the task's committed work sat on its branch with
+nothing the user could do to land it, retrying the merge included.  The
+task that owns the session still says which worktree the branch is in,
+so the merge reads it from there."
+  (harness-merge-test-with
+    (harness-merge-test--write wt "feature.txt" "new feature\n")
+    (harness-merge-test--commit wt "add feature" "feature.txt")
+    ;; The session loses its worktree, as a record written before the
+    ;; field was kept does, and its cwd falls back to the project root.
+    (harness-call 'session/update child :worktree nil)
+    (should-not (plist-get (harness-call 'session/get child) :worktree))
+    ;; The task that owns it still names the worktree.
+    (let ((real-call (symbol-function 'harness-call))
+          (real-exists (symbol-function 'harness-method-exists-p)))
+      (cl-letf (((symbol-function 'harness-method-exists-p)
+                 (lambda (name) (or (eq name 'task/for-session)
+                                    (funcall real-exists name))))
+                ((symbol-function 'harness-call)
+                 (lambda (name &rest args)
+                   (if (eq name 'task/for-session)
+                       (list :id "t-test" :worktree wt :worktree-removed nil)
+                     (apply real-call name args)))))
+        (should (equal (harness-merge--worktree (harness-call 'session/get child)) wt))
+        (harness-call 'merge/enqueue child parent)
+        (harness-test-wait (lambda () (null (harness-call 'merge/status child))) 20 "merge")
+        (should (file-exists-p (expand-file-name "feature.txt" root)))
+        (should (equal "new feature\n"
+                       (with-temp-buffer
+                         (insert-file-contents (expand-file-name "feature.txt" root))
+                         (buffer-string))))))))
+
+(ert-deftest harness-merge-a-lost-worktree-still-merges-the-branch-not-the-root ()
+  "The branch is read from the worktree the task names, not the session's cwd.
+A session that lost its worktree also falls back to the project root for
+its cwd, where HEAD is the target's own branch.  Reading the branch from
+there would merge the target into itself and report nothing to do, so the
+work would never land even once the refusal was gone."
+  (harness-merge-test-with
+    (harness-merge-test--write wt "feature.txt" "new feature\n")
+    (harness-merge-test--commit wt "add feature" "feature.txt")
+    ;; The session works where the project's checkout is, not in its worktree.
+    (harness-call 'session/update child :worktree nil :cwd root)
+    (should-not (plist-get (harness-call 'session/get child) :worktree))
+    (let ((real-call (symbol-function 'harness-call))
+          (real-exists (symbol-function 'harness-method-exists-p)))
+      (cl-letf (((symbol-function 'harness-method-exists-p)
+                 (lambda (name) (or (eq name 'task/for-session) (funcall real-exists name))))
+                ((symbol-function 'harness-call)
+                 (lambda (name &rest args)
+                   (if (eq name 'task/for-session)
+                       (list :id "t-test" :worktree wt :worktree-removed nil)
+                     (apply real-call name args)))))
+        (harness-call 'merge/enqueue child parent)
+        (harness-test-wait (lambda () (null (harness-call 'merge/status child))) 20 "merge")
+        ;; The work landed in the root's checkout: the branch was read from
+        ;; the worktree, not from the root HEAD the session's cwd names.
+        (should (equal "new feature\n"
+                       (with-temp-buffer
+                         (insert-file-contents (expand-file-name "feature.txt" root))
+                         (buffer-string))))))))
+
+(ert-deftest harness-merge-a-session-with-no-worktree-anywhere-is-still-refused ()
+  "A session no task claims, and whose record has no worktree, is refused.
+The fallback is the task's record, not a guess: a session that names no
+worktree and belongs to no task has nothing to merge from."
+  (harness-merge-test-with
+    (harness-merge-test--write wt "feature.txt" "new feature\n")
+    (harness-merge-test--commit wt "add feature" "feature.txt")
+    (harness-call 'session/update child :worktree nil)
+    (should-error (harness-call 'merge/enqueue child parent) :type 'harness-error)))
+
 (ert-deftest harness-merge-fast-path-when-parent-idle ()
   (harness-merge-test-with
     (harness-merge-test--write wt "feature.txt" "new feature\n")

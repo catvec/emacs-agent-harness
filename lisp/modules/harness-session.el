@@ -1264,6 +1264,14 @@ is a real schema, and `tools/settle' never makes one."
         (progn
           (when (consp (harness-session-tool-schema s))
             (setf (harness-session-tool-schema s) nil)
+            ;; The next request settles a different list, which rewrites
+            ;; the schema the provider already read.  Announcing it is
+            ;; what lets the replay module record the reset: without it
+            ;; the boundary check finds a prompt component that changed
+            ;; with nothing to explain it and refuses every request the
+            ;; session ever makes again, because a frozen body is only
+            ;; rewritten by a request that is sent.
+            (harness-session--settled s :tools)
             (harness-session--touch s))
           nil)
       (unless (consp (harness-session-tool-schema s))

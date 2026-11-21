@@ -1478,5 +1478,114 @@ is still refused, since that is a rebuild nothing accounts for."
       (should (cdr (harness-replay-test--seam
                     id (list (harness-replay-test--message "HI"))))))))
 
+(ert-deftest harness-replay-a-changed-effort-is-recorded-not-refused-forever ()
+  "A reasoning effort that changed for a reason no setting announces recovers.
+A model's listing can name the reasoning efforts it takes only after a
+session's first request went out (`harness-openai--effort'), which maps
+the same thinking level onto another effort: the body then no longer
+continues the one the provider read, and no setting announced it.  The
+boundary check refused the request -- and because a frozen body is only
+rewritten by a request that is sent, it refused every request the
+session made afterwards, forever.  The change is recorded as the reset
+it is and the request goes out built fresh, as a prompt field that is
+gone already did."
+  (harness-replay-test-with
+    (let* ((id (harness-replay-test-session))
+           (messages (list (harness-replay-test--message "hi")))
+           (first (harness-replay-test--body messages :reasoning '(:effort "max")))
+           (changed (harness-replay-test--body messages :reasoning '(:effort "high")))
+           (request (list :model "m" :session (list :id id))))
+      (harness-replay-seam-keep request "m" "route" first)
+      (should (> (plist-get (harness-call 'replay/frozen-status id) :bytes) 0))
+      ;; The request goes out, built fresh: nothing is refused.
+      (let ((seam (harness-replay-seam request "m" "route" changed)))
+        (should-not (cdr seam))
+        (should (equal (decode-coding-string (car seam) 'utf-8)
+                       (decode-coding-string (harness-json-encode changed) 'utf-8))))
+      ;; And it says why the body stopped applying.
+      (should (equal (plist-get (harness-call 'replay/frozen-status id) :reset)
+                     "diverged"))
+      ;; The request after it continues the body this one kept, so the
+      ;; session is not stranded on a refusal.
+      (harness-replay-seam-keep request "m" "route" changed)
+      (let ((next (harness-replay-seam request "m" "route" changed)))
+        (should-not (cdr next))
+        (should (equal (decode-coding-string (car next) 'utf-8)
+                       (decode-coding-string (harness-json-encode changed) 'utf-8)))))))
+
+(ert-deftest harness-replay-a-changed-tool-schema-is-still-refused ()
+  "A tool schema that changed with nothing recorded is still a refusal.
+The one way a settled schema moves mid-session -- `session/set-tool-schema'
+clearing it so the supervisor's mode can be re-decided -- records its own
+`tools' reset, so the exception for an unannounced change does not reach
+the schema: a tool whose bytes changed with neither the schema cleared
+nor a reset recorded is a rebuild the harness cannot account for, and
+nothing is sent."
+  (harness-replay-test-with
+    (let* ((id (harness-replay-test-session))
+           (messages (list (harness-replay-test--message "hi")))
+           (tool (list :type "function" :function (list :name "a" :description "d")))
+           (changed (list :type "function" :function (list :name "a" :description "D"))))
+      (harness-replay-test--keep id messages :tools (list tool))
+      (let ((seam (harness-replay-test--seam id messages :tools (list changed))))
+        (should (cdr seam))
+        (should (string-match-p "tools\\[0\\]" (cdr seam)))))))
+
+(ert-deftest harness-replay-a-changed-message-is-still-refused-for-good ()
+  "The envelope's exception never reaches the conversation.
+A message whose text changed is a rebuild of the transcript: it is
+refused, and stays refused until something records why, because a
+session that sent different words than it holds is a defect and not a
+change it can go on from."
+  (harness-replay-test-with
+    (let* ((id (harness-replay-test-session))
+           (first (list (harness-replay-test--message "hi")))
+           (changed (list (harness-replay-test--message "HI"))))
+      (harness-replay-test--keep id first)
+      (dotimes (_ 3)
+        (let ((seam (harness-replay-test--seam id changed)))
+          (should (cdr seam))
+          (should (string-match-p "messages\\[0\\]\\.content" (cdr seam))))))))
+
+(ert-deftest harness-replay-clearing-a-settled-schema-explains-the-change ()
+  "Clearing a settled tool schema records the reset it makes.
+`session/set-tool-schema' with nil forgets the list so the next request
+settles a new one -- the supervisor's judge does it to make its mode
+decision real -- and that rewrites the tool schema the provider already
+read.  It announced nothing, so the boundary check refused the next
+request for a change with no recorded reset, and every request after it:
+a frozen body is only rewritten by a request that is sent.  The clear
+now announces itself, so the reset is recorded and the request after it
+is built fresh."
+  (harness-replay-test-with
+    (let* ((id (harness-replay-test-session))
+           (messages (list (harness-replay-test--message "hi")))
+           (before (harness-replay-test--body
+                    messages
+                    :tools (vector (list :type "function"
+                                         :function (list :name "read" :description "Read")))))
+           (after (harness-replay-test--body
+                   messages
+                   :tools (vector (list :type "function"
+                                        :function (list :name "read" :description "Read"))
+                                  (list :type "function"
+                                        :function (list :name "write" :description "Write"))))))
+      (harness-replay-seam-keep (list :model "m" :session (list :id id))
+                                "m" "route" before)
+      ;; The session settled the schema it first sent, as `tools/settle' does.
+      (harness-call 'session/set-tool-schema id '("read"))
+      (should (equal (plist-get (harness-call 'session/get id) :tool-schema) '("read")))
+      (harness-call 'session/set-tool-schema id nil)
+      (should-not (plist-get (harness-call 'session/get id) :tool-schema))
+      (should (equal (plist-get (harness-call 'replay/frozen-status id) :reset) "tools"))
+      ;; The next request, with the schema settled again, goes out.
+      (let ((seam (harness-replay-seam (list :model "m" :session (list :id id))
+                                       "m" "route" after)))
+        (should-not (cdr seam))
+        (should (string-match-p "write" (car seam))))
+      (harness-replay-seam-keep (list :model "m" :session (list :id id))
+                                "m" "route" after)
+      (should (> (plist-get (harness-call 'replay/frozen-status id) :bytes) 0)))))
+
 (provide 'harness-replay-test)
 ;;; harness-replay-test.el ends here

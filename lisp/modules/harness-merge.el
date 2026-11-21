@@ -213,6 +213,26 @@ never lose work.")
   (and id (harness-method-exists-p 'session/get)
        (ignore-errors (harness-call 'session/get id))))
 
+(defun harness-merge--worktree (child)
+  "Return the worktree directory of CHILD, a session plist, or nil.
+It is the session's own `:worktree', or the worktree its task records
+when the session lost it.  A session's record is written by whatever
+reads it, and one written before a restart -- or by a version that did
+not keep the field for a session that ran in its task's worktree --
+hydrates with the directory it works in but without the worktree it
+belongs to.  The task that owns the session still says it, so the
+branch stays mergeable: refusing it would leave the work committed on
+its branch with nothing the user could do to land it."
+  (or (plist-get child :worktree)
+      (when (and (plist-get child :id)
+                 (harness-method-exists-p 'task/for-session))
+        (let ((task (ignore-errors (harness-call 'task/for-session (plist-get child :id)))))
+          (and (not (harness-json-true-p (plist-get task :worktree-removed)))
+               (let ((worktree (plist-get task :worktree)))
+                 (and (stringp worktree) (not (harness-string-blank-p worktree))
+                      (file-directory-p worktree)
+                      worktree)))))))
+
 (defun harness-merge--label (id)
   "Return a short label for session ID (its name or a short id)."
   (let ((s (harness-merge--session id)))
@@ -426,10 +446,13 @@ are through: a branch merges on top of the work it was built on."
          (parent-id (plist-get resolved :session))
          (cwd (plist-get resolved :cwd)))
     (unless child (signal 'harness-error (list (format "No session %s" child-id))))
-    (unless (plist-get child :worktree)
+    (unless (harness-merge--worktree child)
       (signal 'harness-error (list (format "Session %s has no worktree; only worktree sessions can be merged" child-id))))
-    (unless (harness-merge--in-git-repo-p (plist-get child :cwd))
-      (signal 'harness-error (list (format "The child's directory %s is not a git worktree" (plist-get child :cwd)))))
+    (unless (harness-merge--in-git-repo-p (or (harness-merge--worktree child)
+                                              (plist-get child :cwd)))
+      (signal 'harness-error (list (format "The child's directory %s is not a git worktree"
+                                           (or (harness-merge--worktree child)
+                                               (plist-get child :cwd))))))
     (unless (harness-merge--in-git-repo-p cwd)
       (signal 'harness-error (list (format "The target's directory %s is not inside a git repository" cwd))))
     (when (harness-merge--entry child-id)
@@ -574,7 +597,7 @@ An asynchronous step checks this first, so a cancelled merge stops."
       (puthash target child-id harness-merge--locks)
       (harness-merge--set entry :status 'merging)
       (harness-emit 'merge/started child-id (or parent-id target))
-      (let ((child-cwd (plist-get child :cwd))
+      (let ((child-cwd (or (harness-merge--worktree child) (plist-get child :cwd)))
             (parent-cwd (plist-get entry :cwd)))
         (harness-then
          (harness-merge--git child-cwd "status" "--porcelain")
@@ -894,7 +917,7 @@ and merge_done is called."
          (parent-id (plist-get entry :parent))
          (key (plist-get entry :target))
          (child (harness-merge--session child-id))
-         (child-cwd (directory-file-name (or (plist-get child :cwd) "")))
+         (child-cwd (directory-file-name (or (harness-merge--worktree child) (plist-get child :cwd) "")))
          (short (substring head 0 (min 12 (length head))))
          (where (if (plist-get entry :target-branch)
                     (format "%s (branch %s)" (directory-file-name cwd) (plist-get entry :target-branch))
@@ -1143,7 +1166,7 @@ never solely because time elapsed."
   "Lift the harness's lock on the worktree of ENTRY's child, now merged.
 Return a promise, or nil without a worktree or the worktree module."
   (let* ((child (harness-merge--session (plist-get entry :child)))
-         (worktree (plist-get child :worktree)))
+         (worktree (and child (harness-merge--worktree child))))
     (when (and worktree (harness-method-exists-p 'worktree/unlock))
       (harness-catch
        (harness-call-async 'worktree/unlock (or (plist-get entry :cwd) worktree) worktree)

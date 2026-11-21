@@ -108,6 +108,8 @@ in `harness-replay-frozen-reset-reasons`:
 | `route` | the endpoint or the account |
 | `redaction` | a secret was taken out |
 | `images-pruned` | pictures dropped from the history |
+| `field-dropped` | a prompt field the body kept that the request no longer sends |
+| `diverged` | the reasoning effort, which no setting announces |
 | `adapter-version` | another serialization version |
 | `storage-failure` | the body could not be written |
 | `too-large` | over `harness-replay-frozen-max-bytes` |
@@ -117,6 +119,18 @@ A recorded reset **empties** the frozen body, so the boundary check has
 nothing to refuse.  That is the whole mechanism: a change the harness
 knows about is explained in advance, and a change it does not know about
 is refused.  The two are never the same code path.
+
+The one refusal that records its own reset is a body that no longer
+continues the kept one in a way no setting announces.  A prompt field
+that is gone (`field-dropped`) and a reasoning effort that moved under
+the same thinking level (`diverged`: a model's listing can name its
+efforts only after the first request went out, and
+`harness-openai--effort` then maps the level to another) both leave the
+session unable to make **any** request, because a frozen body is only
+rewritten by a request that is sent.  They are recorded at the splice,
+and the request goes out built fresh.  Everything else stays refused: a
+message whose text changed, a system prompt nobody approved, a tool
+schema that moved with neither `session/set-tool-schema` nor a reset.
 
 `session/updated` carries the changed settings, so
 `harness-replay-reset-on-change` records `model`, `system`, `tools` or
