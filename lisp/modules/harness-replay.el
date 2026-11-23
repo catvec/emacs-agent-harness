@@ -51,7 +51,8 @@
 ;; splices, because re-sending the bytes the provider read is what reads
 ;; the cache, and is never kept, because the conversation's next step
 ;; would diverge at what it appended.  Neither is a licence to change the
-;; prefix: a body whose bytes changed under it is still refused.
+;; prefix: a body whose bytes changed under it is recorded as the reset it
+;; is, and goes out built fresh.
 ;;
 ;; The files are the session's, in the state directory:
 ;; sessions/ID.responses.jsonl, one response a line, and
@@ -71,14 +72,18 @@
 ;; as they were encoded (`replay/frozen-splice'): the next request is
 ;; assembled from those bytes for every component already sent, and only
 ;; the components the new nodes add are encoded fresh.  The assembled
-;; body is compared component by component with what was kept before it
-;; is handed to the transport; a difference no recorded reset explains
-;; is refused there, naming the first divergent component, and nothing is
-;; sent.  The resets are explicit and recorded, each with its reason and
-;; a new generation: a compaction, a change of model, route, system
-;; prompt or tools, an adapter serialization version, a redaction,
-;; images dropped from the history, a payload too large to keep, and a
-;; store that could not be written.
+;; body is compared component by component with what was kept: a
+;; component that moved is recorded as the reset it is, naming the first
+;; one, and the request goes out built fresh rather than not at all --
+;; since a frozen body is only rewritten by a request that is sent, a
+;; refusal could never be cleared and would refuse every request that
+;; session ever made again.  The boundary check keeps one tooth: a body
+;; the splice said it put the kept bytes back into, which does not hold
+;; them, is a defect and is not sent.  The resets are explicit and
+;; recorded, each with its reason and a new generation: a compaction, a
+;; change of model, route, system prompt or tools, an adapter
+;; serialization version, a redaction, images dropped from the history, a
+;; payload too large to keep, and a store that could not be written.
 ;;
 ;; Identical components do not promise a provider cache hit: eviction,
 ;; retention and routing are the provider's, and the diagnostics module
@@ -258,7 +263,7 @@ harness should stop a turn for."
 
 (defconst harness-replay-frozen-reset-reasons
   '(compaction system tools model route redaction images-pruned field-dropped
-    diverged tool-definition adapter-version storage-failure too-large no-session)
+    diverged adapter-version storage-failure too-large no-session)
   "Why a frozen body stops applying, as the reason a reset records.
 Each is a change of what the model is sent, or of a store that could not
 hold it, never an unexplained one: `compaction' a conversation replaced,
@@ -267,23 +272,26 @@ settings, `route' the endpoint or the account, `redaction' a secret taken
 out, `images-pruned' pictures dropped from the history by
 `harness-agent-history-images', `field-dropped' a prompt field the body
 kept that this request no longer sends at all, `diverged' a prompt
-component the rebuilt body no longer continues -- a value inside a field
-that changed, such as the reasoning effort a model's listing named only
-after the first request went out -- `tool-definition' a tool the body
-kept whose definition the harness changed while the names the session
-settled stayed the same, `adapter-version' another
-serialization, `storage-failure' a body that could not be written,
-`too-large' one over `harness-replay-frozen-max-bytes', and `no-session' a
-request that names no session.
+component the rebuilt body no longer continues and no setting of its own
+names -- a message the renderer writes another way, the reasoning effort
+a model's listing named only after the first request went out, a tool
+whose definition the harness changed while the names the session settled
+stayed the same -- `adapter-version' another serialization,
+`storage-failure' a body that could not be written, `too-large' one over
+`harness-replay-frozen-max-bytes', and `no-session' a request that names
+no session.
 
-A reset says the next request is built fresh.  A prompt field that is
-gone, the reasoning effort a model's listing named late, and a tool
-definition the harness itself changed are all recorded by the splice
-that finds them: the request goes out built fresh, since refusing it
-forever would leave the session unable to make any request at all.
-Every other divergence is refused by the boundary check and nothing is
-sent, until something records why -- the two are never the same code
-path.")
+A reset says the next request is built fresh.  Every divergence is
+recorded by the splice that finds it, with the component named
+\(`harness-replay--divergence-reset-reason'): a field that is gone, a
+tool schema a reload rewrote, a message the renderer changed, the
+reasoning effort a listing mapped late.  The request then goes out built
+fresh, since refusing it forever would leave the session unable to make
+any request at all -- a frozen body is only rewritten by a request that
+is sent.  Nothing is ever left permanently refused for a change that
+really happened; the boundary check stops only a body that does not hold
+the bytes the splice said it put back, which is a defect and not a
+change.")
 
 (defconst harness-replay--frozen-separator ","
   "What goes between two components of a body: the JSON comma.")
@@ -393,9 +401,9 @@ OLD and NEW are the prompt objects of two bodies.  A field that is gone
 is not the prompt's text changing: it is the request no longer sending a
 component the provider already read -- the tool schema a session no
 longer has, the reasoning effort of a thinking level that went nil -- and
-`harness-replay--piece-diff' reports it as the bare path, which a refusal
-prints as \"body\".  A caller can explain that with a recorded reset, as
-it cannot explain a field whose bytes changed."
+`harness-replay--piece-diff' reports it as the bare path, which the
+complaint prints as \"body\".  The splice records it as the `field-dropped'
+reset, naming the fields here, so the request goes out built fresh."
   (let ((news (harness-replay--piece-fields new)))
     (cl-loop for field in (harness-replay--piece-fields old)
              for name = (harness-replay--field-name field)
@@ -403,55 +411,21 @@ it cannot explain a field whose bytes changed."
                              :test #'equal)
              collect name)))
 
-(defun harness-replay--field-piece-named (name piece)
-  "Return the piece of NAME's field in PIECE, an object, or nil."
-  (let ((field (cl-find name (harness-replay--piece-fields piece)
-                        :key #'harness-replay--field-name :test #'equal)))
-    (and field (harness-replay--field-piece field))))
-
-(defun harness-replay--scalar-text (piece)
-  "Return PIECE, a scalar, as the value it was encoded from, or nil.
-A scalar that cannot be read as JSON says nothing rather than signalling:
-it is read to compare tool names, and a body this module cannot read is a
-body it must not refuse a request for."
-  (when (and (consp piece) (equal (plist-get piece :kind) "scalar")
-             (plist-get piece :bytes))
-    (condition-case nil
-        (harness-json-parse (plist-get piece :bytes))
-      (error nil))))
-
-(defun harness-replay--tool-name (tool)
-  "Return the name TOOL, a tool of a body, is called by, or nil.
-The chat-completions route nests it under `function'; the Responses
-route's `additional_tools' items carry it themselves."
-  (or (harness-replay--scalar-text (harness-replay--field-piece-named "name" tool))
-      (harness-replay--scalar-text
-       (harness-replay--field-piece-named
-        "name" (harness-replay--field-piece-named "function" tool)))))
-
-(defun harness-replay--tool-names (prompt)
-  "Return the names of the tools PROMPT, a body's prompt, carries.
-They are read where each adapter keeps them -- the `tools' and `functions'
-fields, and the `additional_tools' items of a Responses `input' -- so that
-a body is read by its own shape and not by a name this module would have
-to know.  The order is the body's."
-  (let (names)
-    (dolist (field (harness-replay--piece-fields prompt))
-      (let ((name (harness-replay--field-name field))
-            (piece (harness-replay--field-piece field)))
-        (cond
-         ((member name '("tools" "functions"))
-          (dolist (tool (harness-replay--piece-items piece))
-            (push (harness-replay--tool-name tool) names)))
-         ((equal name "input")
-          (dolist (item (harness-replay--piece-items piece))
-            (when (equal (harness-replay--scalar-text
-                          (harness-replay--field-piece-named "type" item))
-                         "additional_tools")
-              (dolist (tool (harness-replay--piece-items
-                             (harness-replay--field-piece-named "tools" item)))
-                (push (harness-replay--tool-name tool) names))))))))
-    (delq nil (nreverse names))))
+(defun harness-replay--moved-prompt-fields (old new)
+  "Return the names of the prompt fields that appeared or went between OLD and NEW.
+OLD and NEW are the prompt objects of two bodies.  A field that is gone is
+one the request no longer sends at all; a field that appeared is one it
+did not send before.  Either way the prompt object's own bytes changed,
+which is where a provider's cache prefix ends, and the field's name is
+what the reset is named after (`harness-replay--field-reset-reason')."
+  (let ((olds (harness-replay--piece-fields old))
+        (news (harness-replay--piece-fields new)))
+    (append (harness-replay--dropped-prompt-fields old new)
+            (cl-loop for field in news
+                     for name = (harness-replay--field-name field)
+                     unless (cl-find name olds :key #'harness-replay--field-name
+                                     :test #'equal)
+                     collect name))))
 
 (defun harness-replay--changed-tool-field-p (path)
   "Non-nil when PATH is inside the tool schema of a body.
@@ -462,7 +436,16 @@ keeps the tools in a field of the body; the Responses route brings them in
 as an `additional_tools' item of `input', so the path reads
 \"input[0].tools[0].description\" there.  Nothing else under `input' is a
 tool: the conversation's items are the messages, and a change of one of
-those is never a change of the schema."
+those is never a change of the schema.
+
+The schema is the one component a session settles only the *names* of
+\(`session/set-tool-schema'): the definitions are read from the registry
+with every request, so a release that edits one -- a description, an added
+property, a renamed parameter -- rewrites the schema the provider already
+read with nothing announcing it, since no name changed.  That is the
+divergence the `tools' reset is for; a tool the kept body had and the new
+one no longer sends is the list itself moving, which the schema's own
+announcement records."
   (when (stringp path)
     (let* ((segments (split-string path "\\." t))
            (root (and segments (car (split-string (car segments) "\\[" t))))
@@ -472,51 +455,77 @@ those is never a change of the schema."
                (and (equal root "input") (member next '("tools" "functions"))))
            t))))
 
-(defun harness-replay--changed-tool-definition-p (old new path)
-  "Non-nil when PATH's divergence is a tool definition the harness changed.
-OLD and NEW are the prompt pieces of two bodies, and PATH is where
-`harness-replay--piece-diff' found NEW no longer continuing OLD.  That is
-a divergence inside the tool schema with no tool the kept body had
-dropped: the definitions, and not the list.
+(defun harness-replay--field-piece-named (piece name)
+  "Return the piece of PIECE, an object, named NAME, or nil."
+  (when (equal (plist-get piece :kind) "object")
+    (let ((field (cl-find name (harness-replay--piece-fields piece)
+                          :key #'harness-replay--field-name :test #'equal)))
+      (and field (harness-replay--field-piece field)))))
 
-A session settles the tool *names* it sends (`session/set-tool-schema'),
-and their definitions are read from the registry with every request.  So
-an upgrade that edits one -- a description, a property, a renamed
-parameter -- rewrites the schema the provider already read, and no setting
-announces it: the names did not change, so `session/set-tool-schema' was
-never called.  Left to the refusal, that would stop every request the
-session made afterwards, because a frozen body is only rewritten by a
-request that is sent.
+(defun harness-replay--system-first-p (kept)
+  "Non-nil when KEPT, a frozen prompt, carries its system material first.
+That is `instructions' (the Responses route) or a first message whose role
+is \"system\": the two places an adapter puts the prompt, and so the two
+whose change is a change of the system prompt rather than of the
+conversation."
+  (if (harness-replay--field-piece-named kept "instructions")
+      t
+    (let* ((messages (harness-replay--field-piece-named kept "messages"))
+           (first (and (equal (plist-get messages :kind) "array")
+                       (car (harness-replay--piece-items messages))))
+           (role (harness-replay--field-piece-named first "role")))
+      (and role
+           (equal (ignore-errors (harness-json-parse (plist-get role :bytes)))
+                  "system")))))
 
-A tool the kept body had and the new one no longer sends is not this: the
-list itself moved, which `session/set-tool-schema' announces with a
-`tools' reset.  Nor is a tool added, which appends and diverges nowhere,
-nor anything outside the tool schema."
-  (and (harness-replay--changed-tool-field-p path)
-       (let ((olds (harness-replay--tool-names old))
-             (news (harness-replay--tool-names new)))
-         (and (cl-subsetp olds news :test #'equal) t))))
+(defun harness-replay--field-reset-reason (name)
+  "Return the reset reason a change of prompt field NAME is, or nil."
+  (pcase name
+    ("tools" 'tools)
+    ("functions" 'tools)
+    ((or "system" "instructions") 'system)
+    ("model" 'model)
+    (_ nil)))
 
-(defun harness-replay--changed-effort-field-p (path)
-  "Non-nil when PATH names the reasoning effort of a body.
+(defun harness-replay--divergence-reset-reason (path &optional kept new)
+  "Return the reset reason for a divergence at PATH, or nil.
 PATH is where `harness-replay--piece-diff' found a rebuilt body no
-longer continuing the kept one, such as \"reasoning.effort\" or
-\"reasoning_effort\".  That is the one prompt component a change of
-which no setting announces: it is not the session's thinking level but
-the effort its adapter maps the level onto, and a model's listing that
-arrives after the first request can map the same level to another
-\(`harness-openai--effort').  The replay module records it as a reset
-instead of leaving the session refused for good.
+longer continuing the kept one, such as \"tools[46].function.name\".
+KEPT and NEW are the two prompt objects, which say what actually moved:
+a top-level field that appeared or went names itself, and a message at
+index 0 is the system prompt only when the kept body's first message is
+one.
 
-Everything else is left to the refusal: the conversation, the system
-prompt and the tool schema each have a way of announcing a change of
-theirs (`session/transition-system', `session/set-tool-schema',
-`harness-replay-reset-changes'), and a rebuild that none of them
-accounts for must not go out."
-  (and (stringp path)
-       (member (car (split-string path "\\." t))
-               '("reasoning" "reasoning_effort"))
-       t))
+The reason names what moved, so the record says which change the session
+went on from: `tools' inside the tool schema -- on either route, the chat
+`tools' field or a Responses `additional_tools' item
+\(`harness-replay--changed-tool-field-p') -- `system' in the system
+prompt, `model' in the model field, and `diverged' for a component no
+setting of its own names: a conversation message rendered another way, a
+reasoning effort a model's listing mapped onto another
+\(`harness-openai--effort'), a prompt field that appeared or went and is
+neither of those.
+
+A divergence is never left as a permanent refusal.  A frozen body is only
+rewritten by a request that is sent, so a refusal the harness could not
+explain would refuse every request that session ever made again: one tool
+description a reload changed, one message the renderer writes differently,
+and the session is wedged for good.  The reset is recorded by the splice
+that finds it, and the request goes out built fresh, which is the only
+thing it could have done -- the bytes really did change."
+  (when (stringp path)
+    (or
+     ;; A whole top-level field that appeared or went names itself.
+     (cl-some #'harness-replay--field-reset-reason
+              (and kept new (harness-replay--moved-prompt-fields kept new)))
+     (cond
+      ((harness-replay--changed-tool-field-p path) 'tools)
+      ((equal path "model") 'model)
+      ((string-prefix-p "instructions" path) 'system)
+      ((and (string-prefix-p "messages[0]" path)
+            (harness-replay--system-first-p kept))
+       'system)
+      (t 'diverged)))))
 
 (defun harness-replay--prompt-only (piece)
   "Return PIECE, a body, with only the fields that are the prompt.
@@ -654,8 +663,8 @@ and records a `storage-failure' reset."
   "Record that session ID's frozen body no longer applies, and why.
 REASON is one of `harness-replay-frozen-reset-reasons'; DETAIL says what
 changed, for the log, never a prompt's text.  The record keeps the reason
-and a new generation, so a difference the next check finds is explained by
-what was recorded and one it does not find is refused.  Return the new
+and a new generation, so the next request is built fresh rather than
+compared with a body that stopped applying.  Return the new
 generation, or nil when there is nothing to record."
   (when (stringp id)
     (let* ((old (harness-replay--frozen-read id))
@@ -860,58 +869,56 @@ that were encoded fresh as metadata."
             :reset (and old (plist-get old :reset))
             :metadata metadata))
      (divergence
-      ;; A prompt field that is gone is a component the provider read and
-      ;; this request no longer sends.  Nothing else can explain it: no
-      ;; setting announces it (a thinking level that went nil, a session
-      ;; whose tool list emptied), and the boundary check would refuse
-      ;; every request this session ever makes again, because the frozen
-      ;; body is only rewritten by a request that is sent.  It is recorded
-      ;; here, with the field named, so the next request is built fresh
-      ;; instead.  A field whose bytes changed is left to the refusal: that
-      ;; is a rebuild the harness cannot account for, and it must not go
-      ;; out.
+      ;; The rebuilt prompt no longer continues the one the provider read.
+      ;; Whatever moved -- a tool description a reload changed under a
+      ;; settled schema, a message the renderer writes another way, the
+      ;; reasoning effort a model's listing mapped onto another -- the
+      ;; bytes really did change, so this request cannot splice them.
       ;;
-      ;; The exception is the reasoning effort, which no setting announces:
-      ;; a model's listing can name the efforts it takes only after the
-      ;; first request went out (`harness-openai--effort'), which maps the
-      ;; same thinking level onto another effort.  Refusing that forever
-      ;; leaves the session unable to make any request at all, so it is
-      ;; recorded as the reset it is and the request goes out built fresh.
-      ;; Nothing else is: the conversation, the system prompt and the tool
-      ;; schema each have a way of announcing a change of theirs, and a
-      ;; rebuild that none of them accounts for must not go out.
-      (let ((dropped (harness-replay--dropped-prompt-fields kept prompt))
-            (effort (harness-replay--changed-effort-field-p divergence))
-            (definition (harness-replay--changed-tool-definition-p
-                         kept prompt divergence)))
-        (cond
-         (dropped
-          (harness-call 'replay/frozen-reset
-                        id 'field-dropped
-                        (format "no longer sent: %s"
-                                (mapconcat #'identity dropped ", "))))
-         (effort
-          (harness-call 'replay/frozen-reset
-                        id 'diverged
+      ;; It is recorded as the reset it is, with the component named, and
+      ;; the request goes out built fresh.  Refusing instead would not send
+      ;; anything *and* could never be cleared: a frozen body is only
+      ;; rewritten by a request that is sent, so the same refusal would
+      ;; meet every request the session ever made again, which is how a
+      ;; reload that touched one tool description wedged sessions for good.
+      ;; A tool definition is the one that reaches a session nobody touched:
+      ;; the schema settles the tool *names*, so an upgrade that edits one
+      ;; rewrites what the provider already read with nothing announcing it.
+      ;; The reset is the honest record: the change happened, this request
+      ;; pays for it once, and the next one continues from what this sends.
+      (let* ((dropped (harness-replay--dropped-prompt-fields kept prompt))
+             (reason (if dropped 'field-dropped
+                       (harness-replay--divergence-reset-reason divergence kept prompt))))
+        (harness-call 'replay/frozen-reset id reason
+                      (if dropped
+                          (format "no longer sent: %s"
+                                  (mapconcat #'identity dropped ", "))
                         (format "changed: %s" divergence)))
-         (definition
-          (harness-call 'replay/frozen-reset
-                        id 'tool-definition
-                        (format "changed: %s" divergence)))))
-      (list :body prompt :text (harness-replay--piece-text piece) :spliced nil
-            :generation (plist-get old :generation)
-            :reset 'diverged :divergence divergence
-            :metadata metadata))
+        (list :body prompt :text (harness-replay--piece-text piece) :spliced nil
+              :generation (plist-get old :generation)
+              :reset reason
+              :divergence divergence
+              :metadata metadata)))
      (t
       ;; The prompt is spliced from the kept bytes; the metadata is this
       ;; request's own and goes out as the adapter just encoded it.
       (let* ((head (harness-replay--piece-splice kept prompt))
+             ;; The comparison happens here, where the kept prompt still is:
+             ;; recording a reset empties it, so a boundary check that read
+             ;; the store afterwards could never see what was kept, and the
+             ;; one refusal worth making -- a splice that lost the bytes it
+             ;; claimed to put back -- would be impossible to make.
+             (complaint (harness-call 'replay/frozen-check
+                                      kept head (plist-get old :generation)))
              (whole (harness-replay--with-metadata head piece)))
-        (list :body head :text (harness-replay--piece-text whole) :spliced t
+        (list :body head :text (harness-replay--piece-text whole)
+              :spliced (not complaint)
               :generation (plist-get old :generation)
               ;; How much of this request's prompt came from the kept bytes,
               ;; which is what a telemetry line reports as the prefix.
-              :prefix-bytes (string-bytes (harness-replay--piece-text kept))
+              :prefix-bytes (and (not complaint)
+                                 (string-bytes (harness-replay--piece-text kept)))
+              :complaint complaint
               :metadata metadata))))))
 
 (defun harness-replay--with-metadata (prompt body)
@@ -935,20 +942,23 @@ record."
                                                                  :test #'equal))
                                                        (harness-replay--field-piece field)))
                               else collect field))))))
-(harness-defmethod replay/frozen-check (id body &optional generation)
-  "Return why BODY may not be sent for session ID, or nil.
-This is the transport boundary.  BODY is the body about to go out, as the
-harness holds it, and the value is nil when every byte of it that was sent
-before is still there, unchanged and in place: the request continues what
-was frozen.  A recorded reset empties the frozen body, so a body that
-differs from a non-empty one is a mutation nothing explains -- a rebuild
-after the splice, a field changed on the way to the transport -- and the
-string names the first place it happened.  The caller must then send
-nothing.  GENERATION is the one the splice reported; it only sharpens the
+(harness-defmethod replay/frozen-check (kept body &optional generation)
+  "Return why BODY may not be sent, compared with KEPT, or nil.
+KEPT is the prompt the frozen body held when the splice read it, and
+BODY is the prompt the splice is about to send: the kept bytes plus this
+request's new material.  The value is nil when every byte of KEPT that
+was sent before is still there, unchanged and in place.
+
+A complaint here is one thing only: the splice said it put the kept
+bytes back and the body does not hold them -- a rebuild after the splice,
+a field changed on the way to the transport.  That is a defect in the
+harness and the caller must send nothing, which is what makes it worth
+stopping a turn for.  A prompt component that genuinely moved is not
+this: the splice finds it, records the reset it is, and the request goes
+out built fresh (see `replay/frozen-splice').  GENERATION is the
+generation of the frozen body KEPT came from; it only sharpens the
 message."
-  (when-let* ((old (and (stringp id) (harness-replay--frozen-read id)))
-              (kept (plist-get old :body))
-              ((harness-replay--piece-fields kept)))
+  (when (harness-replay--piece-fields kept)
     ;; Only the prompt is compared: a metadata field the adapter encoded
     ;; differently is not a change of what the model is told, and refusing
     ;; a request for one would stop a turn the cache never cared about.
@@ -956,14 +966,11 @@ message."
                         kept
                         (harness-replay--prompt-only (harness-replay--as-piece body))
                         "")))
-      (format "prompt component %s changed with no recorded reset%s"
+      (format "prompt component %s changed after the splice reported it unchanged%s"
               (if (string-empty-p where) "body" where)
-              (if (and (integerp generation)
-                       (= generation (plist-get old :generation)))
-                  ""
-                (format "; the frozen body is generation %s, the splice reported %s"
-                        (plist-get old :generation)
-                        (or generation "none")))))))
+              (if (integerp generation)
+                  (format "; the frozen body is generation %s" generation)
+                "")))))
 
 ;;;;
 ;;;; The seam an adapter uses
@@ -1071,8 +1078,13 @@ MODEL and ROUTE name what BODY was built for.  The first value is the body
 to send: every byte an earlier request of the same session sent is the
 bytes that request sent, and only the request's new material is encoded
 fresh.  COMPLAINT is nil, or a string saying that the body may not be sent
-at all -- a prompt component changed and no recorded reset explains it --
-and the caller must then send nothing.
+at all, and the caller must then send nothing.
+
+A prompt component that genuinely moved is not a complaint: the splice
+finds it, records the reset it is, and the request goes out built fresh
+\(`replay/frozen-splice').  A complaint means the splice said it put the
+kept bytes back and the body does not hold them, which is a defect in the
+harness rather than a change of the prompt.
 
 Nothing is frozen for a request that names no session, for a one-off
 call that is not its session's conversation (`harness-replay-conversation-p'),
@@ -1087,18 +1099,24 @@ returned as it is."
         ;; with text.
         (cons (harness-replay--piece-text (harness-replay--piece body)) nil)
       (let* ((frozen (harness-call 'replay/frozen-splice id model route body))
-             (piece (plist-get frozen :body))
-             (complaint (harness-call 'replay/frozen-check id piece
-                                      (plist-get frozen :generation))))
-        (unless (plist-get frozen :spliced)
-          (when-let* ((reset (plist-get frozen :reset)))
-            (harness-log 'debug "replay: %s sends a fresh body (%s): %s"
-                         id reset (or (plist-get frozen :divergence) "-"))))
-        ;; One content-free line per request, so a cache miss can be read
-        ;; later without a prompt ever being kept for it.
-        (ignore-errors
-          (harness-emit 'replay/prefix id
-                        (harness-replay--telemetry id model route frozen body)))
+             ;; The splice compares what it assembled with the kept prompt
+             ;; while it still has it, and answers with a complaint when the
+             ;; bytes it claimed to put back are not there.  Nothing else is
+             ;; a complaint: a body built fresh was recorded as the reset it
+             ;; is, and is the adapter's own bytes.
+             (complaint (plist-get frozen :complaint)))
+        ;; A refused request sends nothing, so it made no prefix decision to
+        ;; record and nothing to say about a fresh body.
+        (unless complaint
+          (unless (plist-get frozen :spliced)
+            (when-let* ((reset (plist-get frozen :reset)))
+              (harness-log 'debug "replay: %s sends a fresh body (%s): %s"
+                           id reset (or (plist-get frozen :divergence) "-"))))
+          ;; One content-free line per request, so a cache miss can be read
+          ;; later without a prompt ever being kept for it.
+          (ignore-errors
+            (harness-emit 'replay/prefix id
+                          (harness-replay--telemetry id model route frozen body))))
         (cons (plist-get frozen :text) complaint)))))
 
 (defun harness-replay-seam-keep (request model route body)
@@ -1311,8 +1329,10 @@ kept for a request that names no session, or for one over
 ;; session moves to another model or route, its system prompt or tools
 ;; change, or the store could not hold the body.  Each is recorded as a
 ;; reset, with its reason and a new generation (`replay/frozen-reset'), so
-;; that the next request is built fresh and the check at the transport
-;; boundary can tell a recorded change from an unexplained one.
+;; that the next request is built fresh.  A change the harness did not
+;; announce is recorded by the splice that finds it, and goes out fresh
+;; the same way: what must never happen is a change that is neither
+;; recorded nor sent, which is a session that can make no request at all.
 
 (defconst harness-replay-reset-changes
   '((:model . model) (:thinking . model) (:system . system)
@@ -1320,8 +1340,9 @@ kept for a request that names no session, or for one over
   "The session settings a frozen body cannot survive, and why.
 A body kept for one model, one thinking level, one system prompt, one
 tool set or one route is not what the next request sends, and a change of
-any of them is recorded as a reset rather than left for the boundary
-check to refuse.")
+any of them is recorded as a reset as it happens, so the next request is
+built fresh instead of being compared with a body that stopped
+applying.")
 
 (defun harness-replay-reset-on-change (id changes)
   "Record why a frozen body of session ID stops applying, if it does.
@@ -1489,7 +1510,7 @@ or reset** for it.  Return `provider' when the prefix was identical and
 (harness-declare-event 'replay/prefix "(SESSION-ID INFO) for every request whose body the replay module was asked to freeze, saying what it did with the prefix: INFO is (:generation N :decision SYMBOL :reason REASON :divergence PATH :prefix-bytes N :appended-bytes N :metadata N :model M :route R :at TIME).  DECISION is `spliced' when the prompt was re-sent from the kept bytes plus an appended suffix, `fresh' when no kept body applied, and `diverged' when the rebuilt prompt no longer continued it; REASON is why, one of `harness-replay-frozen-reset-reasons', or `diverged'.  Nothing in INFO is a prompt's text or a digest of one, so a cache miss can be diagnosed from it without a prompt ever being kept for that purpose.")
 
 (harness-define-module 'replay
-  :doc "Keeps what a session's model was sent: the responses it made, the payload of its last request, and the exact body of the final request field by field, so that a restart, a change of the rendering code and a change of the adapter's serialization keep the prompt cache; a body that changed with no recorded reset is refused before it is sent."
+  :doc "Keeps what a session's model was sent: the responses it made, the payload of its last request, and the exact body of the final request field by field, so that a restart, a change of the rendering code and a change of the adapter's serialization keep the prompt cache; a prompt component that changed is recorded as the reset it is and the request goes out built fresh, never left refused."
   :requires '(store session)
   :init #'harness-replay--init)
 

@@ -242,10 +242,14 @@ say what the work is doing out of the request."
         (harness-replay-seam-keep recap "m" "route" recap-body)
         (should (equal before (harness-call 'replay/frozen-status sid)))
         (should (equal wire (car (harness-replay-seam request "m" "route" body))))
-        ;; No reset or weakened check: a real conversation mutation is refused.
+        ;; The recap left the conversation's own prefix alone, so a real
+        ;; change of the conversation is the conversation's: it is recorded
+        ;; as the reset it is and sent, never left refused for good.
         (let ((changed (copy-tree body)))
           (setf (plist-get (car (plist-get changed :messages)) :content) "Mutated")
-          (should (cdr (harness-replay-seam request "m" "route" changed)))))
+          (should-not (cdr (harness-replay-seam request "m" "route" changed)))
+          (should (equal "system"
+                         (plist-get (harness-call 'replay/frozen-status sid) :reset)))))
       (should (equal "Recap" (plist-get recap :job)))
       (should (equal sid (plist-get recap :job-parent)))
       (should (equal session (plist-get recap :session))))))
@@ -288,13 +292,16 @@ say what the work is doing out of the request."
       (should (equal before (harness-call 'session/nodes sid)))
       (should (equal sid (plist-get (harness-call 'task/get task) :session)))
       (should (= 0 (plist-get (harness-call 'replay/frozen-status sid) :bytes)))
-      ;; A fresh main prefix is permitted, and subsequent true mutations are not.
+      ;; A fresh main prefix is permitted, and a later change of it is
+      ;; recorded and sent rather than refused.
       (let* ((req (list :session (harness-call 'session/get sid)))
              (body '(:model "m" :messages ((:role "system" :content "Main")))))
         (should-not (cdr (harness-replay-seam req "m" "route" body)))
         (harness-replay-seam-keep req "m" "route" body)
-        (should (cdr (harness-replay-seam req "m" "route"
-                                        '(:model "m" :messages ((:role "system" :content "Changed"))))))))))
+        (should-not (cdr (harness-replay-seam req "m" "route"
+                                             '(:model "m" :messages ((:role "system" :content "Changed"))))))
+        (should (equal "system"
+                       (plist-get (harness-call 'replay/frozen-status sid) :reset)))))))
 
 (ert-deftest harness-recap-recovery-refuses-stale-and-substantive-evidence ()
   (harness-recap-test-with

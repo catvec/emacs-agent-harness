@@ -588,9 +588,9 @@ bytes the boot found, and the refusal says what restores it."
 
 (ert-deftest harness-session-hydration-a-boot-does-not-reset-the-frozen-body ()
   "A boot reads the canonical record and leaves the frozen body alone.
-The body is not reset to explain a difference, and the guard still
-refuses a request whose prompt component changed with no reset recorded
-for it."
+The body is not reset to explain a difference, and a request whose prompt
+component changed with no reset recorded for it is recorded then and
+sent, never left refused."
   (harness-session-hydration-test-with-agent
     (let* ((cwd (harness-test-temp-dir))
            (id (plist-get (harness-call 'session/create :cwd cwd :name "Guarded"
@@ -614,16 +614,18 @@ for it."
           (should-not (cdr seam))
           (harness-replay-seam-keep (list :model "demo:scripted" :session (list :id id))
                                     "demo:scripted" "demo|scripted" body))
-        ;; A prompt component that changed with no reset recorded for it
-        ;; is still refused, and the complaint names it without its text.
+        ;; A prompt component that changed with no reset recorded for it is
+        ;; recorded as the reset it is and sent, naming the component by
+        ;; path and never by its text.
         (let ((seam (harness-replay-seam
                      (list :model "demo:scripted" :session (list :id id))
                      "demo:scripted" "demo|scripted"
                      (list :model "scripted"
                            :messages (list (list :role "user" :content "HI"))))))
-          (should (cdr seam))
-          (should (string-match-p "messages\\[0\\]\\.content" (cdr seam)))
-          (should-not (string-match-p "HI" (cdr seam))))))))
+          (should-not (cdr seam))
+          (should (string-match-p "HI" (car seam)))
+          (should (equal (plist-get (harness-call 'replay/frozen-status id) :reset)
+                         "diverged")))))))
 
 ;;;; Recovery of a record the boot refused
 

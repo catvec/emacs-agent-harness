@@ -1141,11 +1141,13 @@ body that changed underneath it is still refused, as for any request."
             ;; And the conversation's next step still splices, with no complaint.
             (should-not (cdr (harness-replay-seam base "model" "route" body)))))))))
 
-(ert-deftest harness-compaction-a-warm-summary-is-still-refused-a-changed-prefix ()
+(ert-deftest harness-compaction-a-warm-summary-records-a-changed-prefix ()
   "A read-only summary is no licence to rewrite the frozen prefix.
 The request may only read what was frozen: a body whose bytes changed
-under it -- a re-rendered message, say -- is refused at the transport as
-for any other request, so nothing goes out."
+under it -- a re-rendered message, say -- is a change the summary did not
+make and cannot claim, so it is recorded as the reset it is and the
+summary goes out built fresh rather than spliced into bytes it no longer
+matches."
   (harness-compaction-test-with
     (harness-test-load-module 'replay)
     (harness-test-load-module 'provider-openai)
@@ -1161,11 +1163,14 @@ for any other request, so nothing goes out."
              (messages (cons (list :role 'user :content "something else entirely")
                              (cdr messages)))
              (changed (plist-put (copy-sequence summary) :messages messages))
-             (complaint (cdr (harness-replay-seam changed "model" "route"
-                                                  (harness-openai--body endpoint "model" changed)))))
-        ;; A refusal, not silence: the guard is not weakened by the flag.
-        (should (stringp complaint))
-        (should (string-match-p "changed with no recorded reset" complaint))
+             (seam (harness-replay-seam changed "model" "route"
+                                        (harness-openai--body endpoint "model" changed))))
+        ;; The summary goes out built fresh, with the change recorded: the
+        ;; flag says it may read the prefix, not that it may rewrite it, and
+        ;; a change nobody recorded is still a change the session pays for.
+        (should-not (cdr seam))
+        (should (equal (plist-get (harness-call 'replay/frozen-status id) :reset)
+                       "diverged"))
         ;; And the conversation's own body was not rewritten by the attempt.
         (should-not (cdr (harness-replay-seam base "model" "route"
                                              (harness-openai--body endpoint "model" base))))))))

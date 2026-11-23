@@ -2,7 +2,7 @@
 
 # replay
 
-Keeps what a session's model was sent: the responses it made, the payload of its last request, and the exact body of the final request field by field, so that a restart, a change of the rendering code and a change of the adapter's serialization keep the prompt cache; a body that changed with no recorded reset is refused before it is sent.
+Keeps what a session's model was sent: the responses it made, the payload of its last request, and the exact body of the final request field by field, so that a restart, a change of the rendering code and a change of the adapter's serialization keep the prompt cache; a prompt component that changed is recorded as the reset it is and the request goes out built fresh, never left refused.
 
 - **Runs in:** the harness process
 - **Source:** [lisp/modules/harness-replay.el](../../lisp/modules/harness-replay.el)
@@ -60,7 +60,8 @@ compaction summary made from the prompt cache (`:replay-read-only`) --
 splices, because re-sending the bytes the provider read is what reads
 the cache, and is never kept, because the conversation's next step
 would diverge at what it appended.  Neither is a licence to change the
-prefix: a body whose bytes changed under it is still refused.
+prefix: a body whose bytes changed under it is recorded as the reset it
+is, and goes out built fresh.
 
 The files are the session's, in the state directory:
 sessions/ID.responses.jsonl, one response a line, and
@@ -80,14 +81,18 @@ so.  So the components of the *final* body are kept as well, exactly
 as they were encoded (`replay/frozen-splice`): the next request is
 assembled from those bytes for every component already sent, and only
 the components the new nodes add are encoded fresh.  The assembled
-body is compared component by component with what was kept before it
-is handed to the transport; a difference no recorded reset explains
-is refused there, naming the first divergent component, and nothing is
-sent.  The resets are explicit and recorded, each with its reason and
-a new generation: a compaction, a change of model, route, system
-prompt or tools, an adapter serialization version, a redaction,
-images dropped from the history, a payload too large to keep, and a
-store that could not be written.
+body is compared component by component with what was kept: a
+component that moved is recorded as the reset it is, naming the first
+one, and the request goes out built fresh rather than not at all --
+since a frozen body is only rewritten by a request that is sent, a
+refusal could never be cleared and would refuse every request that
+session ever made again.  The boundary check keeps one tooth: a body
+the splice said it put the kept bytes back into, which does not hold
+them, is a defect and is not sent.  The resets are explicit and
+recorded, each with its reason and a new generation: a compaction, a
+change of model, route, system prompt or tools, an adapter
+serialization version, a redaction, images dropped from the history, a
+payload too large to keep, and a store that could not be written.
 
 Identical components do not promise a provider cache hit: eviction,
 retention and routing are the provider's, and the diagnostics module
@@ -99,7 +104,7 @@ module guarantees only what the harness sends.
 ### Methods
 
 - `replay/forget` (id) — Delete what is kept for session ID: its responses and its last request.
-- `replay/frozen-check` (id body &optional generation) — Return why BODY may not be sent for session ID, or nil.
+- `replay/frozen-check` (kept body &optional generation) — Return why BODY may not be sent, compared with KEPT, or nil.
 - `replay/frozen-record` (id body &optional model route) — Keep BODY, the body of session ID's request, as what that request sent.
 - `replay/frozen-reset` (id reason &optional detail) — Record that session ID's frozen body no longer applies, and why.
 - `replay/frozen-splice` (id model route body) — Return the body of session ID's next request, frozen where it may be.

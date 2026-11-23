@@ -1024,15 +1024,17 @@ why a request's `:max-tokens' does not reach the wire."
 (declare-function harness-replay-route "harness-replay")
 
 (defconst harness-responses--replay-mutation-error 'harness-replay-mutation
-  "The condition a body that may not be sent signals.")
+  "The condition a body the seam cannot vouch for signals.")
 
 (defun harness-responses--frozen-body (name request)
   "Return the body to send for REQUEST, frozen where it may be.
 The body is what `harness-responses--body' builds, with every field an
 earlier request of the same session sent put back as the bytes that
-request sent (see harness-replay.el).  A body that may not be sent at all
--- a prompt component changed and no recorded reset explains it -- signals
-`harness-replay-mutation', and nothing goes on the wire."
+request sent (see harness-replay.el).  A prompt component that genuinely
+moved is not an error: the seam records the reset it is and the request
+goes out built fresh.  What signals `harness-replay-mutation' is a splice
+that claimed to put the kept bytes back and did not: nothing goes on the
+wire."
   (let* ((body (harness-responses--body name request))
          (seam (if (fboundp 'harness-replay-seam)
                    (harness-replay-seam request (format "chatgpt-plan:%s" name)
@@ -1559,10 +1561,10 @@ the efforts the answer names."
            (name (harness-responses--stream-name stream))
            (sse (harness-http-sse-parser
                  (lambda (event data) (harness-responses--sse stream event data))))
-           ;; The body is frozen where it may be, and checked at the
-           ;; boundary before anything is sent: a component that changed
-           ;; with no recorded reset stops the request here, and the wire
-           ;; sees nothing.
+           ;; The body is frozen where it may be: a prompt component that
+           ;; genuinely moved was recorded as the reset it is and goes out
+           ;; built fresh, and only a splice that lost the bytes it claimed
+           ;; to put back stops the request here, so the wire sees nothing.
            (frozen (condition-case err
                        (harness-responses--frozen-body name request)
                      (harness-replay-mutation

@@ -75,17 +75,23 @@ text to `harness-http-request` as `:json`, so the wire body was a JSON
 `harness-provider-openai-test` -- which asserts on what the transport
 received -- is the regression test for it.
 
-## The boundary check fails closed
+## The boundary check fails closed on a splice that lost bytes
 
-`replay/frozen-check` runs at the transport boundary, on the body about
-to go out.  It returns nil when every byte that was sent before is
-still there, unchanged and in place.  It returns a complaint -- naming
-the first divergent component by path, never by content -- when
-something changed with no recorded reset.  The adapter then **sends
+`replay/frozen-check` is the transport boundary's own comparison.  It is
+given the prompt the frozen body held and the prompt the splice assembled
+from it, and it returns nil when every byte that was sent before is still
+there, unchanged and in place.  It returns a complaint -- naming the first
+divergent component by path, never by content -- when the splice said it
+put the kept bytes back and they are not there.  The adapter then **sends
 nothing**: the openai adapter sets `:error-kind 'permanent` and finishes
 with the complaint, and
-`harness-replay-a-mutation-stops-before-the-transport` asserts the
-transport was called zero times.
+`harness-replay-a-splice-that-loses-bytes-stops-before-the-transport`
+asserts the transport was called zero times.
+
+The comparison happens inside the splice, where the kept prompt still is.
+Recording a reset empties the frozen body, so a check that read the store
+afterwards could never see what was kept, and the one refusal worth making
+would be impossible to make.
 
 Failing closed is a deliberate cost.  A rebuild after the splice, or a
 field changed on the way to the transport, stops the turn rather than
@@ -109,33 +115,30 @@ in `harness-replay-frozen-reset-reasons`:
 | `redaction` | a secret was taken out |
 | `images-pruned` | pictures dropped from the history |
 | `field-dropped` | a prompt field the body kept that the request no longer sends |
-| `diverged` | the reasoning effort, which no setting announces |
-| `tool-definition` | a tool's own definition, which the session never settles |
+| `diverged` | a prompt component no setting of its own names |
 | `adapter-version` | another serialization version |
 | `storage-failure` | the body could not be written |
 | `too-large` | over `harness-replay-frozen-max-bytes` |
 | `no-session` | a request that names no session |
 
-A recorded reset **empties** the frozen body, so the boundary check has
-nothing to refuse.  That is the whole mechanism: a change the harness
-knows about is explained in advance, and a change it does not know about
-is refused.  The two are never the same code path.
+A recorded reset **empties** the frozen body, so the next request is
+built fresh instead of being compared with a body that stopped applying.
 
-The one refusal that records its own reset is a body that no longer
-continues the kept one in a way no setting announces.  A prompt field
-that is gone (`field-dropped`), a reasoning effort that moved under
-the same thinking level (`diverged`: a model's listing can name its
-efforts only after the first request went out, and
-`harness-openai--effort` then maps the level to another), and a tool
-whose definition the harness itself changed (`tool-definition`) all
-leave the session unable to make **any** request, because a frozen body
-is only rewritten by a request that is sent.  They are recorded at the
-splice, and the request goes out built fresh.  Everything else stays
-refused: a message whose text changed, a system prompt nobody approved, a
-tool *list* that moved with neither `session/set-tool-schema` nor a
-reset.
+Every divergence records one, at the splice that finds it.  A body that no
+longer continues the kept one is never refused forever, because a frozen
+body is only rewritten by a request that is sent: a refusal would meet
+every request the session ever made again, which is how a reload that
+touched one tool description left sessions unable to make any request at
+all.  `harness-replay--divergence-reset-reason` names what moved --
+`tools` inside the tool schema, `system` in the system prompt, `model` in
+the model field, `field-dropped` for a field that went, `diverged` for a
+component no setting of its own names (a message rendered another way, the
+reasoning effort `harness-openai--effort` mapped onto another) -- the reset
+is recorded with the path as its detail, and the request goes out built
+fresh.  The bytes really did change, so it could not have spliced them
+anyway, and the next request continues from what this one sends.
 
-`tool-definition` is the one that reaches sessions nobody touched.  A
+The tool schema is the one that reaches sessions nobody touched.  A
 session settles the tool **names** it sends and nothing more: the
 definitions are read from the registry with every request, so a release
 that edits a tool's `:schema` -- a description, an added property, a
@@ -143,32 +146,34 @@ renamed parameter -- rewrites the schema the provider already read, for
 every session already running, and `session/set-tool-schema` is never
 called because no name changed.  `history.undo` gaining `:revision` and
 `:dryRun` wedged two running sessions at
-`tools[46].function.parameters.properties` that way.  The exception is
-narrow on purpose: the divergence must be inside the tool schema and
-every tool the kept body had must still be sent, so a tool list that
-moved is still refused and still the schema's own reset to announce.
+`tools[46].function.parameters.properties` that way.  The path is read by
+its shape, so a divergence inside a Responses `additional_tools` item of
+`input` is the same schema as a chat-completions `tools` field
+(`harness-replay--changed-tool-field-p`), and both are the `tools` reset:
+the definition moving under a settled name is not a different change from
+the name moving, which `session/set-tool-schema` announces.
+`harness-replay-a-reload-rewrote-one-tool-the-settled-names-hide`,
 `harness-replay-a-changed-tool-definition-recovers` and
-`harness-replay-a-responses-tool-definition-recovers` are the tests,
-with `harness-replay-a-changed-tool-name-is-still-refused`,
-`harness-replay-a-tool-dropped-is-still-refused` and
-`harness-replay-a-tool-added-is-not-a-definition-change` for the edges
-the exception does not reach.
+`harness-replay-a-responses-tool-definition-recovers` are the tests, with
+`harness-replay-a-tool-added-is-not-a-definition-change` for the edge that
+is no change at all.
 
 `session/updated` carries the changed settings, so
 `harness-replay-reset-on-change` records `model`, `system`, `tools` or
-`route` before the next request is built.
+`route` before the next request is built.  That is what spares the cache,
+not what lets the session make a request at all: a change nobody announced
+is recorded when the splice finds it, one request later.
 
 A session settling its prompt or its tool schema is one of those changes,
 and the one that is not a setting: `session/set-system` and
 `session/set-tool-schema` fix what every request starts with, so a session
 that had already sent one and settles it now has a frozen body built from
 a prompt this one replaces.  Both announce it on `session/updated`, which
-is what records the reset -- otherwise the next request is refused as a
-change nothing explained.  A session settling at its first request has
-sent nothing, so there is no frozen body to stop applying and neither
-announces anything.  Sessions that lived before prompts were settled at
-all are the ones this repairs: their records say nil, and their next
-request is the first after the settle.
+records the reset and spares the cache.  A session settling at its first
+request has sent nothing, so there is no frozen body to stop applying and
+neither announces anything.  Sessions that lived before prompts were
+settled at all are the ones this repairs: their records say nil, and their
+next request is the first after the settle.
 
 ## What may become the prefix: the conversation, not every request
 
@@ -179,8 +184,8 @@ next step diverging from a body it never sent:
 
 - **One-off calls.**  An auto-name, a permission judge and a recap carry the
   session's id but their own system prompt and their own message list.  Kept
-  as the session's prefix, the next real step was refused at the boundary
-  (`prompt component system changed with no recorded reset`).
+  as the session's prefix, the next real step no longer continued it and was
+  refused at the boundary.
 - **A cache refresh.**  `harness-cache-warm` sends the conversation plus one
   short message the transcript does not hold, to read the cache.  Kept as the
   prefix, the next real step diverged at that message.
@@ -216,7 +221,7 @@ the seam sees, and the tests are
 `harness-replay-a-read-only-request-reads-without-becoming-the-prefix`,
 `harness-compaction-a-cold-summary-is-not-the-conversation`,
 `harness-compaction-a-warm-summary-reads-the-frozen-prefix-but-never-replaces-it`,
-`harness-compaction-a-warm-summary-is-still-refused-a-changed-prefix` and
+`harness-compaction-a-warm-summary-records-a-changed-prefix` and
 `harness-replay-the-module-defines-its-handlers-and-inits-once`.
 
 Those faults were latent rather than billed: no `sessions/ID.frozen.json`

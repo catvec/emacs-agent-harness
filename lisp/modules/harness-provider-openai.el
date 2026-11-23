@@ -956,11 +956,11 @@ alone keep the shape."
 ;;;; The body, frozen where it may be
 
 (defconst harness-openai--replay-mutation-error 'harness-replay-mutation
-  "The condition a body that may not be sent signals.
+  "The condition a body the seam cannot vouch for signals.
 It carries the complaint, the request and the body, so that the caller
 can say which component changed and send nothing.")
 
-(define-error 'harness-replay-mutation "A prompt component changed with no recorded reset")
+(define-error 'harness-replay-mutation "A spliced prompt body lost the bytes it claimed")
 
 ;; The seam lives in harness-replay.el, which is loaded after this
 ;; module and may not be loaded at all: it is reached by name, as the
@@ -973,9 +973,11 @@ can say which component changed and send nothing.")
   "Return (TEXT . BODY) for REQUEST at ENDPOINT, frozen where it may be.
 BODY is what `harness-openai--body' builds; TEXT is what a transport sends:
 every field an earlier request of the same session sent, put back as the
-bytes that request sent (see harness-replay.el).  A body that may not be
-sent at all -- a prompt component changed and no recorded reset explains it
--- signals `harness-replay-mutation', and nothing goes on the wire."
+bytes that request sent (see harness-replay.el).  A prompt component that
+genuinely moved is not an error: the seam records the reset it is and the
+request goes out built fresh.  What signals `harness-replay-mutation' is a
+splice that claimed to put the kept bytes back and did not, which is a
+defect in the harness: nothing goes on the wire."
   (let* ((body (harness-openai--body endpoint name request))
          (seam (if (fboundp 'harness-replay-seam)
                    (harness-replay-seam request

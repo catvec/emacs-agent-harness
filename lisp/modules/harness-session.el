@@ -677,13 +677,14 @@ settings went through, but it changes what its next request starts with,
 which is what a provider's prompt cache reads.  A session that sent a
 request before it settled one -- one that lived before prompts were
 settled at all, whose record says nil -- has a frozen body built from a
-prompt this one replaces, and the boundary check would refuse its next
-request for a change nothing explained (see the \"no recorded reset\"
-refusal in `harness-replay.el').  Emitting it as `session/updated' is how
-that change is explained in advance, exactly as a change of the model or
-of the system prompt made through `session/update' is: the replay module
-records the reset that empties the frozen body, and the next request is
-built fresh instead of refused.  A session settling at its first request
+prompt this one replaces.  Emitting it as `session/updated' is how that
+change is explained in advance, exactly as a change of the model or of
+the system prompt made through `session/update' is: the replay module
+records the reset that empties the frozen body, so the next request is
+built fresh at once and pays for the cache miss once, rather than the
+splice finding the change and recording the same reset then
+\(`harness-replay--divergence-reset-reason').  A session settling at its
+first request
 has sent nothing yet, so there is no frozen body to stop applying and
 nothing is announced: its first request is the first thing frozen, and
 the reset would say a body stopped applying when none ever did."
@@ -1266,11 +1267,9 @@ is a real schema, and `tools/settle' never makes one."
             (setf (harness-session-tool-schema s) nil)
             ;; The next request settles a different list, which rewrites
             ;; the schema the provider already read.  Announcing it is
-            ;; what lets the replay module record the reset: without it
-            ;; the boundary check finds a prompt component that changed
-            ;; with nothing to explain it and refuses every request the
-            ;; session ever makes again, because a frozen body is only
-            ;; rewritten by a request that is sent.
+            ;; what spares the cache: the replay module records the reset
+            ;; as the change happens, so the next request is built fresh
+            ;; instead of being compared with a schema it no longer sends.
             (harness-session--settled s :tools)
             (harness-session--touch s))
           nil)

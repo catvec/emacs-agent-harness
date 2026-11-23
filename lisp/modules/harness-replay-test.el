@@ -592,27 +592,49 @@ the bytes of every field and item the provider already read."
                         (harness-json-encode (harness-replay-test--body second))
                         'utf-8)))))))
 
-(ert-deftest harness-replay-a-change-with-no-recorded-reset-is-refused ()
-  "A prompt component that changed with nothing to explain it is refused.
-The complaint names the field and the index, never the text."
+(ert-deftest harness-replay-a-change-with-no-recorded-reset-is-recorded ()
+  "A prompt component that moved is recorded as the reset it is, and sent.
+A frozen body is only rewritten by a request that is sent, so refusing a
+changed component could never be cleared: the same refusal would meet
+every request the session made again, which is how one tool description a
+reload changed wedged a session for good.  The splice names the component,
+records the reset, and the request goes out built fresh -- the bytes
+really did change, so it could not have spliced them anyway."
   (harness-replay-test-with
     (let* ((id (harness-replay-test-session))
            (first (list (harness-replay-test--message "hi")))
            (changed (list (harness-replay-test--message "HI"))))
       (harness-replay-test--keep id first)
       (let ((seam (harness-replay-test--seam id changed)))
-        (should (cdr seam))
-        (should (string-match-p "messages\\[0\\]\\.content" (cdr seam)))
-        (should-not (string-match-p "HI" (cdr seam)))))))
+        ;; Sent, built fresh: the adapter's own bytes, no complaint.
+        (should-not (cdr seam))
+        (should (equal (car seam)
+                       (decode-coding-string
+                        (harness-json-encode (harness-replay-test--body changed))
+                        'utf-8)))
+        ;; And it says why the body stopped applying, naming the component
+        ;; by path and never by content.
+        (should (equal "diverged"
+                       (plist-get (harness-call 'replay/frozen-status id) :reset))))
+      ;; The session is not stranded: the next request is kept and
+      ;; continued from what this one sent.
+      (harness-replay-test--keep id changed)
+      (let ((next (harness-replay-test--seam
+                   id (append changed (list (harness-replay-test--message "yo" "assistant"))))))
+        (should-not (cdr next))
+        (should (string-match-p "HI" (car next)))))))
 
 (ert-deftest harness-replay-a-recorded-reset-explains-the-change ()
-  "A reset recorded for the reason that changed empties the frozen body."
+  "A reset recorded for the reason that changed empties the frozen body.
+The splice records its own reset when the prompt moved, and an explicit
+one recorded afterwards is the record of a later change: it starts a new
+generation, and the body that follows is built fresh instead of compared
+with a body that stopped applying."
   (harness-replay-test-with
     (let* ((id (harness-replay-test-session))
            (first (list (harness-replay-test--message "hi")))
            (changed (list (harness-replay-test--message "HI"))))
       (harness-replay-test--keep id first)
-      (should (cdr (harness-replay-test--seam id changed)))
       (harness-call 'replay/frozen-reset id 'redaction)
       (should-not (cdr (harness-replay-test--seam id changed)))
       (should (equal (plist-get (harness-call 'replay/frozen-status id) :reset)
@@ -623,9 +645,9 @@ The complaint names the field and the index, never the text."
   "A session that settles a system prompt after it sent one records a reset.
 That is a session from before prompts were settled at all: its record
 says nil, so the request it sends next is built from a prompt no earlier
-request sent, and the boundary check would refuse it as a change nothing
-explained.  Settling it is a change the harness knows, so it is recorded
-in advance and the next request goes out instead of being refused."
+request sent.  Settling it is a change the harness knows, so it is
+recorded in advance and the next request goes out spliced rather than
+built fresh and paid for."
   (harness-replay-test-with
     (let* ((id (harness-replay-test-session))
            (first (list (harness-replay-test--message "hi")))
@@ -634,17 +656,28 @@ in advance and the next request goes out instead of being refused."
       ;; A request went out before the session settled a prompt.
       (harness-replay-test--keep id first)
       (should-not (plist-get (harness-call 'session/get id) :system))
-      ;; The settle is what the fix announces.  Its change is exactly what
-      ;; the boundary check refuses when nothing records it, which is the
-      ;; stranded session's failure: the prompt the next request is built
-      ;; from is not the one the frozen body kept.
-      (should (cdr (harness-replay-test--seam id settled :system "You are a test.")))
       (harness-call 'session/set-system id "You are a test.")
       ;; The reset is recorded, so the same body is sent, not refused.
       (should (equal "system" (plist-get (harness-call 'replay/frozen-status id) :reset)))
       (should (= 0 (plist-get (harness-call 'replay/frozen-status id) :bytes)))
       (let ((seam (harness-replay-test--seam id settled :system "You are a test.")))
         (should-not (cdr seam))))))
+
+(ert-deftest harness-replay-a-system-nobody-announced-is-recorded-not-refused ()
+  "A system prompt that changed with no reset recorded still goes out.
+The announcement is what spares the cache, not what lets the session make
+a request at all: the splice records the `system' reset it finds and the
+request goes out built fresh."
+  (harness-replay-test-with
+    (let* ((id (harness-replay-test-session))
+           (first (list (harness-replay-test--message "hi")))
+           (settled (list (harness-replay-test--message "hi" "assistant")
+                          (harness-replay-test--message "there"))))
+      (harness-replay-test--keep id first)
+      (let ((seam (harness-replay-test--seam id settled :system "You are a test.")))
+        (should-not (cdr seam))
+        (should (string-match-p "You are a test" (car seam))))
+      (should (equal "system" (plist-get (harness-call 'replay/frozen-status id) :reset))))))
 
 (ert-deftest harness-replay-settling-a-tool-schema-explains-the-change-it-makes ()
   "A session that settles a tool schema after it sent a request records a reset.
@@ -675,55 +708,100 @@ frozen."
       (should-not (harness-call 'replay/frozen-status id)))))
 
 (ert-deftest harness-replay-the-tool-schema-is-a-component-of-its-own ()
-  "A tool list that moved is refused, and an added tool is not a change of the old.
-The tool a session settled is compared as a component of its own: a tool
-whose *name* changed, or one the kept body had and the new one does not,
-is the list moving with nothing recorded, and nothing is sent.  An added
-tool appends, as an array may, and continues the kept body."
+  "A tool schema that changed is recorded as `tools', and an added tool changes nothing.
+The schema is a component of the prompt: a tool's own definition moving is a
+change the provider pays for once, whether the definition was edited under a
+name the session settled or the name itself moved.  Adding a tool at the end
+of the array is not a change of the tools before it."
   (harness-replay-test-with
     (let* ((id (harness-replay-test-session))
            (tool (list :type "function" :function (list :name "a" :description "d")))
+           (bigger (list :type "function" :function (list :name "a" :description "D")))
            (renamed (list :type "function" :function (list :name "b" :description "d")))
            (added (list :type "function" :function (list :name "c" :description "e")))
            (messages (list (harness-replay-test--message "hi"))))
       (harness-replay-test--keep id messages :tools (list tool))
+      ;; A definition edited under the name the session settled: sent.
+      (let ((changed (harness-replay-test--seam id messages :tools (list bigger))))
+        (should-not (cdr changed))
+        (should (string-match-p "\"description\":\"D\"" (car changed))))
+      (should (equal "tools" (plist-get (harness-call 'replay/frozen-status id) :reset)))
+      ;; A name that moved is the same component moving: also sent.
+      (harness-replay-test--keep id messages :tools (list tool))
       (let ((changed (harness-replay-test--seam id messages :tools (list renamed))))
-        (should (string-match-p "tools\\[0\\]" (cdr changed))))
-      (should (string-match-p "tools"
-                              (cdr (harness-replay-test--seam id messages :tools nil))))
-      (should-not (cdr (harness-replay-test--seam id messages :tools (list tool added)))))))
+        (should-not (cdr changed))
+        (should (string-match-p "\"name\":\"b\"" (car changed))))
+      (should (equal "tools" (plist-get (harness-call 'replay/frozen-status id) :reset)))
+      ;; The whole list going is that component going, and it is recorded too.
+      (harness-replay-test--keep id messages :tools (list tool))
+      (let ((gone (harness-replay-test--seam id messages :tools nil)))
+        (should-not (cdr gone))
+        (should (string-match-p "\"tools\":null" (car gone))))
+      (should (equal "tools" (plist-get (harness-call 'replay/frozen-status id) :reset)))
+      ;; The request after it continues what it sent: an added tool appends.
+      (harness-replay-test--keep id messages :tools (list bigger))
+      (should-not (cdr (harness-replay-test--seam id messages :tools (list bigger added)))))))
 
 (ert-deftest harness-replay-a-metadata-field-is-not-a-prompt-change ()
-  "A per-request metadata field is encoded fresh, never refused.
+  "A per-request metadata field is encoded fresh, never a reset.
 The invariant is the prompt the model is given, not the whole body:
 `max_tokens', `stream_options' and `include' are how a request was
-transported, and a provider's cache does not read them.  Freezing
-them would stop a turn for a change the cache never cared about."
+transported, and a provider's cache does not read them.  A change of one
+is spliced, not a reset the session pays for."
   (harness-replay-test-with
     (let* ((id (harness-replay-test-session))
            (messages (list (harness-replay-test--message "hi"))))
       (harness-replay-test--keep id messages)
-      ;; A budget the first request did not carry: sent, not refused.
+      ;; A budget the first request did not carry: sent, still spliced.
       (let ((seam (harness-replay-test--seam id messages :max_tokens 40)))
         (should-not (cdr seam))
         (should (string-match-p "\"max_tokens\":40" (car seam))))
+      ;; No reset: nothing the model is told moved.
+      (should-not (plist-get (harness-call 'replay/frozen-status id) :reset))
       ;; The prompt itself is still the frozen bytes.
       (should (equal (car (harness-replay-test--seam id messages))
                      (decode-coding-string
                       (harness-json-encode (harness-replay-test--body messages))
                       'utf-8))))))
 
-(ert-deftest harness-replay-a-prompt-field-changed-is-still-refused ()
-  "A field that is the prompt is still refused when it changes.
-The metadata allowance does not weaken the prompt invariant: a
-changed system prompt, tool schema or message is a mutation with no
-recorded reset, and nothing is sent."
+(ert-deftest harness-replay-a-prompt-field-changed-is-recorded-and-sent ()
+  "A field that is the prompt is recorded when it changes, and then sent.
+The metadata allowance does not weaken the prompt invariant -- the bytes
+the provider read are still what go back out when they still apply -- but
+a changed prompt is a change that happened, not a turn to stop for good."
   (harness-replay-test-with
     (let* ((id (harness-replay-test-session))
            (messages (list (harness-replay-test--message "hi"))))
       (harness-replay-test--keep id messages)
-      (should (cdr (harness-replay-test--seam
-                    id (list (harness-replay-test--message "HI"))))))))
+      (let ((seam (harness-replay-test--seam
+                   id (list (harness-replay-test--message "HI")))))
+        (should-not (cdr seam))
+        (should (string-match-p "HI" (car seam))))
+      (should (equal "diverged"
+                     (plist-get (harness-call 'replay/frozen-status id) :reset))))))
+
+(ert-deftest harness-replay-a-splice-that-loses-the-kept-bytes-is-refused ()
+  "A body the splice said continues the kept one, and does not, is not sent.
+That is the one thing the guard still stops: not a prompt that moved --
+which the splice records -- but a splice that lost bytes it claimed to put
+back, which is a defect in the harness."
+  (harness-replay-test-with
+    (let* ((id (harness-replay-test-session))
+           (first (list (harness-replay-test--message "hi")))
+           ;; This one continues the kept prompt, so the splice claims to
+           ;; have put its bytes back.
+           (second (append first (list (harness-replay-test--message "yo" "assistant")))))
+      (harness-replay-test--keep id first)
+      (cl-letf (((symbol-function 'harness-replay--piece-splice)
+                 (lambda (_old _new)
+                   (harness-replay--piece
+                    (harness-replay-test--body
+                     (list (harness-replay-test--message "CORRUPTED")))))))
+        (let ((seam (harness-replay-test--seam id second)))
+          (should (cdr seam))
+          (should (string-match-p "messages\\[0\\]\\.content" (cdr seam)))
+          (should-not (string-match-p "CORRUPTED" (cdr seam))))))))
+
 (ert-deftest harness-replay-a-body-kept-for-another-model-is-not-continued ()
   "A body kept for one model or route is not spliced into another's."
   (harness-replay-test-with
@@ -922,7 +1000,11 @@ The event is what `harness-agent-history-images' emits when it drops them."
            (first (list (harness-replay-test--message "hi")))
            (pruned (list (harness-replay-test--message "look, without the picture"))))
       (harness-replay-test--keep id first)
-      (should (cdr (harness-replay-test--seam id pruned)))
+      ;; The splice finds it and records it itself, so the request goes out.
+      (should-not (cdr (harness-replay-test--seam id pruned)))
+      (should (equal (plist-get (harness-call 'replay/frozen-status id) :reset)
+                     "diverged"))
+      (harness-replay-test--keep id pruned)
       (harness-emit 'agent/images-pruned id 4 2)
       (should (equal (plist-get (harness-call 'replay/frozen-status id) :reset)
                      "images-pruned"))
@@ -935,8 +1017,10 @@ The event is what `harness-agent-history-images' emits when it drops them."
            (before (list (harness-replay-test--message "hi")))
            (after (list (harness-replay-test--message "summary of hi"))))
       (harness-replay-test--keep id before)
-      (should (cdr (harness-replay-test--seam id after)))
+      (should-not (cdr (harness-replay-test--seam id after)))
       (harness-emit 'compaction/done id nil)
+      (should (equal (plist-get (harness-call 'replay/frozen-status id) :reset)
+                     "compaction"))
       (should-not (cdr (harness-replay-test--seam id after))))))
 
 (ert-deftest harness-replay-two-sessions-do-not-share-a-frozen-body ()
@@ -978,10 +1062,11 @@ were re-sent and how many were new, never what they said."
         (should-not (string-match-p "hi" (format "%S" info)))
         (should-not (plist-get info :digest)))
       ;; A changed prompt diverges, and names only the field and index.
+      ;; The request goes out built fresh, with the reset recorded.
       (setq records nil)
       (let ((seam (harness-replay-test--seam
                    id (list (harness-replay-test--message "HI")))))
-        (should (cdr seam)))
+        (should-not (cdr seam)))
       (let ((info (cdar records)))
         (should (eq (plist-get info :decision) 'diverged))
         (should (equal (plist-get info :divergence) "messages[0].content"))
@@ -1149,22 +1234,22 @@ for byte, so the chain of thought it stored is not lost."
         (should (string-match-p "ENCRYPTED-1" (car seam)))
         (should (string-match-p "call_1" (car seam)))))))
 
-(ert-deftest harness-replay-a-mutation-stops-before-the-transport ()
-  "A prompt component that changed under the adapter is never sent.
-The complaint reaches the caller as a failed step, and the transport is not
-called at all: no HTTP request is made for a body the harness cannot explain."
+(ert-deftest harness-replay-a-changed-body-is-sent-fresh-not-stopped ()
+  "A prompt that changed under the adapter is sent fresh, and says so.
+The adapter rebuilt the same conversation with another text, which is a
+change the harness cannot splice -- and must not refuse forever, since a
+frozen body is only rewritten by a request that is sent.  The reset is
+recorded, and the request goes out: the transport is called once, with
+the adapter's own bytes."
   (harness-replay-test--with-openai
     (let* ((sid "replay-probe-mutation")
-           (first (list (list :role "user" :content "hi"))))
+           (first (list (list :role "user" :content "hi")))
+           (decisions nil))
+      (harness-on 'replay/prefix (lambda (id info) (when (equal id sid) (push info decisions))))
       (harness-replay-test--run sid first)
       (should (= 1 (length harness-replay-test--requests)))
-      ;; The next request rebuilds the same conversation differently.
       (let ((harness-replay-test--requests nil)
             (events nil))
-        ;; The adapter rebuilds the same conversation with another text:
-        ;; the shape is unchanged, so the divergence is a component.
-        ;; The adapter rebuilds the same body, field for field, with
-        ;; another message text: the divergence is that component.
         (cl-letf (((symbol-function 'harness-openai--body)
                    (lambda (_endpoint name _request)
                      (list :model name
@@ -1172,6 +1257,39 @@ called at all: no HTTP request is made for a body the harness cannot explain."
                            :stream t
                            :stream_options (list :include_usage t)))))
           (setq events (harness-replay-test--run sid first)))
+        ;; Sent, built fresh, and answered.
+        (should (= 1 (length harness-replay-test--requests)))
+        (should (string-match-p "CHANGED" (plist-get (car harness-replay-test--requests) :body)))
+        (should (equal (plist-get (car (last events)) :stop-reason) 'end-turn))
+        ;; And the decision says why the body stopped applying.
+        (let ((info (car decisions)))
+          (should (eq (plist-get info :decision) 'diverged))
+          (should (equal (plist-get info :divergence) "messages[0].content"))
+          ;; Content-free: the path, never the text.
+          (should-not (string-match-p "CHANGED" (format "%S" info))))))))
+
+(ert-deftest harness-replay-a-splice-that-loses-bytes-stops-before-the-transport ()
+  "A body the splice said continues the kept one, and does not, is never sent.
+That is the only thing the guard still stops: a defect in the harness, not
+a prompt that moved."
+  (harness-replay-test--with-openai
+    (let* ((sid "replay-probe-bad-splice")
+           (first (list (list :role "user" :content "hi")))
+           (ok (list :role "assistant" :content "ok")))
+      (harness-replay-test--run sid first)
+      (should (= 1 (length harness-replay-test--requests)))
+      (let ((harness-replay-test--requests nil)
+            (events nil))
+        ;; The request continues the kept prompt, so the splice claims to
+        ;; have put its bytes back -- and hands over something else.
+        (cl-letf (((symbol-function 'harness-replay--piece-splice)
+                   (lambda (_old _new)
+                     (harness-replay--piece
+                      (list :model "m"
+                            :messages (list (list :role "user" :content "CORRUPTED"))
+                            :stream t
+                            :stream_options (list :include_usage t))))))
+          (setq events (harness-replay-test--run sid (append first (list ok)))))
         (should (= 0 (length harness-replay-test--requests)))
         (should (equal (mapcar (lambda (e) (plist-get e :type)) events) '(start done)))
         (should (equal (plist-get (car (last events)) :stop-reason) 'error))
@@ -1247,8 +1365,13 @@ were, and only what it adds is new."
       (let ((changed (copy-tree body t)))
         (setf (plist-get (aref (plist-get changed :messages) 0) :content)
               "Unicode → café 日本語 🐕")
-        (should (string-match-p "messages\\[0\\]\\.content"
-                                (cdr (harness-replay-seam request "m" "route" changed))))))))
+        ;; A system prompt that changed is recorded as `system' and sent,
+        ;; naming the component and never its text.
+        (let ((seam (harness-replay-seam request "m" "route" changed)))
+          (should-not (cdr seam))
+          (should (string-match-p "🐕" (car seam))))
+        (should (equal "system"
+                       (plist-get (harness-call 'replay/frozen-status id) :reset)))))))
 
 (defmacro harness-replay-test-with-system-transition (&rest body)
   "Run BODY with a frozen chat and a changed real system-prompt filter."
@@ -1295,17 +1418,31 @@ were, and only what it adds is new."
       (harness-replay-seam-keep request "m" "route" wire)
       (should (equal (plist-get (harness-replay--frozen-read id) :transition)
                      (plist-get after :transition)))
-      ;; Approval of system text cannot approve any unrelated divergence.
+      ;; Approval of system text cannot approve any unrelated divergence:
+      ;; each one is its own reset, recorded and sent.  Each starts from a
+      ;; body that continues the kept one, so the splice has bytes to
+      ;; claim to put back.
       (dolist (field '(history tools model system))
+        (harness-replay-seam-keep request "m" "route" wire)
         (let ((changed (copy-tree wire t)))
           (pcase field
             ('history (setf (plist-get (aref (plist-get changed :messages) 1) :content) "CHANGED"))
-            ('tools (setq changed (plist-put changed :tools [])))
+            ('tools (setq changed (plist-put changed :tools [(:type "function"
+                                                              :function (:name "other"))])))
             ('model (setq changed (plist-put changed :model "other")))
             ('system (setf (plist-get (aref (plist-get changed :messages) 0) :content) "unapproved")))
-          (should (cdr (harness-replay-seam request "m" "route" changed)))))
-      (should (cdr (harness-replay-seam request "other-model" "other-route"
-                                       (plist-put (copy-tree wire t) :model "other")))))))
+          (ert-info ((format "%S" field))
+            (should-not (cdr (harness-replay-seam request "m" "route" changed)))
+            (should (equal (format "%s"
+                                   (pcase field
+                                     ('history 'diverged)
+                                     ('tools 'tools)
+                                     ('model 'model)
+                                     ('system 'system)))
+                           (plist-get (harness-call 'replay/frozen-status id) :reset))))))
+      ;; A body kept for another model or route is never spliced at all.
+      (should-not (cdr (harness-replay-seam request "other-model" "other-route"
+                                            (plist-put (copy-tree wire t) :model "other")))))))
 
 (ert-deftest harness-replay-system-transition-refuses-stale-or-unapproved-state ()
   (harness-replay-test-with-system-transition
@@ -1463,8 +1600,7 @@ sending `tools'.  No setting announces either, so the boundary check saw
 a body whose field count changed, named it `body', and refused it -- and
 because the frozen body is only rewritten by a request that is sent, the
 refusal repeated for every request the session made, forever.  A field
-that is gone is recorded as the reset it is; a field whose bytes changed
-is still refused, since that is a rebuild nothing accounts for."
+that is gone is recorded as the reset it is, and the request goes out."
   (harness-replay-test-with
     (let* ((id (harness-replay-test-session))
            (messages (list (harness-replay-test--message "hi")))
@@ -1479,10 +1615,12 @@ is still refused, since that is a rebuild nothing accounts for."
       ;; And it says why the body stopped applying.
       (should (equal (plist-get (harness-call 'replay/frozen-status id) :reset)
                      "field-dropped"))
-      ;; A field whose bytes changed is still a mutation: nothing is sent.
+      ;; The session goes on: the next request continues what this sent.
       (harness-replay-test--keep id messages)
-      (should (cdr (harness-replay-test--seam
-                    id (list (harness-replay-test--message "HI"))))))))
+      (let ((next (harness-replay-test--seam
+                   id (append messages (list (harness-replay-test--message "yo" "assistant"))))))
+        (should-not (cdr next))
+        (should (> (plist-get (harness-call 'replay/frozen-status id) :bytes) 0))))))
 
 (ert-deftest harness-replay-a-changed-effort-is-recorded-not-refused-forever ()
   "A reasoning effort that changed for a reason no setting announces recovers.
@@ -1519,70 +1657,73 @@ gone already did."
         (should (equal (decode-coding-string (car next) 'utf-8)
                        (decode-coding-string (harness-json-encode changed) 'utf-8)))))))
 
-(ert-deftest harness-replay-a-changed-tool-name-is-still-refused ()
-  "A tool name that changed with nothing recorded is still a refusal.
-A session settles the tool *names* it sends (`session/set-tool-schema'),
-and the one way that list moves mid-session -- the schema cleared so the
-supervisor's mode can be re-decided -- records its own `tools' reset.  A
-tool list that moved with neither the schema cleared nor a reset recorded
-is a rebuild the harness cannot account for, and nothing is sent.  The
-definition exception does not reach it: it covers a definition changing
-while the names the session settled stayed the same."
+(ert-deftest harness-replay-a-changed-tool-schema-records-its-reset ()
+  "A tool schema that changed is recorded as `tools' and sent.
+The one way a settled schema is meant to move mid-session --
+`session/set-tool-schema' clearing it so the supervisor's mode can be
+re-decided -- announces itself, which spares the cache.  A tool whose
+bytes changed with no announcement is the same change found later: it is
+recorded, not refused, so the session can go on.  The definition moving
+under a settled name is the same component as the name itself moving."
   (harness-replay-test-with
     (let* ((id (harness-replay-test-session))
            (messages (list (harness-replay-test--message "hi")))
            (tool (list :type "function" :function (list :name "a" :description "d")))
-           (changed (list :type "function" :function (list :name "b" :description "d"))))
+           (changed (list :type "function" :function (list :name "a" :description "D"))))
       (harness-replay-test--keep id messages :tools (list tool))
       (let ((seam (harness-replay-test--seam id messages :tools (list changed))))
-        (should (cdr seam))
-        (should (string-match-p "tools\\[0\\]" (cdr seam)))))))
+        (should-not (cdr seam))
+        (should (string-match-p "\"description\":\"D\"" (car seam))))
+      (should (equal "tools" (plist-get (harness-call 'replay/frozen-status id) :reset))))))
 
-(ert-deftest harness-replay-a-changed-tool-definition-recovers ()
-  "A tool whose definition the harness changed records a reset, not a refusal.
-A session settles the tool *names* it sends, and their definitions are
-read from the registry with every request.  So a release that edits one --
-a description, a property, a renamed parameter -- rewrites the schema the
-provider already read, and no setting announces it, because the names did
-not change.  Left to the refusal it stopped every request the session made
-afterwards, since a frozen body is only rewritten by a request that is
-sent: this is what wedged the soundcore session at
-`tools[46].function.parameters.properties' when `history.undo' gained two
-properties under a running session."
+(ert-deftest harness-replay-a-reload-rewrote-one-tool-the-settled-names-hide ()
+  "A reload that rewrote one tool's parameters is recorded, and the session goes on.
+This is the shape the sessions were wedged on: a settled schema fixes the
+tool *names*, and `tools/list' reads the specs live, so a harness reload
+that changes one tool rewrites `tools[46].function.parameters.properties'
+under a session whose settled names never changed and which announced
+nothing.  It used to be refused, and a refusal can never be cleared -- a
+frozen body is only rewritten by a request that is sent -- so every later
+request of that session met it again.  The splice records it instead,
+naming the schema, which is the component that moved."
   (harness-replay-test-with
     (let* ((id (harness-replay-test-session))
            (messages (list (harness-replay-test--message "hi")))
-           (request (list :model "m" :session (list :id id)))
-           (tool (lambda (properties)
+           (tool (lambda (name props)
                    (list :type "function"
-                         :function (list :name "history.undo" :description "Undo board edit"
+                         :function (list :name name :description (concat name " tool")
                                          :parameters (list :type "object"
-                                                           :properties properties
-                                                           :required (list "board"))))))
-           (before (funcall tool (list :board (list :type "string"))))
-           (after (funcall tool (list :board (list :type "string" :description "The board id.")
-                                      :revision (list :type "number")))))
-      (harness-replay-test--keep id messages :tools (list before))
-      (should (> (plist-get (harness-call 'replay/frozen-status id) :bytes) 0))
-      ;; The request goes out, built fresh: nothing is refused.
-      (let ((seam (harness-replay-test--seam id messages :tools (list after))))
+                                                           :properties props)))))
+           ;; Forty-seven tools, as the real session had.
+           (before (cl-loop for i below 46 collect (funcall tool (format "t%d" i) nil)))
+           (after (append before
+                          (list (funcall tool "t46" nil))))
+           (changed (append before
+                            (list (funcall tool "t46"
+                                           (list :revision (list :type "number")
+                                                 :dryRun (list :type "boolean")))))))
+      (harness-replay-test--keep id messages :tools after)
+      (let ((seam (harness-replay-test--seam id messages :tools changed)))
+        ;; Sent, with the rewritten schema, and no complaint.
         (should-not (cdr seam))
-        (should (string-match-p "\\\"revision\\\"" (car seam))))
-      ;; And it says why the body stopped applying.
-      (should (equal (plist-get (harness-call 'replay/frozen-status id) :reset)
-                     "tool-definition"))
-      ;; The request after it continues the body this one kept, so the
-      ;; session is not stranded on a refusal.
-      (harness-replay-test--keep id messages :tools (list after))
-      (let ((next (harness-replay-test--seam id messages :tools (list after))))
+        (should (string-match-p "\"dryRun\"" (car seam)))
+        (should (string-match-p "\"revision\"" (car seam))))
+      ;; Recorded as the tool schema changing, which is what it is.
+      (should (equal "tools" (plist-get (harness-call 'replay/frozen-status id) :reset)))
+      ;; And the session is not stranded: kept as sent, the next request
+      ;; continues those bytes and is spliced.
+      (harness-replay-test--keep id messages :tools changed)
+      (let ((next (harness-replay-test--seam
+                   id (append messages (list (harness-replay-test--message "yo" "assistant")))
+                   :tools changed)))
         (should-not (cdr next))
-        (should (string-match-p "\\\"revision\\\"" (car next)))))))
+        (should (string-match-p "\"dryRun\"" (car next)))))))
 
 (ert-deftest harness-replay-a-tool-added-is-not-a-definition-change ()
   "A tool the kept body did not have appends, and diverges nowhere.
 The list is the session's to settle, and `session/set-tool-schema'
-announces a change of it; the definition exception is not needed for an
-added tool, which continues the kept body as an array may."
+announces a change of it; a tool added at the end continues the kept body
+as an array may, so nothing moved for the reset to name."
   (harness-replay-test-with
     (let* ((id (harness-replay-test-session))
            (messages (list (harness-replay-test--message "hi")))
@@ -1591,26 +1732,14 @@ added tool, which continues the kept body as an array may."
       (harness-replay-test--keep id messages :tools (list read))
       (let ((seam (harness-replay-test--seam id messages :tools (list read write))))
         (should-not (cdr seam))
-        (should (string-match-p "\\\"write\\\"" (car seam)))))))
-
-(ert-deftest harness-replay-a-tool-dropped-is-still-refused ()
-  "A tool the kept body sent and the new one does not is the list moving.
-That is `session/set-tool-schema''s to announce with a `tools' reset, so
-the definition exception stays out of it and nothing is sent."
-  (harness-replay-test-with
-    (let* ((id (harness-replay-test-session))
-           (messages (list (harness-replay-test--message "hi")))
-           (read (list :type "function" :function (list :name "read" :description "Read")))
-           (write (list :type "function" :function (list :name "write" :description "Write"))))
-      (harness-replay-test--keep id messages :tools (list read write))
-      (let ((seam (harness-replay-test--seam id messages :tools (list read))))
-        (should (cdr seam))
-        (should (string-match-p "tools" (cdr seam)))))))
+        (should (string-match-p "\"write\"" (car seam))))
+      (should-not (plist-get (harness-call 'replay/frozen-status id) :reset)))))
 
 (ert-deftest harness-replay-a-responses-tool-definition-recovers ()
   "The Responses route's tools are found where that route keeps them.
 They come in as an `additional_tools' item of `input', so a definition
-changing there diverges at \"input[0].tools[0]...\" and not at \"tools\"."
+changing there diverges at \"input[0].tools[0]...\" and not at \"tools\".
+That is the schema moving all the same, and the reset names it."
   (harness-replay-test-with
     (let* ((id (harness-replay-test-session))
            (messages (list (harness-replay-test--message "hi")))
@@ -1628,34 +1757,38 @@ changing there diverges at \"input[0].tools[0]...\" and not at \"tools\"."
         (should-not (cdr seam))
         (should (string-match-p "Undo an edit" (car seam))))
       (should (equal (plist-get (harness-call 'replay/frozen-status id) :reset)
-                     "tool-definition")))))
+                     "tools")))))
 
-(ert-deftest harness-replay-a-changed-message-is-still-refused-for-good ()
-  "The envelope's exception never reaches the conversation.
-A message whose text changed is a rebuild of the transcript: it is
-refused, and stays refused until something records why, because a
-session that sent different words than it holds is a defect and not a
-change it can go on from."
+(ert-deftest harness-replay-a-changed-message-is-recorded-and-sent ()
+  "A message whose text changed is recorded as `diverged' and sent.
+A session that sends different words than it holds is worth knowing
+about, and the reset names it.  What it must not do is stop the session
+for good: the bytes really changed, so the request pays for them once and
+the next one continues from it."
   (harness-replay-test-with
     (let* ((id (harness-replay-test-session))
            (first (list (harness-replay-test--message "hi")))
            (changed (list (harness-replay-test--message "HI"))))
       (harness-replay-test--keep id first)
+      (let ((seam (harness-replay-test--seam id changed)))
+        (should-not (cdr seam))
+        (should (string-match-p "HI" (car seam))))
+      (should (equal "diverged"
+                     (plist-get (harness-call 'replay/frozen-status id) :reset)))
+      ;; Kept as what was sent, the change is behind it: every request
+      ;; after it continues those bytes, and none is refused.
+      (harness-replay-test--keep id changed)
       (dotimes (_ 3)
-        (let ((seam (harness-replay-test--seam id changed)))
-          (should (cdr seam))
-          (should (string-match-p "messages\\[0\\]\\.content" (cdr seam))))))))
+        (should-not (cdr (harness-replay-test--seam id changed)))))))
 
 (ert-deftest harness-replay-clearing-a-settled-schema-explains-the-change ()
   "Clearing a settled tool schema records the reset it makes.
 `session/set-tool-schema' with nil forgets the list so the next request
 settles a new one -- the supervisor's judge does it to make its mode
 decision real -- and that rewrites the tool schema the provider already
-read.  It announced nothing, so the boundary check refused the next
-request for a change with no recorded reset, and every request after it:
-a frozen body is only rewritten by a request that is sent.  The clear
-now announces itself, so the reset is recorded and the request after it
-is built fresh."
+read.  Announcing it is what spares the cache: the reset is recorded as
+the change happens, so the next request is built fresh rather than
+compared with a schema it no longer sends."
   (harness-replay-test-with
     (let* ((id (harness-replay-test-session))
            (messages (list (harness-replay-test--message "hi")))

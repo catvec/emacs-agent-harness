@@ -152,10 +152,17 @@
                 (should (= 1 (length (harness-openrouter-health-test--sent-completions))))
                 (let* ((wire (plist-get (car (harness-openrouter-health-test--sent-completions)) :json)))
                   (should (equal (plist-get wire :messages) (plist-get body :messages))))))
-            ;; This genuine subsequent edit must still be rejected.
+            ;; This genuine subsequent edit is a change the harness records
+            ;; rather than a body it splices: it goes out built fresh, and
+            ;; the telemetry says the system prompt is what moved.
             (let* ((changed (plist-put (copy-sequence req) :system "different system"))
-                   (new (harness-openrouter-test--routed-body p harness-openrouter-test--stored changed)))
-              (should (cdr (harness-replay-seam changed (plist-get req :model) route new))))))))))
+                   (new (harness-openrouter-test--routed-body p harness-openrouter-test--stored changed))
+                   (decisions nil))
+              (harness-on 'replay/prefix (lambda (_id info) (push info decisions)))
+              (should-not (cdr (harness-replay-seam changed (plist-get req :model) route new)))
+              (let ((info (car decisions)))
+                (should (eq (plist-get info :decision) 'diverged))
+                (should (equal (plist-get info :reason) 'system))))))))))
 
 (ert-deftest harness-openrouter-health-tracking-persists-before-transport-and-cancel ()
   (let* ((s (harness-openrouter-health-test--session "unsent"))
@@ -178,6 +185,9 @@
 
 
 (ert-deftest harness-openrouter-health-local-replay-refusal-keeps-unused-pin-unsent ()
+  "A request the replay guard refuses never reaches the transport, or the pin.
+The guard stops a body that does not hold the bytes the splice said it put
+back; nothing about such a request may count as sent."
   (harness-test-with-temp-state
     (let* ((p (harness-openrouter-test-policy))
            (s (harness-openrouter-health-test--session "unsent"))
@@ -191,10 +201,19 @@
                                    (harness-replay-route req (harness-openrouter--endpoint))
                                    (harness-openrouter-test--routed-body p old req))
           (harness-openrouter-test-with-fake (list (harness-openrouter-test--completion-response))
-            (let ((events (harness-openrouter-test--run (plist-put (copy-sequence req) :system "mutated"))))
-              (should (eq 'error (plist-get (car (last events)) :stop-reason)))
-              (should-not (harness-openrouter-health-test--sent-completions))
-              (should (equal "unsent" (plist-get (harness-openrouter--send-evidence harness-openrouter-test--session-value) :state))))))))))
+            ;; The splice claims the kept bytes back and hands over others:
+            ;; the guard is what refuses this, and the pin stays unused.
+            (cl-letf (((symbol-function 'harness-replay--piece-splice)
+                       (lambda (_old new)
+                         (harness-replay--piece
+                          (list :model "m"
+                                :messages (list (list :role "user" :content "CORRUPTED")))))))
+              (let ((events (harness-openrouter-test--run req)))
+                (should (eq 'error (plist-get (car (last events)) :stop-reason)))
+                (should (string-match-p "changed after the splice reported it unchanged"
+                                        (plist-get (car (last events)) :error)))
+                (should-not (harness-openrouter-health-test--sent-completions))
+                (should (equal "unsent" (plist-get (harness-openrouter--send-evidence harness-openrouter-test--session-value) :state)))))))))))
 
 (ert-deftest harness-openrouter-health-durable-evidence-failure-sends-nothing ()
   (let* ((p (harness-openrouter-test-policy))
