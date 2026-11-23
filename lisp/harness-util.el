@@ -2608,7 +2608,17 @@ output is better off without all that."
                                                     (lambda ()
                                                       (harness-kill-process-tree tree 'kill)))))))
       (when stdin (harness-process-send proc stdin))
-      (when (process-live-p proc) (harness-process-send-eof proc)))))
+      ;; End-of-file is a courtesy to the child, never part of the answer.
+      ;; The command can exit between the check above and the write -- git
+      ;; answers in milliseconds -- and Emacs then refuses with "Process
+      ;; NAME not running: finished", before the sentinel has settled the
+      ;; promise with what the command wrote and returned.  Letting that
+      ;; refusal out of here rejected the promise with it, and the caller
+      ;; read Emacs's complaint where the command's own answer was due.
+      (when (process-live-p proc)
+        (condition-case nil
+            (harness-process-send-eof proc)
+          (error nil))))))
 
 (defun harness-grep-hit (line suffix)
   "Split LINE of `grep -H' output into (NAME . TEXT), or return nil.

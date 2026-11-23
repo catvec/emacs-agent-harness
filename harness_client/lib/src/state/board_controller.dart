@@ -93,6 +93,13 @@ class BoardController extends ChangeNotifier {
   bool busy = false;
   String? error;
 
+  /// Whether the last read or write failed because the connection to the
+  /// harness went, not because the board answered.  The board refused
+  /// nothing then, so the page shows no error of the board's: what it draws
+  /// stays as it was, and the app gets the connection back (see
+  /// [BoardScreen], which asks it to).  A read that comes back clears this.
+  bool connectionLost = false;
+
   /// What the last write or refusal said, in the engine's own words.  A
   /// stale refusal also says so in [stale] and [notice].
   String? actionError;
@@ -246,7 +253,10 @@ class BoardController extends ChangeNotifier {
     }
     final api = _api;
     if (api == null) {
-      error = 'offline';
+      // No harness to ask at all: the app is between connections, which is
+      // the connection's state and not the board's.
+      connectionLost = true;
+      error = null;
       notifyListeners();
       return;
     }
@@ -264,10 +274,10 @@ class BoardController extends ChangeNotifier {
       _adopt(next, walked: true);
     } on AcpException catch (failure) {
       if (mine != _generation || _disposed) return;
-      error = failure.message;
+      _failedToRead(failure);
     } catch (failure) {
       if (mine != _generation || _disposed) return;
-      error = '$failure';
+      _failedToRead(failure);
     } finally {
       if (mine == _generation) {
         loading = false;
@@ -276,11 +286,30 @@ class BoardController extends ChangeNotifier {
     }
   }
 
+  /// A read that did not come back: the board's own refusal is shown as one,
+  /// and a connection that went is not.  What the page draws stays as it is,
+  /// so a board read once is still there while the connection is got back.
+  void _failedToRead(Object failure) {
+    if (boardTransportFailure(failure)) {
+      connectionLost = true;
+      error = null;
+      return;
+    }
+    error = failure is AcpException ? failure.message : '$failure';
+  }
+
   /// Take an answer as what the page draws.  A read that is only a refresh
   /// keeps the diagram, the viewport and the selection the person has; the
   /// first one takes the document's own.
   void _adopt(BoardDocument next, {required bool walked}) {
     document = next;
+    // The connection is there, and this is what the board holds now: an
+    // edit whose answer was lost is settled by it, and so is a read that
+    // could not be made while the connection was out.
+    if (connectionLost) {
+      connectionLost = false;
+      if (notice == boardUnconfirmedNotice) notice = null;
+    }
     final place = next.diagram;
     if (_walked.isEmpty) {
       final here = place?.id ?? diagramId ?? '';
@@ -821,6 +850,7 @@ class BoardController extends ChangeNotifier {
       notifyListeners();
       return true;
     } on AcpException catch (failure) {
+      if (boardTransportFailure(failure)) return _unconfirmed();
       actionError = BoardError.fromMessage(failure.message).message;
       notice = 'Refused';
       notifyListeners();
@@ -899,6 +929,7 @@ class BoardController extends ChangeNotifier {
       return true;
     } on AcpException catch (failure) {
       if (_disposed) return false;
+      if (boardTransportFailure(failure)) return _unconfirmed();
       final refusal = BoardError.fromMessage(failure.message);
       actionError = refusal.message;
       if (refusal.isStale) {
@@ -947,6 +978,10 @@ class BoardController extends ChangeNotifier {
       notice = answer.conflicts.isEmpty ? 'Undone' : 'Undone · conflicts';
     } on AcpException catch (failure) {
       if (_disposed) return;
+      if (boardTransportFailure(failure)) {
+        _unconfirmed(notify: false);
+        return;
+      }
       final refusal = BoardError.fromMessage(failure.message);
       actionError = refusal.message;
       notice = 'Refused · ${refusal.summary}';
@@ -981,6 +1016,10 @@ class BoardController extends ChangeNotifier {
       notifyListeners();
       return place;
     } on AcpException catch (failure) {
+      if (boardTransportFailure(failure)) {
+        _unconfirmed();
+        return null;
+      }
       actionError = BoardError.fromMessage(failure.message).message;
       notice = 'Refused';
       notifyListeners();
@@ -1040,6 +1079,10 @@ class BoardController extends ChangeNotifier {
       notice = 'Task · ${task.id}';
       return task;
     } on AcpException catch (failure) {
+      if (boardTransportFailure(failure)) {
+        _unconfirmed();
+        return null;
+      }
       actionError = failure.message;
       notice = 'Refused';
       return null;
@@ -1102,7 +1145,34 @@ class BoardController extends ChangeNotifier {
     if (focusRequests.isEmpty) return null;
     return focusRequests.removeAt(0);
   }
+
+  /// A write whose answer never came, because the connection went: the
+  /// harness may have committed it, or may not, so the page says it is
+  /// unconfirmed rather than refused.  Nothing is retried behind the
+  /// person's back; the board is read again once the connection is back
+  /// (see [BoardScreen]), and that is what settles it.
+  bool _unconfirmed({bool notify = true}) {
+    connectionLost = true;
+    actionError = null;
+    diagnostics = const [];
+    busy = false;
+    notice = boardUnconfirmedNotice;
+    if (notify) notifyListeners();
+    return false;
+  }
 }
+
+/// What the board page says of a write whose answer never came, in the
+/// words the app uses for a request it sent and heard nothing back of: a
+/// state, and no guess at what became of it.  Why it never came -- the
+/// connection -- is the banner's to say.
+const boardUnconfirmedNotice = 'Unconfirmed';
+
+/// Whether [failure] says the connection to the harness went, rather than
+/// that the board refused anything: a transport failure, which every page
+/// of the app treats as a connection to get back, not as an answer.
+bool boardTransportFailure(Object failure) =>
+    failure is AcpException && failure.isTransport;
 
 /// The step an arrow key moves a selection by, in canvas units: a distance a
 /// person sees, and far inside the engine's movement budget.

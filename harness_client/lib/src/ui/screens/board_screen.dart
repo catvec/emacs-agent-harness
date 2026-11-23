@@ -13,6 +13,7 @@ import '../adaptive/adaptive_widgets.dart';
 import '../navigation.dart';
 import '../theme/harness_theme.dart';
 import '../widgets/board_canvas.dart';
+import '../widgets/connection_banner.dart';
 import '../widgets/markdown_view.dart';
 
 /// What a tap on the canvas does.  `select` is the hand; the others make one
@@ -106,6 +107,15 @@ class _BoardScreenState extends State<BoardScreen> {
   final _name = TextEditingController();
   final _comment = TextEditingController();
 
+  /// Whether the app had a connection when this page last looked: a board
+  /// read while the connection was out is read again when it is back, and
+  /// an edit whose answer was lost is settled by what the board holds then.
+  bool _wasConnected = false;
+
+  /// Whether the app has already been asked to check the connection for the
+  /// failure the page is showing, so that one failure is asked about once.
+  bool _askedToCheck = false;
+
   BoardController get controller => _controller;
 
   @override
@@ -121,6 +131,8 @@ class _BoardScreenState extends State<BoardScreen> {
         );
     _controller.addListener(_changed);
     _controller.attach();
+    widget.app.addListener(_appChanged);
+    _wasConnected = widget.app.isConnected;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       unawaited(_controller.load(showSpinner: false));
       if (mounted) _focus.requestFocus();
@@ -128,7 +140,18 @@ class _BoardScreenState extends State<BoardScreen> {
   }
 
   @override
+  void didUpdateWidget(BoardScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.app != widget.app) {
+      oldWidget.app.removeListener(_appChanged);
+      widget.app.addListener(_appChanged);
+      _wasConnected = widget.app.isConnected;
+    }
+  }
+
+  @override
   void dispose() {
+    widget.app.removeListener(_appChanged);
     _controller.removeListener(_changed);
     if (widget.controller == null) _controller.dispose();
     _pictures.dispose();
@@ -137,6 +160,19 @@ class _BoardScreenState extends State<BoardScreen> {
     _name.dispose();
     _comment.dispose();
     super.dispose();
+  }
+
+  /// The connection came back: read the board again, which may have changed
+  /// while the page could not hear it, and which settles an edit whose
+  /// answer was lost (see [BoardController.connectionLost]).  The page is a
+  /// route over the shell, so nothing else reads for it.
+  void _appChanged() {
+    final connected = widget.app.isConnected;
+    if (connected && !_wasConnected && !_controller.preview) {
+      unawaited(_controller.refresh());
+    }
+    _wasConnected = connected;
+    if (mounted) setState(() {});
   }
 
   /// Frame the drawing the first time it arrives, and not again: a person
@@ -157,6 +193,19 @@ class _BoardScreenState extends State<BoardScreen> {
     // one's: Back returns to the board the person was on.
     final next = _controller.takeFocusRequest();
     if (next != null) unawaited(_openBoard(next));
+    // A read or a write the connection took with it: the app is asked
+    // whether the connection is there.  A socket that died without a word is
+    // found out now rather than when the next request times out, and the
+    // page says the connection is being got back (its banner) instead of
+    // showing the board's error.  One failure is asked about once; a read
+    // that comes back arms the next one.
+    if (!_controller.connectionLost) {
+      _askedToCheck = false;
+      return;
+    }
+    if (_askedToCheck) return;
+    _askedToCheck = true;
+    unawaited(widget.app.checkConnection());
   }
 
   Future<void> _openBoard(BoardPlace place) async {
@@ -303,6 +352,9 @@ class _BoardScreenState extends State<BoardScreen> {
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // The page is opened over the shell, whose own banner it covers:
+          // a connection that goes while a board is open says so here.
+          ConnectionBanner(app: widget.app),
           _header(context),
           _tools(context),
           if (_controller.error != null || _controller.actionError != null)
@@ -347,6 +399,12 @@ class _BoardScreenState extends State<BoardScreen> {
         title: 'Unsupported',
         message: 'board/get',
       );
+    }
+    // A board that could not be read because the connection went is not a
+    // board that is not there: the page waits for the connection, which its
+    // banner says is being got back, rather than claiming there is none.
+    if (_controller.connectionLost && _controller.document == null) {
+      return const Center(child: HarnessActivity());
     }
     if (_controller.error != null) {
       return HarnessEmptyState(

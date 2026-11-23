@@ -2535,6 +2535,28 @@ process, fill their section when they arrive, or it says why not."
   (should (equal "abc" (plist-get (harness-await (harness-run-command '("cat") :stdin "abc")) :stdout)))
   (should (eq 'timeout (plist-get (harness-await (harness-run-command '("sleep" "5") :timeout 0.2)) :exit))))
 
+(ert-deftest harness-util-run-command-a-command-that-finished-first-still-answers ()
+  "A command that finishes before its end-of-file goes out answers as it did.
+`harness-run-command' sends end-of-file to a process it has just found
+alive.  The command can exit in the moment between that check and the
+write -- git, above all, which answers in milliseconds -- and Emacs then
+refuses with \"Process NAME not running: finished\", before the sentinel
+has settled the promise with what the command wrote and returned.  The
+refusal used to become the answer: a caller reading git's reply got
+Emacs's complaint instead, and a full test run under load failed that
+way.  End-of-file is a courtesy to the child, never part of the answer."
+  (cl-letf (((symbol-function 'harness-process-send-eof)
+             ;; Emacs's own refusal, raised after the check that found the
+             ;; process alive and before the sentinel has run.
+             (lambda (proc)
+               (signal 'error (list (format "Process %s not running: finished"
+                                            (process-name proc)))))))
+    (let ((r (harness-await (harness-run-command '("sh" "-c" "echo out; exit 3")
+                                                 :name "harness-finished-first")
+                            10)))
+      (should (= 3 (plist-get r :exit)))
+      (should (equal "out\n" (plist-get r :stdout))))))
+
 (ert-deftest harness-util-process-send-waits-in-line ()
   "Writes to a process that does not read yet wait in line, never nested.
 `process-send-string' runs the timers due while it waits for room; each

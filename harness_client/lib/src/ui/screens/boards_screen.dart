@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../models/board.dart';
 import '../../state/app_controller.dart';
+import '../../state/board_controller.dart';
 import '../../services/harness_api.dart';
 import '../adaptive/adaptive_widgets.dart';
 import '../format.dart';
@@ -31,6 +32,28 @@ class _BoardsScreenState extends State<BoardsScreen> {
   List<BoardSummary> boards = const [];
   bool loading = true;
   String? error;
+
+  /// Whether the last read failed because the connection to the harness
+  /// went, rather than because the harness answered: the list that was read
+  /// stays, and the page says the connection is being got back (its banner)
+  /// instead of showing the failure as the harness's.
+  bool connectionLost = false;
+
+  /// Whether the app had a connection when this page last looked: the list
+  /// is read again when it is back, which is what a read made while the
+  /// connection was out was waiting for.
+  bool _wasConnected = false;
+
+  /// Whether the app has already been asked to check the connection for the
+  /// failure the page is showing, so that one failure is asked about once.
+  bool _askedToCheck = false;
+
+  /// A board made whose answer never came, because the connection went: the
+  /// harness may have made it, or may not, so the page says it is
+  /// unconfirmed rather than refused or absent.  It goes when the list is
+  /// read again, which is what settles it.
+  bool _creationUnconfirmed = false;
+
   BoardPlace? _opened;
 
   /// The name being typed for a new board.
@@ -44,12 +67,19 @@ class _BoardsScreenState extends State<BoardsScreen> {
   void initState() {
     super.initState();
     _opened = widget.initial;
+    widget.app.addListener(_appChanged);
+    _wasConnected = widget.app.isConnected;
     WidgetsBinding.instance.addPostFrameCallback((_) => _load());
   }
 
   @override
   void didUpdateWidget(BoardsScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.app != widget.app) {
+      oldWidget.app.removeListener(_appChanged);
+      widget.app.addListener(_appChanged);
+      _wasConnected = widget.app.isConnected;
+    }
     final next = widget.initial;
     if (next != null && !next.samePlace(_opened ?? const BoardPlace(board: '', diagram: ''))) {
       _opened = next;
@@ -59,8 +89,18 @@ class _BoardsScreenState extends State<BoardsScreen> {
 
   @override
   void dispose() {
+    widget.app.removeListener(_appChanged);
     _newName.dispose();
     super.dispose();
+  }
+
+  /// The connection came back: read the list again, which may have changed
+  /// while the page could not hear it.
+  void _appChanged() {
+    final connected = widget.app.isConnected;
+    if (connected && !_wasConnected && mounted) unawaited(_load(showSpinner: false));
+    _wasConnected = connected;
+    if (mounted) setState(() {});
   }
 
   /// A board of one's own: a name, and the board opens empty, with the
@@ -124,6 +164,18 @@ class _BoardsScreenState extends State<BoardsScreen> {
       );
     } on Object catch (failure) {
       if (!mounted) return;
+      if (boardTransportFailure(failure)) {
+        // The board may have been made, or may not: the answer never came.
+        // The page says so in the state's own words, and the connection is
+        // got back, whose banner says why.
+        setState(() {
+          connectionLost = true;
+          _creationUnconfirmed = true;
+          error = null;
+        });
+        _checkConnection();
+        return;
+      }
       setState(() => error = '$failure');
       return;
     }
@@ -150,6 +202,8 @@ class _BoardsScreenState extends State<BoardsScreen> {
         boards = const [];
         loading = false;
         error = null;
+        connectionLost = false;
+        _creationUnconfirmed = false;
       });
       return;
     }
@@ -160,13 +214,40 @@ class _BoardsScreenState extends State<BoardsScreen> {
       setState(() {
         boards = next;
         error = null;
+        connectionLost = false;
+        // The list read now says whether a board whose making went
+        // unanswered is there.
+        _creationUnconfirmed = false;
       });
     } on Object catch (failure) {
       if (!mounted) return;
-      setState(() => error = '$failure');
+      // A connection that went is no answer of the harness's: the list that
+      // was read stays, and the page says the connection is being got back.
+      if (boardTransportFailure(failure)) {
+        setState(() {
+          connectionLost = true;
+          error = null;
+        });
+        _checkConnection();
+      } else {
+        setState(() => error = '$failure');
+      }
     } finally {
       if (mounted) setState(() => loading = false);
     }
+  }
+
+  /// Ask the app whether the connection that failed is there: a socket that
+  /// died without a word is found out now, and the app gets it back.  One
+  /// failure is asked about once; a read that comes back arms the next one.
+  void _checkConnection() {
+    if (!connectionLost) {
+      _askedToCheck = false;
+      return;
+    }
+    if (_askedToCheck) return;
+    _askedToCheck = true;
+    unawaited(widget.app.checkConnection());
   }
 
   Future<void> _open(BoardPlace place) async {
@@ -197,7 +278,10 @@ class _BoardsScreenState extends State<BoardsScreen> {
             'Unsupported'
           else if (boards.isNotEmpty)
             boards.length == 1 ? '1 board' : '${boards.length} boards',
-        ].join(),
+          // A board whose making went unanswered may be here or not; the
+          // next read of the list is what says which.
+          if (_creationUnconfirmed) 'Unconfirmed',
+        ].join(' · '),
       ),
       actions: [
         if (_supported && _canCreate)
@@ -240,17 +324,20 @@ class _BoardsScreenState extends State<BoardsScreen> {
         ),
       ];
     }
-    if (loading && boards.isEmpty) {
+    if (error != null) {
+      return [
+        HarnessErrorBanner(message: error!),
+      ];
+    }
+    // Nothing to list, and no answer to say whether there is: the page waits
+    // for the connection, which its banner says is being got back, rather
+    // than claiming the harness has no boards.
+    if (boards.isEmpty && (loading || connectionLost)) {
       return [
         const Padding(
           padding: EdgeInsets.only(top: HarnessSpace.xl),
           child: Center(child: HarnessActivity()),
         ),
-      ];
-    }
-    if (error != null) {
-      return [
-        HarnessErrorBanner(message: error!),
       ];
     }
     if (boards.isEmpty) {

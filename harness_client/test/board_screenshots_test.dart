@@ -6,6 +6,7 @@
 // draw, check that nothing overflows, and write nothing.  The list is read
 // through the fake harness's board fixture; the board itself is the engine's
 // own preview drawing, which is the same geometry a harness answers with.
+import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
@@ -121,8 +122,7 @@ Future<GlobalKey> _showBoard(
 /// Time passes in the real world, as decoding the drawing's picture takes:
 /// a widget test's own clock would leave the image an outlined box, and the
 /// picture would be a lie about what the board draws.
-Future<void> _decoded(WidgetTester tester) async {
-  for (var i = 0; i < 120; i++) {
+Future<void> _decoded(WidgetTester tester) async {  for (var i = 0; i < 120; i++) {
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 25)),
     );
@@ -271,4 +271,78 @@ void main() {
     await _showBoard(tester, size: const Size(320, 640));
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('the board with the connection lost, on a phone', (tester) async {
+    final (boundary, app, harness) = await _showLostBoard(tester);
+    // The connection's words on the board's own page, and no claim about
+    // the board: the drawing the person was looking at is still there.
+    expect(app.isReconnecting, isTrue);
+    expect(find.byKey(const Key('connection-banner')), findsOneWidget);
+    expect(find.textContaining('connection was closed'), findsNothing);
+    expect(find.text('No board'), findsNothing);
+    if (shots != null) {
+      await _write(tester, boundary, '$shots/board-connection-lost-phone.png');
+    }
+    // The connection is got back, so the app leaves no retry behind.
+    harness.refuseConnects = 0;
+    app.retryNow();
+    for (var i = 0; i < 40 && !app.isConnected; i++) {
+      await tester.pump(const Duration(milliseconds: 40));
+    }
+    expect(app.isConnected, isTrue);
+  });
+}
+
+/// The board page of an app whose connection has just gone: the page is a
+/// route over the shell, so this is where the person reads it.  The harness
+/// is a scripted one that closes the connection and refuses the next ones,
+/// so what is drawn is the app's own answer to a lost connection rather than
+/// a fixture of this file.  The app comes back before this returns, so that
+/// no retry is left waiting on a clock when the test ends.
+Future<(GlobalKey, AppController, FakeHarness)> _showLostBoard(
+  WidgetTester tester, {
+  Size size = const Size(390, 844),
+}) async {
+  SharedPreferences.setMockInitialValues({});
+  final settings = SettingsController();
+  await settings.load();
+  final harness = FakeHarness(boards: true);
+  final app = AppController(
+    settings: settings,
+    connector: harness.connector,
+    reconnectDelays: const [Duration(hours: 1)],
+  );
+  addTearDown(app.dispose);
+  await app.connect('ws://memory/acp');
+  final controller = BoardController(app.harness, boardId: 'b-fieldnotes');
+  addTearDown(controller.dispose);
+  _sized(tester, size);
+  final boundary = GlobalKey();
+  await tester.pumpWidget(
+    _framed(
+      boundary,
+      size,
+      BoardScreen(app: app, board: 'b-fieldnotes', controller: controller),
+    ),
+  );
+  for (var i = 0; i < 10; i++) {
+    await tester.pump(const Duration(milliseconds: 120));
+    _takeOverflows(tester);
+  }
+  expect(controller.document, isNotNull);
+  // The connection goes, and the page reads again: the read fails on a
+  // connection that is no longer there, which is the state to draw.
+  harness.refuseConnects = 1000000;
+  await harness.dropConnection('The connection dropped.');
+  for (var i = 0; i < 30 && !app.isReconnecting; i++) {
+    await tester.pump(const Duration(milliseconds: 40));
+    _takeOverflows(tester);
+  }
+  unawaited(controller.refresh());
+  for (var i = 0; i < 20; i++) {
+    await tester.pump(const Duration(milliseconds: 40));
+    _takeOverflows(tester);
+  }
+  await _decoded(tester);
+  return (boundary, app, harness);
 }

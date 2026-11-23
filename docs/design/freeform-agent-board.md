@@ -351,7 +351,7 @@ The copy is the repository's: tools are nouns (`Select`, `Note`,
 `Delete`, `New diagram`, `New board`, `Create`, `Submit`), and states
 are noun phrases (`No task`, `No other diagram`, `No project`,
 `2 selected`, `Grouped`, `Locked`, `Saved`, `Stale · the board moved`,
-`Task · ID`).  A tooltip says what a control needs, not a sentence about
+`Unconfirmed`, `Task · ID`).  A tooltip says what a control needs, not a sentence about
 it: `Connect two selected objects`, `Group two selected objects`,
 `Ungroup the members`, `Quarter turn clockwise`, `Drill down from this
 object`, `Discuss in the task review`, `Implementation task from the
@@ -371,6 +371,33 @@ prompt it sends names the board, the diagram and the objects picked, so
 the task can find the drawing again.  Editing, moving or accepting a
 drawing never makes a task and never approves code; a board with no
 project says `No project` and offers nothing.
+
+## When the connection goes
+
+A board page is opened over the shell, so the shell's own connection
+banner is covered by it.  The page draws the app's banner itself, and a
+connection that goes is never shown as the board's answer: `No board ·
+The connection was closed.` was the defect, and the board list's
+`ACP error -32003: The connection was closed.` was the same defect one
+page out.
+
+- A read that fails because the connection went keeps the drawing that
+  was read, and says nothing about the board: the banner says the
+  connection is being got back, and the page waits, with the activity
+  where a board never read would otherwise be said not to exist.
+- A write whose answer never came is `Unconfirmed`, a state like
+  `Sending` and `Delivered`: the harness may have committed it, so the
+  page does not say `Refused`, which only the harness can say.
+- A page that notices the failure asks the app to check the connection
+  (`checkConnection`), so a socket that died without a word is found out
+  then rather than when the next request times out.
+- When the connection is back, the page reads the board again: what it
+  holds settles an unconfirmed edit, and the notice that said so goes.
+  The board list reads again the same way.
+
+`harness_client/test/board_connection_test.dart` holds this shut, and
+`test/board_screenshots_test.dart` takes
+`docs/evidence/freeform-board/board-connection-lost-phone.png`.
 
 ## What is not here
 
@@ -432,6 +459,12 @@ The same component, placed again by a second diagram's own view, with the
 breadcrumb back:
 
 ![a second diagram, walked into](../evidence/freeform-board/board-queue-detail.png)
+
+The board with the connection lost: the drawing stays, and the app's own
+banner says the connection is being got back, in place of any claim about
+the board:
+
+![the board with the connection lost](../evidence/freeform-board/board-connection-lost-phone.png)
 
 And the same board drawn by Emacs's own renderer, which is the picture the
 Emacs page shows:
