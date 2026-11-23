@@ -675,16 +675,22 @@ frozen."
       (should-not (harness-call 'replay/frozen-status id)))))
 
 (ert-deftest harness-replay-the-tool-schema-is-a-component-of-its-own ()
-  "A changed tool schema is refused, and an added tool is not a change of the old."
+  "A tool list that moved is refused, and an added tool is not a change of the old.
+The tool a session settled is compared as a component of its own: a tool
+whose *name* changed, or one the kept body had and the new one does not,
+is the list moving with nothing recorded, and nothing is sent.  An added
+tool appends, as an array may, and continues the kept body."
   (harness-replay-test-with
     (let* ((id (harness-replay-test-session))
            (tool (list :type "function" :function (list :name "a" :description "d")))
-           (bigger (list :type "function" :function (list :name "a" :description "D")))
-           (added (list :type "function" :function (list :name "b" :description "e")))
+           (renamed (list :type "function" :function (list :name "b" :description "d")))
+           (added (list :type "function" :function (list :name "c" :description "e")))
            (messages (list (harness-replay-test--message "hi"))))
       (harness-replay-test--keep id messages :tools (list tool))
-      (let ((changed (harness-replay-test--seam id messages :tools (list bigger))))
+      (let ((changed (harness-replay-test--seam id messages :tools (list renamed))))
         (should (string-match-p "tools\\[0\\]" (cdr changed))))
+      (should (string-match-p "tools"
+                              (cdr (harness-replay-test--seam id messages :tools nil))))
       (should-not (cdr (harness-replay-test--seam id messages :tools (list tool added)))))))
 
 (ert-deftest harness-replay-a-metadata-field-is-not-a-prompt-change ()
@@ -1513,23 +1519,116 @@ gone already did."
         (should (equal (decode-coding-string (car next) 'utf-8)
                        (decode-coding-string (harness-json-encode changed) 'utf-8)))))))
 
-(ert-deftest harness-replay-a-changed-tool-schema-is-still-refused ()
-  "A tool schema that changed with nothing recorded is still a refusal.
-The one way a settled schema moves mid-session -- `session/set-tool-schema'
-clearing it so the supervisor's mode can be re-decided -- records its own
-`tools' reset, so the exception for an unannounced change does not reach
-the schema: a tool whose bytes changed with neither the schema cleared
-nor a reset recorded is a rebuild the harness cannot account for, and
-nothing is sent."
+(ert-deftest harness-replay-a-changed-tool-name-is-still-refused ()
+  "A tool name that changed with nothing recorded is still a refusal.
+A session settles the tool *names* it sends (`session/set-tool-schema'),
+and the one way that list moves mid-session -- the schema cleared so the
+supervisor's mode can be re-decided -- records its own `tools' reset.  A
+tool list that moved with neither the schema cleared nor a reset recorded
+is a rebuild the harness cannot account for, and nothing is sent.  The
+definition exception does not reach it: it covers a definition changing
+while the names the session settled stayed the same."
   (harness-replay-test-with
     (let* ((id (harness-replay-test-session))
            (messages (list (harness-replay-test--message "hi")))
            (tool (list :type "function" :function (list :name "a" :description "d")))
-           (changed (list :type "function" :function (list :name "a" :description "D"))))
+           (changed (list :type "function" :function (list :name "b" :description "d"))))
       (harness-replay-test--keep id messages :tools (list tool))
       (let ((seam (harness-replay-test--seam id messages :tools (list changed))))
         (should (cdr seam))
         (should (string-match-p "tools\\[0\\]" (cdr seam)))))))
+
+(ert-deftest harness-replay-a-changed-tool-definition-recovers ()
+  "A tool whose definition the harness changed records a reset, not a refusal.
+A session settles the tool *names* it sends, and their definitions are
+read from the registry with every request.  So a release that edits one --
+a description, a property, a renamed parameter -- rewrites the schema the
+provider already read, and no setting announces it, because the names did
+not change.  Left to the refusal it stopped every request the session made
+afterwards, since a frozen body is only rewritten by a request that is
+sent: this is what wedged the soundcore session at
+`tools[46].function.parameters.properties' when `history.undo' gained two
+properties under a running session."
+  (harness-replay-test-with
+    (let* ((id (harness-replay-test-session))
+           (messages (list (harness-replay-test--message "hi")))
+           (request (list :model "m" :session (list :id id)))
+           (tool (lambda (properties)
+                   (list :type "function"
+                         :function (list :name "history.undo" :description "Undo board edit"
+                                         :parameters (list :type "object"
+                                                           :properties properties
+                                                           :required (list "board"))))))
+           (before (funcall tool (list :board (list :type "string"))))
+           (after (funcall tool (list :board (list :type "string" :description "The board id.")
+                                      :revision (list :type "number")))))
+      (harness-replay-test--keep id messages :tools (list before))
+      (should (> (plist-get (harness-call 'replay/frozen-status id) :bytes) 0))
+      ;; The request goes out, built fresh: nothing is refused.
+      (let ((seam (harness-replay-test--seam id messages :tools (list after))))
+        (should-not (cdr seam))
+        (should (string-match-p "\\\"revision\\\"" (car seam))))
+      ;; And it says why the body stopped applying.
+      (should (equal (plist-get (harness-call 'replay/frozen-status id) :reset)
+                     "tool-definition"))
+      ;; The request after it continues the body this one kept, so the
+      ;; session is not stranded on a refusal.
+      (harness-replay-test--keep id messages :tools (list after))
+      (let ((next (harness-replay-test--seam id messages :tools (list after))))
+        (should-not (cdr next))
+        (should (string-match-p "\\\"revision\\\"" (car next)))))))
+
+(ert-deftest harness-replay-a-tool-added-is-not-a-definition-change ()
+  "A tool the kept body did not have appends, and diverges nowhere.
+The list is the session's to settle, and `session/set-tool-schema'
+announces a change of it; the definition exception is not needed for an
+added tool, which continues the kept body as an array may."
+  (harness-replay-test-with
+    (let* ((id (harness-replay-test-session))
+           (messages (list (harness-replay-test--message "hi")))
+           (read (list :type "function" :function (list :name "read" :description "Read")))
+           (write (list :type "function" :function (list :name "write" :description "Write"))))
+      (harness-replay-test--keep id messages :tools (list read))
+      (let ((seam (harness-replay-test--seam id messages :tools (list read write))))
+        (should-not (cdr seam))
+        (should (string-match-p "\\\"write\\\"" (car seam)))))))
+
+(ert-deftest harness-replay-a-tool-dropped-is-still-refused ()
+  "A tool the kept body sent and the new one does not is the list moving.
+That is `session/set-tool-schema''s to announce with a `tools' reset, so
+the definition exception stays out of it and nothing is sent."
+  (harness-replay-test-with
+    (let* ((id (harness-replay-test-session))
+           (messages (list (harness-replay-test--message "hi")))
+           (read (list :type "function" :function (list :name "read" :description "Read")))
+           (write (list :type "function" :function (list :name "write" :description "Write"))))
+      (harness-replay-test--keep id messages :tools (list read write))
+      (let ((seam (harness-replay-test--seam id messages :tools (list read))))
+        (should (cdr seam))
+        (should (string-match-p "tools" (cdr seam)))))))
+
+(ert-deftest harness-replay-a-responses-tool-definition-recovers ()
+  "The Responses route's tools are found where that route keeps them.
+They come in as an `additional_tools' item of `input', so a definition
+changing there diverges at \"input[0].tools[0]...\" and not at \"tools\"."
+  (harness-replay-test-with
+    (let* ((id (harness-replay-test-session))
+           (messages (list (harness-replay-test--message "hi")))
+           (request (list :model "m" :session (list :id id)))
+           (body (lambda (description)
+                   (list :model "m" :store :false :stream t :messages messages
+                         :input (vector (list :type "additional_tools" :role "developer"
+                                              :tools (vector
+                                                      (list :type "function" :name "history.undo"
+                                                            :description description
+                                                            :strict :false
+                                                            :parameters (list :type "object")))))))))
+      (harness-replay-seam-keep request "m" "route" (funcall body "Undo"))
+      (let ((seam (harness-replay-seam request "m" "route" (funcall body "Undo an edit"))))
+        (should-not (cdr seam))
+        (should (string-match-p "Undo an edit" (car seam))))
+      (should (equal (plist-get (harness-call 'replay/frozen-status id) :reset)
+                     "tool-definition")))))
 
 (ert-deftest harness-replay-a-changed-message-is-still-refused-for-good ()
   "The envelope's exception never reaches the conversation.

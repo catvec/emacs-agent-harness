@@ -110,6 +110,7 @@ in `harness-replay-frozen-reset-reasons`:
 | `images-pruned` | pictures dropped from the history |
 | `field-dropped` | a prompt field the body kept that the request no longer sends |
 | `diverged` | the reasoning effort, which no setting announces |
+| `tool-definition` | a tool's own definition, which the session never settles |
 | `adapter-version` | another serialization version |
 | `storage-failure` | the body could not be written |
 | `too-large` | over `harness-replay-frozen-max-bytes` |
@@ -122,15 +123,36 @@ is refused.  The two are never the same code path.
 
 The one refusal that records its own reset is a body that no longer
 continues the kept one in a way no setting announces.  A prompt field
-that is gone (`field-dropped`) and a reasoning effort that moved under
+that is gone (`field-dropped`), a reasoning effort that moved under
 the same thinking level (`diverged`: a model's listing can name its
 efforts only after the first request went out, and
-`harness-openai--effort` then maps the level to another) both leave the
-session unable to make **any** request, because a frozen body is only
-rewritten by a request that is sent.  They are recorded at the splice,
-and the request goes out built fresh.  Everything else stays refused: a
-message whose text changed, a system prompt nobody approved, a tool
-schema that moved with neither `session/set-tool-schema` nor a reset.
+`harness-openai--effort` then maps the level to another), and a tool
+whose definition the harness itself changed (`tool-definition`) all
+leave the session unable to make **any** request, because a frozen body
+is only rewritten by a request that is sent.  They are recorded at the
+splice, and the request goes out built fresh.  Everything else stays
+refused: a message whose text changed, a system prompt nobody approved, a
+tool *list* that moved with neither `session/set-tool-schema` nor a
+reset.
+
+`tool-definition` is the one that reaches sessions nobody touched.  A
+session settles the tool **names** it sends and nothing more: the
+definitions are read from the registry with every request, so a release
+that edits a tool's `:schema` -- a description, an added property, a
+renamed parameter -- rewrites the schema the provider already read, for
+every session already running, and `session/set-tool-schema` is never
+called because no name changed.  `history.undo` gaining `:revision` and
+`:dryRun` wedged two running sessions at
+`tools[46].function.parameters.properties` that way.  The exception is
+narrow on purpose: the divergence must be inside the tool schema and
+every tool the kept body had must still be sent, so a tool list that
+moved is still refused and still the schema's own reset to announce.
+`harness-replay-a-changed-tool-definition-recovers` and
+`harness-replay-a-responses-tool-definition-recovers` are the tests,
+with `harness-replay-a-changed-tool-name-is-still-refused`,
+`harness-replay-a-tool-dropped-is-still-refused` and
+`harness-replay-a-tool-added-is-not-a-definition-change` for the edges
+the exception does not reach.
 
 `session/updated` carries the changed settings, so
 `harness-replay-reset-on-change` records `model`, `system`, `tools` or

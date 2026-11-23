@@ -1136,10 +1136,16 @@ within the log limit, and given to the caller's function as text."
             (plist-get run :reported) (float-time))
       (unless (plist-get run :reason)
         (setf (plist-get run :reason)
-              (cond ((memq code '(124 137))
+              ;; A run the harness asked to stop is a cancellation, whatever
+              ;; code the kill left: the supervisor's kill loop sends TERM and
+              ;; then KILL, and `timeout --kill-after' turns the same pair into
+              ;; 124 and then 137.  Reading the code first called an explicit
+              ;; cancellation a timeout whenever a process ignored TERM, which
+              ;; is exactly when a stop takes the longer road.
+              (cond (wanted (plist-get run :cancelled-reason))
+                    ((memq code '(124 137))
                      (format "it reached its timeout of %s"
-                             (harness-format-duration (plist-get run :seconds))))
-                    (wanted (plist-get run :cancelled-reason)))))
+                             (harness-format-duration (plist-get run :seconds)))))))
       ;; What the instance held before this run ended is no answer to what
       ;; it holds now: the run may have left processes behind, and only a
       ;; new count can say.  The run's own survivors are a lower bound, and
@@ -1149,10 +1155,10 @@ within the log limit, and given to the caller's function as text."
             (plist-get runtime :asked) (and (> survivors 0) (float-time)))
       (harness-sandbox-session--end-run
        run state code
-       (cond ((memq code '(124 137))
+       (cond (wanted (plist-get run :cancelled-reason))
+             ((memq code '(124 137))
               (format "it reached its timeout of %s"
-                      (harness-format-duration (plist-get run :seconds))))
-             (wanted (plist-get run :cancelled-reason))))
+                      (harness-format-duration (plist-get run :seconds))))))
       ;; A run the session ended must be gone: a process of it that would
       ;; not stop is a process nothing can stop in this instance, so the
       ;; instance is ended -- which the backend's confinement does

@@ -258,7 +258,7 @@ harness should stop a turn for."
 
 (defconst harness-replay-frozen-reset-reasons
   '(compaction system tools model route redaction images-pruned field-dropped
-    diverged adapter-version storage-failure too-large no-session)
+    diverged tool-definition adapter-version storage-failure too-large no-session)
   "Why a frozen body stops applying, as the reason a reset records.
 Each is a change of what the model is sent, or of a store that could not
 hold it, never an unexplained one: `compaction' a conversation replaced,
@@ -269,18 +269,21 @@ out, `images-pruned' pictures dropped from the history by
 kept that this request no longer sends at all, `diverged' a prompt
 component the rebuilt body no longer continues -- a value inside a field
 that changed, such as the reasoning effort a model's listing named only
-after the first request went out -- `adapter-version' another
+after the first request went out -- `tool-definition' a tool the body
+kept whose definition the harness changed while the names the session
+settled stayed the same, `adapter-version' another
 serialization, `storage-failure' a body that could not be written,
 `too-large' one over `harness-replay-frozen-max-bytes', and `no-session' a
 request that names no session.
 
 A reset says the next request is built fresh.  A prompt field that is
-gone, and the reasoning effort a model's listing named late, are both
-recorded by the splice that finds them: the request goes out built
-fresh, since refusing it forever would leave the session unable to make
-any request at all.  Every other divergence is refused by the boundary
-check and nothing is sent, until something records why -- the two are
-never the same code path.")
+gone, the reasoning effort a model's listing named late, and a tool
+definition the harness itself changed are all recorded by the splice
+that finds them: the request goes out built fresh, since refusing it
+forever would leave the session unable to make any request at all.
+Every other divergence is refused by the boundary check and nothing is
+sent, until something records why -- the two are never the same code
+path.")
 
 (defconst harness-replay--frozen-separator ","
   "What goes between two components of a body: the JSON comma.")
@@ -399,6 +402,100 @@ it cannot explain a field whose bytes changed."
              unless (cl-find name news :key #'harness-replay--field-name
                              :test #'equal)
              collect name)))
+
+(defun harness-replay--field-piece-named (name piece)
+  "Return the piece of NAME's field in PIECE, an object, or nil."
+  (let ((field (cl-find name (harness-replay--piece-fields piece)
+                        :key #'harness-replay--field-name :test #'equal)))
+    (and field (harness-replay--field-piece field))))
+
+(defun harness-replay--scalar-text (piece)
+  "Return PIECE, a scalar, as the value it was encoded from, or nil.
+A scalar that cannot be read as JSON says nothing rather than signalling:
+it is read to compare tool names, and a body this module cannot read is a
+body it must not refuse a request for."
+  (when (and (consp piece) (equal (plist-get piece :kind) "scalar")
+             (plist-get piece :bytes))
+    (condition-case nil
+        (harness-json-parse (plist-get piece :bytes))
+      (error nil))))
+
+(defun harness-replay--tool-name (tool)
+  "Return the name TOOL, a tool of a body, is called by, or nil.
+The chat-completions route nests it under `function'; the Responses
+route's `additional_tools' items carry it themselves."
+  (or (harness-replay--scalar-text (harness-replay--field-piece-named "name" tool))
+      (harness-replay--scalar-text
+       (harness-replay--field-piece-named
+        "name" (harness-replay--field-piece-named "function" tool)))))
+
+(defun harness-replay--tool-names (prompt)
+  "Return the names of the tools PROMPT, a body's prompt, carries.
+They are read where each adapter keeps them -- the `tools' and `functions'
+fields, and the `additional_tools' items of a Responses `input' -- so that
+a body is read by its own shape and not by a name this module would have
+to know.  The order is the body's."
+  (let (names)
+    (dolist (field (harness-replay--piece-fields prompt))
+      (let ((name (harness-replay--field-name field))
+            (piece (harness-replay--field-piece field)))
+        (cond
+         ((member name '("tools" "functions"))
+          (dolist (tool (harness-replay--piece-items piece))
+            (push (harness-replay--tool-name tool) names)))
+         ((equal name "input")
+          (dolist (item (harness-replay--piece-items piece))
+            (when (equal (harness-replay--scalar-text
+                          (harness-replay--field-piece-named "type" item))
+                         "additional_tools")
+              (dolist (tool (harness-replay--piece-items
+                             (harness-replay--field-piece-named "tools" item)))
+                (push (harness-replay--tool-name tool) names))))))))
+    (delq nil (nreverse names))))
+
+(defun harness-replay--changed-tool-field-p (path)
+  "Non-nil when PATH is inside the tool schema of a body.
+PATH is where `harness-replay--piece-diff' found a rebuilt body no longer
+continuing the kept one, such as
+\"tools[46].function.parameters.properties\".  The chat-completions route
+keeps the tools in a field of the body; the Responses route brings them in
+as an `additional_tools' item of `input', so the path reads
+\"input[0].tools[0].description\" there.  Nothing else under `input' is a
+tool: the conversation's items are the messages, and a change of one of
+those is never a change of the schema."
+  (when (stringp path)
+    (let* ((segments (split-string path "\\." t))
+           (root (and segments (car (split-string (car segments) "\\[" t))))
+           (next (and (cdr segments)
+                      (car (split-string (cadr segments) "\\[" t)))))
+      (and (or (member root '("tools" "functions"))
+               (and (equal root "input") (member next '("tools" "functions"))))
+           t))))
+
+(defun harness-replay--changed-tool-definition-p (old new path)
+  "Non-nil when PATH's divergence is a tool definition the harness changed.
+OLD and NEW are the prompt pieces of two bodies, and PATH is where
+`harness-replay--piece-diff' found NEW no longer continuing OLD.  That is
+a divergence inside the tool schema with no tool the kept body had
+dropped: the definitions, and not the list.
+
+A session settles the tool *names* it sends (`session/set-tool-schema'),
+and their definitions are read from the registry with every request.  So
+an upgrade that edits one -- a description, a property, a renamed
+parameter -- rewrites the schema the provider already read, and no setting
+announces it: the names did not change, so `session/set-tool-schema' was
+never called.  Left to the refusal, that would stop every request the
+session made afterwards, because a frozen body is only rewritten by a
+request that is sent.
+
+A tool the kept body had and the new one no longer sends is not this: the
+list itself moved, which `session/set-tool-schema' announces with a
+`tools' reset.  Nor is a tool added, which appends and diverges nowhere,
+nor anything outside the tool schema."
+  (and (harness-replay--changed-tool-field-p path)
+       (let ((olds (harness-replay--tool-names old))
+             (news (harness-replay--tool-names new)))
+         (and (cl-subsetp olds news :test #'equal) t))))
 
 (defun harness-replay--changed-effort-field-p (path)
   "Non-nil when PATH names the reasoning effort of a body.
@@ -784,7 +881,9 @@ that were encoded fresh as metadata."
       ;; schema each have a way of announcing a change of theirs, and a
       ;; rebuild that none of them accounts for must not go out.
       (let ((dropped (harness-replay--dropped-prompt-fields kept prompt))
-            (effort (harness-replay--changed-effort-field-p divergence)))
+            (effort (harness-replay--changed-effort-field-p divergence))
+            (definition (harness-replay--changed-tool-definition-p
+                         kept prompt divergence)))
         (cond
          (dropped
           (harness-call 'replay/frozen-reset
@@ -794,6 +893,10 @@ that were encoded fresh as metadata."
          (effort
           (harness-call 'replay/frozen-reset
                         id 'diverged
+                        (format "changed: %s" divergence)))
+         (definition
+          (harness-call 'replay/frozen-reset
+                        id 'tool-definition
                         (format "changed: %s" divergence)))))
       (list :body prompt :text (harness-replay--piece-text piece) :spliced nil
             :generation (plist-get old :generation)

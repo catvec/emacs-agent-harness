@@ -937,6 +937,46 @@ nothing of how it ended."
     ;; The harness's own reason is not replaced by the late report.
     (should (equal "it reached its timeout of 2s" (plist-get run :reason)))))
 
+(ert-deftest harness-sandbox-session-a-cancelled-run-is-not-called-a-timeout ()
+  "A run the harness asked to stop reports the cancellation, whatever code it exited with.
+The supervisor's kill loop sends TERM and then KILL to what ignored it,
+and `timeout --kill-after' turns that same pair into 124 and then 137.
+Reading the exit code before the cancellation called an explicit
+cancellation a timeout whenever a process took the longer road -- which
+is exactly the case a stop is for.  The shell tool then saw a stopped run
+whose reason was a timeout, could not tell it from one that really
+reached its time, and recorded `timeout' where the call was cancelled;
+`harness-tasks-pause-stops-the-tool-the-task-was-running' read that as a
+failure under load.  A run nobody cancelled is still a timeout at 124 and
+137."
+  (harness-sandbox-session-test--setup)
+  (let* ((runtime (harness-sandbox-session--runtime
+                   (list :session "s" :runs (make-hash-table :test 'equal))))
+         (run (harness-sandbox-session--new-run
+               (list :id "r1" :token "r1" :session "s" :command "sleep 60" :cwd "/"
+                     :seconds 90 :started (float-time) :deadline (+ (float-time) 90)
+                     :state 'running :cancelled t
+                     :cancelled-reason "explicit voice cancellation"))))
+    (puthash "r1" run (plist-get runtime :runs))
+    ;; The supervisor's report of the kill, for each code the kill can leave.
+    (dolist (code '("143" "137" "124" "0"))
+      (setf (plist-get run :state) 'running
+            (plist-get run :exit) nil
+            (plist-get run :reason) nil)
+      (harness-sandbox-session--ended runtime "r1" code "0")
+      (should (equal "explicit voice cancellation" (plist-get run :reason)))
+      (should (eq 'stopped (harness-sandbox-session-run-state run))))
+    ;; A run nobody cancelled is still a timeout at the codes a timeout leaves.
+    (dolist (code '("124" "137"))
+      (setf (plist-get run :state) 'running
+            (plist-get run :exit) nil
+            (plist-get run :reason) nil
+            (plist-get run :cancelled) nil
+            (plist-get run :cancelled-reason) nil)
+      (harness-sandbox-session--ended runtime "r1" code "0")
+      (should (string-prefix-p "it reached its timeout"
+                               (plist-get run :reason))))))
+
 (ert-deftest harness-sandbox-session-the-generic-layer-says-what-holds-an-instance ()
   "sandbox/hold answers with a command line and what the backend can promise.
 The command line is what confines the harness's own supervisor; the facts
