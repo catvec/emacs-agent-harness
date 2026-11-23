@@ -313,6 +313,8 @@ void main() {
     await tester.pump();
     await _settle(tester, 10);
     await openTaskSession(tester, 's-task-2');
+    // The way into the review is one of the details the bar keeps shut.
+    await tester.tap(find.byKey(const Key('task-bar-chevron')));
     for (var i = 0; i < 60; i++) {
       if (find.byKey(const Key('task-review')).evaluate().isNotEmpty) break;
       await tester.pump(const Duration(milliseconds: 120));

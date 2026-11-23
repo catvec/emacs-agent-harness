@@ -132,6 +132,10 @@ Future<void> main() async {
       expect(find.byType(BottomSheet), findsNothing);
       final bar = find.byKey(const Key('task-bar'));
       expect(bar, findsOneWidget);
+      // The bar is one line until it is opened: the report's line is one of
+      // the details it keeps.
+      expect(find.text('View report'), findsNothing);
+      await openTaskBar(tester);
       Finder inBar(Finder finder) =>
           find.descendant(of: bar, matching: finder);
       // What there is to say of the report, and the way to read it.
@@ -189,6 +193,7 @@ Future<void> main() async {
             height: 640,
           );
           await openTaskSession(tester, toolShowcaseId);
+          await openTaskBar(tester);
           await tester.ensureVisible(find.text('View report'));
           await tester.pump();
           final button = tester.getRect(
@@ -212,6 +217,7 @@ Future<void> main() async {
       await openApp(tester, seed: seedUnreportedTask);
       await openTask(tester, unreportedTaskName);
       // The bar says so before the report is opened.
+      await openTaskBar(tester);
       expect(find.text('Report missing'), findsOneWidget);
       expect(find.textContaining('piece'), findsNothing);
       await tester.ensureVisible(find.text('View report'));
@@ -258,6 +264,8 @@ Future<void> main() async {
         },
       );
       await openTask(tester, 'Still at work');
+      expect(find.text('Verify'), findsOneWidget);
+      await openTaskBar(tester);
       expect(find.text('Verify and merge'), findsOneWidget);
       expect(find.textContaining('Handed in'), findsNothing);
       expect(find.text('View report'), findsNothing);

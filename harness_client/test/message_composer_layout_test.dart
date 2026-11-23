@@ -234,7 +234,7 @@ void main() {
       // The place the pictures took is the queue's while the agent works:
       // a picture cannot go with a message queued for the next turn.
       expect(find.byKey(const Key('composer-attach')), findsNothing);
-      expect(find.text('Message for the next turn'), findsOneWidget);
+      expect(find.text('Message · next turn'), findsOneWidget);
       expect(find.bySemanticsLabel('Queue message'), findsOneWidget);
       expect(find.byKey(const Key('composer-stop')), findsOneWidget);
       expect(

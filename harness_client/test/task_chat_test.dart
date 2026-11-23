@@ -59,10 +59,12 @@ void main() {
       ]);
     });
 
-    test('says what to do, in a line', () {
+    test('says nothing the bar does not: the actions are the bar\'s', () {
       final line = TaskStateLine.of(task);
       expect(line.heading, 'Review');
-      expect(line.message, contains('Verification or feedback'));
+      // The verification is the bar's action and the feedback is written in
+      // the box under it: a line saying so would only take the height.
+      expect(line.message, isNull);
     });
 
     test('has no conversation to open, no message to write and no answer', () {
@@ -89,7 +91,9 @@ void main() {
         TaskAction.delete,
       ]);
       expect(TaskStateLine.of(task).heading, 'Backlog');
-      expect(TaskStateLine.of(task).message, contains('message starts it'));
+      // The heading is the column, and the message box says what a message
+      // does there: the line says nothing more.
+      expect(TaskStateLine.of(task).message, isNull);
     });
 
     test('being written up can be stopped, and has no button', () {
@@ -102,7 +106,7 @@ void main() {
         TaskAction.stop,
         TaskAction.delete,
       ]);
-      expect(TaskStateLine.of(task).message, contains('Write-up running'));
+      expect(TaskStateLine.of(task).message, 'Write-up running');
     });
 
     test('waiting for a slot is started at once, or paused', () {
@@ -116,7 +120,7 @@ void main() {
         TaskAction.drop,
         TaskAction.delete,
       ]);
-      expect(TaskStateLine.of(task).message, 'Queue · waiting for a slot');
+      expect(TaskStateLine.of(task).message, 'Waiting for a slot');
     });
 
     test('that is paused is resumed first, and started second', () {
@@ -124,23 +128,23 @@ void main() {
       final bar = _bar(task);
       expect(bar.primary, TaskAction.resume);
       expect(bar.buttons, [TaskAction.start]);
-      expect(TaskStateLine.of(task).message, contains('held until resume'));
+      expect(TaskStateLine.of(task).message, 'Paused');
     });
 
     test('that waits for quota or a budget says which', () {
       expect(
         TaskStateLine.of(_task('pending', hold: 'quota')).message,
-        contains('Quota'),
+        'Waiting for quota',
       );
       expect(
         TaskStateLine.of(_task('pending', hold: 'budget')).message,
-        contains('Budget'),
+        'Waiting for budget',
       );
     });
 
     test('that was put back in the queue carries on where it stopped', () {
       final task = _task('pending', returned: true);
-      expect(TaskStateLine.of(task).message, contains('carries on from its stop'));
+      expect(TaskStateLine.of(task).message, 'Returned to queue');
     });
   });
 
@@ -197,10 +201,7 @@ void main() {
       expect(bar.buttons, isEmpty);
       expect(bar.menu, contains(TaskAction.stop));
       expect(TaskStateLine.of(task).heading, 'Your input');
-      expect(
-        TaskStateLine.of(task).message,
-        contains('Your answer · this conversation'),
-      );
+      expect(TaskStateLine.of(task).message, 'Your answer');
     });
 
     for (final outcome in ['error', 'cancelled', 'interrupted', 'max-tokens']) {
@@ -230,12 +231,14 @@ void main() {
       expect(TaskStateLine.of(task).message, contains('Merge failure · conflicts in a'));
     });
 
-    test('that cannot continue is not retried: it says why, here', () {
+    test('that cannot continue is not retried: it says so, here', () {
       final task = _task('needs-input', outcome: 'cannot-continue');
       final bar = _bar(task);
       expect(bar.primary, isNull);
       expect(bar.all, isNot(contains(TaskAction.retry)));
-      expect(TaskStateLine.of(task).message, contains('reply or completion'));
+      // The state is a noun phrase; what to do about it is the bar's
+      // message box and its buttons.
+      expect(TaskStateLine.of(task).message, 'Cannot continue');
     });
 
     test('whose write-up found it a duplicate may be started all the same', () {
@@ -332,22 +335,13 @@ void main() {
   });
 
   group('what a message does in the conversation of a task', () {
-    test('sends a task in review back', () {
-      expect(
-        taskMessageHint(_task('review')),
-        'Feedback · sending it sends the task back',
-      );
+    test('is the feedback of a task in review', () {
+      expect(taskMessageHint(_task('review')), 'Feedback');
     });
 
     test('starts a task in the backlog, a write-up that runs included', () {
-      expect(
-        taskMessageHint(_task('backlog', state: 'pending')),
-        'Message · sending it starts the task',
-      );
-      expect(
-        taskMessageHint(_task('backlog', state: 'refining')),
-        'Message · sending it starts the task',
-      );
+      expect(taskMessageHint(_task('backlog', state: 'pending')), 'Message');
+      expect(taskMessageHint(_task('backlog', state: 'refining')), 'Message');
     });
 
     test('is only a message anywhere else, or for a session of no task', () {

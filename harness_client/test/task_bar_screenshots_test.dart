@@ -29,6 +29,7 @@ enum _Scene {
   board,
   boardReview,
   review,
+  collapsed,
   feedback,
   backlog,
   stopped,
@@ -46,8 +47,10 @@ const _cases = {
   // The board is a list to choose from: nothing on a card to push.
   'android-tasks': _Scene.board,
   'android-tasks-review': _Scene.boardReview,
-  // A task in review: the report it handed in, then the bar.
+  // A task in review: the report it handed in, then the bar opened to what
+  // it has to say, and the same bar as it stands until it is opened.
   'android-task-review': _Scene.review,
+  'android-task-collapsed': _Scene.collapsed,
   // Send back: the cursor is in the box, the bar makes room for the keyboard.
   'android-task-feedback': _Scene.feedback,
   // A task that waits in the backlog, and one that stopped on an error.
@@ -183,6 +186,13 @@ Future<void> main() async {
         await settle(10);
       }
 
+      /// The bar of the conversation, opened to what it has to say: its
+      /// buttons, the report and the review are behind its chevron.
+      Future<void> openBar() async {
+        await tester.tap(find.byKey(const Key('task-bar-chevron')));
+        await settle(6);
+      }
+
       switch (scene) {
         case _Scene.board:
           expect(find.text('Answer the permission'), findsOneWidget);
@@ -198,7 +208,15 @@ Future<void> main() async {
         case _Scene.review:
           await open('Review the emulator screenshots');
           expect(find.byType(SessionScreen), findsOneWidget);
+          await openBar();
           expect(find.text('Verify and merge'), findsOneWidget);
+        case _Scene.collapsed:
+          await open('Review the emulator screenshots');
+          expect(find.byType(SessionScreen), findsOneWidget);
+          // One line: the state, the branch, the one action and the chevron.
+          expect(find.text('Verify'), findsOneWidget);
+          expect(find.text('Verify and merge'), findsNothing);
+          expect(find.byTooltip('Show details'), findsOneWidget);
         case _Scene.menu:
           await open('Build the Flutter ACP client');
           await tester.tap(find.byTooltip('Task actions'));
@@ -214,6 +232,7 @@ Future<void> main() async {
           expect(find.text('Task stop'), findsOneWidget);
         case _Scene.paused:
           await open('Cache the model catalogue');
+          await openBar();
           await tester.tap(find.text('Pause'));
           await settle(8);
           expect(find.text('Resume'), findsOneWidget);
@@ -229,6 +248,7 @@ Future<void> main() async {
           expect(find.text('Paused · 3 tasks'), findsOneWidget);
         case _Scene.feedback:
           await open('Review the emulator screenshots');
+          await openBar();
           await tester.tap(find.text('Send back'));
           await settle(3);
           keyboardUp.value = true;
@@ -247,6 +267,7 @@ Future<void> main() async {
           expect(find.text('Verify and merge'), findsNothing);
         case _Scene.backlog:
           await open('Write the migration notes');
+          await openBar();
           expect(find.text('Queue it'), findsOneWidget);
         case _Scene.stopped:
           await open('Answer the permission');

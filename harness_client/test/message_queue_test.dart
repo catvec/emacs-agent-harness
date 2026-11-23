@@ -135,7 +135,7 @@ void main() {
         findsOneWidget,
         reason: 'the box offers the queue while the turn runs',
       );
-      expect(find.text('Message for the next turn'), findsOneWidget);
+      expect(find.text('Message · next turn'), findsOneWidget);
       expect(find.bySemanticsLabel('Queue message'), findsOneWidget);
 
       await _queueFromBox(tester, 'Also update the docs');
@@ -336,7 +336,7 @@ void main() {
 
       expect(find.byKey(const Key('composer-queue')), findsNothing);
       expect(find.text('Agent working…'), findsOneWidget);
-      expect(find.text('Message for the next turn'), findsNothing);
+      expect(find.text('Message · next turn'), findsNothing);
       await _rest(tester);
     });
   });

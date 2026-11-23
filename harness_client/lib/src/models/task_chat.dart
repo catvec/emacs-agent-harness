@@ -24,22 +24,22 @@ class TaskStateLine {
     if (task.isReview) {
       // A round of work that ended without `hand_in` has no report, only the
       // last message of its session, which is in the conversation above.
-      final none = task.report?.missing == true
-          ? 'No report · last message above · '
-          : '';
+      // Otherwise the state says nothing the bar's own actions do not: the
+      // verification is the bar's, and the feedback the message box's.
       return TaskStateLine(
         heading: heading,
-        message:
-            '${none}Verification or feedback below',
+        message: task.report?.missing == true
+            ? 'No report · last message above'
+            : null,
       );
     }
     if (task.isClosed) return TaskStateLine(heading: heading);
     if (task.isBacklog) {
+      // The heading is the column, and the message box says what a message
+      // does there: the line says only what the column does not.
       return TaskStateLine(
         heading: heading,
-        message: task.isRefining
-            ? 'Write-up running · message starts the task'
-            : 'Backlog · message starts it',
+        message: task.isRefining ? 'Write-up running' : null,
       );
     }
     if (task.isPending) {
@@ -47,13 +47,10 @@ class TaskStateLine {
       return TaskStateLine(
         heading: heading,
         message: switch (hold?.kind) {
-          'paused' => 'Queue · held until resume',
-          'quota' => 'Quota · waiting',
-          'budget' => 'Budget · waiting for raise',
-          _ =>
-            task.returned
-                ? 'Queue · carries on from its stop'
-                : 'Queue · waiting for a slot',
+          'paused' => 'Paused',
+          'quota' => 'Waiting for quota',
+          'budget' => 'Waiting for budget',
+          _ => task.returned ? 'Returned to queue' : 'Waiting for a slot',
         },
       );
     }
@@ -73,10 +70,7 @@ class TaskStateLine {
       );
     }
     if (task.needsInput) {
-      return TaskStateLine(
-        heading: heading,
-        message: 'Your answer · this conversation',
-      );
+      return TaskStateLine(heading: heading, message: 'Your answer');
     }
     return TaskStateLine(heading: heading);
   }
@@ -87,11 +81,10 @@ class TaskStateLine {
       task.conflicts.isEmpty
           ? 'Merge failure'
           : 'Merge failure · conflicts in ${_files(task.conflicts)}',
-    'cannot-continue' =>
-      'Cannot continue · reply or completion',
-    'duplicate' => 'Duplicate · board has it',
+    'cannot-continue' => 'Cannot continue',
+    'duplicate' => 'Duplicate',
     'error' => 'Turn error',
-    'cancelled' => 'Stopped before finish',
+    'cancelled' => 'Cancelled',
     'interrupted' => 'Interrupted',
     'max-tokens' => 'Output token limit',
     _ => 'Stopped · $outcome',
@@ -199,8 +192,10 @@ class TaskBarActions {
 /// back, and one to a task that waits in the backlog for its start.
 String? taskMessageHint(HarnessTask? task) {
   if (task == null || task.archived) return null;
-  if (task.isReview) return 'Feedback · sending it sends the task back';
-  if (task.isBacklog) return 'Message · sending it starts the task';
+  // The bar above says where the task stands and what its actions do; the
+  // box says what is written in it.
+  if (task.isReview) return 'Feedback';
+  if (task.isBacklog) return 'Message';
   return null;
 }
 

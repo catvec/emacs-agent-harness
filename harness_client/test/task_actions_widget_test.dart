@@ -99,6 +99,24 @@ Future<void> _open(WidgetTester tester, String title) async {
   await _settle(tester, 10);
 }
 
+/// Open the bar of the task's conversation: it is one line until its chevron
+/// is tapped, and its buttons are in the open bar.
+Future<void> _openBar(WidgetTester tester) async {
+  // The chevron points up while the bar is open.
+  bool open() => find
+      .descendant(
+        of: find.byKey(const Key('task-bar-chevron')),
+        matching: find.byIcon(Icons.expand_less_rounded),
+      )
+      .evaluate()
+      .isNotEmpty;
+  if (!open()) {
+    await tester.tap(find.byKey(const Key('task-bar-chevron')));
+    await _settle(tester, 4);
+  }
+  expect(open(), isTrue);
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -187,7 +205,10 @@ void main() {
       final rig = await _rig();
       await _openBoard(tester, rig);
       await _open(tester, 'Build the Flutter ACP client');
-      // The quick one is a button; the rest is in the menu.
+      // The line has no button: the one action of the state is the open
+      // bar's, and the rest is the menu's.
+      expect(_inBar(find.byType(OutlinedButton)), findsNothing);
+      await _openBar(tester);
       expect(find.widgetWithText(OutlinedButton, 'Pause'), findsOneWidget);
       await _tap(tester, find.byTooltip('Task actions'), 4);
       final labels = [
@@ -229,6 +250,7 @@ void main() {
       final rig = await _rig();
       await _openBoard(tester, rig);
       await _open(tester, 'Build the Flutter ACP client');
+      await _openBar(tester);
       await _tap(tester, find.widgetWithText(OutlinedButton, 'Pause'));
       expect(rig.harness.calls('_harness/task/pause'), [
         {'id': 'task-1'},
@@ -257,6 +279,7 @@ void main() {
       final rig = await _rig();
       await _openBoard(tester, rig);
       await _open(tester, 'Build the Flutter ACP client');
+      await _openBar(tester);
       await _menu(tester, 'Return to queue');
       expect(rig.harness.calls('_harness/task/return-to-pending'), [
         {'id': 'task-1'},
@@ -275,6 +298,7 @@ void main() {
       final rig = await _rig();
       await _openBoard(tester, rig);
       await _open(tester, 'Review the emulator screenshots');
+      await _openBar(tester);
       await _tap(tester, find.widgetWithText(FilledButton, 'Verify and merge'));
       expect(rig.harness.calls('_harness/task/verify'), [
         {'id': 'task-2'},
@@ -333,6 +357,7 @@ void main() {
       final rig = await _rig();
       await _openBoard(tester, rig);
       await _open(tester, 'Review the emulator screenshots');
+      await _openBar(tester);
       await _tap(tester, find.widgetWithText(OutlinedButton, 'Send back'));
       // No dialog: the box takes the feedback, and the harness takes a
       // message to a task in review for it.
@@ -409,6 +434,7 @@ void main() {
       rig.harness.tasks['task-2']!
         ..['state'] = 'done'
         ..['column'] = 'done';
+      await _openBar(tester);
       await _tap(tester, find.widgetWithText(FilledButton, 'Verify and merge'));
       expect(
         _inBar(find.text('Task task-2 is not waiting for review')),
@@ -423,11 +449,13 @@ void main() {
       final rig = await _rig();
       await _openBoard(tester, rig);
       await _open(tester, 'Ship the session list');
-      await _tap(tester, find.widgetWithText(FilledButton, 'Archive'));
+      // The one action of the state is on the line, as its verb.
+      await _tap(tester, find.text('Archive'));
       expect(rig.harness.calls('_harness/task/archive'), [
         {'id': 'task-6'},
       ]);
       // Out of sight on the board, as in Emacs; the conversation still has it.
+      await _openBar(tester);
       expect(find.widgetWithText(FilledButton, 'Unarchive'), findsOneWidget);
       await _tap(tester, find.widgetWithText(FilledButton, 'Unarchive'));
       expect(rig.harness.calls('_harness/task/archive').last, {
@@ -460,6 +488,7 @@ void main() {
       );
       await tester.tap(find.text('Ship the session list'));
       await _settle(tester, 10);
+      await _openBar(tester);
       await _tap(tester, find.widgetWithText(FilledButton, 'Unarchive'));
       expect(rig.harness.calls('_harness/task/archive').last, {
         'id': 'task-6',

@@ -143,6 +143,32 @@ enum TaskAction {
     retry when task.isRefining => 'Retry write-up',
     _ => label,
   };
+
+  /// The verb this action goes by where a line of the bar of a task's
+  /// conversation has room for one word and no more, as the task board of
+  /// Emacs names it on a card.  It acts, as every label of an action does.
+  String get shortLabel => switch (this) {
+    verify => 'Verify',
+    start => 'Start',
+    queue => 'Queue',
+    resume => 'Resume',
+    retry || retryMerge => 'Retry',
+    pause => 'Pause',
+    sendBack => 'Send back',
+    returnToPending => 'Return',
+    putInReview => 'Review',
+    complete => 'Complete',
+    archive => 'Archive',
+    unarchive => 'Unarchive',
+    answer => 'Answer',
+    message => 'Message',
+    stop => 'Stop',
+    drop => 'Drop',
+    park => 'Backlog',
+    openSession => 'Open',
+    setPriority => 'Priority',
+    delete => 'Delete',
+  };
 }
 
 /// The actions to offer for one task.

@@ -345,7 +345,7 @@ class MessageComposerState extends State<MessageComposer> {
         ? 'Answer above'
         : widget.running
         ? (widget.canQueue && widget.onQueue != null
-              ? 'Message for the next turn'
+              ? 'Message · next turn'
               : 'Agent working…')
         : widget.hint ??
               (_keyboardHint
@@ -369,10 +369,7 @@ class MessageComposerState extends State<MessageComposer> {
         onEdited: () {
           if (mounted) setState(() {});
         },
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 15,
-          vertical: 11,
-        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 15, vertical: 9),
       ),
     );
   }
@@ -471,7 +468,7 @@ class MessageComposerState extends State<MessageComposer> {
       child: SafeArea(
         top: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+          padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -592,19 +589,20 @@ class MessageComposerState extends State<MessageComposer> {
                 },
               ),
               if (widget.footer != null)
+                widget.footer!
+              // The keys a keyboard has, for the desktop whose Enter is one:
+              // a phone's keyboard has a send key of its own, and the line
+              // would only take the height the conversation needs.
+              else if (_keyboardHint &&
+                  !widget.running &&
+                  _text.text.isEmpty &&
+                  !compact)
                 Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: widget.footer!,
-                )
-              else if (!widget.running && _text.text.isEmpty && !compact)
-                Padding(
-                  padding: const EdgeInsets.only(left: 4, top: 6),
+                  padding: const EdgeInsets.only(left: 4, top: 4),
                   child: Text(
-                    _keyboardHint
-                        ? (_sendKey == SendKey.ctrlCctrlC
-                              ? 'C-c C-c · send · Enter · newline'
-                              : 'Enter · send · Shift+Enter · newline')
-                        : 'Harness approval · possible before a tool',
+                    _sendKey == SendKey.ctrlCctrlC
+                        ? 'C-c C-c · send · Enter · newline'
+                        : 'Enter · send · Shift+Enter · newline',
                     style: HarnessText.caption(context),
                   ),
                 ),

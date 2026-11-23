@@ -179,7 +179,7 @@ void main() {
       find.text('And run the full test suite again before you hand it in.'),
       findsOneWidget,
     );
-    expect(find.text('Message for the next turn'), findsOneWidget);
+    expect(find.text('Message · next turn'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await _shot(tester, frame, shots, 'android-message-queue.png');
     // Let the slow turn run out, and the reads it scheduled, so that no

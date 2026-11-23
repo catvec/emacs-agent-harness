@@ -95,9 +95,9 @@ class _ActivityBarState extends State<ActivityBar> {
     return Container(
       padding: const EdgeInsets.fromLTRB(
         HarnessSpace.gutter,
-        8,
+        6,
         HarnessSpace.gutter,
-        8,
+        6,
       ),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.04),

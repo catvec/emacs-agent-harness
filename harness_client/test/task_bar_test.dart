@@ -29,6 +29,15 @@ Future<void> _settle(WidgetTester tester, [int rounds = 10]) async {
 
 const _bar = Key('task-bar');
 
+/// Whether the bar is open: its chevron points up then.
+bool _barOpen(WidgetTester tester) => find
+    .descendant(
+      of: find.byKey(const Key('task-bar-chevron')),
+      matching: find.byIcon(Icons.expand_less_rounded),
+    )
+    .evaluate()
+    .isNotEmpty;
+
 Finder get _composer => find.byType(MessageComposer);
 
 /// The bar, and what is in it.
@@ -53,7 +62,8 @@ Future<void> main() async {
     SharedPreferences.setMockInitialValues({});
     final settings = SettingsController();
     await settings.load();
-    harness = FakeHarness();
+    // The harness keeps a task's change review, so the bar has its way in.
+    harness = FakeHarness(reviews: true);
     if (sessions) harness.seedTaskSessions();
     arrange?.call(harness);
     app = AppController(settings: settings, connector: harness.connector);
@@ -74,6 +84,17 @@ Future<void> main() async {
     await showTask(tester, title);
     await tester.tap(find.text(title));
     await _settle(tester, 10);
+  }
+
+  /// The bar, opened to what it has to say: the line it is until then keeps
+  /// the rest behind its chevron.
+  Future<void> openBar(WidgetTester tester) async {
+    // The chevron is a toggle, and it points up while the bar is open.
+    if (!_barOpen(tester)) {
+      await tester.tap(find.byKey(const Key('task-bar-chevron')));
+      await _settle(tester, 4);
+    }
+    expect(_barOpen(tester), isTrue);
   }
 
   /// The heading of the bar: where the task stands.
@@ -161,7 +182,7 @@ Future<void> main() async {
       await openTask(tester, 'Write the changelog');
       expect(find.byType(SessionScreen), findsOneWidget);
       expect(heading(tester), 'Pending');
-      expect(find.text('Start now'), findsOneWidget);
+      expect(find.text('Start'), findsOneWidget);
       // The task is its first message.
       expect(find.text('Write the changelog'), findsWidgets);
     });
@@ -183,6 +204,8 @@ Future<void> main() async {
         },
       );
       await openTask(tester, 'Cache the model catalogue');
+      // The line fits what it has room for; the open bar says it whole.
+      await openBar(tester);
       expect(
         _inBar(find.textContaining('2 attachments', findRichText: true)),
         findsOneWidget,
@@ -225,12 +248,19 @@ Future<void> main() async {
         findsWidgets,
       );
       expect(heading(tester), 'Review');
-      expect(find.text('Verify and merge'), findsOneWidget);
-      expect(find.text('Send back'), findsOneWidget);
+      // The bar is one line: the state, the one action, the way into the
+      // review and the chevron.
+      expect(find.byKey(const Key('task-bar-chevron')), findsOneWidget);
+      expect(find.text('Verify'), findsOneWidget);
+      expect(find.text('Verify and merge'), findsNothing);
+      expect(find.text('Send back'), findsNothing);
       expect(
-        find.text('Feedback · sending it sends the task back'),
+        find.text('Feedback'),
         findsOneWidget,
       );
+      await openBar(tester);
+      expect(find.text('Verify and merge'), findsOneWidget);
+      expect(find.text('Send back'), findsOneWidget);
 
       await tester.tap(find.text('Verify and merge'));
       await _settle(tester, 8);
@@ -241,18 +271,20 @@ Future<void> main() async {
       expect(heading(tester), 'Done');
       expect(find.text('Verify and merge'), findsNothing);
       expect(find.text('Archive'), findsOneWidget);
+      await openBar(tester);
       expect(
         _inBar(find.textContaining('· Verified', findRichText: true)),
         findsOneWidget,
       );
       expect(
-        find.text('Feedback · sending it sends the task back'),
+        find.text('Feedback'),
         findsNothing,
       );
     });
 
     testWidgets('is sent back by typing what should change', (tester) async {
       await review(tester);
+      await openBar(tester);
       final field = find.byKey(const Key('composer-field'));
       final focus = tester
           .widget<EditableText>(
@@ -285,6 +317,7 @@ Future<void> main() async {
       tester,
     ) async {
       await review(tester);
+      await openBar(tester);
       harness.taskActionError = 'Task task-2 is not waiting for review';
       await tester.tap(find.text('Verify and merge'));
       await _settle(tester, 6);
@@ -334,17 +367,22 @@ Future<void> main() async {
       await open(tester);
       await openTask(tester, 'Write the migration notes');
       expect(heading(tester), 'Backlog');
-      expect(find.text('Start now'), findsOneWidget);
+      expect(find.text('Start'), findsOneWidget);
+      expect(find.text('Queue it'), findsNothing);
+      expect(find.text('Message'), findsOneWidget);
+      await openBar(tester);
+      expect(find.text('Start now'), findsWidgets);
       expect(find.text('Queue it'), findsOneWidget);
-      expect(find.text('Message · sending it starts the task'), findsOneWidget);
 
       await tester.tap(find.text('Queue it'));
       await _settle(tester, 8);
       expect(harness.tasks['task-5']!['column'], 'pending');
       expect(heading(tester), 'Pending');
-      expect(find.text('Start now'), findsOneWidget);
+      // The bar stays open on the state it moved to, which offers the same
+      // start and no queue.
+      expect(find.text('Start now'), findsWidgets);
       expect(find.text('Queue it'), findsNothing);
-      expect(find.text('Message · sending it starts the task'), findsNothing);
+      expect(find.text('Message'), findsOneWidget);
     });
 
     testWidgets('in the backlog is started by a message too', (tester) async {
@@ -364,7 +402,7 @@ Future<void> main() async {
     testWidgets('in the backlog is started from the bar', (tester) async {
       await open(tester);
       await openTask(tester, 'Write the migration notes');
-      await tester.tap(find.text('Start now'));
+      await tester.tap(find.text('Start'));
       await _settle(tester, 8);
       expect(harness.tasks['task-5']!['state'], 'active');
       expect(heading(tester), 'Active');
@@ -374,7 +412,7 @@ Future<void> main() async {
       await open(tester);
       await openTask(tester, 'Cache the model catalogue');
       expect(heading(tester), 'Pending');
-      await tester.tap(find.text('Start now'));
+      await tester.tap(find.text('Start'));
       await _settle(tester, 8);
       expect(harness.tasks['task-3']!['state'], 'active');
       expect(heading(tester), 'Active');
@@ -388,21 +426,27 @@ Future<void> main() async {
       await open(tester);
       await openTask(tester, 'Build the Flutter ACP client');
       expect(heading(tester), 'Active');
-      // One button, the one that undoes itself; stopping is in the menu.
+      // One line, and the one action of the state on it; stopping is in the
+      // menu, and the buttons are the open bar's.
+      expect(_inBar(find.byType(FilledButton)), findsNothing);
+      expect(_inBar(find.byType(OutlinedButton)), findsNothing);
+      expect(find.text('Stop'), findsNothing);
+      expect(find.byTooltip('Task actions'), findsOneWidget);
+      await openBar(tester);
       expect(_inBar(find.byType(FilledButton)), findsNothing);
       expect(_inBar(find.byType(OutlinedButton)), findsOneWidget);
       expect(find.widgetWithText(OutlinedButton, 'Pause'), findsOneWidget);
-      expect(find.text('Stop'), findsNothing);
-      expect(find.byTooltip('Task actions'), findsOneWidget);
+      // The facts the line fits, then all of them, once it is open.
       expect(
         _inBar(find.textContaining('High priority', findRichText: true)),
-        findsOneWidget,
+        findsWidgets,
       );
+      await openBar(tester);
       expect(
         _inBar(
           find.textContaining('task/flutter-acp-client', findRichText: true),
         ),
-        findsOneWidget,
+        findsWidgets,
       );
     });
   });
@@ -419,6 +463,10 @@ Future<void> main() async {
       );
       await openTask(tester, 'Answer the permission');
       expect(heading(tester), 'Your input');
+      // The line carries the one action; why it stopped is a detail.
+      expect(find.text('Retry'), findsOneWidget);
+      expect(find.text('Turn error'), findsNothing);
+      await openBar(tester);
       expect(find.text('Turn error'), findsOneWidget);
       expect(find.text('The model said: overloaded'), findsOneWidget);
 
@@ -440,6 +488,8 @@ Future<void> main() async {
         },
       );
       await openTask(tester, 'Answer the permission');
+      expect(find.text('Retry'), findsOneWidget);
+      await openBar(tester);
       expect(find.text('Retry merge'), findsOneWidget);
       expect(
         find.textContaining('conflicts in lib/a.dart, lib/b.dart'),
@@ -464,6 +514,7 @@ Future<void> main() async {
         findsOneWidget,
       );
       expect(find.text('Archive'), findsNothing);
+      expect(find.text('Unarchive'), findsOneWidget);
       await tester.tap(find.text('Unarchive'));
       await _settle(tester, 8);
       expect(harness.tasks['task-6']!['archived'], isFalse);
@@ -496,7 +547,7 @@ Future<void> main() async {
       await tester.tap(find.text('Tidy the tool cards'));
       await _settle(tester, 10);
       expect(heading(tester), 'Review');
-      expect(find.text('Verify and merge'), findsOneWidget);
+      expect(find.text('Verify'), findsOneWidget);
     });
 
     testWidgets('is in the pane of a wide screen too', (tester) async {
@@ -506,6 +557,7 @@ Future<void> main() async {
       await _settle(tester, 10);
       expect(find.byType(SessionScreen), findsOneWidget);
       expect(heading(tester), 'Review');
+      await openBar(tester);
       await tester.tap(find.text('Verify and merge'));
       await _settle(tester, 8);
       expect(harness.tasks['task-2']!['state'], 'done');
@@ -516,14 +568,17 @@ Future<void> main() async {
     ) async {
       await open(tester);
       await openTask(tester, 'Review the emulator screenshots');
-      expect(find.text('Verify and merge'), findsOneWidget);
+      expect(find.text('Verify'), findsOneWidget);
       tester.view.viewInsets = const FakeViewPadding(bottom: 900);
       addTearDown(tester.view.resetViewInsets);
       await _settle(tester, 4);
-      // One line: where the task stands, and the menu.
+      // One line: where the task stands, and the menu.  No action, and
+      // nothing to open it with: the keyboard has the room.
       expect(heading(tester), 'Review');
+      expect(find.text('Verify'), findsNothing);
       expect(find.text('Verify and merge'), findsNothing);
       expect(find.text('Send back'), findsNothing);
+      expect(find.byKey(const Key('task-bar-chevron')), findsNothing);
     });
 
     testWidgets('sits above the message box, its actions in one row', (
@@ -531,6 +586,7 @@ Future<void> main() async {
     ) async {
       await open(tester);
       await openTask(tester, 'Review the emulator screenshots');
+      await openBar(tester);
       final bar = tester.getRect(find.byKey(_bar));
       final composer = tester.getRect(_composer);
       expect(bar.bottom, lessThanOrEqualTo(composer.top + 0.5));
@@ -550,9 +606,49 @@ Future<void> main() async {
       expect(back.right, lessThanOrEqualTo(bar.right));
     });
 
+    testWidgets('is one line until it is opened, and open says so', (
+      tester,
+    ) async {
+      await open(tester);
+      await openTask(tester, 'Review the emulator screenshots');
+      // Shut: the state, the facts, the one action and the chevron, in the
+      // height of one line of a page.
+      final shut = tester.getSize(find.byKey(_bar));
+      expect(shut.height, lessThan(56));
+      expect(_barOpen(tester), isFalse);
+      expect(
+        find.textContaining('Changes, threads and feedback'),
+        findsNothing,
+      );
+      expect(find.byKey(const Key('task-review')), findsNothing);
+
+      await openBar(tester);
+      // Open: the line about the state, the report, the review and the
+      // actions, and the chevron turns over.
+      final unfolded = tester.getSize(find.byKey(_bar));
+      expect(unfolded.height, greaterThan(shut.height + 40));
+      expect(_barOpen(tester), isTrue);
+      expect(
+        find.textContaining('Changes, threads and feedback'),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('task-review')), findsOneWidget);
+
+      // A tap on the chevron closes it again, and one on the line opens it.
+      await tester.tap(find.byKey(const Key('task-bar-chevron')));
+      await _settle(tester, 4);
+      expect(tester.getSize(find.byKey(_bar)).height, closeTo(shut.height, 1));
+      await openBar(tester);
+      expect(
+        find.textContaining('Changes, threads and feedback'),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('fits a small phone', (tester) async {
       await open(tester, size: const Size(960, 2000));
       await openTask(tester, 'Review the emulator screenshots');
+      await openBar(tester);
       expect(tester.takeException(), isNull);
       final bar = tester.getRect(find.byKey(_bar));
       for (final label in ['Verify and merge', 'Send back']) {
@@ -567,6 +663,81 @@ Future<void> main() async {
         expect(button.right, lessThanOrEqualTo(bar.right), reason: label);
         expect(button.left, greaterThanOrEqualTo(bar.left), reason: label);
       }
+    });
+  });
+
+  // The bottom of a conversation is the part a phone has least of: the bar is
+  // one line until it is asked for more, and every word on it is a noun
+  // phrase or the imperative of the control that acts.
+  group('the words and the height of the bar', () {
+    testWidgets('is one line at 412 by 915, and the composer under it fits', (
+      tester,
+    ) async {
+      await open(tester, size: const Size(1236, 2745));
+      await openTask(tester, 'Review the emulator screenshots');
+      final bar = tester.getSize(find.byKey(_bar));
+      final composer = tester.getSize(_composer);
+      // A line of a page, not the three rows the bar used to take.
+      expect(bar.height, lessThan(56));
+      expect(composer.height, lessThan(110));
+      // And the conversation above them has the rest of the page.
+      final transcript = tester.getRect(
+        find.byKey(const ValueKey('transcript-list')),
+      );
+      expect(transcript.bottom, greaterThan(915 * 0.75));
+    });
+
+    testWidgets('says where the task stands, and its one action as a verb', (
+      tester,
+    ) async {
+      await open(tester, size: const Size(1236, 2745));
+      await openTask(tester, 'Review the emulator screenshots');
+      // The state, in a noun: the column's own word.
+      expect(heading(tester), 'Review');
+      // The one action is the imperative the button takes, shortened to the
+      // verb alone for a line.
+      expect(_inBar(find.text('Verify')), findsOneWidget);
+      expect(find.byTooltip('Verify and merge'), findsOneWidget);
+      // The way into the review and the menu are icons, with their nouns.
+      expect(find.byTooltip('Task actions'), findsOneWidget);
+      expect(find.byTooltip('Show details'), findsOneWidget);
+      // No sentence anywhere on the line: the old line about what to do is
+      // gone, and so is the prose under the message box.
+      expect(find.textContaining('Verification or feedback'), findsNothing);
+      expect(
+        find.text('Harness approval · possible before a tool'),
+        findsNothing,
+      );
+    });
+
+    testWidgets('opens with its nouns and its actions in the imperative', (
+      tester,
+    ) async {
+      await open(tester, size: const Size(1236, 2745));
+      await openTask(tester, 'Review the emulator screenshots');
+      await openBar(tester);
+      // The way into the page is the noun that names it; the actions act.
+      expect(find.text('Review'), findsWidgets);
+      expect(find.text('View report'), findsOneWidget);
+      expect(find.text('Verify and merge'), findsOneWidget);
+      expect(find.text('Send back'), findsOneWidget);
+      // The chevron's tooltip is the act it does, in both directions.
+      expect(find.byTooltip('Hide details'), findsOneWidget);
+      expect(find.byTooltip('Show details'), findsNothing);
+    });
+
+    testWidgets('says the keys of a desktop, and nothing on a phone', (
+      tester,
+    ) async {
+      await open(tester, size: const Size(1236, 2745));
+      await openTask(tester, 'Review the emulator screenshots');
+      // A phone's keyboard has a send key: the line about Enter is a desktop's
+      // and would only take the conversation's height here.
+      expect(find.textContaining('Enter · send'), findsNothing);
+      expect(
+        find.text('Harness approval · possible before a tool'),
+        findsNothing,
+      );
     });
   });
 }

@@ -1243,9 +1243,9 @@ class _PlanStrip extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.fromLTRB(
                   HarnessSpace.gutter,
-                  10,
+                  6,
                   HarnessSpace.md,
-                  10,
+                  6,
                 ),
                 child: Row(
                   children: [

@@ -115,10 +115,44 @@ Future<void> openTaskSession(WidgetTester tester, String sessionId) async {
   }
 }
 
+/// The bar of the conversation of the task [name], opened to what it has to
+/// say: the line it is until then carries the state and the one action, and
+/// the rest is behind its chevron.
+Future<void> openTaskBar(WidgetTester tester) async {
+  expect(
+    find.byKey(const Key('task-bar-chevron')),
+    findsOneWidget,
+    reason: 'the bar of the task',
+  );
+  // The chevron is a toggle, and it turns over when the bar opens.  The mark
+  // is the icon rather than a tooltip: a Cupertino bar's buttons have none.
+  if (barOpen(tester) == false) {
+    await tester.tap(find.byKey(const Key('task-bar-chevron')));
+    await settle(tester, 4);
+  }
+  expect(barOpen(tester), isTrue);
+}
+
+/// Whether the bar of the task's conversation is open to what it has to say:
+/// its chevron points up then, and the way into the review is on its line.
+bool? barOpen(WidgetTester tester) {
+  final chevron = find.byKey(const Key('task-bar-chevron'));
+  if (chevron.evaluate().isEmpty) return null;
+  return find
+      .descendant(
+        of: chevron,
+        matching: find.byIcon(Icons.expand_less_rounded),
+      )
+      .evaluate()
+      .isNotEmpty;
+}
+
 /// "View report", on the bar of the conversation of the task [name]: the
-/// task's way.
+/// task's way.  The bar is opened first: the report's line is one of the
+/// details it keeps shut.
 Future<void> viewReport(WidgetTester tester, String name) async {
   await openTask(tester, name);
+  await openTaskBar(tester);
   await tester.ensureVisible(find.text('View report'));
   await tester.pump();
   await tester.tap(find.text('View report'));

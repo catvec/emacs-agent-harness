@@ -67,8 +67,12 @@ goes over the wire.
   own honest state.
 
 The way in is the task's bar above the message box (`task_bar.dart`):
-`Changes, threads and feedback` with `Review`. The bar has the same way as an
-icon when the keyboard is up and the bar is one line.
+`Changes, threads and feedback` with `Review`, in the bar's open state. The
+bar is one line until its chevron is tapped -- the state, the facts that fit
+and the one action of the state -- so that the conversation keeps the height
+of the page; the open bar adds the line about the state, the report, the way
+into the review and every action. With the keyboard up the bar is the line
+alone, and the way in is its icon.
 
 ### A file
 
@@ -232,7 +236,8 @@ below are the ones the widget tests assert (`review_screen_test.dart`,
 
 | Where | Copy |
 |---|---|
-| Task bar | `Changes, threads and feedback`, `Review` |
+| Task bar, one line | `Review`, `Active`, `Pending`, `Backlog`, `Done` (the column's word); `Verify`, `Start`, `Resume`, `Retry`, `Pause`, `Archive`, `Unarchive` (the one action, in the imperative); tooltips `Show details`, `Hide details`, `Task actions`, `Review`; the facts `High priority`, `Low priority`, `Verified`, `Blocked`, `No merge`, `Paused`, `Waiting for quota`, `Waiting for budget`, `Archived`, `3 attachments` |
+| Task bar, open | `Changes, threads and feedback`, `Review`, `View report`, `Handed in`, `Report missing`, `2 pieces of evidence`, `Verify and merge`, `Send back` |
 | Review heading | `Review`, `Replies`, `Revision 9a8b7c6`, `v2 · 9a8b7c6`, `34 files · +556 −120`, `2/34 viewed`, `1/34 approved`, `4 open · 1 to review`, `New thread` |
 | Tabs, filters, menus | `Files`, `Threads`, `All`, `Open`, `To review`, `Closed`, `Drafts`, `File tree`, `Flat list`, `Skip approved: on`, `Skip approved: off`, `Review`, `Reload`, `Report` |
 | Tooltips | `Search files`, `Hide file search`, `Refresh review`, `Review actions`, `Previous file`, `Next file`, `Select lines`, `Wrap lines`, `No wrap`, `Split view`, `Unified view`, `Previous hunk`, `Next hunk`, `Previous thread`, `Next thread` |

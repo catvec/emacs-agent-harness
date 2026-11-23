@@ -175,6 +175,9 @@ Future<void> main() async {
   testWidgets('draws the bar of a task with its report line', (tester) async {
     final frame = await open(tester);
     await openTask(tester, handedInTaskName);
+    // The report's line is one of the details the bar keeps behind its
+    // chevron.
+    await openTaskBar(tester);
     await tester.ensureVisible(find.text('View report'));
     await settle(tester, 4);
     expect(find.text('View report'), findsOneWidget);
@@ -349,6 +352,7 @@ Future<void> main() async {
     final frame = await open(tester, apple: true);
     await openTask(tester, handedInTaskName);
     tester.takeException();
+    await openTaskBar(tester);
     await tester.ensureVisible(find.text('View report'));
     await settle(tester, 4);
     if (shots != null) {

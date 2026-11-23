@@ -165,8 +165,10 @@ final _cases = <_Case>[
     await showTask(tester, 'Review the emulator screenshots');
     await tester.tap(find.text('Review the emulator screenshots'));
     await _pump(tester, 20);
-    // The bar of the conversation leads to the report; the report is on its
-    // page.
+    // The bar of the conversation leads to the report, once it is opened to
+    // what it has to say; the report is on its page.
+    await tester.tap(find.byKey(const Key('task-bar-chevron')));
+    await _pump(tester, 6);
     await _scrollTo(tester, find.text('View report'));
     await tester.tap(find.text('View report'));
     await _pump(tester, 12);

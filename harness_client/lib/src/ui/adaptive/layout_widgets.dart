@@ -804,7 +804,7 @@ class HarnessPicker extends StatelessWidget {
   Widget build(BuildContext context) {
     final tint = color ?? Theme.of(context).colorScheme.onSurfaceVariant;
     final content = Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 7),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [

@@ -171,7 +171,10 @@ void main() {
     await tester.tap(find.text('Review the emulator screenshots'));
     await _settle(tester, 20);
     // The bar of the conversation leads to the report and draws none of it,
-    // pictures included.
+    // pictures included.  The way in is one of the details it keeps behind
+    // its chevron.
+    await tester.tap(find.byKey(const Key('task-bar-chevron')));
+    await _settle(tester, 6);
     expect(find.text('View report'), findsOneWidget);
     expect(harness.imageRequests, isEmpty);
     expect(_drawn, findsNothing);
@@ -290,8 +293,10 @@ void main() {
     await showTask(tester, 'Show the chat');
     await tester.tap(find.text('Show the chat'));
     await _settle(tester, 20);
-    // The bar of the conversation leads to the report; the report is on its
-    // page.
+    // The bar of the conversation leads to the report, once it is opened;
+    // the report is on its page.
+    await tester.tap(find.byKey(const Key('task-bar-chevron')));
+    await _settle(tester, 6);
     expect(find.textContaining('Handed in'), findsOneWidget);
     await tester.ensureVisible(find.text('View report'));
     await tester.pump();

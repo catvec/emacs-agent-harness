@@ -216,6 +216,7 @@ class HarnessIconButton extends StatelessWidget {
     this.color,
     this.size = 22,
     this.selected = false,
+    this.dense = false,
   });
 
   final IconData icon;
@@ -228,6 +229,12 @@ class HarnessIconButton extends StatelessWidget {
   /// choice made, so a mode the person chose is visible without reading a
   /// tooltip.
   final bool selected;
+
+  /// The target a finger needs, without the room a page's header gives it:
+  /// for a line that carries several controls beside its words (the bar of a
+  /// task's conversation), where four at the header's size would leave the
+  /// words nothing.
+  final bool dense;
 
   @override
   Widget build(BuildContext context) {
@@ -252,7 +259,7 @@ class HarnessIconButton extends StatelessWidget {
           ),
           child: CupertinoButton(
             padding: EdgeInsets.zero,
-            minimumSize: const Size(40, 40),
+            minimumSize: dense ? const Size(32, 32) : const Size(40, 40),
             onPressed: onPressed,
             child: Icon(icon, size: size, color: effective),
           ),
@@ -269,6 +276,11 @@ class HarnessIconButton extends StatelessWidget {
         onPressed: onPressed,
         icon: Icon(icon, size: size, color: effective),
         isSelected: selected,
+        padding: dense ? const EdgeInsets.all(6) : null,
+        constraints: dense
+            ? const BoxConstraints(minWidth: 32, minHeight: 32)
+            : null,
+        visualDensity: dense ? VisualDensity.compact : null,
       ),
     );
   }

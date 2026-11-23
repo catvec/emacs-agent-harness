@@ -304,7 +304,11 @@ Future<void> main() async {
       await tester.tap(find.text('Render the hand-in'));
       await _settle(tester, 10);
       // The conversation draws that last message, and its bar says that it is
-      // all there is: no report was handed in.
+      // all there is: no report was handed in.  The bar is one line until it
+      // is opened.
+      expect(find.textContaining('No report'), findsNothing);
+      await tester.tap(find.byKey(const Key('task-bar-chevron')));
+      await _settle(tester, 6);
       expect(find.textContaining('No report'), findsOneWidget);
       _expectNoSyntax();
       expect(_run('finished').style?.fontWeight, FontWeight.w700);

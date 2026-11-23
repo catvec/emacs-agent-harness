@@ -317,9 +317,15 @@ time it opens. It asks again only when the harness does.
   follows a queue that is paused in Emacs, or by an agent, as the harness says
   so (`task/queue`, `task/backlog-mode`).
 
-  | A task in review | The menu of the bar | What is asked first |
+  The bar of a task's conversation is one line until it is asked for more:
+  the state, the facts that fit and the one action of the state, with the
+  report, the review and the rest behind its chevron.  A phone's page keeps
+  the height the conversation needs, and the bar takes it only when a person
+  opens it.
+
+  | A task in review | The bar, one line | The menu of the bar |
   |---|---|---|
-  | ![The bar of a task in review: the report above it, Verify and merge and Send back in it](screenshots/android-task-review.png) | ![The menu of a task at work: return to queue, mark complete, priority, stop and delete](screenshots/android-task-bar-menu.png) | ![Stopping a task asks first](screenshots/android-task-stop-asks.png) |
+  | ![The bar of a task in review, opened: the report line, Verify and merge and Send back](screenshots/android-task-review.png) | ![The same bar shut: Review, the branch, Verify and the chevron, in one line](screenshots/android-task-collapsed.png) | ![The menu of a task at work: return to queue, mark complete, priority, stop and delete](screenshots/android-task-bar-menu.png) |
   | ![A task that is paused waits in Pending, to be resumed](screenshots/android-task-paused.png) | ![The queue of a project: paused, with every task paused](screenshots/android-task-queue-paused.png) | ![Send back: the feedback is typed in the box, which makes room for the keyboard](screenshots/android-task-feedback.png) |
 
  **Detects extensions per feature.** `initialize` is read for standard ACP
@@ -1078,7 +1084,7 @@ same whichever way it is come to:
 
 | From | How |
 |---|---|
-| The task | Tap it on the board: its conversation opens, and the bar above the message box has a line for the report -- when the work was handed in and how many pieces of evidence came with it -- and *View report*. The bar draws none of the report itself. A round of work that handed none in has no call to open, so the bar's line is the way to its page. |
+| The task | Tap it on the board: its conversation opens, and the bar above the message box is one line -- the state, the facts that fit and the one action of the state -- until its chevron opens it. The open bar has a line for the report, when the work was handed in and how many pieces of evidence came with it, and *View report*. The bar draws none of the report itself. A round of work that handed none in has no call to open, so the bar's line is the way to its page. |
 | The task's session | Open the call that handed the work in: its card shows the report, and *Open full view* opens the page. |
 
 The page reads the report to its end: the problem first, then the summary as
@@ -1592,7 +1598,7 @@ the way.
 |---|---|
 | A conversation | What the agent answers, and a plan; the messages sent to it, whoever sends them, in their bubble (the text takes the bubble's colour, and the bubble hugs it); the summary a compaction leaves, which is a page long, under the line "Context compacted · N words" that opens to it (a note of one line stays on its line). Thoughts, hints and nodes the app does not know are shown as they are, as in the Emacs chat. |
 | A tool call | The prose in its input (a summary, a prompt, a question, a body) and, for the hand-in call, the problem, the summary, how to reproduce it and the notes among the evidence. |
-| A task's conversation | The report the task was handed in with: the card of the `hand_in` call opens to the problem, the summary, how to reproduce it and the evidence (`HandInReportView`), and the bar above the message box has a line for it with *View report*, which says when a round of work handed none in (the last message of the session, which the conversation draws, is all there is, and the page shows it as such). |
+| A task's conversation | The report the task was handed in with: the card of the `hand_in` call opens to the problem, the summary, how to reproduce it and the evidence (`HandInReportView`), and the bar above the message box has a line for it with *View report* once it is opened, which says when a round of work handed none in (the last message of the session, which the conversation draws, is all there is, and the page shows it as such). |
 | The task board, a card | The first words of the summary, without its syntax (`markdownPreview` in `lib/src/ui/format.dart`): a heading, a paragraph and an item of a list are told apart by a dot, a link is its text, a code span its code, and words that only look like syntax (`snake_case`, `2 * 3`, `List<String>`) stay. A row of a list has no room for a heading. |
 | A question | The question of the card that asks one. |
 
@@ -1997,8 +2003,9 @@ with feedback typed in the box, one archived and brought back, the queue of a
 project paused -- on both styles, and writes a screenshot for each.  The
 screenshots in this README are the output, but the ones of the task board and
 of a task's conversation (`android-tasks*.png`, `android-task-review.png`,
-`-feedback`, `-backlog`, `-stopped`, `-bar-menu`, `-stop-asks`, `-paused` and
-`-queue-paused`), which are drawn by `test/task_bar_screenshots_test.dart`
+`-collapsed`, `-feedback`, `-backlog`, `-stopped`, `-bar-menu`, `-stop-asks`,
+`-paused` and `-queue-paused`), which are drawn by
+`test/task_bar_screenshots_test.dart`
 with the fonts of a phone until the next run of the flows draws them again.
 
 | | |
