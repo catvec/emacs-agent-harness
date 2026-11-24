@@ -1582,9 +1582,12 @@ asked and answered."
             (when bad-protocol (funcall stop-bad-protocol))
             ;; A late handle and an asynchronous protocol failure both stop
             ;; this exact request, once, even if the caller cancels it too.
-            (setq handle
-                  (plist-put (copy-sequence handle) :cancel
-                             cancel-transport))
+            ;; Preserve an absent or invalid cancel field: capability checks
+            ;; must not mistake our wrapper for a working transport cancel.
+            (when (functionp transport-cancel)
+              (setq handle
+                    (plist-put (copy-sequence handle) :cancel
+                               cancel-transport)))
             ;; A recorded call says which internal session holds it, so a
             ;; caller can show the prompt, the reply and any error; its
             ;; cancel ends that record when the provider's emits nothing.
