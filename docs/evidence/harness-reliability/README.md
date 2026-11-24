@@ -42,11 +42,11 @@ OpenRouter health and policy, hydration, resilience and retry), exit 0.
 The separate server regression passed outside the restricted sandbox, exit 0.
 `scripts/lint.sh` completed with exit 0 and warnings.
 
-The expanded final fault checks cover ten lifecycle tests and 24 routing health
+The expanded final fault checks cover eleven lifecycle tests and 24 routing health
 tests. Use the full runner for final verification on the committed tree:
 
 ```sh
-scripts/test.sh
+TMPDIR=/var/tmp scripts/test.sh
 scripts/test.sh --status
 ```
 
@@ -57,3 +57,11 @@ command refuses a selected run, a dirty tree, an older commit or any failure.
 `revision-checks.txt` records direct checks of the known-good base, offending
 commits, their parents, the hydration repair, the original HEAD, and the repaired
 working tree. Every exit status matched the expected result.
+
+The initial lifecycle fault-injection suite was also run against original HEAD;
+all eleven tests fail there (`lifecycle-original-summary.txt`). The repaired
+suite passes all eleven. `pause-project-repro.el` runs the pause-all fixture
+under an explicit parent project; it fails before fixture isolation and passes
+after it. The Git signing regression requires no signing key: its injected
+signing program always refuses, and a successful fixture commit proves the
+fixture did not try to use it.

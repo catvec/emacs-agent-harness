@@ -1,0 +1,14 @@
+Ran 11 tests, 0 results as expected, 11 unexpected (2026-11-24 15:54:43-0500, 13.389019 sec)
+
+11 unexpected results:
+   FAILED  harness-agent-lifecycle-bookkeeping-failure-still-announces-end
+   FAILED  harness-agent-lifecycle-done-handler-failure-settles-turn
+   FAILED  harness-agent-lifecycle-late-opening-gate-cannot-edit-new-transcript
+   FAILED  harness-agent-lifecycle-obsolete-head-follow-cannot-enter-gate
+   FAILED  harness-agent-lifecycle-old-step-gate-cannot-start-request
+   FAILED  harness-agent-lifecycle-rejected-opening-gate-settles-turn
+   FAILED  harness-agent-lifecycle-rejected-step-gate-settles-turn
+   FAILED  harness-agent-lifecycle-request-build-failure-settles-turn
+   FAILED  harness-agent-lifecycle-synchronous-failure-cancels-returned-handle
+   FAILED  harness-agent-lifecycle-terminal-event-reentry-is-idempotent
+   FAILED  harness-agent-lifecycle-terminal-fault-matrix

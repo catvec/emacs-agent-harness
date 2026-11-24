@@ -49,8 +49,9 @@ chain to `22beae4` (October 3). Those are history observations, not additional
 bisect results. Recent cache, routing and persistence failures exposed paths the
 turn lifecycle had never made exception-safe.
 
-The repair gives the turn loop a failure boundary around request construction
-and event processing, and observes entire opening, step-gate, stop and retry
+The repair skips malformed stream data before it reaches internal handlers,
+while giving the turn loop a failure boundary around request construction
+and processing of valid events, and observes entire opening, step-gate, stop and retry
 continuations. An internal failure cancels the captured provider and supported
 tool executions, records an `internal` error, and completes the turn. It does not
 retry a possibly executed operation. A rejection handler is attached *after*
@@ -86,7 +87,11 @@ The repair checks ownership both at the step entry point and when gates settle.
 Opening and held messages are preserved as the old turn ends, before another
 turn can start. Releasing the obsolete gate then changes neither the transcript
 nor the replacement request. This also means cancellation can preserve input
-without waiting for a broken gate to release it.
+without waiting for a broken gate to release it. A provider that calls back
+synchronously can also end a turn before returning its cancellation handle. The
+step now clears the previous handle before requesting a new one, then cancels
+the exact returned handle if its turn has already ended. The regression shows
+that the original code leaked that request after completing the failed turn.
 
 ### Process liveness was confused with request liveness
 
@@ -124,18 +129,43 @@ bookkeeping, reentrant completion, and obsolete opening and step callbacks. The
 terminal matrix injects failure at six separate session methods and requires one
 completion event, a settled promise, and no registered turn.
 
-The original six lifecycle tests all failed before the repair. The expanded
-suite has ten tests. The OpenRouter health suite adds terminal-write failure,
+All eleven lifecycle regressions fail on the original HEAD (`c546c72`) and
+pass on the repair; the original-run summary is kept with the evidence. The OpenRouter health suite adds terminal-write failure,
 exact-token/owner proof checks, stable owner identity, and wall-clock drift. The
 terminal-save and wall-clock drift regressions were separately observed failing
 before their respective repairs. Existing hydration, retry, resilience and
 routing suites remain part of validation.
 
 The focused run passed 357 tests in seven suites before the final two ownership
-assertion tests were added. Byte compilation completed with exit 0 and warnings. Full-suite verification
-is recorded by `scripts/.dev/test-stamp.json`; `scripts/test.sh --status` checks
-its result against the current commit and worktree. Integration tests requiring live models
-remain opt-in; these reproductions require no paid model calls.
+assertion tests were added. Byte compilation completed with exit 0 and warnings.
+Full-suite verification is recorded by `scripts/.dev/test-stamp.json`; `scripts/test.sh --status` checks
+its result against the current commit and worktree. Integration tests requiring live
+models remain opt-in; these reproductions require no paid model calls.
+
+## Validation failures that required follow-up
+
+The first full run exposed a malformed-event regression in the initial failure
+boundary. The existing gremlin test expects malformed text/usage to be ignored
+and a valid final event and tool error result to survive. Event data is now
+checked before internal failure handling; that assertion is preserved.
+
+The pause-all fixture assumed two temporary directories could never belong to
+the same parent project. A deterministic reproduction places both beneath a
+parent project: one task waits for the other's slot, and the test times out
+waiting for two running tasks. Explicit project markers make its independence
+real. The parent-project reproduction now passes without lengthening the wait.
+
+The new Git-tool fixture inherited `commit.gpgsign = true` and blocked while
+creating its first commit, outside any asynchronous timeout. It now disables
+signing in its own repository and checks that creating the commit succeeds. A
+regression injects a Git configuration requiring signatures with a signing
+program that always fails; the old fixture fails it and the repair passes.
+
+Other tests of unrelated or absent projects saw `/tmp/` as their project during
+the run. The final full verification uses `TMPDIR=/var/tmp`, a clean temporary
+parent, without changing the user's Git configuration or deleting that parent
+project. These environment-sensitive results are kept distinct from passing
+full-suite verification.
 
 ## Reliability boundaries that remain
 
