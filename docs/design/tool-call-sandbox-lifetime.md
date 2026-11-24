@@ -89,9 +89,14 @@ limit, and `sandbox/status`'s `:limits` line for MXC still says the
 namespace is missing.  What changed is the held runtime: a job there is
 not one command but the supervisor, which finds what the instance runs
 by the environment it inherited -- from `/proc` on Linux and from the
-process table (`ps -E`, `ps e`) where there is none -- and ends every
-process of it before it says it is going, so the end of a job on MXC is
-verified rather than hoped.  That path is measured against a stand-in
+process table (`ps -E`, `ps e`) where there is none, and, where neither
+is available, by the process group each run was started in -- and ends
+every process of it before it says it is going, so the end of a job on
+MXC is verified rather than hoped.  The process group is the way a Mac
+under MXC has, since Seatbelt refuses to exec the setuid `/bin/ps` and
+macOS 27 withholds an Apple platform binary's environment from `ps -E`;
+it is a lower bound where a `setsid` child left the group, which the
+supervisor's `V` frame says.  That path is measured against a stand-in
 executor (`harness-sandbox-session-a-supervisor-finds-runs-without-proc`)
 rather than on a Mac, and the fact it turns on -- that MXC's executor
 carries a command's standard input and output as it runs -- is probed

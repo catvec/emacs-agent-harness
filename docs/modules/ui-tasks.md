@@ -156,13 +156,10 @@ priority only ever ordered what had yet to run.  The harness decides
 which column a task is in (`:column`, the tasks module's
 `harness-tasks--column`); the board draws what it says.
 
-Pausing: u, or a card's [Pause], pauses the task at point.  A card at
-work shows [Steer] and [Pause] -- a turn held up by a tool that takes
-minutes is what Pause is for -- and keeps [Stop] in its menu, where it
-was.  A task at work has its turn stopped, the command it was waiting
-on with it, and goes back to Pending, a task waiting there stays;
-either is held, however many slots are free, until U, or [Resume],
-lets the queue have it, and s starts it at once.  A pause
+Pausing: u, or a card's [Pause], pauses the task at point.  A task at
+work has its turn stopped and goes back to Pending, a task waiting
+there stays; either is held, however many slots are free, until U, or
+[Resume], lets the queue have it, and s starts it at once.  A pause
 is kept across a restart, and is not the queue's: P suspends every
 waiting task of the project, a pause one.  A task whose turn stopped
 because every provider it could run on was out of quota, or a hard

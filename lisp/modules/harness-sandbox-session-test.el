@@ -679,6 +679,135 @@ processes, and report zero afterwards while the foreign process lives."
         (kill-buffer frames)
         (delete-directory scratch t)))))
 
+(ert-deftest harness-sandbox-session-a-supervisor-runs-with-no-ps-at-all ()
+  "A supervisor starts and works where it cannot run `ps', as under MXC.
+This is the reported defect: on macOS the sandbox backend is MXC, its
+Seatbelt profile refuses to exec a setuid binary, and /bin/ps is setuid
+root -- so `ps' cannot run in the jail at all.  macOS 27 withholds an
+Apple platform binary's environment from the call `ps -E' makes as well,
+and the supervisor and every command it starts are /bin/bash.  The
+supervisor used to demand one of the two, find neither, answer
+`R VERSION  ps-with-environment' and exit 3, which the harness read as a
+runtime that lacks what a run needs: every bash call and every bash_job
+in that sandbox died before its command ran.
+
+Here `ps' is not on PATH at all and HARNESS_SUPERVISOR_PROCS is unset, so
+the program must negotiate its way to the answer that needs no program --
+the process group a run is started in -- say so in its `V' frame, and run
+the whole protocol over it: a command's output and status, a count of
+what the instance holds, a command cancelled with its child, a command
+ended at its time, and `quit' ending what the session left before it
+says it is going."
+  (harness-sandbox-session-test--setup)
+  (dolist (program '("bash" "base64" "grep" "sed" "mkfifo" "dd" "tr" "sleep"))
+    (skip-unless (executable-find program)))
+  (let* ((scratch (harness-test-temp-dir))
+         ;; A PATH with the supervisor's own programs and no `ps' at all.
+         (bare (make-temp-file "supervisor-bin-" t))
+         (frames (generate-new-buffer " *supervisor-group-test*"))
+         (instance (concat "test-" (harness-short-id)))
+         (token (concat "run-" (harness-short-id)))
+         (process-environment (copy-sequence process-environment))
+         supervisor)
+    (unwind-protect
+        (progn
+          (dolist (program '("bash" "base64" "grep" "sed" "mkfifo" "dd" "tr" "sleep"
+                             "mkdir" "rm" "cat" "head"))
+            (let ((path (executable-find program)))
+              (when path
+                (ignore-errors
+                  (make-symbolic-link path (expand-file-name program bare))))))
+          (setenv "PATH" bare)
+          (setenv "HARNESS_SUPERVISOR_PROCS" nil)
+          ;; A Mac has no `/proc', and this says so on a Linux host: with
+          ;; no `/proc' and no `ps' to run, `group' is the only answer
+          ;; left, which is the state the reported defect was found in.
+          (setenv "HARNESS_SUPERVISOR_PROC" (expand-file-name "no-proc-here" scratch))
+          ;; `ps' is not on PATH at all: a shell in this sandbox could not
+          ;; run it even if Seatbelt let it.  The `V' frame below is what
+          ;; proves the supervisor saw that and chose the way that needs
+          ;; no program.
+          (setq supervisor
+                (make-process
+                 :name "group-supervisor" :buffer frames :noquery t :connection-type 'pipe
+                 :command (list (expand-file-name "bash" bare)
+                                (harness-sandbox-session--write-supervisor scratch)
+                                (number-to-string harness-sandbox-session--protocol)
+                                instance scratch "1")
+                 :coding 'utf-8-unix))
+          (cl-labels ((frame (regexp)
+                        (with-current-buffer frames
+                          (cl-find-if (lambda (line)
+                                        (and (not (equal line "H"))
+                                             (string-match-p regexp line)))
+                                      (split-string (buffer-string) "\n"))))
+                      (await-frame (regexp)
+                        (harness-test-wait (lambda () (frame regexp)) 40 regexp))
+                      (send (fmt &rest args)
+                        (process-send-string supervisor (apply #'format fmt args))))
+            ;; It is up, and it said how it finds a run's processes: the
+            ;; way that needs no program, because there is none here.
+            (should (equal (format "R %s" harness-sandbox-session--protocol)
+                           (await-frame "^R [0-9]+$")))
+            (should (equal "V group" (await-frame "^V [a-z]+$")))
+            ;; A command's output and its status are its own.
+            (send "run %s 60 %s\n" token
+                  (base64-encode-string "echo hello-with-no-ps; exit 7" t))
+            (should (await-frame (format "^O %s " token)))
+            (should (string-match-p
+                     (format "^X %s 7 0$" token)
+                     (await-frame (format "^X %s [0-9]+ [0-9]+$" token))))
+            ;; The instance holds nothing, and says so with the number of
+            ;; the question it answers.
+            (with-current-buffer frames (erase-buffer))
+            (send "status 3\n")
+            (should (equal "P 0 3" (await-frame "^P [0-9]+ [0-9]+$")))
+            ;; A command that ignores TERM and leaves a child behind is
+            ;; cancelled: both are in the group it was started in.
+            (with-current-buffer frames (erase-buffer))
+            (send "run %s 120 %s\n" (concat token "k")
+                  (base64-encode-string
+                   "trap '' TERM\nbash -c 'trap \"\" TERM; sleep 300' &\nsleep 300" t))
+            (should (await-frame (format "^S %s" (concat token "k"))))
+            (harness-test-wait
+             (lambda ()
+               (let ((pgid (with-temp-buffer
+                             (insert-file-contents
+                              (expand-file-name (concat (concat token "k") "/pgid") scratch))
+                             (string-trim (buffer-string)))))
+                 (and (not (string-empty-p pgid))
+                      (eql 0 (call-process "sh" nil nil nil "-c"
+                                           (format "kill -0 -- -%s" pgid))))))
+             30 "the run's group to be there")
+            (send "kill %s\n" (concat token "k"))
+            (should (equal (format "K %s 0" (concat token "k"))
+                           (await-frame (format "^K %s [0-9]+$" (concat token "k")))))
+            (should (string-match-p
+                     " 0$" (await-frame (format "^X %s [0-9]+ [0-9]+$" (concat token "k")))))
+            ;; A command that never ends is ended at its time, and says
+            ;; 124 as `timeout' did -- there is no `timeout' here either.
+            (with-current-buffer frames (erase-buffer))
+            (send "run %s 1 %s\n" (concat token "t")
+                  (base64-encode-string "sleep 300" t))
+            (should (string-match-p
+                     (format "^X %s 124 0$" (concat token "t"))
+                     (await-frame (format "^X %s [0-9]+ [0-9]+$" (concat token "t")))))
+            ;; `quit' ends what the instance runs before it says it is
+            ;; going: a process the session left behind is gone by `D'.
+            (with-current-buffer frames (erase-buffer))
+            (send "run %s 120 %s\n" (concat token "q")
+                  (base64-encode-string "sleep 300 & echo left-a-process" t))
+            (should (await-frame (format "^O %s " (concat token "q"))))
+            (send "quit\n")
+            (should (equal "D" (await-frame "^D$")))
+            (harness-test-wait (lambda () (not (process-live-p supervisor))) 15
+                               "the supervisor to go")))
+      (when (and supervisor (process-live-p supervisor))
+        (ignore-errors (delete-process supervisor)))
+      (kill-buffer frames)
+      (ignore-errors (delete-directory bare t))
+      (ignore-errors (delete-directory scratch t)))))
+
 (defun harness-sandbox-session-test--tagged (token)
   "Return how many processes of this machine carry TOKEN as a run's own.
 It is read from the process table, as a Mac's supervisor reads it: no
@@ -918,6 +1047,111 @@ whole of what was missing."
         (ignore-errors (delete-directory root t))
         (ignore-errors (delete-directory bin t)))))))
 
+(ert-deftest harness-sandbox-session-a-runtime-is-held-where-ps-cannot-run ()
+  "A session holds a whole runtime on the backend macOS has, with no `ps'.
+This is the reported defect, run end to end.  Under MXC the sandbox
+cannot exec the setuid /bin/ps, and macOS 27 withholds an Apple platform
+binary's environment from `ps -E', so a runtime on a Mac finds a run's
+processes by the process group it was started in.  This holds a real
+session's runtime that way -- a stand-in executor for mxc-exec-mac, no
+`ps' on PATH and no `/proc' -- and checks the whole of what a runtime
+must do: it says how it finds processes, a command's output and status
+come back, a process a call leaves running is still there and is counted,
+one command is cancelled without the runtime, and ending the runtime ends
+what the session left.
+
+Without the fix the supervisor answered `R VERSION  ps-with-environment'
+and exited, so the runtime never came up and every call in it failed."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (harness-sandbox-session-test--setup t)
+    (dolist (program '("bash" "base64" "grep" "sed" "mkfifo" "dd" "tr" "sleep"))
+      (skip-unless (executable-find program)))
+    (skip-unless (file-executable-p "/bin/sh"))
+    (let* ((bin (harness-test-temp-dir))
+           (executor (harness-sandbox-session-test--mxc-stand-in bin))
+           (bare (make-temp-file "supervisor-bin-" t))
+           (root (file-name-as-directory (harness-test-temp-dir)))
+           (harness-sandbox-policy 'required)
+           (harness-sandbox-session-idle-seconds nil)
+           (process-environment (copy-sequence process-environment))
+           (default-directory root)
+           sid ctx runtime)
+      (unwind-protect
+          (progn
+            ;; A PATH with the supervisor's programs and no `ps', and a
+            ;; `/proc' that is not there: what a Mac under MXC is.
+            (dolist (program '("bash" "base64" "grep" "sed" "mkfifo" "dd" "tr" "sleep"
+                               "mkdir" "rm" "cat" "head" "sh"))
+              (let ((path (executable-find program)))
+                (when path
+                  (ignore-errors (make-symbolic-link path (expand-file-name program bare))))))
+            (setenv "PATH" bare)
+            (setenv "HARNESS_SUPERVISOR_PROCS" nil)
+            (setenv "HARNESS_SUPERVISOR_PROC" (expand-file-name "no-proc-here" root))
+            (let ((system-type 'darwin))
+              (cl-letf (((symbol-function 'executable-find)
+                         (lambda (name &optional _remote)
+                           (and (equal name harness-sandbox-mxc-program) executor))))
+                (harness-sandbox-detect)))
+            (should (eq 'mxc (plist-get (harness-call 'sandbox/status) :backend)))
+            (setq sid (plist-get (harness-call 'session/create :cwd root) :id)
+                  ctx (list :session-id sid :cwd root))
+            ;; The runtime is held, and it says how it finds processes.
+            (setq runtime (harness-sandbox-session-ensure ctx root))
+            (should (eq 'mxc (plist-get runtime :backend)))
+            (harness-test-wait
+             (lambda () (eq 'running (harness-sandbox-session-state runtime)))
+             20 "the runtime to say it is up")
+            (harness-test-wait (lambda () (plist-get runtime :procs)) 15
+                               "the supervisor to say how it finds processes")
+            (should (eq 'group (plist-get runtime :procs)))
+            (should (eq 'group (plist-get (harness-call 'sandbox/session sid) :procs)))
+            ;; A command's output and status are its own, as in any runtime.
+            (let ((result (harness-sandbox-session-test-run
+                           ctx "echo held-without-ps; exit 5" 30)))
+              (should (string-search "held-without-ps" (plist-get result :stdout)))
+              (should (eql 5 (plist-get result :exit))))
+            ;; A process a call leaves running is still there, and the
+            ;; runtime counts it -- which is what keeps it alive.
+            (let ((run (harness-sandbox-session-start-run
+                        ctx root "sleep 300 >/dev/null 2>&1 & echo left-a-process"
+                        :seconds 30 :done #'ignore)))
+              (should (string-search "left-a-process"
+                                     (plist-get (harness-test-await
+                                                 (harness-sandbox-session-wait run) 60)
+                                                :stdout)))
+              (should (>= (or (plist-get (harness-sandbox-session-run-result run) :owned) 0) 1))
+              ;; One command is cancelled without the runtime: the
+              ;; supervisor ends the group the run was started in, and
+              ;; says none of it is left.
+              (let ((doomed (harness-sandbox-session-start-run
+                             ctx root "trap '' TERM\nsleep 300" :seconds 120 :done #'ignore)))
+                (harness-test-wait
+                 (lambda () (plist-get doomed :started)) 20 "the run to start")
+                (harness-sandbox-session-kill-run doomed)
+                (let ((result (harness-test-await (harness-sandbox-session-wait doomed) 90)))
+                  (should (eq 'stopped (plist-get result :state)))
+                  (should (eql 0 (or (plist-get result :owned) 0)))))
+              ;; The runtime is still the session's, and it still runs
+              ;; commands: cancelling one did not end the instance.
+              (should (process-live-p (plist-get runtime :process)))
+              (should (string-search "still-here"
+                                     (plist-get (harness-sandbox-session-test-run
+                                                 ctx "echo still-here" 30)
+                                                :stdout)))
+              ;; Ending the runtime ends what the session left in it.
+              (harness-sandbox-session-stop-session sid "a test ended it")
+              (harness-test-wait
+               (lambda () (eql 0 (harness-sandbox-session-test--tagged (plist-get run :token))))
+               30 "the runtime to leave nothing behind"))
+        (ignore-errors (harness-call 'session/delete sid))
+        (harness-sandbox-session-shutdown-for-tests)
+        (harness-sandbox-detect)
+        (ignore-errors (delete-directory root t))
+        (ignore-errors (delete-directory bare t))
+        (ignore-errors (delete-directory bin t)))))))
+
 (ert-deftest harness-sandbox-session-the-poll-does-not-wait-for-a-runtime-to-go ()
   "Looking at the runtimes never waits on one, so the loop keeps running.
 `harness-sandbox-session--stop' answers only when the supervisor's
@@ -1128,6 +1362,30 @@ one but simply describes a state that is gone."
     (harness-sandbox-session--ask runtime)
     (harness-sandbox-session--frame runtime "P 1 1")
     (should (eql 1 (plist-get runtime :owned)))))
+
+(ert-deftest harness-sandbox-session-a-runtime-says-how-it-finds-processes ()
+  "The `V' frame is taken as the runtime's way of finding processes.
+A backend that can read `/proc' or ask a `ps' that answers finds a
+process that left its group; one that cannot -- a Mac under MXC, where
+Seatbelt will not exec the setuid /bin/ps -- asks the kernel about the
+process group a run was started in.  The harness records which it was, so
+the access view and `sandbox/session' can say what a count is worth, and
+a frame naming anything else is no frame: it is logged, not believed."
+  (harness-sandbox-session-test--setup)
+  (let ((runtime (harness-sandbox-session--runtime
+                  (list :session "s" :instance "i" :runs (make-hash-table :test 'equal)
+                        :state 'running))))
+    ;; Before its supervisor has said, nothing is claimed.
+    (should-not (plist-get runtime :procs))
+    (harness-sandbox-session--frame runtime "V group")
+    (should (eq 'group (plist-get runtime :procs)))
+    (harness-sandbox-session--frame runtime "V proc")
+    (should (eq 'proc (plist-get runtime :procs)))
+    (harness-sandbox-session--frame runtime "V ps")
+    (should (eq 'ps (plist-get runtime :procs)))
+    ;; A way the harness does not know is not a way it pretends to know.
+    (harness-sandbox-session--frame runtime "V telepathy")
+    (should (eq 'ps (plist-get runtime :procs)))))
 
 (ert-deftest harness-sandbox-session-answers-out-of-order-leave-the-newest ()
   "A late answer to an older question never replaces a newer count.

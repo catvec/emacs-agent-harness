@@ -85,19 +85,15 @@ Two ways for a model to run things:
   has the backend table and what each path does and does not promise).
   `sandbox/session` says which of the two a session has, and why.
 
-  Cancelling an in-flight bash call (`agent/tool-canceller`) works only
-  in that shared runtime, and `agent/cancel` asks it for every running
-  call of a turn, so a paused task, and a `C-c C-k`, stop the command
-  they were waiting on rather than leaving it to its timeout; so does
-  voice cancellation (`agent/voice-control`), which reports the outcome
-  of each call.  The filter captures the actual run by the originating
-  context's `:turn-id` and `:call-id`, never by the session's current
-  work.  Invoking it requests `harness-sandbox-session-kill-run` for that
-  run only, not runtime teardown or job cancellation (the sandbox's
-  existing fail-safe may still tear down a run that cannot stop).  A run
-  already ended is reported completed; unshared commands and other tools
-  have no supported canceller.  A cancellation request promises neither
-  undo nor rollback.
+  Voice cancellation (`agent/voice-control`) supports an in-flight bash
+  call only in that shared runtime.  The `agent/tool-canceller` filter
+  captures its actual run by the originating context's `:turn-id` and
+  `:call-id`, never by the session's current work.  Invoking it requests
+  `harness-sandbox-session-kill-run` for that run only, not runtime
+  teardown or job cancellation (the sandbox's existing fail-safe may
+  still tear down a run that cannot stop).  A run already ended is
+  reported completed; unshared commands and other tools have no supported
+  canceller.  A cancellation request promises neither undo nor rollback.
 
   A shared runtime costs one thing, and the settings say it: its mounts
   are fixed when it starts, so a change to what the session may reach

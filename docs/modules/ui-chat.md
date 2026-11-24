@@ -55,8 +55,8 @@ harness says when it was sent, and nothing in the middle of a turn
 does.  A block that folds several events under one line -- a run of
 tool calls, with the thinking and the notes between them -- shows the
 stretch they took in that same slot, earliest to latest
-(`harness-chat--group-time-range`), one reading when both ends read the
-same.  A line of its own under the header
+(`harness-chat--group-time-range`), one reading when both ends read
+the same.  A line of its own under the header
 (`harness-chat--refresh-time-bar`) shows the clock of the message the
 window starts on, unless that message shows its own timestamp
 already, so a message whose sender line scrolled away is still dated

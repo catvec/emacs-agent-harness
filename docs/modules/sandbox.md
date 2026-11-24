@@ -149,9 +149,11 @@ guarantee than bwrap's, and it is the one the backend has.  MXC has no
 PID namespace and no unit: a background process there can outlive the
 call that started it.  A runtime held on it is not a one-shot command
 though, and its end is the harness's own: the supervisor finds what
-the instance runs by the environment it inherited, from `/proc` or
-from the process table where there is none, and ends every one of
-them before it says it is going (see "Holding an instance" below).
+the instance runs -- by the environment it inherited where `/proc` or
+a `ps` that answers is there, and by the process group the run was
+started in where neither is, which is what a Mac under Seatbelt has --
+and ends every one of them before it says it is going (see "Holding an
+instance" below).
 OpenShell's ephemeral sandbox is deleted after the command, by
 the gateway, which is the same bound by another rule.
 

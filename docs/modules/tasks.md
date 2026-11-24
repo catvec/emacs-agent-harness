@@ -211,15 +211,11 @@ Pausing: `task/pause` (the board's Pause) is a return to pending that
 sticks -- the task is marked `:paused`, a hold the scheduler keeps,
 until `task/resume`, `task/start` or a turn the user starts in its
 session -- and the mark is kept with the record, so a restart leaves
-the task paused.  The turn it stops takes its tool calls with it: a
-`bash` command in the session's shared sandbox ends with the pause
-(`agent/cancel` asks each call's `agent/tool-canceller`), rather than
-running on for its own timeout with no turn to read the result.
-`task/pause-all` and `task/resume-all` do it for every task of a
-project or of every project; `task/queues` lists every project's queue
-and its state, and `task/suspend-all-queues` and
-`task/resume-all-queues` switch them all, which the task slots page
-offers in one place (see Queues, all of them below).
+the task paused.  `task/pause-all` and `task/resume-all` do it for
+every task of a project or of every project; `task/queues` lists
+every project's queue and its state, and `task/suspend-all-queues`
+and `task/resume-all-queues` switch them all, which the task slots
+page offers in one place (see Queues, all of them below).
 
 Waiting for a slot: a queued task knows since when it waits
 (`:queued-at`, stamped whenever a task joins the queue: submitted,

@@ -53,6 +53,7 @@ provides:
 
 - `harness-ui-connected-hook` — Hook run once the UI has connected to a harness and initialised it.
 - `harness-ui-event-functions` — Functions called with (EVENT ARGS) for every `_harness/event` notification.
+- `harness-ui-held-changed-functions` — Functions called with no arguments when a held button is pushed or let go.
 - `harness-ui-live-functions` — Functions called with (SESSION-ID LIVE) after live token figures change.
 - `harness-ui-model-picker-functions` — Functions that can offer a model picker instead of the default one.
 - `harness-ui-notification-functions` — Functions called with (NOTIFICATION) when a desktop notification is clicked.

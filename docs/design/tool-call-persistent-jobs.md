@@ -136,7 +136,16 @@ MXC is the one whose facts are conditional.  It has no PID namespace and
 no handle on a command, so what it can promise is the supervisor's own:
 the supervisor finds a run's processes by the environment they inherited
 -- `/proc` on Linux, the process table (`ps -E` on BSD, `ps e` elsewhere)
-where there is none -- sends TERM to each, waits, then KILLs what ignored
+where there is none -- and, where neither is available, by the process
+group the run was started in, asked of the kernel.  That last way is what
+a Mac under MXC has, and it is why this adapter promises `:enumerate` at
+all: Seatbelt refuses to exec the setuid `/bin/ps`, so `ps` cannot run in
+the jail, and macOS 27 withholds an Apple platform binary's environment
+from the call `ps -E` makes -- and the supervisor and its commands are
+`/bin/bash`.  A supervisor that demanded either one answered
+`R VERSION  ps-with-environment` and exited, which made every command in
+that sandbox fail before it ran.  Whichever way is chosen, the supervisor
+sends TERM to each process of the run, waits, then KILLs what ignored
 it, and ends every process of the instance before it says it is going.
 What that needs of the executor is that the supervisor's standard input
 and output are the harness's pipe while it runs; an executor that collects

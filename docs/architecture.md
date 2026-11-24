@@ -11414,10 +11414,18 @@ file.  Under bwrap the namespace is the runtime's, not the call's, and
 it is still a namespace: a daemon, a background `&` job and a `nohup` or
 `setsid` child all inherit the run's token, are enumerated by it in
 `/proc`, and end with the runtime.  A backend without a namespace of its
-own is not left with nothing: the supervisor reads the same token out of
-the environment each process inherited -- `/proc` on Linux, the process
-table (`ps -E` on BSD, `ps e` elsewhere) where there is none -- so a run's
-processes are found, TERM and then KILL are sent to each, the count of
+own is not left with nothing: the supervisor finds a run's processes by
+the same token read out of the environment each process inherited --
+`/proc` on Linux, the process table (`ps -E` on BSD, `ps e` elsewhere)
+where there is none -- and, where neither is available, by the process
+group the run was started in, asked of the kernel, which needs no program
+at all.  That last way is what a Mac under MXC has: Seatbelt refuses to
+exec the setuid `/bin/ps`, and macOS 27 withholds an Apple platform
+binary's environment from the call `ps -E` makes.  The way chosen is said
+in the supervisor's `V` frame, so a count is read for what it is --
+exact under `/proc` and `ps`, a lower bound under the process group,
+which a `setsid` child can leave.  Either way a run's processes are
+found, TERM and then KILL are sent to each, the count of
 those still alive is what `kill` answers with, and `quit` ends every
 process of the instance before it says `D`.  That is what makes MXC, whose
 confinement is a process tree rather than a namespace, able to hold a

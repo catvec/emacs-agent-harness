@@ -71,6 +71,8 @@ supervisor's standard output is the one channel, and every record on it
 is a line the supervisor writes in one `write()` call:
 
   R VERSION [MISSING…]  the instance is up, one supervisor in it
+  V WAY                 how it finds a run's processes: `proc`, `ps`
+                        or `group`
   S TOKEN               a command started
   O TOKEN BASE64        bytes of its standard output
   E TOKEN BASE64        bytes of its standard error
@@ -101,10 +103,13 @@ supervisor's standard input, which the sandbox cannot reach.
 the instance's id, so the supervisor finds every one of them by what
 they inherited -- a `setsid` child and a double-forked daemon included
 -- reading it from `/proc` on Linux and from the process table
-(`ps -E`, `ps e`) where there is none, as on macOS; and cancel sends
-TERM to each, waits, then KILLs what ignored it, and says how many are
-still alive when it replies.  A run is cancelled only when that count
-is zero; a run that cannot be emptied ends its whole runtime instead.
+(`ps -E`, `ps e`) where there is none; where neither is available it
+asks the kernel about the process group the run was started in, which
+is what a Mac under MXC has (see
+`harness-sandbox-session--supervisor-program`).  Cancel sends TERM to
+each, waits, then KILLs what ignored it, and says how many are still
+alive when it replies.  A run is cancelled only when that count is
+zero; a run that cannot be emptied ends its whole runtime instead.
 Destroy ends the instance: the supervisor ends every process of the
 instance before it says it is going -- the kernel does that with the
 namespace where there is one, and the supervisor does it itself where

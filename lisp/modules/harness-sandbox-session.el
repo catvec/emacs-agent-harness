@@ -64,6 +64,8 @@
 ;; is a line the supervisor writes in one `write()' call:
 ;;
 ;;   R VERSION [MISSING…]  the instance is up, one supervisor in it
+;;   V WAY                 how it finds a run's processes: `proc', `ps'
+;;                         or `group'
 ;;   S TOKEN               a command started
 ;;   O TOKEN BASE64        bytes of its standard output
 ;;   E TOKEN BASE64        bytes of its standard error
@@ -94,10 +96,13 @@
 ;; the instance's id, so the supervisor finds every one of them by what
 ;; they inherited -- a `setsid' child and a double-forked daemon included
 ;; -- reading it from `/proc' on Linux and from the process table
-;; (`ps -E', `ps e') where there is none, as on macOS; and cancel sends
-;; TERM to each, waits, then KILLs what ignored it, and says how many are
-;; still alive when it replies.  A run is cancelled only when that count
-;; is zero; a run that cannot be emptied ends its whole runtime instead.
+;; (`ps -E', `ps e') where there is none; where neither is available it
+;; asks the kernel about the process group the run was started in, which
+;; is what a Mac under MXC has (see
+;; `harness-sandbox-session--supervisor-program').  Cancel sends TERM to
+;; each, waits, then KILLs what ignored it, and says how many are still
+;; alive when it replies.  A run is cancelled only when that count is
+;; zero; a run that cannot be emptied ends its whole runtime instead.
 ;; Destroy ends the instance: the supervisor ends every process of the
 ;; instance before it says it is going -- the kernel does that with the
 ;; namespace where there is one, and the supervisor does it itself where
@@ -224,7 +229,7 @@ lease, so a heartbeat at the lease would be no heartbeat at all.")
    '("set +e"
      "version=$1 instance=$2 scratch=$3 beat=${4:-10}"
      "missing="
-     "for p in base64 grep sed mkfifo dd tr ps sleep; do"
+     "for p in base64 grep sed mkfifo dd tr sleep; do"
      "  command -v \"$p\" >/dev/null 2>&1 || missing=\"$missing $p\""
      "done"
      "if [ -n \"$missing\" ]; then printf 'R %s %s\\n' \"$version\" \"$missing\"; exit 3; fi"
@@ -239,35 +244,69 @@ lease, so a heartbeat at the lease would be no heartbeat at all.")
      "export HARNESS_SUPERVISOR=$$"
      "live="
      "say() { printf '%s\\n' \"$*\"; }"
-     ;; Where a run's processes are found.  `/proc' is the exact answer
-     ;; and GNU/Linux has it; macOS has no /proc, so there the process
-     ;; table is asked for each process's environment (`ps -E' on BSD,
-     ;; `ps e' elsewhere), and a process belongs to the instance by the
-     ;; HARNESS_INSTANCE it inherited -- which is what makes a `setsid'
-     ;; child and a double-forked daemon findable, since a process
-     ;; group or a session can be left and an environment cannot.
-     ;; HARNESS_SUPERVISOR_PROCS forces one way, so the way a Mac uses
-     ;; is measured on a Linux host by its own tests.
+     ;; Where a run's processes are found.  Three ways, best first, and
+     ;; the one that is chosen is said in the `V' frame:
+     ;;
+     ;;   proc   each process's environment, read from
+     ;;          /proc/PID/environ.  Exact, and GNU/Linux has it.
+     ;;   ps     the process table, asked for each process's environment
+     ;;          (`ps -E' on BSD, `ps e' elsewhere), matching the
+     ;;          HARNESS_INSTANCE it inherited.  Exact too, and what a
+     ;;          BSD has where it can run `ps' at all.
+     ;;   group  the process group each run is started in, and nothing
+     ;;          else.  A run's shell is its group's leader (`set -m'),
+     ;;          so its pid is the group's, `kill -0 -- -PGID' says
+     ;;          whether anything of the run is left, and
+     ;;          `kill -TERM/-KILL -- -PGID' ends it.  The kernel answers
+     ;;          both, so this needs no program and no `/proc'.
+     ;;
+     ;; The last one is what macOS under MXC has.  Seatbelt refuses to
+     ;; exec a setuid binary, and /bin/ps is setuid root, so `ps' cannot
+     ;; run there at all -- and on macOS 27 the kernel withholds the
+     ;; environment of Apple platform binaries (which /bin/bash, /bin/sh
+     ;; and /bin/sleep are) from KERN_PROCARGS2, which is the call `ps -E'
+     ;; makes.  Demanding either one made the supervisor say it lacked
+     ;; ps-with-environment and exit, so every command in the sandbox
+     ;; failed before it ran.
+     ;;
+     ;; What `group' gives up is what leaves the group: a `setsid' child
+     ;; or a daemon that called setpgid.  Seatbelt confines a process
+     ;; tree rather than a namespace, so such a process is still confined
+     ;; by the profile it inherited, and MXC ends the run's whole tree
+     ;; when the run's shell exits; the supervisor's own count of the
+     ;; group is then a lower bound, which is what it says it is.
+     ;;
+     ;; HARNESS_SUPERVISOR_PROCS forces one way, so the way a Mac uses is
+     ;; measured on a Linux host by its own tests.
      "procs=${HARNESS_SUPERVISOR_PROCS:-}"
+     ;; Where `/proc' would be, so that a test can say there is none -- a
+     ;; Mac has no /proc -- without a Mac to run it on.
+     "procdir=${HARNESS_SUPERVISOR_PROC:-/proc}"
      "ps_style="
-     "if [ \"$procs\" = ps ]; then"
-     "  if ps -A -E -ww -o pid=,command= 2>/dev/null | grep -Fq \"HARNESS_INSTANCE=$instance\"; then ps_style=bsd"
-     "  elif ps -A -ww -o pid=,command= e 2>/dev/null | grep -Fq \"HARNESS_INSTANCE=$instance\"; then ps_style=gnu"
-     "  else ps_style=none; fi"
-     "  if [ \"$ps_style\" = none ]; then"
-     "    printf 'R %s %s\\n' \"$version\" \" ps-with-environment\"; exit 3"
-     "  fi"
-     "elif [ \"$procs\" = proc ] || [ -r /proc/self/environ ]; then"
+     ;; `ps' may not be there, or may be there and unable to run (a
+     ;; setuid binary under Seatbelt): asking is the only way to know.
+     "ps_works() {"
+     "  ps -A -E -ww -o pid=,command= 2>/dev/null | grep -Fq \"HARNESS_INSTANCE=$instance\" && { ps_style=bsd; return 0; }"
+     "  ps -A -ww -o pid=,command= e 2>/dev/null | grep -Fq \"HARNESS_INSTANCE=$instance\" && { ps_style=gnu; return 0; }"
+     "  return 1"
+     "}"
+     "if [ \"$procs\" = group ]; then"
+     "  :"
+     "elif [ \"$procs\" = ps ]; then"
+     "  if command -v ps >/dev/null 2>&1 && ps_works; then procs=ps; else procs=group; fi"
+     "elif [ \"$procs\" = proc ]; then"
+     "  :"
+     "elif [ -r \"$procdir/self/environ\" ]; then"
      "  procs=proc"
-     "else"
+     "elif command -v ps >/dev/null 2>&1 && ps_works; then"
      "  procs=ps"
-     "  if ps -A -E -ww -o pid=,command= 2>/dev/null | grep -Fq \"HARNESS_INSTANCE=$instance\"; then ps_style=bsd"
-     "  elif ps -A -ww -o pid=,command= e 2>/dev/null | grep -Fq \"HARNESS_INSTANCE=$instance\"; then ps_style=gnu"
-     "  else ps_style=none; fi"
-     "  if [ \"$ps_style\" = none ]; then"
-     "    printf 'R %s %s\\n' \"$version\" \" ps-with-environment\"; exit 3"
-     "  fi"
+     "else"
+     "  procs=group"
      "fi"
+     "if [ \"$procs\" = ps ]; then :; else ps_style=; fi"
+     ;; Said before anything runs, so the harness -- and a user reading
+     ;; the access view -- knows which answer a count is.
+     "say V \"$procs\""
      "ps_lines() {"
      "  case \"$ps_style\" in"
      "    bsd) ps -A -E -ww -o pid=,command= 2>/dev/null ;;"
@@ -276,25 +315,38 @@ lease, so a heartbeat at the lease would be no heartbeat at all.")
      "}"
      ;; Every process of the instance, one per line, as the backend lets
      ;; it be seen: a path to its environment under /proc, or its whole
-     ;; line of the process table.
+     ;; line of the process table.  `group' has no such list -- it knows
+     ;; the runs it started, and asks the kernel about each group -- so
+     ;; this answers nothing and its callers take their own `group' arm.
      "instance_environs() {"
      "  case \"$procs\" in"
-     "    proc) grep -Flzx \"HARNESS_INSTANCE=$instance\" /proc/[0-9]*/environ 2>/dev/null ;;"
+     "    proc) grep -Flzx \"HARNESS_INSTANCE=$instance\" \"$procdir\"/[0-9]*/environ 2>/dev/null ;;"
      "    ps) ps_lines | while IFS= read -r line; do"
      "          case \" $line \" in *\" HARNESS_INSTANCE=$instance \"*) printf '%s\\n' \"$line\" ;; esac"
      "        done ;;"
+     "    *) : ;;"
      "  esac"
+     "}"
+     ;; The process group a run was started in, which is its shell's pid
+     ;; (see `run_one'), kept in its scratch until the group is empty.
+     "pgid_of() { cat \"$scratch/$1/pgid\" 2>/dev/null; }"
+     "group_alive() {"
+     "  local g"
+     "  g=$(pgid_of \"$1\")"
+     "  [ -n \"$g\" ] || return 1"
+     "  kill -0 -- \"-$g\" 2>/dev/null"
      "}"
      ;; The pids carrying RUN's token.  A tag matches whole, so one
      ;; instance's `-foreign' namesake and one run's `r1' beside `r12'
-     ;; are not taken for each other.
+     ;; are not taken for each other.  Under `group' the group is the
+     ;; answer, and a run whose group is empty has no process left.
      "pids_of() {"
      "  case \"$procs\" in"
      "    proc)"
      "      local f"
      "      for f in $(instance_environs); do"
      "        grep -Fqzx \"HARNESS_RUN=$1\" \"$f\" 2>/dev/null || continue"
-     "        f=${f#/proc/}"
+     "        f=${f#\"$procdir\"/}"
      "        printf '%s\\n' \"${f%/environ}\""
      "      done ;;"
      "    ps)"
@@ -303,13 +355,20 @@ lease, so a heartbeat at the lease would be no heartbeat at all.")
      "        read -r pid rest <<< \"$line\""
      "        printf '%s\\n' \"$pid\""
      "      done ;;"
+     "    group) pgid_of \"$1\" ;;"
      "  esac"
      "}"
      ;; The state of every process, from the process table: a zombie is
-     ;; no process of the run, whatever it is still listed as.
-     "states() { ps -A -o pid=,stat= 2>/dev/null; }"
+     ;; no process of the run, whatever it is still listed as.  `group'
+     ;; asks the kernel whether the group has a member at all, so there
+     ;; is nothing to filter.
+     "states() { case \"$procs\" in group) : ;; *) ps -A -o pid=,stat= 2>/dev/null ;; esac; }"
      "alive_of() {"
      "  local p st table"
+     "  if [ \"$procs\" = group ]; then"
+     "    group_alive \"$1\" && pgid_of \"$1\""
+     "    return 0"
+     "  fi"
      "  table=$(states)"
      "  for p in $(pids_of \"$1\"); do"
      "    st=$(printf '%s\\n' \"$table\" | sed -n \"s/^ *$p  *//p\" | head -1)"
@@ -349,14 +408,40 @@ lease, so a heartbeat at the lease would be no heartbeat at all.")
      "        case \" $line \" in *\" HARNESS_RUN=\"*) ;; *) continue ;; esac"
      "        printf '%s\\n' \"$line\" | sed -n 's/.* HARNESS_RUN=\\([^ ]*\\).*/\\1/p' | head -1"
      "      done ;;"
+     ;; The token a run's group still holds is the token of a run in
+     ;; flight: `run_one' writes the pgid before the command starts and
+     ;; removes it when the group is empty, so a file left behind by a
+     ;; run whose group went is no run at all.
+     "    group)"
+     "      local d g"
+     "      for d in \"$scratch\"/*; do"
+     "        [ -f \"$d/pgid\" ] || continue"
+     "        [ -f \"$d/cmd\" ] && continue"
+     "        g=$(cat \"$d/pgid\" 2>/dev/null)"
+     "        [ -n \"$g\" ] || continue"
+     "        kill -0 -- \"-$g\" 2>/dev/null || continue"
+     "        printf '%s\\n' \"${d##*/}\""
+     "      done ;;"
      "  esac"
      "}"
      ;; Every process of the instance, whatever run it belongs to.  The
      ;; supervisor and the helpers it starts carry HARNESS_SUPERVISOR with
      ;; its pid; a command is started with that name empty, so what is
-     ;; left is exactly what the instance runs.
+     ;; left is exactly what the instance runs.  Under `group' that is the
+     ;; runs whose group still has a member -- which is what the instance
+     ;; is, since the supervisor and its helpers are in the supervisor's
+     ;; own group and no run's.
      "alive_of_instance() {"
-     "  local p st table"
+     "  local p st table g"
+     "  if [ \"$procs\" = group ]; then"
+     ;; The tokens the instance still runs, as the groups they are: a
+     ;; caller kills what this answers, so it is pids here, not tokens.
+     "    for p in $(pids_of_instance); do"
+     "      g=$(pgid_of \"$p\")"
+     "      [ -n \"$g\" ] && printf '%s ' \"$g\""
+     "    done"
+     "    return 0"
+     "  fi"
      "  table=$(states)"
      "  for p in $(pids_of_instance); do"
      "    st=$(printf '%s\\n' \"$table\" | sed -n \"s/^ *$p  *//p\" | head -1)"
@@ -369,7 +454,7 @@ lease, so a heartbeat at the lease would be no heartbeat at all.")
      "      local f"
      "      for f in $(instance_environs); do"
      "        if grep -Fqzx \"HARNESS_SUPERVISOR=$$\" \"$f\" 2>/dev/null; then continue; fi"
-     "        f=${f#/proc/}"
+     "        f=${f#\"$procdir\"/}"
      "        printf '%s\\n' \"${f%/environ}\""
      "      done ;;"
      "    ps)"
@@ -378,6 +463,7 @@ lease, so a heartbeat at the lease would be no heartbeat at all.")
      "        read -r pid rest <<< \"$line\""
      "        printf '%s\\n' \"$pid\""
      "      done ;;"
+     "    group) run_tokens ;;"
      "  esac"
      "}"
      "count_of() { printf '%s' \"$1\" | tr -s ' ' '\\n' | grep -c .; }"
@@ -408,6 +494,12 @@ lease, so a heartbeat at the lease would be no heartbeat at all.")
      "  printf '%s' \"$3\" | base64 -d > \"$dir/cmd\" 2>/dev/null"
      "  set -m"
      "  HARNESS_SUPERVISOR= HARNESS_RUN=$token bash \"$dir/cmd\" </dev/null >\"$dir/o\" 2>\"$dir/e\" & rp=$!"
+     ;; The run's group is the run's shell's pid (`set -m' makes it the
+     ;; leader), and it is written where `pgid_of' reads it before the
+     ;; command can start: a `kill' that arrives at once names a group
+     ;; this instance already knows.  `cmd' is what says a run is in
+     ;; flight; `pgid' is what says one is still there.
+     "  printf '%s\\n' \"$rp\" > \"$dir/pgid\""
      "  ( sleep \"$secs\"; : > \"$dir/timed-out\"; kill -TERM -- \"-$rp\" 2>/dev/null"
      "    sleep 3; kill -KILL -- \"-$rp\" 2>/dev/null ) >/dev/null 2>&1 & wp=$!"
      "  set +m"
@@ -420,6 +512,10 @@ lease, so a heartbeat at the lease would be no heartbeat at all.")
      "  rm -f \"$dir/cmd\""
      "  live=$(untag \"$token\" \"$live\")"
      "  left=$(alive_of \"$token\")"
+     ;; The group is gone when nothing is left of it, and the record of it
+     ;; goes with it: a pgid kept after its group is empty is a pid the
+     ;; kernel may hand to something else, which would be counted here.
+     "  [ -z \"$left\" ] && rm -f \"$dir/pgid\""
      "  say X \"$token\" \"$st\" \"$(count_of \"$left\")\""
      "}"
      "kill_one() {"
@@ -530,20 +626,31 @@ writes no file the harness reads: what a command prints is drawn into a
 frame as it arrives, one `write()' each, below `PIPE_BUF', so a frame is
 whole in the pipe and cannot be forged from a command's bytes.
 
-It needs `base64', `grep', `sed', `mkfifo', `dd', `tr', `ps' and
-`sleep' -- the programs a Mac and a Linux both have -- and names in its
-`R' frame whichever is missing, so a backend that gives fewer tools says
-so rather than hang.  Coreutils' `timeout' and `setsid' are not among
-them: macOS has neither, so a run's own time is kept by a shell watchdog
-and its processes are found by the environment they inherited, from
-`/proc' on Linux and from the process table (`ps -E', `ps e') where
-there is none.  HARNESS_SUPERVISOR_PROCS=ps forces the second way, which
-is how the tests measure the way a Mac finds them.")
+It needs `base64', `grep', `sed', `mkfifo', `dd', `tr' and `sleep' -- the
+programs a Mac and a Linux both have -- and names in its `R' frame
+whichever is missing, so a backend that gives fewer tools says so rather
+than hang.  Coreutils' `timeout' and `setsid' are not among them: macOS
+has neither, so a run's own time is kept by a shell watchdog.
+
+How it finds a run's processes is negotiated, not demanded, and said in
+its `V' frame: `proc' (each process's environment from
+`/proc/PID/environ', exact, GNU/Linux), `ps' (the process table with each
+process's environment, `ps -E' or `ps e', exact, where `ps' can run at
+all) or `group' (the process group the run was started in, asked of the
+kernel, which needs no program).  It falls to `group' when neither
+`/proc' nor a `ps' that answers is there, which is what a Mac under MXC
+is: Seatbelt refuses to exec a setuid binary and /bin/ps is setuid root,
+and macOS 27 withholds an Apple platform binary's environment -- which
+/bin/bash and /bin/sleep are -- from the call `ps -E' makes.
+HARNESS_SUPERVISOR_PROCS forces one way, which is how the tests measure
+each of them on a Linux host.  HARNESS_SUPERVISOR_PROC names where
+`/proc' would be, so a test can say there is none -- a Mac has none --
+without a Mac to run it on.")
 
 (defconst harness-sandbox-session--runtime-keys
   '(:session :instance :dir :scratch :process :buffer :partial :state
     :reason :since :started :checked :idle-since :owned :asked
-    :epoch :profile
+    :epoch :profile :procs
     :cwd :generation :backend :capabilities :runs :going)
   "Every key a runtime's plist is given when it is made.
 It is not documentation only: `harness-sandbox-session--runtime' builds
@@ -1121,6 +1228,7 @@ believed until it is a frame of this protocol."
          (token (nth 1 parts)))
     (pcase kind
       ("R" (harness-sandbox-session--ready runtime parts))
+      ("V" (harness-sandbox-session--visibility runtime token))
       ("S" (when-let* ((run (harness-sandbox-session--run runtime token)))
              (setf (plist-get run :started) (or (plist-get run :started) (float-time))
                    (plist-get runtime :state) 'running)))
@@ -1142,6 +1250,17 @@ believed until it is a frame of this protocol."
        ;; never shown as output.
        (harness-log 'debug "sandbox: %s said %S" (plist-get runtime :instance)
                     (truncate-string-to-width line 200))))))
+
+(defun harness-sandbox-session--visibility (runtime way)
+  "Record that RUNTIME finds its processes WAY, from its `V' frame.
+WAY is `proc', `ps' or `group' (see
+`harness-sandbox-session--supervisor-program').  It is what a count of the
+runtime's processes is worth: `proc' and `ps' find a process that left its
+group, and `group' does not -- a group cannot be left and then found, only
+asked after -- so a `group' runtime's count is a lower bound and its
+answer says so."
+  (when (member way '("proc" "ps" "group"))
+    (setf (plist-get runtime :procs) (intern way))))
 
 (defun harness-sandbox-session--ready (runtime parts)
   "Record that RUNTIME's supervisor said it is up, from PARTS.
@@ -1748,7 +1867,12 @@ now, `:owned' how many processes of the session it holds that no command
 of this harness started, and `:since' when it started.  Nil without a
 session id.  A session with no runtime is still one that *can* hold one:
 `:available' says so and `:state' is nil, because a runtime is built on
-demand and a session that is not working holds none."
+demand and a session that is not working holds none.
+
+`:procs' says how the runtime finds the processes it counts -- `proc',
+`ps' or `group' (see `harness-sandbox-session--supervisor-program') --
+or nil before its supervisor has said.  `:owned' is exact under `proc'
+and `ps', and a lower bound under `group'."
   (when (stringp session-id)
     (let ((runtime (harness-sandbox-session-sandbox session-id))
           (record (and (harness-method-exists-p 'session/get)
@@ -1760,6 +1884,7 @@ demand and a session that is not working holds none."
               :generation (plist-get runtime :generation)
               :backend (plist-get runtime :backend)
               :capabilities (plist-get runtime :capabilities)
+              :procs (plist-get runtime :procs)
               :since (plist-get runtime :started)
               :processes (length (harness-sandbox-session-live-runs runtime))
               :owned (plist-get runtime :owned)

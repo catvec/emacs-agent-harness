@@ -139,9 +139,11 @@
 ;; PID namespace and no unit: a background process there can outlive the
 ;; call that started it.  A runtime held on it is not a one-shot command
 ;; though, and its end is the harness's own: the supervisor finds what
-;; the instance runs by the environment it inherited, from `/proc' or
-;; from the process table where there is none, and ends every one of
-;; them before it says it is going (see "Holding an instance" below).
+;; the instance runs -- by the environment it inherited where `/proc' or
+;; a `ps' that answers is there, and by the process group the run was
+;; started in where neither is, which is what a Mac under Seatbelt has --
+;; and ends every one of them before it says it is going (see "Holding an
+;; instance" below).
 ;; OpenShell's ephemeral sandbox is deleted after the command, by
 ;; the gateway, which is the same bound by another rule.
 ;;
@@ -2569,13 +2571,15 @@ Nil for a backend that gives it whole."
 (defun harness-sandbox--mxc-limits ()
   "Return what MXC cannot do of holding a session's runtime, as lines, or nil.
 The lifecycle is the supervisor's, not a namespace's: its processes are
-found by the environment they inherited, from the process table, and it
-ends them before it goes.  What is left to say is what an executor that
-cannot carry a command's standard input and output costs -- no runtime is
-held there, and every command gets a sandbox of its own.  Only an answer
-already measured is shown: the probe runs when a runtime is asked for
-(`sandbox/hold'), not when the backend is described, so asking for the
-status of a Mac never waits on an executor."
+found by the environment they inherited where the backend can show it,
+and by the process group each run was started in where it cannot -- which
+is what a Mac under Seatbelt has, since it cannot exec the setuid /bin/ps
+-- and it ends them before it goes.  What is left to say is what an
+executor that cannot carry a command's standard input and output costs --
+no runtime is held there, and every command gets a sandbox of its own.
+Only an answer already measured is shown: the probe runs when a runtime is
+asked for (`sandbox/hold'), not when the backend is described, so asking
+for the status of a Mac never waits on an executor."
   (when (and (eq harness-sandbox--backend 'mxc)
              harness-sandbox--mxc-stream
              (not (eq harness-sandbox--mxc-stream t)))
@@ -3042,10 +3046,14 @@ nil, and `:why' for one that is missing when it can be said in a line.
     ('mxc
      ;; Seatbelt exec runs one program -- the supervisor -- and confines
      ;; what it does.  The supervisor is a shell program that finds a
-     ;; run's processes by the environment they inherited: from `/proc'
-     ;; where there is one, and from the process table (`ps -E') on macOS,
-     ;; which is why the adapter can enumerate them and end a run of them
-     ;; without ending the instance.  Ending the instance is the
+     ;; run's processes from `/proc' where there is one and from the
+     ;; process table where there is not; a Mac under Seatbelt has
+     ;; neither -- it cannot exec the setuid /bin/ps at all, and macOS 27
+     ;; withholds an Apple platform binary's environment from `ps -E' --
+     ;; so there it asks the kernel about the process group the run was
+     ;; started in.  Either way the adapter can enumerate them and end a
+     ;; run of them without ending the instance, which is what `:cancel'
+     ;; and `:enumerate' promise.  Ending the instance is the
      ;; supervisor's own: it ends every process of the instance before it
      ;; says `D' (see `harness-sandbox-session--supervisor-program').
      ;; Its standard input and output are the harness's pipe only when the

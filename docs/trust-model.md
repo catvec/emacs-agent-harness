@@ -96,7 +96,9 @@ sandbox or stops it.  Which backends answer is asked of
 every fact, because it is the process the harness has and ending it ends
 the namespace; MXC promises every fact too, because its supervisor finds
 what the instance runs by the inherited environment — from `/proc`, or
-from the process table where there is none — and ends them before it
+from the process table where there is none — or, where neither is
+available, by the process group each run was started in, which is what a
+Mac under MXC has, and ends them before it
 says it is going, which is measured against a stand-in executor, not a
 Mac.  systemd-run's adapter declares all of them but `:enumerate` — its
 unit is given no `PrivatePIDs`, so it has no PID namespace of its own to

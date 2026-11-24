@@ -159,6 +159,7 @@ Everything runs asynchronously through `harness-run-command`.
 - `session/get` ([session](session.md))
 - `session/hint` ([session](session.md))
 - `session/nodes` ([session](session.md))
+- `task/for-session` ([tasks](tasks.md)), when it is loaded
 - `worktree/unlock` ([worktree](worktree.md)), when it is loaded
 
 ### Events it handles

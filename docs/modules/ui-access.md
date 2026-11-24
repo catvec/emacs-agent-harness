@@ -149,6 +149,7 @@ window shows when it is shown again.
 
 - `harness-ui-connected-hook` → `harness-ui-access--reconnected`
 - `harness-ui-event-functions` → `harness-ui-access--on-event`
+- `harness-ui-held-changed-functions` → `harness-ui-access--held-changed`
 - `harness-ui-redraw-hook` → `harness-ui-access--redraw`
 - `harness-ui-update-functions` → `harness-ui-access--on-update`
 - `window-buffer-change-functions` → `harness-ui-access--shown`
