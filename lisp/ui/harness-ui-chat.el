@@ -727,24 +727,52 @@ or FORWARD on to the next line when more than half of it was scrolled."
             (set-window-start nil (or next start))
             (when (and next (< (point) next)) (goto-char next))))))))
 
-(defun harness-chat--shown-whole-p (pos)
-  "Return non-nil if the selected window shows the screen line at POS whole.
-Scrolled into a tall line, the line has to end above the window's
-bottom edge, not on it.  The window's start is not forced then, which
-would lose the vscroll, and redisplay keeps a start it was not forced
-to only while point's line ends above that edge; else it recenters on
-point and keeps the vscroll, which cuts through the text at the top."
-  (let ((shown (pos-visible-in-window-p pos nil t)))
-    (and shown (null (cddr shown))
-         (or (zerop (window-vscroll nil t))
-             (< (+ (cadr shown) (harness-chat--line-height pos))
-                (+ (window-tab-line-height) (window-header-line-height)
-                   (window-text-height nil t)))))))
+(defun harness-chat--line-top (pos)
+  "Return how many pixels below the window's top edge the line at POS begins.
+Measured with `window-text-pixel-size', which lays out the text up to
+POS and no further: a line of any height costs its own.  Measured from
+the window's start, which that function takes the vscroll off already,
+so a line the vscroll cuts at the top comes out negative; a POS above
+the window's start is nil.  It reads the window's start, not the
+display, which a scroll has not caught up with."
+  (let ((start (window-start)))
+    (when (>= pos start)
+      (save-excursion
+        (goto-char pos)
+        (vertical-motion 0)
+        (cdr (window-text-pixel-size nil start (point) nil nil nil))))))
 
 (defun harness-chat--bottom-line ()
-  "Return a position on the selected window's bottom screen line, or nil."
-  (posn-point (posn-at-x-y 0 (+ (window-tab-line-height) (window-header-line-height)
-                                (1- (window-text-height nil t))))))
+  "Return a position on the selected window's bottom screen line, or nil.
+It is found by moving the window's body height of screen lines from its
+start in one call, not by walking a line at a time: a window over a
+tall image would otherwise lay that image out for every line it was
+asked about.  It reads the window's start, not the display, which a
+scroll has not caught up with yet."
+  (save-excursion
+    (goto-char (window-start))
+    (vertical-motion (max 0 (1- (window-body-height))) nil)
+    (point)))
+
+(defun harness-chat--shown-whole-p (pos)
+  "Return non-nil if the selected window shows the screen line at POS whole.
+A line the vscroll cuts at the top is not whole, nor is one that runs
+past the window's bottom edge: the window's start is not forced then,
+which would lose the vscroll, and redisplay keeps a start it was not
+forced to only while point's line ends above that edge; else it
+recenters on point and keeps the vscroll, which cuts through the text
+at the top.  The line is measured as `harness-chat--line-top' does, not
+from the display, which a scroll has not caught up with yet."
+  (let* ((vscroll (window-vscroll nil t))
+         (edge (window-text-height nil t))
+         (top (harness-chat--line-top pos))
+         (bottom (and top (+ top (harness-chat--line-height pos)))))
+    (and top
+         (>= top 0)
+         ;; A line ending exactly on the bottom edge shows whole when
+         ;; nothing is scrolled; with a vscroll, the line above it stands
+         ;; at the top and it must end above the edge.
+         (if (zerop vscroll) (<= bottom edge) (< bottom edge)))))
 
 (defun harness-chat--point-into-view ()
   "Move point onto a screen line the selected window shows whole.
