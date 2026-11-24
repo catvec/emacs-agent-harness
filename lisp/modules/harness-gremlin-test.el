@@ -420,7 +420,13 @@ session running or lose the ending."
                 (should (= 3 (length results)))
                 (should (cl-every (lambda (node) (plist-get node :is-error)) results))
                 (should (cl-every (lambda (node)
-                                    (string-match-p "Unknown tool" (or (plist-get node :output) "")))
+                                    (if (equal "gremlin-ghost-3" (plist-get node :call-id))
+                                        ;; This delivery has a string in place
+                                        ;; of an arguments object: reject it
+                                        ;; before lookup or tool execution.
+                                        (equal "Tool arguments must be a JSON object; this call was not executed."
+                                               (plist-get node :output))
+                                      (string-match-p "Unknown tool" (or (plist-get node :output) ""))))
                                   results))))))))))
 
 (ert-deftest harness-gremlin-provider-shortcut-is-refused-by-the-jail ()

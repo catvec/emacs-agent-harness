@@ -1,0 +1,8 @@
+Ran 5 tests, 0 results as expected, 5 unexpected (2026-11-24 17:59:34-0500, 0.786513 sec)
+
+5 unexpected results:
+   FAILED  harness-provider-chaos-completed-hosted-call-cannot-repeat-effect
+   FAILED  harness-provider-chaos-duplicate-call-cannot-repeat-effect
+   FAILED  harness-provider-chaos-malformed-terminal-stops-the-live-provider
+   FAILED  harness-provider-chaos-non-object-arguments-never-execute-or-poison-history
+   FAILED  harness-provider-chaos-terminal-shapes-always-deliver-a-usable-ending

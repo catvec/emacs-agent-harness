@@ -2594,7 +2594,29 @@ same: a result the transcript refuses must not leave the model waiting."
                                 ;; `:rerun-tool' are among it.
                                 (plist-get result :meta)))))))
 
+(defvar harness-agent--tool-deliveries (make-hash-table :test 'eq :weakness 'key)
+  "Turn -> tool-call ids already delivered, qualified by provider step.
+Completed calls remain known until the turn is collected.  The active
+call list alone cannot detect a duplicate delivered after its result.")
+
 (defun harness-agent--tool-call (turn ev)
+  "Accept EV once per request of TURN, without repeating a duplicate effect."
+  (let* ((id (plist-get ev :id))
+         (key (cons (harness-agent-turn-steps turn) id))
+         (seen (or (gethash turn harness-agent--tool-deliveries)
+                   (puthash turn (make-hash-table :test 'equal) harness-agent--tool-deliveries))))
+    (if (and id (gethash key seen))
+        (progn
+          (harness-log 'warn "agent: ignored a duplicate tool-call delivery")
+          ;; A hosted adapter may be waiting on this delivery's own RPC.
+          ;; Answer it without starting another tool or claiming rollback.
+          (when-let* ((respond (plist-get ev :respond)))
+            (harness-agent--respond respond (plist-get ev :name)
+                                    "Duplicate tool-call ID; the original call owns the result." t)))
+      (when id (puthash key t seen))
+      (harness-agent--execute-tool-call turn ev))))
+
+(defun harness-agent--execute-tool-call (turn ev)
   "Run the call EV of a harness tool for TURN; record it and its result.
 The result, with any steering waiting, goes back to the provider through
 EV's `:respond' when it runs a hosted loop, and with it the images the
@@ -2610,7 +2632,15 @@ for the result of each, so a failure here that skipped the rest would
 leave the session waiting for the model for good.  A step that fails is
 logged, short, and the ones after it still run."
   (let* ((sid (harness-agent-turn-session-id turn))
-         (name (plist-get ev :name)) (input (plist-get ev :input))
+         (name (plist-get ev :name))
+         (given (plist-get ev :input))
+         (input-ok (or (eq given :empty)
+                       (and (proper-list-p given) (cl-evenp (length given))
+                            (cl-loop for (key _value) on given by #'cddr always (keywordp key)))))
+         ;; A rejected argument value must not become malformed tool_use
+         ;; history that a native API refuses on every subsequent prompt.
+         ;; The result records the rejection; only a valid object is replayed.
+         (input (and input-ok (not (eq given :empty)) given))
          (call-id (or (plist-get ev :id) (harness-short-id)))
          (respond (plist-get ev :respond))
          (title (harness-agent--call-title name input))
@@ -2625,17 +2655,24 @@ logged, short, and the ones after it still run."
                   (harness-call 'session/append sid
                                 (append (list :kind 'tool-call :tool name :call-id call-id :input input
                                               :title title
-                                              :meta (list :model (plist-get (harness-call 'session/get sid) :model)))
+                                              :meta (append
+                                                     (list :model (plist-get (harness-call 'session/get sid) :model))
+                                                     (unless input-ok
+                                                       (list :invalid-input-type (symbol-name (type-of given))))))
                                         (and (plist-get ev :checkpoint)
                                              (list :checkpoint (plist-get ev :checkpoint)))))))
           (execution nil))
       (when node (harness-emit 'agent/tool-call sid node))
       ;; Recorded before it starts, so its permission decision finds it.
       (harness-agent--add-call sid call-id name title)
-      (setq execution (harness-call-async
-                       'tools/execute sid
-                       (list :id call-id :name name :input input
-                             :turn-id (plist-get (harness-agent--control-turn turn) :turn-id))))
+      (setq execution
+            (if input-ok
+                (harness-call-async
+                 'tools/execute sid
+                 (list :id call-id :name name :input input
+                       :turn-id (plist-get (harness-agent--control-turn turn) :turn-id)))
+              (harness-resolved
+               (harness-tool-error "Tool arguments must be a JSON object; this call was not executed."))))
       (harness-agent--update-activity sid)
       (harness-then
        execution

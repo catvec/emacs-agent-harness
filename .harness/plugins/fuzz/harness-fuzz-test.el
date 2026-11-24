@@ -76,6 +76,20 @@ FORM is inserted as the body of the top-level definition."
                     :check #'identity :seeds '(1 2)))
     (should-not (harness-fuzz-target-get 'fuzz-test-invalid))))
 
+(ert-deftest harness-fuzz-provider-target-delivers-malformed-envelopes-to-the-guard ()
+  "Malformed shapes must reach the boundary, not be discarded by the fuzzer."
+  (harness-fuzz-test-with
+    (let ((guard (symbol-function 'harness-provider--guard-events)) (delivered 0))
+      (cl-letf (((symbol-function 'harness-provider--guard-events)
+                 (lambda (consumer &rest options)
+                   (let ((callback (apply guard consumer options)))
+                     (lambda (event) (cl-incf delivered) (funcall callback event))))))
+        (should (harness-fuzz--check-provider-events
+                 "(42 [] (:type . text) (:type text :delta) (:type done :stop-reason [bad]))")))
+      (should (= 5 delivered)))
+    (dolist (seed (harness-fuzz-target-seeds (harness-fuzz-target-get 'provider-events)))
+      (should (harness-fuzz--check-provider-events seed)))))
+
 (ert-deftest harness-fuzz-the-adapter-runs-a-check-in-another-emacs ()
   "The adapter runs a target file's check on the exact bytes it was given."
   (harness-fuzz-test-with

@@ -1,0 +1,4 @@
+Info: corpus case 19: (:type tool-call :id "bad-input" :name "chaos_echo" :input 42)
+       (ert-test-failed
+        ((should (eq 'end-turn (plist-get ... :stop-reason))) :form
+         (eq end-turn error) :value nil))

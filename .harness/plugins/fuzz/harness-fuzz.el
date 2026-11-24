@@ -1372,11 +1372,10 @@ containment, and records the rest; the guard must never deliver an
 event once `done' has gone through."
   (when-let* ((parsed (harness-fuzz--read-lisp bytes)))
     (let ((events (cdr parsed)))
-      (when (and (listp events)
-                 (proper-list-p events)
-                 (cl-every (lambda (event)
-                             (and (consp event) (keywordp (car event))))
-                           events))
+      ;; Do not filter malformed envelopes out before they reach the
+      ;; boundary under test.  Atoms, dotted lists and circular events
+      ;; are precisely the inputs whose containment matters here.
+      (when (and (listp events) (proper-list-p events))
         (let ((seen nil) (failed nil))
           (let ((guard (harness-provider--guard-events
                         (lambda (event)
@@ -1480,7 +1479,9 @@ event once `done' has gone through."
               "((:type done :stop-reason end-turn))"
               "((:type text :delta \"a\") (:type done) (:type text :delta \"b\"))"
               "((:type tool-call :id 1 :name \"bash\" :input (:command \"ls\")))"
-              "((:type usage :input 10 :output 20 :cost 0.1))")
+              "((:type usage :input 10 :output 20 :cost 0.1))"
+              "(42 [] (:type . text) (:type text :delta) (:type done :stop-reason [bad]))"
+              "(#1=(:unknown t . #1#) (:type done :stop-reason \"end-turn\"))")
  :check #'harness-fuzz--check-provider-events)
 
 (harness-define-module 'fuzz

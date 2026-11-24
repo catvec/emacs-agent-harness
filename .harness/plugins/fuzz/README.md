@@ -113,7 +113,7 @@ may segfault Emacs and the campaign survives it.
 | `links` | harness links, handles and link scanning |
 | `search-query` | the session search query parser |
 | `http-headers` | HTTP headers, disposition and URL file names |
-| `provider-events` | provider events through the guard that ends a turn once |
+| `provider-events` | raw event envelopes, terminal normalization and the exactly-once callback guard |
 
 Each target is a pure boundary: it touches no session, file, process or
 network.  A check must treat malformed input as handled (return non-nil)
@@ -166,3 +166,12 @@ with a stock Emacs when `afl-qemu-trace` is installed.
 command lines, the report and replay without AFL++, and runs a short
 campaign against the built-in targets when `afl-fuzz` is on `exec-path`
 (and skips it otherwise).
+
+## Whole turn recovery
+
+The pure targets do not create sessions. The complementary
+[provider chaos suite](../../../docs/design/provider-chaos-testing.md) drives
+malformed and seeded event sequences through the real agent and persistence,
+then checks another prompt and a cold load of the same session. It runs in the
+ordinary ERT suite without requiring AFL++. The provider-events target deliberately
+passes malformed envelopes to the guard rather than filtering them out first.
