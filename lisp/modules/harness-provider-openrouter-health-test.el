@@ -283,6 +283,76 @@ back; nothing about such a request may count as sent."
                 (should (equal "sent" (plist-get (harness-openrouter--send-evidence harness-openrouter-test--session-value) :state))))))))))
 )
 
+(ert-deftest harness-openrouter-health-owner-start-rounding-is-not-pid-reuse ()
+  "Emacs reconstructs wall-clock start times, which can drift by a clock tick."
+  (let ((owner (list :host (system-name) :uid (user-uid) :pid 123 :start 100.0))
+        (native-comp-enable-subr-trampolines nil))
+    (cl-letf (((symbol-function 'process-attributes)
+               (lambda (_) (list (cons 'start (seconds-to-time 100.01)))))
+              ((symbol-function 'file-directory-p) (lambda (_) t)))
+      (should-not (harness-openrouter--owner-dead-p owner)))))
+
+(ert-deftest harness-openrouter-health-completion-proof-names-exact-token-and-owner ()
+  (let* ((s (harness-openrouter-health-test--session "sent"))
+         (owner (harness-openrouter--owner))
+         (harness-openrouter--completed-sends (make-hash-table :test 'equal))
+         (e (plist-get (plist-get s :ext) harness-openrouter--send-key)))
+    (setq e (plist-put e :inflight "live-token")
+          e (plist-put e :owner owner))
+    (harness-openrouter-test-with-session s
+      (cl-letf (((symbol-function 'harness-openrouter--owner-dead-p) (lambda (_) nil)))
+        (dolist (proof (list nil (list "another-token" owner)
+                            (list "live-token" '(:pid 999 :host "another-host"))))
+          (puthash (plist-get s :id) proof harness-openrouter--completed-sends)
+          (should (eq e (harness-openrouter--recover-orphan s e))))))))
+
+(ert-deftest harness-openrouter-health-owner-identity-is-stable-across-reads ()
+  (let ((harness-openrouter--process-owner nil)
+        (reads 0))
+    (cl-letf (((symbol-function 'process-attributes)
+               (lambda (_) (list (cons 'start (+ 100.0 (* 0.01 (cl-incf reads)))))))
+              ((symbol-function 'harness-openrouter--process-start-ticks) (lambda (_) "1234")))
+      (let ((owner (harness-openrouter--owner)))
+        (should (equal "1234" (plist-get owner :start-ticks)))
+        (dotimes (_ 5) (should (equal owner (harness-openrouter--owner))))
+        (should (= 1 reads))))))
+
+(ert-deftest harness-openrouter-health-terminal-write-failure-does-not-wedge-live-owner ()
+  "A failed terminal save cannot hide done or strand this process's marker."
+  (let* ((s (harness-openrouter-health-test--session "sent"))
+         (req (plist-put (harness-openrouter-test--request s)
+                         :openrouter-route (harness-openrouter--route-of s)))
+         callback events token)
+    (harness-openrouter-test-with-session s
+      (cl-letf (((symbol-function 'harness-openai--complete)
+                 (lambda (_endpoint request)
+                   (setq callback (plist-get request :on-event))
+                   (funcall (plist-get request :before-dispatch))
+                   (list :cancel #'ignore))))
+        (setq req (plist-put req :on-event (lambda (event) (push event events))))
+        (harness-openrouter--tracked-complete req)
+        (setq token (plist-get (harness-openrouter--send-evidence
+                               harness-openrouter-test--session-value) :inflight))
+        (let ((call (symbol-function 'harness-call)))
+          (cl-letf (((symbol-function 'harness-call)
+                     (lambda (method &rest args)
+                       (if (and (eq method 'session/set-ext)
+                                (eq (nth 1 args) harness-openrouter--send-key))
+                           (error "terminal save failed")
+                         (apply call method args)))))
+            (funcall callback '(:type done :stop-reason end-turn))))
+        (should (eq 'done (plist-get (car events) :type)))
+        (should (equal token (plist-get (harness-openrouter--send-evidence
+                                        harness-openrouter-test--session-value) :inflight)))
+        ;; The owner is still alive.  The terminal callback proves that
+        ;; this exact request ended, so a same-pin send can recover it.
+        (harness-openrouter--tracked-complete req)
+        (let ((e (harness-openrouter--send-evidence harness-openrouter-test--session-value)))
+          (should-not (equal token (plist-get e :inflight)))
+          (should (plist-get e :partial))
+          (should (equal "request-ended" (plist-get (car (last (plist-get e :recoveries))) :reason))))
+        (funcall callback '(:type done :stop-reason end-turn))))))
+
 (ert-deftest harness-openrouter-health-orphaned-marker-recovers-instead-of-wedging ()
   "A marker whose owning process exited must not refuse every later send.
 The manual `session/recover-openrouter-send' was the only way to clear
@@ -364,20 +434,22 @@ every retry was refused `routing-inflight' and no retry could undo it."
     (should (equal "Cohere" (plist-get (harness-openrouter-select p (append records (list third)) (float-time)) :provider)))))
 
 (ert-deftest harness-openrouter-health-owner-proof-fails-closed ()
-  (let ((owner (list :host (system-name) :uid (user-uid) :pid 123 :start 10))
-        (attrs '((start . 10))) (exists t)
+  (let ((owner (list :host (system-name) :uid (user-uid) :pid 123 :start 10 :start-ticks "100"))
+        (attrs '((start . 10))) (ticks "100") (exists t)
         (native-comp-enable-subr-trampolines nil))
     (cl-letf (((symbol-function 'process-attributes) (lambda (_) attrs))
+              ((symbol-function 'harness-openrouter--process-start-ticks) (lambda (_) ticks))
               ((symbol-function 'file-directory-p) (lambda (path) (or (equal path "/proc/self") exists))))
       (should-not (harness-openrouter--owner-dead-p owner))
-      (setq attrs '((start . 11)))
+      (setq ticks "101")
       (should (harness-openrouter--owner-dead-p owner))
       (setq attrs nil)
       (should-not (harness-openrouter--owner-dead-p owner))
       (setq exists nil)
       (should (harness-openrouter--owner-dead-p owner))
       (should-not (harness-openrouter--owner-dead-p (plist-put (copy-sequence owner) :host "another-host")))
-      (should-not (harness-openrouter--owner-dead-p (plist-put (copy-sequence owner) :start nil))))))
+      (should-not (harness-openrouter--owner-dead-p
+                   (plist-put (plist-put (copy-sequence owner) :start nil) :start-ticks nil))))))
 
 
 (ert-deftest harness-openrouter-health-recovery-survives-disk-roundtrip ()

@@ -2918,27 +2918,59 @@ has already set the flag, and nothing is sent."
       (setcar (cdr state) (plist-get sent :cancel))))
   nil)
 
+(defvar harness-openrouter--completed-sends (make-hash-table :test 'equal)
+  "Session id -> (TOKEN OWNER) whose terminal callback ran in this process.
+Kept only when persisting completion failed.  Unlike PID liveness, this
+proves an exact request ended even though its owner remains alive.  A
+reload keeps the proof; a restart instead uses the dead-owner check.")
+
+(defun harness-openrouter--process-start-ticks (pid)
+  "Return Linux PID's stable start counter, or nil if it cannot be read.
+Field 22 of /proc/PID/stat is measured since boot.  Unlike the wall-clock
+start reconstructed by `process-attributes', it does not vary between reads."
+  (condition-case nil
+      (with-temp-buffer
+        (insert-file-contents-literally (format "/proc/%d/stat" pid))
+        ;; comm may contain spaces and parentheses; fields follow its last ).
+        (goto-char (point-max))
+        (search-backward ")")
+        (let ((ticks (nth 19 (split-string (buffer-substring-no-properties
+                                           (1+ (point)) (point-max))))))
+          (and (stringp ticks) (string-match-p "\\`[0-9]+\\'" ticks) ticks)))
+    (error nil)))
+
+(defvar harness-openrouter--process-owner nil
+  "Stable identity of this Emacs process, retained across module reloads.")
+
 (defun harness-openrouter--owner ()
   "Return this local process's identity for durable dispatch ownership."
-  (let ((attrs (process-attributes (emacs-pid))))
-    (list :host (system-name) :uid (user-uid) :pid (emacs-pid)
-          :start (and (alist-get 'start attrs)
-                      (float-time (alist-get 'start attrs))))))
+  (unless (equal (plist-get harness-openrouter--process-owner :pid) (emacs-pid))
+    (let ((attrs (process-attributes (emacs-pid))))
+      (setq harness-openrouter--process-owner
+            (list :host (system-name) :uid (user-uid) :pid (emacs-pid)
+                  :start-ticks (harness-openrouter--process-start-ticks (emacs-pid))
+                  :start (and (alist-get 'start attrs)
+                              (float-time (alist-get 'start attrs)))))))
+  (copy-sequence harness-openrouter--process-owner))
 
 (defun harness-openrouter--owner-dead-p (owner)
   "Non-nil only when recorded local OWNER is verifiably no longer alive.
 An inaccessible process, another host/user, or incomplete ownership is
-unknown, not dead.  A reused PID is distinguished by its start time."
+unknown, not dead.  A reused PID is distinguished by its stable Linux
+start counter.  Legacy wall-clock start times are insufficient proof
+of PID reuse: Emacs reconstructs them and successive readings can differ."
   (let ((pid (plist-get owner :pid))
-        (start (plist-get owner :start)))
+        (start (plist-get owner :start))
+        (ticks (let ((value (plist-get owner :start-ticks)))
+                 (and (stringp value) (string-match-p "\\`[0-9]+\\'" value) value))))
     (when (and (equal (plist-get owner :host) (system-name))
                (equal (plist-get owner :uid) (user-uid))
-               (integerp pid) (> pid 0) (numberp start)
+               (integerp pid) (> pid 0) (or (numberp start) (stringp ticks))
                (file-directory-p "/proc/self"))
       (let* ((attrs (process-attributes pid))
-             (current (alist-get 'start attrs)))
+             (current (and ticks (harness-openrouter--process-start-ticks pid))))
         (if attrs
-            (and current (/= start (float-time current)))
+            (and ticks current (not (equal ticks current)))
           (not (file-directory-p (format "/proc/%d" pid))))))))
 
 (harness-defmethod session/recover-openrouter-send (id token)
@@ -3000,21 +3032,29 @@ buys is a deliberate same-pin retry, never automatic movement."
     recovered))
 
 (defun harness-openrouter--recover-orphan (session evidence)
-  "Recover SESSION's in-flight EVIDENCE when its owner is proven dead.
+  "Recover SESSION's in-flight EVIDENCE when the send is proven over.
 Return the evidence to send under: EVIDENCE itself while a request may
-still be in flight, or the recovered one when the process that sent it
-is gone.  A marker whose owner is alive, another host's, or cannot be
-verified dead is left alone -- an unproven orphan is not a licence to
-send twice.  The recovered record is written before the send it allows,
+still be in flight, or the recovered one when its owner is gone or this
+process observed that exact request's terminal callback.  Without that
+proof a marker whose owner is alive, another host's, or cannot be verified
+dead is left alone: an unproven orphan is not a licence to send twice.
+The recovered record is written before the send it allows,
 so a crash during that send cannot lose the audit."
-  (let ((token (plist-get evidence :inflight)))
-    (if (and token (harness-openrouter--owner-dead-p (plist-get evidence :owner)))
+  (let* ((id (plist-get session :id))
+         (token (plist-get evidence :inflight))
+         (owner (plist-get evidence :owner))
+         (completed (and token
+                         (equal owner (harness-openrouter--owner))
+                         (equal (gethash id harness-openrouter--completed-sends)
+                                (list token owner)))))
+    (if (and token (or completed (harness-openrouter--owner-dead-p owner)))
         (let ((recovered (harness-openrouter--recovered-evidence
-                          evidence token "owner-exited")))
+                          evidence token (if completed "request-ended" "owner-exited"))))
           (harness-call 'session/set-ext (plist-get session :id)
                         harness-openrouter--send-key recovered nil t)
-          (harness-log 'info "openrouter: %s recovered orphaned dispatch %s from exited owner"
-                       (plist-get session :id) token)
+          (when completed (remhash id harness-openrouter--completed-sends))
+          (harness-log 'info "openrouter: %s recovered ended dispatch %s (%s)"
+                       id token (if completed "request ended" "owner exited"))
           recovered)
       evidence)))
 
@@ -3046,21 +3086,36 @@ but not a later deliberate retry of the same endpoint."
       (if (plist-get before :inflight)
           (progn
             (harness-openrouter--refuse id on-event
-                                       '(routing-inflight . "another substantive request is still in flight"))
+                                        '(routing-inflight . "another substantive request is still in flight"))
             (list :cancel #'ignore))
         (cl-labels
-            ((finish (uncertain)
-               (let* ((live (harness-call 'session/get id))
-                      (current (harness-openrouter--send-evidence live)))
-                 (when (equal token (plist-get current :inflight))
-                   (harness-call 'session/set-ext id harness-openrouter--send-key
-                                 (list :state "sent" :at (float-time)
-                                       :sent-at (plist-get stamp :at)
-                                       :owner (plist-get stamp :owner)
-                                       :recoveries (plist-get before :recoveries)
-                                       :model (plist-get stamp :model) :slug (plist-get stamp :slug)
-                                       :partial (and uncertain t))
-                                 nil t)))))
+            ((finish (uncertain &optional terminal)
+               ;; Completion must reach the caller even if the disk cannot
+               ;; record it.  Retain exact local proof before trying the
+               ;; write, so a later same-pin send can repair that marker.
+               ;; Absence from this table never proves a request ended.
+               (when terminal
+                 (puthash id (list token (plist-get stamp :owner))
+                          harness-openrouter--completed-sends))
+               (condition-case err
+                   (progn
+                     (let* ((live (harness-call 'session/get id))
+                            (current (harness-openrouter--send-evidence live)))
+                       (when (equal token (plist-get current :inflight))
+                         (harness-call 'session/set-ext id harness-openrouter--send-key
+                                       (list :state "sent" :at (float-time)
+                                             :sent-at (plist-get stamp :at)
+                                             :owner (plist-get stamp :owner)
+                                             :recoveries (plist-get before :recoveries)
+                                             :model (plist-get stamp :model) :slug (plist-get stamp :slug)
+                                             :partial (and uncertain t))
+                                       nil t)))
+                     (when (equal (car (gethash id harness-openrouter--completed-sends)) token)
+                       (remhash id harness-openrouter--completed-sends)))
+                 (error
+                  (harness--report-error err "openrouter dispatch completion")
+                  (harness-log 'error "openrouter: %s could not persist dispatch completion: %s"
+                               id (harness-error-short-message err))))))
           (condition-case err
               (let* ((handle
                       (harness-openai--complete
@@ -3093,7 +3148,7 @@ but not a later deliberate retry of the same endpoint."
                                                           (not (or (harness-openrouter--not-routing-refusal harness-openrouter-routing)
                                                                    (harness-openrouter--policy-changed-refusal authority harness-openrouter-routing)
                                                                    (harness-openrouter--pin-refusal authority (plist-get request :openrouter-route)
-                                                                                                     (gethash (plist-get authority :model) harness-openrouter--catalogue))))))
+                                                                                                    (gethash (plist-get authority :model) harness-openrouter--catalogue))))))
                                            (error "Routing authority changed during transport admission"))))))
                         :on-event
                         (lambda (event)
@@ -3102,7 +3157,7 @@ but not a later deliberate retry of the same endpoint."
                           (when (eq (plist-get event :type) 'done)
                             (finish (or (eq (plist-get event :stop-reason) 'cancelled)
                                         (and (eq (plist-get event :stop-reason) 'error)
-                                             (or partial (plist-get before :partial))))))
+                                             (or partial (plist-get before :partial)))) t))
                           (funcall on-event event)))))
                      (cancel (plist-get handle :cancel)))
                 (plist-put (copy-sequence handle) :cancel
