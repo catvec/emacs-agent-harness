@@ -1956,7 +1956,15 @@ the payload)."
         ;; request is handed to the provider, and nothing says yet whether
         ;; a model read any of it.
         (harness-agent--receipt-send turn)
-        (setf (harness-agent-turn-handle turn) (harness-call 'provider/complete request)))))))
+        ;; The callback can end the turn before complete returns its handle.
+        ;; Do not cancel a previous step's handle in that window, or leave
+        ;; this request alive once its owner has already ended.
+        (setf (harness-agent-turn-handle turn) nil)
+        (let ((handle (harness-call 'provider/complete request)))
+          (setf (harness-agent-turn-handle turn) handle)
+          (unless (harness-agent--current-p turn)
+            (harness-agent--try "cancelling a request returned after its turn ended"
+              (when-let* ((cancel (plist-get handle :cancel))) (funcall cancel))))))))))
 
 (defun harness-agent--add-step-usage (sid ev)
   "Add EV, the usage of an attempt at the open step of SID, to that step's own.
@@ -2181,9 +2189,25 @@ stamp the turn's own requests made (`cache-stamp')."
         (harness-agent--try (format "recording the usage of the turn a tool ended in %s" sid)
           (harness-agent--add-usage sid ev model))))))
 
+(defun harness-agent--valid-event-p (ev)
+  "Non-nil when EV's stream data is usable by the agent.
+Malformed provider data is skipped; an internal consumer failure while
+processing valid data instead terminates the turn.  Tool arguments are
+validated by the tools layer, which returns an error result for them."
+  (and (proper-list-p ev) (cl-evenp (length ev))
+       (pcase (plist-get ev :type)
+         ((or 'text 'thinking) (stringp (plist-get ev :delta)))
+         ('usage (cl-every (lambda (key)
+                             (let ((value (plist-get ev key)))
+                               (or (null value) (and (numberp value) (>= value 0)))))
+                           '(:input :output :cache-read :cache-write :cost :context)))
+         (_ t))))
+
 (defun harness-agent--on-event (turn ev &optional model)
   "Deliver EV to TURN without losing turn completion on a consumer failure."
-  (harness-agent--guard turn (harness-agent--dispatch-event turn ev model)))
+  (if (harness-agent--valid-event-p ev)
+      (harness-agent--guard turn (harness-agent--dispatch-event turn ev model))
+    (harness-log 'warn "agent: ignored a malformed provider event")))
 
 (defun harness-agent--dispatch-event (turn ev &optional model)
   "Handle EV from TURN's provider; late events of a finished turn are dropped.

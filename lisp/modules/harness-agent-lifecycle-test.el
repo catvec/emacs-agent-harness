@@ -163,5 +163,21 @@
       (harness-test-await (harness-then follow (lambda (_) t)))
       (should (= 1 gates)))))
 
+(ert-deftest harness-agent-lifecycle-synchronous-failure-cancels-returned-handle ()
+  (harness-agent-lifecycle-test-with
+    (let ((call (symbol-function 'harness-call)) (cancelled 0))
+      (cl-letf (((symbol-function 'harness-call)
+                 (lambda (name &rest args)
+                   (pcase name
+                     ('provider/complete
+                      (funcall (plist-get (car args) :on-event) '(:type hint :text "trigger"))
+                      (list :cancel (lambda () (cl-incf cancelled))))
+                     ('session/hint (error "synchronous callback failed"))
+                     (_ (apply call name args))))))
+        (let ((promise (harness-call 'agent/prompt sid "start")))
+          (should (eq 'error (plist-get (harness-test-await promise) :stop-reason)))
+          (should (= 1 cancelled))
+          (should-not (harness-agent-running-p sid)))))))
+
 (provide 'harness-agent-lifecycle-test)
 ;;; harness-agent-lifecycle-test.el ends here
