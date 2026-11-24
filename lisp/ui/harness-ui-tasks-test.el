@@ -3390,6 +3390,35 @@ RET there would push a button point was never on."
       (should (= (point) harness-ui-tasks--list-end))
       (should (string-search "New task" (harness-ui-tasks-test--line))))))
 
+(ert-deftest harness-ui-tasks-a-load-failure-offers-retry ()
+  "The board says what failed and offers to load it again.
+The harness is slow or gone, the task list never arrives, and the line
+above the box is where the reader looks: it carries the button, and
+pushing it loads the board again."
+  (harness-ui-tasks-test-with
+    (with-current-buffer board
+      (harness-test-wait (lambda () harness-ui-tasks--settings) 5 "the settings")
+      (cl-letf (((symbol-function 'harness-ui-tasks--fetch) (lambda (&rest _) nil))
+                ((symbol-function 'harness-ui-refresh-sessions) #'ignore))
+        (setq harness-ui-tasks--error "Loading tasks failed: Connection closed")
+        (harness-ui-tasks--render-tail)
+        (let* ((line (save-excursion
+                       (goto-char harness-ui-tasks--list-end)
+                       (forward-line 0)
+                       (harness-ui-tasks-test--line)))
+               (retry (save-excursion
+                        (goto-char harness-ui-tasks--list-end)
+                        (forward-line 0)
+                        (text-property-search-forward 'harness-task-button 'retry #'eq))))
+          ;; The failure's own words, then the button, on the one line.
+          (should (equal "  Loading tasks failed: Connection closed  [Retry]" line))
+          (should retry)
+          ;; Pushed, it loads the board again.
+          (goto-char (prop-match-beginning retry))
+          (push-button (point))
+          (should-not harness-ui-tasks--error)
+          (should (string-search "New task" (harness-ui-tasks-test--line))))))))
+
 (ert-deftest harness-ui-tasks-click-pushes-the-button ()
   "Any click on a button pushes it once, and leaves point there.
 A slow click, or a double click's second, used to reach the board's own

@@ -372,6 +372,21 @@ stands for its socket, and what `authenticate' waits for is the promise."
     (should-not harness-acp-remote)
     (should-not harness-acp-remote--resume-timer)))
 
+(ert-deftest harness-ui-acp-remote-a-page-that-cannot-load-offers-retry ()
+  "A page whose status never arrived says what failed, and offers to ask again."
+  (harness-ui-acp-remote-test-with-held-port
+    (harness-ui-acp-remote-test-open)
+    (with-current-buffer harness-ui-acp-remote-buffer-name
+      (setq harness-ui-acp-remote--status nil
+            harness-ui-acp-remote--error "Connection closed")
+      (harness-ui-acp-remote--render)
+      (should (string-match-p
+               (regexp-quote "This harness cannot serve other devices: Connection closed  [Retry]")
+               (buffer-substring-no-properties (point-min) (point-max))))
+      (should (equal "Load the server again"
+                     (get-text-property (string-match (regexp-quote "[Retry]") (buffer-string))
+                                        'help-echo (buffer-string)))))))
+
 (ert-deftest harness-ui-acp-remote-try-now-serves-once-the-port-is-free ()
   "While the harness waits to serve, [try now] starts the listener and the page says it is kept."
   (harness-ui-acp-remote-test-with-held-port

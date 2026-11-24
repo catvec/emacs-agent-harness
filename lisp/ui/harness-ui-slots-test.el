@@ -755,6 +755,13 @@ A tool row's key names when its call began, so it is found by its start."
         (should-not harness-ui-slots--loading)
         (should (string-match-p "Could not load the task slots: Method not found: task/slots"
                                 (buffer-string)))
+        ;; And offers to load them again, in the button every view uses.
+        (should (string-match-p
+                 (regexp-quote "Could not load the task slots: Method not found: task/slots  [Retry]")
+                 (buffer-string)))
+        (should (equal "Load the task slots again"
+                       (get-text-property
+                        (string-match (regexp-quote "[Retry]") (buffer-string)) 'help-echo (buffer-string))))
         (should-not (string-match-p "loading…" (buffer-string))))
       ;; A later answer replaces it.
       (setq harness-ui-slots-test--answer (list 'data (harness-ui-slots-test--data)))

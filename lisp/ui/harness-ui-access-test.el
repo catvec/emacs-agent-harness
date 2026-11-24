@@ -617,6 +617,51 @@ one in effect is no button."
     ;; Where a click left point, the redraw leaves it: not at the top.
     (should (> (point) (harness-ui-access--find-anchor '(section . settings))))))
 
+(ert-deftest harness-ui-access-a-choice-shows-held-while-its-request-waits ()
+  "A choice pushed on the page reads held down until the harness answers.
+The page is where the user changes the session's settings, and on a
+harness that is slow a click used to look as though nothing happened
+until the redraw came: the choice is drawn held down from the click,
+keeps its words and its place, and its tooltip says what it waits for,
+until the answer lets it go."
+  (harness-ui-access-test-with
+    (harness-ui-access-test-open sid)
+    (let* ((asked nil)
+           (answer nil)
+           (key (list 'access-choice 'network "Off"))
+           (at (lambda (prop)
+                 (save-excursion
+                   (goto-char (harness-ui-access--find-anchor '(setting . network)))
+                   (search-forward "Off")
+                   (get-text-property (1- (point)) prop)))))
+      ;; The harness has the request, but this Emacs hears nothing until
+      ;; the test answers: `harness-ui--send' holds it, as a slow harness
+      ;; does.
+      (cl-letf (((symbol-function 'harness-ui--send)
+                 (lambda (method params)
+                   (push (list method params) asked)
+                   (setq answer (harness-make-promise))
+                   answer)))
+        (harness-ui-access-test-click "Off" (harness-ui-access--find-anchor '(setting . network)))
+        ;; It went out, and the page draws the choice held down.
+        (should (equal 1 (length asked)))
+        (should (equal "_harness/access/set-network" (car (car asked))))
+        (should (harness-ui-held-p key))
+        (should (eq 'harness-ui-button-held-face (funcall at 'face)))
+        (should (string-match-p "waiting for the harness" (funcall at 'help-echo)))
+        ;; Its words are its own, so the row still reads as it did.
+        (should (equal "Network (x) On ( ) Off" (harness-ui-access-test-setting 'network)))
+        ;; The harness answers, and the page draws the choice as the one
+        ;; in effect: the answer to the request makes it ask again, and
+        ;; the setting is off now.
+        (harness-call 'access/set-network sid :false)
+        (harness-resolve answer '(:network nil))
+        (harness-test-wait (lambda () (not (harness-ui-held-p key))) 5 "the choice let go"))
+      ;; The page asks the harness again for what it draws, now that the
+      ;; request is over: the choice in effect is the one just taken.
+      (harness-ui-access-test-wait-setting 'network "\\`Network ( ) On (x) Off")
+      (should-not (harness-ui-held-p key)))))
+
 (ert-deftest harness-ui-access-settings-a-policy-fixes-leave-no-choice ()
   "A setting an administrator's policy sets, or another module's policy fixes,
 shows the choice in effect and offers no other: nothing is a button, and the
@@ -1640,6 +1685,14 @@ the answer made in the chat's.  The demo provider is the cheap model."
       (harness-ui-access--render)
       (should (equal "Secret status unavailable\n[Refresh]\n" (harness-ui-access-test-text)))
       (should (equal "Secret status refresh (g)" (harness-ui-access-test-help "[Refresh]")))
+      ;; The rest of the page says what failed and offers to load it again.
+      (setq harness-ui-access--page 'overview)
+      (harness-ui-access--render)
+      (should (string-match-p
+               (regexp-quote "Access unreadable: backend payload  [Retry]")
+               (harness-ui-access-test-text)))
+      (should (equal "Load the access again" (harness-ui-access-test-help "[Retry]")))
+      (setq harness-ui-access--page 'secrets)
       (setq harness-ui-access--describe nil)
       (cl-letf (((symbol-function 'harness-ui-session) (lambda (_) nil)))
         (should (equal " Jail & permissions: Secrets"

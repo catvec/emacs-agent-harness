@@ -221,7 +221,25 @@ command asks for is what is looked at."
                                             :error "unknown-id: no board b-fixture")))
       (should (string-match-p "unknown-id: no board b-fixture" text))
       (should (string-match-p "unknown-id: no board b-fixture"
-                              (harness-ui-board-test-header))))))
+                              (harness-ui-board-test-header)))
+      ;; The page offers to load the board again, in the body and the header.
+      (should (string-match-p (regexp-quote "unknown-id: no board b-fixture  [Retry]") text))
+      (should (string-match-p (regexp-quote "unknown-id: no board b-fixture [Retry]")
+                              (harness-ui-board-test-header)))
+      (with-current-buffer (harness-ui-board--board-buffer "b-fixture")
+        (should (equal "Load the board again"
+                       (get-text-property (string-match (regexp-quote "[Retry]") (buffer-string))
+                                          'help-echo (buffer-string))))))))
+
+(ert-deftest harness-ui-boards-a-failure-offers-retry ()
+  "The list of boards that could not be loaded offers to load it again."
+  (harness-ui-board-test-with
+    (let ((text (harness-ui-board-test-draw-list :boards nil :loaded t :error "no connection")))
+      (should (string-match-p (regexp-quote "no connection  [Retry]") text)))
+    (with-current-buffer (harness-ui-board--list-buffer)
+      (should (equal "Load the boards again"
+                     (get-text-property (string-match (regexp-quote "[Retry]") (buffer-string))
+                                        'help-echo (buffer-string)))))))
 
 (ert-deftest harness-ui-board-a-snapshot-without-an-svg-display-says-which ()
   "An Emacs that cannot draw the snapshot says so in a phrase, not a sentence."

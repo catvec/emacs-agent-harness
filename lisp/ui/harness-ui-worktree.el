@@ -311,7 +311,9 @@ for a remote repository, which the library leaves alone."
      "")
    (harness-ui-worktree--segment "[g]" #'harness-ui-worktree-refresh "Refresh (g)")
    (cond (harness-ui-worktree--loading (propertize " loading…" 'face 'harness-dim-face))
-         (harness-ui-worktree--error (propertize (format " error: %s" harness-ui-worktree--error) 'face 'error))
+         (harness-ui-worktree--error
+          (concat (propertize (format " error: %s" harness-ui-worktree--error) 'face 'error)
+                  (harness-ui-retry-header #'harness-ui-worktree-refresh "List the worktrees again")))
          (t ""))
    (if-let* ((q harness-ui-worktree--queue))
        (propertize (format " merge queue → %s: %s"
@@ -341,10 +343,13 @@ for every row."
   (tabulated-list-print t t)
   (when (and (null harness-ui-worktree--worktrees) (= (point-min) (point-max)))
     (let ((inhibit-read-only t))
-      (insert (propertize (cond (harness-ui-worktree--loading "Listing worktrees…")
-                                (harness-ui-worktree--error (format "Worktree list failure: %s" harness-ui-worktree--error))
-                                (t "No worktrees"))
-                          'face (if harness-ui-worktree--error 'error 'harness-dim-face))
+      (insert (if harness-ui-worktree--error
+                  (harness-ui-failure-string
+                   (propertize (format "Worktree list failure: %s" harness-ui-worktree--error)
+                               'face 'error)
+                   #'harness-ui-worktree-refresh "List the worktrees again")
+                (propertize (if harness-ui-worktree--loading "Listing worktrees…" "No worktrees")
+                            'face 'harness-dim-face))
               "\n"))))
 
 (defun harness-ui-worktree--status-schedule-redraw (buffer)

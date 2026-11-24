@@ -3578,6 +3578,233 @@ button in that string, and selects its window without moving point."
         (if action (funcall action) (if (get-text-property (point) 'button) (push-button (point))
                                       (user-error "No button here")))))))
 
+;;;; Failures a view can try again
+
+;; A view that loads something over ACP fails when the harness is slow,
+;; restarting or gone: the request never answers, or answers with an
+;; error.  What failed shows in the view, and beside it a [Retry] that
+;; asks again, so the reader need not find the command, nor wonder
+;; whether the view can be loaded again at all.  Every view says it this
+;; way, so the same word sits in the same place in each of them.
+
+(defconst harness-ui-retry-label "[Retry]"
+  "The button of a failure that can be tried again.")
+
+(defun harness-ui-retry (reload &optional help)
+  "Return the [Retry] button, a string that runs RELOAD.
+RELOAD is a function of no arguments that loads the thing again, or a
+command, which runs as its key does.  HELP is the button's tooltip, the
+act in the imperative -- \"Load the tasks again\" -- which says what a
+click does; without it, \"Ask again\"."
+  (harness-ui-action-button harness-ui-retry-label
+                            (lambda () (harness-ui--run-action reload))
+                            :help (or help "Ask again")))
+
+(defun harness-ui--run-action (action)
+  "Run ACTION, a function of no arguments or a command, as a button does.
+A command reads what it needs from its `interactive' form, as its key
+runs it; a plain function is called."
+  (if (and (symbolp action) (commandp action))
+      (call-interactively action)
+    (funcall action)))
+
+(defun harness-ui-retry-header (reload &optional help)
+  "Return [Retry] for a header line or a mode line, which runs RELOAD.
+A header line takes its keys from `local-map', which is what its other
+buttons bind (`harness-ui-mouse-keymap'), so RELOAD is a command that
+runs as its key does.  HELP is its tooltip."
+  (propertize (concat " " harness-ui-retry-label)
+              'face 'button 'mouse-face 'mode-line-highlight 'pointer 'hand
+              'help-echo (or help "Ask again")
+              'local-map (harness-ui-mouse-keymap reload)))
+
+(defun harness-ui-failure-string (text reload &optional help)
+  "Return TEXT, a failure a view shows, then the [Retry] button for RELOAD.
+TEXT is what the view says failed, in its own words; the button follows
+it, two spaces apart, as the buttons of a message follow its state, and
+RELOAD and HELP are as `harness-ui-retry' takes them."
+  (concat (string-trim-right (or text "")) "  "
+          (harness-ui-retry reload help)))
+
+;;;; A button that waits for its request
+
+;; A button that asks the harness something shows that it did: held down
+;; from the click until the request it made is answered or has failed.
+;; The task board draws its buttons so (`harness-ui-tasks--press', the
+;; worktree list its own); this is the same thing for the views that
+;; draw their buttons as plain strings, where a click otherwise looks as
+;; though nothing happened until the harness, slow or busy, answers.
+
+(defvar harness-ui-held nil
+  "Buttons held down while the request they made has no answer yet.
+A hash table, or nil.  It is global because the answer arrives wherever
+the event loop is; the key names the button -- the view and the thing
+the button is on -- and the value is a plist with `:at', the time it was
+pushed, and `:requests', how many of its requests wait.")
+
+(defconst harness-ui-held-min-seconds 0.25
+  "How long a held button stays down, at least, after it was pushed.
+A request answered in a few milliseconds still shows that it went out.")
+
+(defconst harness-ui-held-max-seconds 120
+  "How long a held button may stay down when no answer comes.
+An answer lost to a connection that went away must not leave a button
+stuck; a request that runs longer than this, a compaction say, says so
+in a view of its own.")
+
+(defface harness-ui-button-held-face
+  '((((type graphic) (background light))
+     :foreground "grey35" :background "grey85"
+     :box (:line-width (-1 . -1) :style pressed-button))
+    (((type graphic) (background dark))
+     :foreground "grey75" :background "grey30"
+     :box (:line-width (-1 . -1) :style pressed-button))
+    (t :inherit shadow :inverse-video t))
+  "A button that was pushed and waits for the harness's answer.
+It reads as held down, as the task board's buttons do
+\(`harness-task-button-pressed-face'): dim grey text in a slot of its
+own, sunk, in a graphic frame, and no underline, as it takes no click."
+  :group 'harness-ui)
+
+(defun harness-ui-held-p (key)
+  "Non-nil when the button KEY is held down, waiting for an answer.
+A button held longer than `harness-ui-held-max-seconds' -- an answer
+that never came, a connection that went away -- is let go here, so a
+view that asks whether to draw it down cannot draw a button stuck."
+  (when (and harness-ui-held (gethash key harness-ui-held))
+    (harness-ui--held-release-stale)
+    (and (gethash key harness-ui-held) t)))
+
+(defun harness-ui--held-release-stale ()
+  "Let go of the buttons held down longer than they may be.
+That is `harness-ui-held-max-seconds': an answer that never came must
+not leave a button stuck."
+  (when (and harness-ui-held (> (hash-table-count harness-ui-held) 0))
+    (let ((now (float-time)) stale)
+      (maphash (lambda (key state)
+                 (when (> (- now (plist-get state :at)) harness-ui-held-max-seconds)
+                   (push key stale)))
+               harness-ui-held)
+      (dolist (key stale) (remhash key harness-ui-held)))))
+
+(defun harness-ui--held-hold (key)
+  "Hold the button KEY down, and return its state.
+The state keeps the buffer the push came from, so the view is drawn
+there again when the button is let go, whichever buffer is current when
+the answer, or the timer that lets it go, arrives."
+  (unless harness-ui-held (setq harness-ui-held (make-hash-table :test #'equal)))
+  (harness-ui--held-release-stale)
+  (puthash key (list :at (float-time) :requests 0 :buffer (current-buffer))
+           harness-ui-held))
+
+(defun harness-ui--held-let-go (key at)
+  "Let the button KEY go, when it is still held down from the push at AT.
+A button pushed again meanwhile has another AT and stays down.  The view
+is drawn again where the button was pushed, which is not where a timer
+that lets it go runs."
+  (let ((state (and harness-ui-held (gethash key harness-ui-held))))
+    (when (and state (eql (plist-get state :at) at))
+      (remhash key harness-ui-held)
+      (let ((buffer (plist-get state :buffer)))
+        (if (buffer-live-p buffer)
+            (with-current-buffer buffer (harness-ui--held-changed))
+          (harness-ui--held-changed))))))
+
+(defun harness-ui--held-settle (key)
+  "Let the button KEY go once nothing it asked for is left to wait for.
+No sooner than `harness-ui-held-min-seconds' after it was pushed."
+  (let ((state (and harness-ui-held (gethash key harness-ui-held))))
+    (when (and state (<= (plist-get state :requests) 0))
+      (let* ((at (plist-get state :at))
+             (left (- (+ at harness-ui-held-min-seconds) (float-time))))
+        (if (> left 0)
+            (run-at-time left nil (lambda () (harness-ui--held-let-go key at)))
+          (harness-ui--held-let-go key at))))))
+(defun harness-ui-held-button (label key action &optional help face)
+  "Return a button LABEL, drawn held down while its request waits.
+KEY names it for `harness-ui-held' -- the view and what the button is on,
+so two buttons of one view do not hold each other down.  ACTION, a
+function of no arguments, runs on a click or RET, and the button is held
+down until the requests it makes through `harness-ui-request-held' are
+answered or have failed.  HELP is its tooltip, FACE its face when it is
+not held (a button's, when nil).
+
+Held down, the button keeps its action -- a view redrawn while it waits
+is drawn again from this, and a click must still find the button -- but
+pushing it again runs nothing (`harness-ui--held-press' says it is still
+working), and it has the look of a button that is down: the same label,
+the same width, no hover, and a tooltip that says what it waits for."
+  (let ((down (harness-ui-held-p key))
+        (s (copy-sequence label)))
+    (add-text-properties
+     0 (length s)
+     (list 'face (if down 'harness-ui-button-held-face (or face 'button))
+           'font-lock-face (if down 'harness-ui-button-held-face (or face 'button))
+           'mouse-face (unless down 'highlight)
+           'follow-link t 'pointer (unless down 'hand)
+           'help-echo (if down
+                          (format "%s · waiting for the harness" (or help "Working"))
+                        help)
+           'harness-ui-held (and down key)
+           'harness-ui-action (lambda () (harness-ui--held-press key action))
+           'keymap (harness-ui-action-map #'harness-ui-action-push))
+     s)
+    s))
+
+(defvar harness-ui-held-changed-functions nil
+  "Functions called with no arguments when a held button is pushed or let go.
+A view that draws held buttons adds one to draw itself again, so the
+button shows down while its request waits and up once it is answered.
+`harness-ui-held-button' draws the look; this is when a view must be
+redrawn for it to show.")
+
+(defun harness-ui--held-changed ()
+  "Tell the views that a held button changed."
+  (run-hooks 'harness-ui-held-changed-functions))
+
+(defun harness-ui--held-press (key action)
+  "Push the button KEY: hold it down, then run ACTION, a function of no arguments.
+A button already down is not pushed again: a second click would run
+ACTION twice, so it says that it is still working instead."
+  (if (harness-ui-held-p key)
+      (message "Still working on that")
+    (harness-ui--held-hold key)
+    (harness-ui--held-changed)
+    (unwind-protect
+        (let ((harness-ui-held-key key))
+          (funcall action))
+      (harness-ui--held-settle key))))
+
+(defvar harness-ui-held-key nil
+  "The key of the button whose push is running, or nil.
+`harness-ui-request-held' makes the request a held button's own while
+this is bound, so the request runs with the button's context, as the
+task board's do.")
+
+(defun harness-ui-request-held (method params &optional callback on-error)
+  "Request METHOD with PARAMS, as `harness-ui-call', for the held button.
+The button named by `harness-ui-held-key' stays down until this request
+is answered, or has failed; a request made with no button held is an
+ordinary `harness-ui-call'."
+  (let* ((key harness-ui-held-key)
+         (state (and key harness-ui-held (gethash key harness-ui-held)))
+         (counted nil))
+    (when state
+      (setf (plist-get state :requests) (1+ (plist-get state :requests)))
+      (setq counted t))
+    (harness-ui-call method params
+                     (lambda (result)
+                       (when counted
+                         (setf (plist-get state :requests) (1- (plist-get state :requests)))
+                         (harness-ui--held-settle key))
+                       (when callback (funcall callback result)))
+                     (lambda (err)
+                       (when counted
+                         (setf (plist-get state :requests) (1- (plist-get state :requests)))
+                         (harness-ui--held-settle key))
+                       (if on-error (funcall on-error err)
+                         (harness-ui--report-failed method err))))))
+
 (defun harness-ui-add-session-keys (object id &optional name start end action)
   "Make OBJECT's text from START to END open session ID on a click or RET.
 OBJECT is a string or a buffer.  START and END default to the whole
@@ -6212,13 +6439,13 @@ thinking level of its own, and shares the task's other settings."
         (message "%s (%s)" label (or (if (functionp context) (funcall context key) context)
                                      "for new tasks")))
     (pcase key
-      (:model (harness-ui-call "session/set_model" (list :sessionId target :modelId value)
-                               (lambda (_) (message "%s" label))))
-      (:permission-mode (harness-ui-call "session/set_mode" (list :sessionId target :modeId value)
-                                         (lambda (_) (message "%s" label))))
-      (_ (harness-ui-call "_harness/session/update"
-                          (list :id target key (if (and (eq key :non-interactive) (not value)) :false value))
-                          (lambda (_) (message "%s" label)))))))
+      (:model (harness-ui-request-held "session/set_model" (list :sessionId target :modelId value)
+                                       (lambda (_) (message "%s" label))))
+      (:permission-mode (harness-ui-request-held "session/set_mode" (list :sessionId target :modeId value)
+                                                 (lambda (_) (message "%s" label))))
+      (_ (harness-ui-request-held "_harness/session/update"
+                                  (list :id target key (if (and (eq key :non-interactive) (not value)) :false value))
+                                  (lambda (_) (message "%s" label)))))))
 
 (defvar harness-ui-model-picker-functions nil
   "Functions that can offer a model picker instead of the default one.

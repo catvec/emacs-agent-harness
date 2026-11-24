@@ -381,9 +381,12 @@ call gets one button each, in call order."
          "Skipped checks are unverified, not supported.  A FAIL names the feature to fix or turn off; it is not a settings change.\n"
          'face 'harness-dim-face))))
     ('error
-     (propertize (format "Could not start the checks: %s\n"
-                         (or harness-ui-provider-check--error "unknown error"))
-                 'face 'harness-failure-face))))
+     (concat (harness-ui-failure-string
+              (propertize (format "Could not start the checks: %s"
+                                  (or harness-ui-provider-check--error "unknown error"))
+                          'face 'harness-failure-face)
+              #'harness-ui-provider-check-rerun "Start the checks again")
+             "\n"))))
 
 (defun harness-ui-provider-check--render ()
   "Draw the whole page, keeping point where it was if it can."

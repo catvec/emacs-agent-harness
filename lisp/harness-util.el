@@ -2506,7 +2506,12 @@ recovery for a framed protocol.  Closing the process must call
 (defun harness-process-send-eof (proc)
   "Send end-of-file to PROC once what waits to go out to it has gone.
 Synchronous and asynchronous writes both send it after their FIFO.
-Further asynchronous writes after EOF are refused."
+Further asynchronous writes after EOF are refused.  A process that has
+already gone takes no end-of-file: it exits as soon as it has read
+what it was given, so the caller's own `process-live-p' check races
+with it (`harness-run-command' runs `git', which does), and
+`process-send-eof' would signal \"Process ... not running\" for a
+command that succeeded."
   (let ((state (process-get proc 'harness--send))
         (async (process-get proc 'harness--async-send)))
     (cond
@@ -2516,7 +2521,7 @@ Further asynchronous writes after EOF are refused."
           (setf (harness--async-send-eof async) (+ (float-time) harness-process-send-timeout)))
         (condition-notify (harness--async-send-ready async))))
      (state (setf (harness--send-eof state) t))
-     (t (process-send-eof proc)))))
+     ((process-live-p proc) (condition-case nil (process-send-eof proc) (error nil))))))
 
 (defun harness-process-send-close (proc)
   "Close PROC after its asynchronous FIFO and end-of-file have gone out.

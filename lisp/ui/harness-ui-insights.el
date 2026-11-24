@@ -821,7 +821,10 @@ Only for a report of every project."
     (setq header-line-format (harness-ui-insights--header))
     (cond
      ((and (null data) harness-ui-insights--error)
-      (insert "\n " (propertize (format "Report failure · %s" harness-ui-insights--error) 'face 'error) "\n"))
+      (insert "\n " (harness-ui-failure-string
+                      (propertize (format "Report failure · %s" harness-ui-insights--error) 'face 'error)
+                      #'harness-ui-insights-refresh "Gather the report again")
+              "\n"))
      ((null data)
       (insert "\n " (propertize "Gathering insights…" 'face 'harness-usage-heading-face) "\n\n "
               (propertize "Background read · transcripts, usage and tasks · Emacs stays yours"

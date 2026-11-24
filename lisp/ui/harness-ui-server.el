@@ -308,7 +308,8 @@ That is its window's, never less than MINIMUM, 40 by default."
             (propertize "connected" 'face 'harness-success-face)
           (propertize "not connected" 'face 'harness-dim-face))
         (if harness-ui-server--error
-            (propertize (format "  %s" harness-ui-server--error) 'face 'harness-failure-face)
+            (concat (propertize (format "  %s" harness-ui-server--error) 'face 'harness-failure-face)
+                    (harness-ui-retry-header #'harness-ui-server-refresh "Load the server again"))
           "")))
 
 (defun harness-ui-server--render ()

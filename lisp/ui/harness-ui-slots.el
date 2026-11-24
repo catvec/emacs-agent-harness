@@ -1251,7 +1251,9 @@ awaited, or why it did not come."
     (concat (harness-ui-slots--first-line nil harness-ui-slots--dir)
             "\n "
             (if (and harness-ui-slots--error (not harness-ui-slots--loading))
-                (propertize (format "Could not load the task slots: %s" harness-ui-slots--error) 'face 'error)
+                (harness-ui-failure-string
+                 (propertize (format "Could not load the task slots: %s" harness-ui-slots--error) 'face 'error)
+                 #'harness-ui-slots-refresh "Load the task slots again")
               (harness-ui-slots--dim "loading…"))
             "\n"))))
 

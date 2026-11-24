@@ -474,8 +474,14 @@ is the page's to show."
       (should (member "Sessions none [Session list]"
                       (harness-ui-server-test-copy-lines (buffer-string))))
       (harness-ui-server--failed (current-buffer) '(error "The connection was refused."))
-      (should (equal " Server server.example.org:4276  not connected  The connection was refused."
-                     (harness-ui-server-test-header))))))
+      ;; The failure offers to load the server again, beside it in the header.
+      (should (equal " Server server.example.org:4276  not connected  The connection was refused. [Retry]"
+                     (harness-ui-server-test-header)))
+      (let ((header (mapconcat (lambda (part) (format "%s" part))
+                               (harness-ui-server--header) "")))
+        (should (equal "Load the server again"
+                       (get-text-property (string-match (regexp-quote "[Retry]") header)
+                                          'help-echo header)))))))
 
 (ert-deftest harness-ui-server-command-copy-inventory ()
   "Echo-area copy and local command errors are noun labels too."

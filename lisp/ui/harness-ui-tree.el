@@ -486,7 +486,9 @@ keys least used ([n/p lane], [TAB expand], [b btw], [c checkout],
                  15)
            (cond (harness-ui-tree--loading (list (propertize "  loading…" 'face 'harness-dim-face) 90))
                  (harness-ui-tree--error
-                  (list (concat "  " (propertize (format "error: %s" harness-ui-tree--error) 'face 'error)) 90)))
+                  (list (concat "  " (propertize (format "error: %s" harness-ui-tree--error) 'face 'error)
+                                (harness-ui-retry-header #'harness-ui-tree-refresh "Load the tree again"))
+                        90)))
            (funcall btn "[RET open]" #'harness-ui-tree-open "Open the session at this node" 70)
            (funcall btn "[c checkout]" #'harness-ui-tree-checkout
                     "Move the session head to this node (time travel): the next message continues from here" 45)
@@ -529,7 +531,10 @@ Every window showing the buffer keeps its own row too."
      ((and (null harness-ui-tree--data) harness-ui-tree--loading)
       (insert (propertize "Loading the conversation tree…\n" 'face 'harness-dim-face)))
      ((and (null harness-ui-tree--data) harness-ui-tree--error)
-      (insert (propertize (format "Could not load the tree: %s\n" harness-ui-tree--error) 'face 'error)))
+      (insert (harness-ui-failure-string
+               (propertize (format "Could not load the tree: %s" harness-ui-tree--error) 'face 'error)
+               #'harness-ui-tree-refresh "Load the tree again")
+              "\n"))
      ((null rows)
       (insert (propertize "This session has no messages yet.\n" 'face 'harness-dim-face)))
      (t (dolist (row rows) (harness-ui-tree--insert-row row nlanes width))))

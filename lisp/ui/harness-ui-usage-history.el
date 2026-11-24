@@ -83,6 +83,12 @@
     (when help (setq text (propertize text 'help-echo (harness-ui-one-line help))))
     (insert " " text "\n")))
 
+(defun harness-ui-usage-history--retry-line ()
+  "Insert the line under a failure that offers [Retry].
+Its own line, not `harness-ui-usage-history--line': the button keeps
+its width however narrow the window is."
+  (insert " " (harness-ui-retry #'harness-ui-usage-history-refresh "Load the history again") "\n"))
+
 (defun harness-ui-usage-history--heading (text)
   "Insert section heading TEXT."
   (insert "\n")
@@ -282,6 +288,7 @@
      (harness-ui-usage-history--loading (harness-ui-usage-history--line "Loading history…" 'harness-dim-face))
      (harness-ui-usage-history--error
       (harness-ui-usage-history--line "History unavailable" 'harness-failure-face)
+      (harness-ui-usage-history--retry-line)
       (harness-ui-usage-history--line harness-ui-usage-history--error 'harness-dim-face))
      (report
       (let ((aggregate (if harness-ui-usage-history--selected

@@ -279,7 +279,15 @@
       (harness-insights)
       (with-current-buffer harness-ui-insights--buffer-name
         (harness-test-wait (lambda () harness-ui-insights--error) 10 "the error")
-        (should (string-match-p "Report failure · No transcripts here" (harness-ui-insights-test-text)))))))
+        (should (string-match-p "Report failure · No transcripts here" (harness-ui-insights-test-text)))
+        ;; The way to gather it again follows the failure.
+        (should (string-match-p (regexp-quote "Report failure · No transcripts here  [Retry]")
+                                (harness-ui-insights-test-text)))
+        ;; The rendered text alone carries no properties: the buffer's does.
+        (should (equal "Gather the report again"
+                       (get-text-property
+                        (string-match (regexp-quote "[Retry]") (buffer-string))
+                        'help-echo (buffer-string))))))))
 
 (ert-deftest harness-ui-insights-words ()
   "Shares, counts and tasks read as sentences."

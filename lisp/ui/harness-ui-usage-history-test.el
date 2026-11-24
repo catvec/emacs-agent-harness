@@ -57,7 +57,12 @@
     (should (equal (harness-history-ui-test-text) "\n Historical token mix\n Loading history…\n"))
     (setq harness-ui-usage-history--loading nil harness-ui-usage-history--error "transport-data")
     (harness-ui-usage-history--render)
-    (should (equal (harness-history-ui-test-text) "\n Historical token mix\n History unavailable\n transport-data\n"))
+    (should (equal (harness-history-ui-test-text)
+                   "\n Historical token mix\n History unavailable\n [Retry]\n transport-data\n"))
+    ;; The text alone carries no properties: the buffer's own does.
+    (should (equal "Load the history again"
+                   (get-text-property (string-match (regexp-quote "[Retry]") (buffer-string))
+                                      'help-echo (buffer-string))))
     (setq harness-ui-usage-history--error nil
           harness-ui-usage-history--data '(:totals (:records 0) :coverage nil))
     (harness-ui-usage-history--render)

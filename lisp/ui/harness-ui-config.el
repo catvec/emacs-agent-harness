@@ -1813,8 +1813,8 @@ The sections of `harness-ui-config-sections-functions' come first."
       (cond
        ((and (null harness-ui-config--data) harness-ui-config--error)
         (insert " " (propertize (format "Could not load the settings: %s" harness-ui-config--error) 'face 'error)
-                "\n\n ")
-        (harness-ui-config--button "Retry" "Ask the harness again (g)" #'harness-ui-config-refresh)
+                "  ")
+        (harness-ui-config--button "Retry" "Load the settings again (g)" #'harness-ui-config-refresh)
         (insert "\n"))
        ((null harness-ui-config--data)
         (insert " " (propertize "Loading settings\u2026" 'face 'harness-settings-doc-face) "\n"))

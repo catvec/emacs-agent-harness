@@ -5696,6 +5696,109 @@ each time: the replies the reader asked to see stay shown."
         (should (equal '(earlier 0) (harness-chat-block-more block)))
         (should (eql 7 (harness-chat-block-shown block)))))))
 
+;;;; A message on its way
+
+;; The box gives a message up when it is sent; the harness records it as a
+;; node when its turn reaches it.  On a harness that is slow, that is a
+;; while, and the message used to be nowhere on screen: the box was empty
+;; and the transcript had nothing.  It now shows above the box, saying
+;; "sending", until the node that records it arrives.
+
+(ert-deftest harness-ui-chat-a-message-shows-as-sending-until-the-harness-has-it ()
+  "A sent message shows above the box until the harness records it.
+The request is out and the harness is slow: the box is empty, and the
+message the user wrote stands above it, drawn as the user message it
+will be, saying \"sending\".  Once the harness records it as a node of
+the transcript, it stands there and nothing waits above the box."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "sending"))
+           (buf (harness-ui-chat-test-open sid))
+           ;; The turn's request is held: the harness has the message, but
+           ;; this Emacs hears nothing until the test lets it go.
+           (held (harness-make-promise))
+           (asked nil))
+      (cl-letf (((symbol-function 'harness-ui--send)
+                 (lambda (method params)
+                   (if (equal method "session/prompt")
+                       (progn (push params asked) held)
+                     (harness-resolved nil))))
+                ;; The transcript is not fetched again while the message
+                ;; waits: the node arrives as an update, as the harness
+                ;; sends it.
+                ((symbol-function 'harness-ui-refresh-sessions) #'ignore))
+        (harness-ui-chat-test-type buf "on its way")
+        (with-current-buffer buf (harness-chat-send))
+        (with-current-buffer buf
+          ;; The box is empty, and the message stands above it.
+          (should (equal "" (harness-compose-text)))
+          (should (harness-ui-chat-test-find
+                   buf (concat harness-chat-user-label "  "
+                               (harness-ui-icon 'harness-icon-caution) " sending\n"
+                               "on its way\n")))
+          ;; It reads "sending", not "queued": it waits on the harness, not
+          ;; on the turn.
+          (should (equal "Sent · not yet recorded by the harness"
+                         (harness-ui-chat-test-prop buf "sending" 'help-echo)))
+          (should-not (harness-ui-chat-test-find buf "queued"))
+          ;; The text wears the user's face, as the message will.
+          (should (harness-ui-chat-test-prop-face buf "on its way" 'harness-user-face))
+          (should (= 1 (length harness-chat--in-flight)))
+          (should (= 1 (length asked))))
+        ;; The harness records the message: its node comes, and the
+        ;; message above the box goes with it.
+        (with-current-buffer buf
+          (harness-chat--on-node (list :id "u-sent" :kind "user" :content "on its way")))
+        (with-current-buffer buf
+          (should-not harness-chat--in-flight)
+          (should-not (harness-ui-chat-test-find buf "sending"))
+          (should (harness-ui-chat-test-find buf "on its way")))
+        ;; The request settles; nothing of the message is left above the box.
+        (harness-resolve held nil)
+        (accept-process-output nil 0.1)
+        (with-current-buffer buf
+          (should-not harness-chat--in-flight)
+          (should-not (harness-ui-chat-test-find buf "sending")))))))
+
+(ert-deftest harness-ui-chat-a-send-that-fails-stops-saying-sending ()
+  "A message the harness refuses stops waiting above the box, and says why.
+The request fails with no node to record the message: it must not read
+\"sending\" forever, so it goes, and the error block says what failed."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "refused"))
+           (buf (harness-ui-chat-test-open sid)))
+      (cl-letf (((symbol-function 'harness-ui--send)
+                 (lambda (method _params)
+                   (if (equal method "session/prompt")
+                       (harness-rejected "Connection closed")
+                     (harness-resolved nil)))))
+        (harness-ui-chat-test-type buf "never arrives")
+        (with-current-buffer buf (harness-chat-send))
+        (harness-test-wait (lambda () (with-current-buffer buf (null harness-chat--in-flight)))
+                           5 "the failed send settled")
+        (with-current-buffer buf
+          (should-not (harness-ui-chat-test-find buf "sending"))
+          ;; The failure is the error block the chat already draws.
+          (should (harness-ui-chat-test-find buf "send failed: Connection closed")))))))
+
+(ert-deftest harness-ui-chat-two-sent-messages-leave-in-their-order ()
+  "Two messages sent alike come out above the box in the order they went out.
+The harness names the node of a message its own way, so a message is
+taken out by what it says: the oldest one that matches, so the second
+keeps waiting until the second node arrives."
+  (harness-ui-chat-test-with
+    (let ((buf (harness-ui-chat-test-open (harness-ui-chat-test-session "twice"))))
+      (with-current-buffer buf
+        (harness-chat--start-sending "same words" nil)
+        (harness-chat--start-sending "same words" nil)
+        (should (= 2 (length harness-chat--in-flight)))
+        ;; The first node takes out the oldest of them.
+        (harness-chat--on-node (list :id "u-1" :kind "user" :content "same words"))
+        (should (= 1 (length harness-chat--in-flight)))
+        (should (harness-ui-chat-test-find buf "sending"))
+        (harness-chat--on-node (list :id "u-2" :kind "user" :content "same words"))
+        (should-not harness-chat--in-flight)
+        (should-not (harness-ui-chat-test-find buf "sending"))))))
+
 ;;;; Queue
 
 (ert-deftest harness-ui-chat-queue-add-edit-remove ()
@@ -10944,6 +11047,63 @@ reopen the ones they showed open, and leave closed one they showed closed."
                          5 "the shown session to reopen")
       (should (eq 'inactive (plist-get (harness-call 'session/get hidden) :status)))
       (should (eq 'inactive (plist-get (harness-call 'session/get closed) :status))))))
+
+(ert-deftest harness-ui-chat-a-load-failure-offers-retry ()
+  "A transcript that cannot be loaded says so, and offers to load it again.
+The harness stalls or goes away, the session's history never arrives, and
+the error block in place of the transcript carries the button: pressing
+it loads the session again."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "retry"))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        ;; Every request the load makes fails: the session's history never
+        ;; arrives, so the error block stands in its place.
+        (cl-letf (((symbol-function 'harness-ui-request)
+                   (lambda (&rest _) (harness-rejected "Connection closed"))))
+          (harness-chat--load)
+          (harness-test-wait (lambda () (with-current-buffer buf (not harness-chat--loading)))
+                             5 "the failed load"))
+        (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
+               (line (string-match (regexp-quote "could not load the session: Connection closed  [Retry]")
+                                   text))
+               ;; `string-match' counts from 0; the buffer's positions from 1.
+               (retry (and line (+ (point-min) (string-match (regexp-quote "[Retry]") text line)))))
+          ;; The failure's own words, then the button, on its line.
+          (should line)
+          (should (equal "Load the session again"
+                         (get-text-property retry 'help-echo (buffer-string))))
+          ;; Pressing it loads the session again: the failure goes, the
+          ;; transcript comes back.
+          (goto-char retry)
+          (call-interactively #'harness-ui-action-push)
+          (harness-test-wait (lambda () (with-current-buffer buf (not harness-chat--loading)))
+                             5 "the transcript loaded again")
+          (with-current-buffer buf
+            (should-not (string-match-p "could not load the session"
+                                        (buffer-substring-no-properties (point-min) (point-max))))))))))
+
+(ert-deftest harness-ui-chat-earlier-messages-that-fail-offer-retry ()
+  "Older history that cannot be loaded says so at the top, with [Retry].
+The echo area's line is gone by the time a reader looks at the top of
+the transcript, where the page was asked for."
+  (harness-ui-chat-test-with
+    (let* ((sid (harness-ui-chat-test-session "earlier"))
+           (buf (harness-ui-chat-test-open sid)))
+      (with-current-buffer buf
+        (cl-letf (((symbol-function 'harness-ui-request)
+                   (lambda (&rest _) (harness-rejected "Connection closed"))))
+          (harness-chat--load-earlier)
+          (harness-test-wait (lambda () (with-current-buffer buf (not harness-chat--fetching)))
+                             5 "the failed page"))
+        (should harness-chat--history-error)
+        (let* ((text (buffer-substring-no-properties (point-min) (point-max)))
+               (line (string-match (regexp-quote "Could not load the earlier messages: Connection closed  [Retry]")
+                                   text))
+               (retry (and line (+ (point-min) (string-match (regexp-quote "[Retry]") text line)))))
+          (should line)
+          (should (equal "Load the earlier messages again"
+                         (get-text-property retry 'help-echo (buffer-string)))))))))
 
 (ert-deftest harness-ui-chat-connect-remote-and-back ()
   "Switching to a harness over TCP with a chat buffer open opens one

@@ -346,7 +346,8 @@ A path longer than the room left is elided in the middle."
               (format "%d registered · %d connected" (length computers) connected)
             (propertize "no computer registered" 'face 'harness-dim-face))
           (if harness-ui-computers--error
-              (propertize (format "  %s" harness-ui-computers--error) 'face 'harness-failure-face)
+              (concat (propertize (format "  %s" harness-ui-computers--error) 'face 'harness-failure-face)
+                      (harness-ui-retry-header #'harness-ui-computers-refresh "Load the computers again"))
             ""))))
 
 (defun harness-ui-computers--fit-lines (width)

@@ -4934,6 +4934,199 @@ for minutes must not keep every board from loading."
         (should-not harness-ui--bulk-active)
         (should-not harness-ui--bulk-stall-timer)))))
 
+;;;; Failures offer a way to try again
+
+;; Every view that loads something over ACP shows what failed with a
+;; [Retry] beside it.  These are the button itself and the copy it
+;; draws; each view's own suite checks that its failure carries one.
+
+(defun harness-ui-test--button-at (string label)
+  "Return the text properties of LABEL in STRING, a drawn button, or nil.
+That is the button of the view's own line, found by its exact label, so
+a test reads the copy the reader sees."
+  (let ((pos 0) (size (length string)) found)
+    (while (and (not found) (< pos size))
+      (if (and (string-prefix-p label string pos)
+               (get-text-property pos 'harness-ui-action string))
+          (setq found pos)
+        (setq pos (1+ pos))))
+    (when found
+      (list :start found
+            :text (substring string found (min size (+ found (length label))))
+            :help (get-text-property found 'help-echo string)
+            :face (get-text-property found 'face string)
+            :action (get-text-property found 'harness-ui-action string)))))
+
+(ert-deftest harness-ui-retry-is-the-same-button-in-every-view ()
+  "The failure button reads [Retry], and its tooltip says what it loads."
+  (let ((button (harness-ui-retry #'ignore "Load the tasks again"))
+        (plain (harness-ui-retry #'ignore)))
+    (should (equal "[Retry]" (substring-no-properties button)))
+    (should (equal "Load the tasks again" (get-text-property 0 'help-echo button)))
+    (should (equal "Ask again" (get-text-property 0 'help-echo plain)))
+    (should (eq 'button (get-text-property 0 'face button)))
+    (should (functionp (get-text-property 0 'harness-ui-action button)))))
+
+(ert-deftest harness-ui-retry-runs-a-function-or-a-command ()
+  "A plain function is called; a command runs as its key does."
+  (let ((called nil))
+    (funcall (get-text-property 0 'harness-ui-action
+                                (harness-ui-retry (lambda () (setq called 'function)))))
+    (should (eq 'function called)))
+  (let* ((called nil)
+         (command (lambda () (interactive) (setq called 'command))))
+    (funcall (get-text-property 0 'harness-ui-action (harness-ui-retry command)))
+    (should (eq 'command called))))
+
+(ert-deftest harness-ui-failure-string-keeps-the-views-own-words ()
+  "A failure keeps its text, and the button follows it two spaces on."
+  (let ((line (harness-ui-failure-string "Loading tasks failed: Connection closed"
+                                         #'ignore "Load the tasks again")))
+    (should (equal "Loading tasks failed: Connection closed  [Retry]"
+                   (substring-no-properties line)))
+    ;; The words keep their own face; the button is a button.
+    (should (equal "Loading tasks failed: Connection closed"
+                   (substring-no-properties line 0 (- (length line) (length "  [Retry]")))))
+    (should (equal "[Retry]" (substring-no-properties line (- (length line) (length "[Retry]")))))
+    ;; Trailing whitespace in the view's own text does not widen the gap.
+    (should (equal "Failed  [Retry]" (substring-no-properties (harness-ui-failure-string "Failed\n" #'ignore))))))
+
+(ert-deftest harness-ui-retry-header-works-on-a-header-line ()
+  "A header's [Retry] runs its command on a click or RET."
+  (let ((button (harness-ui-retry-header #'ignore "Load the tree again"))
+        (map (make-sparse-keymap)))
+    (should (equal " [Retry]" (substring-no-properties button)))
+    (should (equal "Load the tree again" (get-text-property 0 'help-echo button)))
+    (should (keymapp (get-text-property 0 'local-map button)))
+    (should (eq (lookup-key (get-text-property 0 'local-map button) (kbd "RET"))
+                (lookup-key (get-text-property 0 'local-map button) [header-line mouse-1])))))
+
+(ert-deftest harness-ui-a-button-cut-by-a-narrow-line-is-still-offered ()
+  "A fitted failure line that cuts its button offers it in the overflow.
+The board's lines shorten to the window; the way to try again must not
+be what goes."
+  (let* ((line (concat "Loading tasks failed: Connection closed  "
+                       (harness-ui-tasks--button harness-ui-retry-label
+                                                 #'harness-ui-tasks-refresh
+                                                 "Load the tasks again" 'retry)))
+         (cut (harness-ui-overflow-mark (truncate-string-to-width line 20 nil nil "…") line "Task bar"))
+         (items (harness-ui-overflow--button-items line 20)))
+    (should (stringp cut))
+    (should (equal "[Retry]" (plist-get (car items) :label)))
+    (should (equal "Load the tasks again" (plist-get (car items) :help)))
+    (should (eq 'harness-ui-tasks-refresh (plist-get (car items) :command)))))
+;;;; A button that waits for its request
+
+;; A button that asks the harness something shows that it did: held down
+;; from the click until the request it made is answered.  The board draws
+;; its own that way; this is the same thing for the views whose buttons
+;; are plain strings, where a click otherwise looked as though nothing had
+;; happened until the harness, slow or busy, answered.
+
+(defun harness-ui-test--held-button (label key request)
+  "Return a held button LABEL for KEY whose click makes REQUEST.
+REQUEST is a function of no arguments that asks the harness something
+through `harness-ui-request-held', as a view's buttons do."
+  (harness-ui-held-button label key request "Load it again"))
+
+(ert-deftest harness-ui-held-button-is-drawn-down-while-its-request-waits ()
+  "A pushed button reads held down until its request is answered."
+  (let* ((harness-ui-held (make-hash-table :test 'equal))
+         (harness-ui-held-min-seconds 0)
+         (answered nil)
+         (request (lambda () (harness-ui-request-held "m" nil #'ignore)))
+         (button (harness-ui-test--held-button "[On]" 'network request))
+         (action (get-text-property 0 'harness-ui-action button)))
+    ;; Up: a button, with its tooltip and its own face.
+    (should (equal "[On]" (substring-no-properties button)))
+    (should (equal "Load it again" (get-text-property 0 'help-echo button)))
+    (should (eq 'button (get-text-property 0 'face button)))
+    ;; Pushed, and the answer not in: it reads held down, keeps its label,
+    ;; and says in its tooltip what it waits for.
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (_method _params callback &optional _on-error)
+                 (setq answered callback))))
+      (funcall action))
+    (should (harness-ui-held-p 'network))
+    (let ((down (harness-ui-test--held-button "[On]" 'network request)))
+      (should (equal "[On]" (substring-no-properties down)))
+      (should (eq 'harness-ui-button-held-face (get-text-property 0 'face down)))
+      (should (string-match-p "waiting for the harness"
+                              (get-text-property 0 'help-echo down))))
+    ;; Answered: it is up again.
+    (funcall answered nil)
+    (should-not (harness-ui-held-p 'network))
+    (should (eq 'button (get-text-property
+                         0 'face (harness-ui-test--held-button "[On]" 'network request))))))
+
+(ert-deftest harness-ui-held-button-waits-for-every-request-it-made ()
+  "A button held down for two requests goes up when the last is answered."
+  (let* ((harness-ui-held (make-hash-table :test 'equal))
+         (harness-ui-held-min-seconds 0)
+         (calls nil)
+         (request (lambda ()
+                    (harness-ui-request-held "a" nil #'ignore)
+                    (harness-ui-request-held "b" nil #'ignore)))
+         (button (harness-ui-test--held-button "[Go]" 'go request)))
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (_method _params callback &optional _on-error)
+                 (push callback calls))))
+      (funcall (get-text-property 0 'harness-ui-action button)))
+    (should (harness-ui-held-p 'go))
+    (should (= 2 (length calls)))
+    ;; The first answer is not the last: it stays down.
+    (funcall (nth 0 calls) nil)
+    (should (harness-ui-held-p 'go))
+    (funcall (nth 1 calls) nil)
+    (should-not (harness-ui-held-p 'go))))
+
+(ert-deftest harness-ui-held-button-a-failed-request-lets-go ()
+  "A request that fails lets its button go, as an answered one does."
+  (let* ((harness-ui-held (make-hash-table :test 'equal))
+         (harness-ui-held-min-seconds 0)
+         (failed nil)
+         (button (harness-ui-test--held-button
+                  "[Go]" 'go (lambda () (harness-ui-request-held "m" nil #'ignore nil)))))
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (_method _params _callback &optional on-error)
+                 (setq failed on-error))))
+      (funcall (get-text-property 0 'harness-ui-action button)))
+    (should (harness-ui-held-p 'go))
+    (funcall failed "Connection closed")
+    (should-not (harness-ui-held-p 'go))))
+
+(ert-deftest harness-ui-held-button-a-second-click-is-not-a-second-action ()
+  "A button already down says it is still working, and runs nothing."
+  (let* ((harness-ui-held (make-hash-table :test 'equal))
+         (harness-ui-held-min-seconds 0)
+         (ran 0)
+         (request (lambda () (harness-ui-request-held "m" nil #'ignore) (cl-incf ran))))
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (_method _params _callback &optional _on-error) nil)))
+      (funcall (get-text-property 0 'harness-ui-action
+                                  (harness-ui-test--held-button "[Go]" 'go request)))
+      ;; The same button again, drawn down: it still carries its action, so
+      ;; a view redrawn while it waits still has a button, and a click on it
+      ;; runs nothing.
+      (let ((down (harness-ui-test--held-button "[Go]" 'go request)))
+        (should (get-text-property 0 'harness-ui-action down))
+        (funcall (get-text-property 0 'harness-ui-action down))))
+    (should (= 1 ran))))
+
+(ert-deftest harness-ui-held-button-a-lost-answer-does-not-stick ()
+  "A button whose answer never came is let go after the longest it may stay down."
+  (let* ((harness-ui-held (make-hash-table :test 'equal))
+         (harness-ui-held-max-seconds 0.05)
+         (button (harness-ui-test--held-button
+                  "[Go]" 'go (lambda () (harness-ui-request-held "m" nil #'ignore)))))
+    (cl-letf (((symbol-function 'harness-ui-call)
+               (lambda (_method _params _callback &optional _on-error) nil)))
+      (funcall (get-text-property 0 'harness-ui-action button)))
+    (should (harness-ui-held-p 'go))
+    (sleep-for 0.1)
+    ;; Asking whether it is held lets go of the stale ones.
+    (should-not (harness-ui-held-p 'go))))
+
 ;;;; Hooks an older version left behind
 
 (defvar harness-ui-test--retired-hook nil

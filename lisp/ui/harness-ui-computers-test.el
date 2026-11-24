@@ -229,7 +229,16 @@ LABEL is matched as it is written: [view] is not [View]."
     (with-current-buffer (harness-ui-computers--buffer)
       (setq harness-ui-computers--error "the harness is not connected")
       (should (string-match-p "  the harness is not connected"
-                              (harness-ui-computers-test-header))))))
+                              (harness-ui-computers-test-header)))
+      ;; And the header offers to load the page again.
+      (should (string-match-p (regexp-quote "the harness is not connected [Retry]")
+                              (harness-ui-computers-test-header)))
+      ;; The words above are stripped of properties; the header itself has them.
+      (let ((header (mapconcat (lambda (part) (format "%s" part))
+                               (harness-ui-computers--header) "")))
+        (should (equal "Load the computers again"
+                       (get-text-property (string-match (regexp-quote "[Retry]") header)
+                                          'help-echo header)))))))
 
 ;;;; What the buttons say they do
 

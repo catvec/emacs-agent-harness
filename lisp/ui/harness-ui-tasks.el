@@ -4015,8 +4015,16 @@ it is called with, BAND is the face behind it or nil.  MESSAGING and
 BAR are as `harness-ui-tasks--label-line' takes them."
   (let ((lines nil))
     (when harness-ui-tasks--error
-      (let ((text (propertize (concat "  " harness-ui-tasks--error) 'face 'harness-tool-error-face)))
-        (push (list 'error (lambda (room) (harness-ui-tasks--fit text room t)) band) lines)))
+      ;; The board's own button, not `harness-ui-retry': a line fitted to a
+      ;; narrow window that cuts [Retry] offers it again in its overflow
+      ;; (`harness-ui-overflow-mark'), which finds the board's buttons.
+      (let ((text (propertize (concat "  " harness-ui-tasks--error) 'face 'harness-tool-error-face))
+            (button (harness-ui-tasks--button harness-ui-retry-label #'harness-ui-tasks-refresh
+                                              "Load the tasks again" 'retry)))
+        (push (list 'error
+                    (lambda (room) (harness-ui-tasks--fit (concat text "  " button) room t))
+                    band)
+              lines)))
     (push (list 'label (lambda (room) (harness-ui-tasks--label-line room messaging bar)) band) lines)
     (unless harness-ui-tasks--target
       ;; In Refine and Plan, the step before the work, then the work: a

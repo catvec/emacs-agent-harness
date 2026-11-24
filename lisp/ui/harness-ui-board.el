@@ -300,7 +300,8 @@ left out rather than drawn empty."
                 (harness-ui-board--loaded (propertize "no board" 'face 'harness-dim-face))
                 (t (propertize "…" 'face 'harness-dim-face)))
           (if harness-ui-board--error
-              (propertize (format "  %s" harness-ui-board--error) 'face 'harness-failure-face)
+              (concat (propertize (format "  %s" harness-ui-board--error) 'face 'harness-failure-face)
+                      (harness-ui-retry-header #'harness-ui-boards-refresh "Load the boards again"))
             ""))))
 
 (defun harness-ui-boards--render ()
@@ -325,7 +326,9 @@ left out rather than drawn empty."
   (if (null harness-ui-board--boards)
       (insert " " (cond
                     (harness-ui-board--error
-                     (propertize harness-ui-board--error 'face 'harness-failure-face))
+                     (harness-ui-failure-string
+                      (propertize harness-ui-board--error 'face 'harness-failure-face)
+                      #'harness-ui-boards-refresh "Load the boards again"))
                     (harness-ui-board--loaded
                      (propertize "no board" 'face 'harness-dim-face))
                     (t (propertize "…" 'face 'harness-dim-face)))
@@ -444,7 +447,8 @@ names among the document's diagrams."  (or (plist-get harness-ui-board--document
           (format "  %s" (harness-ui-board--count (length (harness-ui-board--document-objects))
                                                   "object" "objects"))
           (if harness-ui-board--error
-              (propertize (format "  %s" harness-ui-board--error) 'face 'harness-failure-face)
+              (concat (propertize (format "  %s" harness-ui-board--error) 'face 'harness-failure-face)
+                      (harness-ui-retry-header #'harness-ui-board-refresh "Load the board again"))
             ""))))
 
 (defun harness-ui-board--render ()
@@ -466,7 +470,9 @@ names among the document's diagrams."  (or (plist-get harness-ui-board--document
     (cond
      ((null document)
       (insert " " (if harness-ui-board--error
-                      (propertize harness-ui-board--error 'face 'harness-failure-face)
+                      (harness-ui-failure-string
+                       (propertize harness-ui-board--error 'face 'harness-failure-face)
+                       #'harness-ui-board-refresh "Load the board again")
                     (propertize "…" 'face 'harness-dim-face))
               "\n"))
      (t

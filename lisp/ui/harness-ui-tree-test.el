@@ -52,6 +52,33 @@
         (forward-line 1)))
     (nreverse ids)))
 
+(ert-deftest harness-ui-tree-a-failure-offers-retry ()
+  "A tree that cannot be loaded says so, and offers to load it again."
+  (harness-ui-tree-test-with
+    (let* ((sid (plist-get (harness-ui-tree-test-request
+                            "session/new" (list :cwd (harness-test-temp-dir)
+                                                :_harness (list :model "demo:scripted" :name "Retry")))
+                           :sessionId))
+           (buf (progn (harness-tree sid) (harness-ui-tree--buffer-for sid))))
+      (with-current-buffer buf
+        ;; The request never answered: what the page draws is the failure.
+        (setq harness-ui-tree--data nil harness-ui-tree--loading nil
+              harness-ui-tree--error "Connection closed")
+        (harness-ui-tree--render)
+        (should (equal "Could not load the tree: Connection closed  [Retry]\n"
+                       (buffer-substring-no-properties (point-min) (point-max))))
+        (should (equal "Load the tree again"
+                       (get-text-property (string-match (regexp-quote "[Retry]") (buffer-string))
+                                          'help-echo (buffer-string))))
+        ;; The header says it too, with its own button.  A width, since
+        ;; no window shows this buffer to measure it from.
+        (let ((header (harness-ui-tree--header 200)))
+          (should (string-match-p (regexp-quote "error: Connection closed [Retry]") header))
+          (should (equal "Load the tree again"
+                         (get-text-property (string-match (regexp-quote "[Retry]") header)
+                                            'help-echo header)))))
+      (kill-buffer buf))))
+
 (defun harness-ui-tree-test-goto (id)
   "Move point to the row of node ID."
   (goto-char (point-min))

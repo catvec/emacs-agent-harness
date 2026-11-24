@@ -171,6 +171,25 @@ read."
       (should (equal harness-ui-provider-check-test--displayed
                      '("other:model" "Other"))))))
 
+(ert-deftest harness-ui-provider-check-a-start-that-fails-offers-retry ()
+  "Checks that could not start say why, and offer to start them again."
+  (harness-ui-provider-check-test-with
+    (harness-ui-provider-check-test-session "s1" "checkfake:model")
+    (with-temp-buffer
+      (setq-local harness-ui-session-id "s1")
+      (let ((harness-ui-provider-check-confirm nil))
+        (harness-ui-provider-check-test-recording (harness-provider-check)))
+      (with-current-buffer (harness-ui-provider-check-test-buffer)
+        (setq harness-ui-provider-check--state 'error
+              harness-ui-provider-check--error "Connection closed")
+        (harness-ui-provider-check--render)
+        (should (string-match-p
+                 (regexp-quote "Could not start the checks: Connection closed  [Retry]")
+                 (buffer-substring-no-properties (point-min) (point-max))))
+        (should (equal "Start the checks again"
+                       (get-text-property (string-match (regexp-quote "[Retry]") (buffer-string))
+                                          'help-echo (buffer-string))))))))
+
 (ert-deftest harness-ui-provider-check-events-fill-the-page ()
   "Results and the summary arrive as events and what they say is drawn."
   (harness-ui-provider-check-test-with

@@ -123,5 +123,31 @@
       (harness-process-send-cancel proc)
       (when (process-live-p proc) (delete-process proc)))))
 
+(ert-deftest harness-util-a-command-that-exits-at-once-is-no-failure ()
+  "A process that exited before its end-of-file is no error.
+`harness-run-command' checks `process-live-p' and then sends EOF; a
+command that read nothing and exited in between -- git does -- must
+not turn a successful run into \"Process ... not running\"."
+  (let ((eof-signalled nil))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_proc) t))
+              ((symbol-function 'process-send-eof)
+               (lambda (_proc) (setq eof-signalled t)
+                 (signal 'file-error '("Process harness-git not running: finished")))))
+      ;; The check says live, the send says gone: neither is an error.
+      (harness-process-send-eof (make-pipe-process :name "harness-gone" :noquery t))
+      (should eof-signalled)))
+  ;; And a process that is really gone is not asked at all.
+  (let* ((proc (make-process :name "harness-exited" :noquery t :connection-type 'pipe
+                             :command '("true")))
+         (signalled nil))
+    (unwind-protect
+        (progn
+          (harness-test-wait (lambda () (not (process-live-p proc))) 3 "the command's exit")
+          (cl-letf (((symbol-function 'process-send-eof)
+                     (lambda (_proc) (setq signalled t))))
+            (harness-process-send-eof proc))
+          (should-not signalled))
+      (when (process-live-p proc) (delete-process proc)))))
+
 (provide 'harness-util-test)
 ;;; harness-util-test.el ends here

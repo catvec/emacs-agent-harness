@@ -307,7 +307,10 @@ showing the buffer keeps its point the same way."
     (erase-buffer)
     (cond
      (harness-ui-search--error
-      (insert " " (propertize "The search failed: " 'face 'error) harness-ui-search--error "\n"))
+      (insert " " (harness-ui-failure-string
+                   (concat (propertize "The search failed: " 'face 'error) harness-ui-search--error)
+                   #'harness-ui-search-again "Search again")
+              "\n"))
      ((and harness-ui-search--loading (null result))
       (insert (propertize (format " Searching for “%s”…\n" harness-ui-search--query) 'face 'harness-dim-face)))
      (result

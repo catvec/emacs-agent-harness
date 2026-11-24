@@ -323,8 +323,10 @@ With SECONDS the clock shows them."
     (insert "\n")
     (cond
      (harness-ui-acp-remote--error
-      (insert " " (propertize (format "This harness cannot serve other devices: %s" harness-ui-acp-remote--error)
-                              'face 'error)
+      (insert " " (harness-ui-failure-string
+                   (propertize (format "This harness cannot serve other devices: %s" harness-ui-acp-remote--error)
+                               'face 'error)
+                   #'harness-ui-acp-remote-refresh "Load the server again")
               "\n"))
      ((null harness-ui-acp-remote--status)
       (insert " " (propertize "Loading…" 'face 'harness-dim-face) "\n"))

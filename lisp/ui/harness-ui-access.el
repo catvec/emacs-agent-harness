@@ -405,16 +405,21 @@ FACE is the button's face, `button' when nil."
   "Return the white space that lines a note up under what a row holds."
   (make-string (+ 2 harness-ui-access--label-width) ?\s))
 
-(defun harness-ui-access--choice (label selected action help)
+(defun harness-ui-access--choice (label selected action help &optional setting)
   "Return the choice LABEL of a setting, drawn as a radio button.
 SELECTED marks the one in effect: a ring with a dot in it, its label
 bold.  The others are rings, their labels a button's colour, and a click
 on one runs ACTION, a function of no arguments, with HELP as its
 tooltip.  Without an ACTION -- the policy or another module decides the
-setting -- the choice is dim and nothing happens on a click."
+setting -- the choice is dim and nothing happens on a click.  SETTING
+names the row the choice is in, for the page's redraws: a choice being
+changed is drawn held down until the harness answers, and two rows with
+a choice of the same words -- the network's On, writing's On -- are two
+buttons."
   (let ((text (concat (harness-ui-icon (if selected 'harness-icon-radio-on 'harness-icon-radio-off)) " " label)))
     (cond (selected (propertize text 'face 'bold 'help-echo help))
-          (action (harness-ui-access--button text action help 'harness-ui-access-choice-face))
+          (action (harness-ui-held-button text (list 'access-choice setting label) action
+                                          help 'harness-ui-access-choice-face))
           (t (propertize text 'face 'harness-dim-face 'help-echo help)))))
 
 (defun harness-ui-access--setting (name label control &optional note separator)
@@ -666,7 +671,8 @@ said under them; a policy that sets the mode leaves no choice to make."
                                (format "%s: %s (%s)" (nth 1 m) (nth 2 m)
                                        (cond (pinned "set by the policy")
                                              ((equal (car m) mode) "in effect")
-                                             (t "choice")))))
+                                             (t "choice")))
+                               'mode))
                             harness-ui-permission-modes)))
      (concat (or (nth 2 entry) "")
              (if pinned (concat (and entry " · ") "set by the policy") "")))))
@@ -682,10 +688,10 @@ nobody is asked and the auto-mode judge decides."
      (harness-ui-access--choices
       (harness-ui-access--choice "Interactive" (not away)
                                  (unless pinned (lambda () (harness-ui-access-set-interaction nil)))
-                                 "Ask mode · undecided calls (i)")
+                                 "Ask mode · undecided calls (i)" 'interaction)
       (harness-ui-access--choice "Non-interactive" away
                                  (unless pinned (lambda () (harness-ui-access-set-interaction t)))
-                                 "Auto mode · judge decisions (i)"))
+                                 "Auto mode · judge decisions (i)" 'interaction))
      (concat (if away "No prompts · decisions by the auto-mode judge" "prompts · undecided calls")
              (if pinned " · set by the policy" "")))))
 
@@ -696,9 +702,9 @@ nobody is asked and the auto-mode judge decides."
      'network "Network"
      (harness-ui-access--choices
       (harness-ui-access--choice "On" network (lambda () (harness-ui-access-set-network t))
-                                 "network access (N)")
+                                 "network access (N)" 'network)
       (harness-ui-access--choice "Off" (not network) (lambda () (harness-ui-access-set-network nil))
-                                 "Block the network (N)"))
+                                 "Block the network (N)" 'network))
      (unless network "No web tools or ssh · bash and elisp offline"))))
 
 (defun harness-ui-access--insert-writing (d)
@@ -713,10 +719,10 @@ A session read-only by another module's policy has no choice to make."
      (harness-ui-access--choices
       (harness-ui-access--choice "On" (not read-only)
                                  (unless fixed (lambda () (harness-ui-access-set-read-only nil)))
-                                 "writing · directory permitting (w)")
+                                 "writing · directory permitting (w)" 'writing)
       (harness-ui-access--choice "Read-only" read-only
                                  (unless fixed (lambda () (harness-ui-access-set-read-only t)))
-                                 "Block writing (w)"))
+                                 "Block writing (w)" 'writing))
      (cond (fixed (format "Read-only by %s" (or other "a module")))
            (own "Reading tools only · bash read-only and offline")))))
 
@@ -1631,8 +1637,11 @@ EXPANDED are the ids of the calls to draw unfolded."
       (insert (propertize "Secret status unavailable\n" 'face 'harness-failure-face)
               (harness-ui-access--button "[Refresh]" #'harness-ui-access-refresh "Secret status refresh (g)") "\n"))
      (harness-ui-access--error
-      (insert (propertize (format "Access unreadable: %s\n" harness-ui-access--error)
-                          'face 'harness-failure-face)
+      (insert (harness-ui-failure-string
+               (propertize (format "Access unreadable: %s" harness-ui-access--error)
+                           'face 'harness-failure-face)
+               #'harness-ui-access-refresh "Load the access again")
+              "\n"
               (propertize "Check the access module: M-x harness-describe-modules\n"
                           'face 'harness-hint-face)))
      ((null d) (insert (propertize "Loading…\n" 'face 'harness-dim-face)))
@@ -1695,6 +1704,14 @@ first, then the session, and the name stays."
                          20)))))))
 
 ;;;; Commands
+
+(defun harness-ui-access--held-changed ()
+  "Draw the page again: a button of it was pushed, or let go.
+The page is drawn at once, so a choice shows held down while the
+harness, slow or busy, has not answered it, and up again once it has.
+The page's own draw keeps point on the anchor it was on."
+  (when (derived-mode-p 'harness-ui-access-mode)
+    (harness-ui-access--render)))
 
 ;;;;; The pages
 
@@ -1778,7 +1795,7 @@ decides what would ask you for permission."
 (defun harness-ui-access-set-network (on)
   "Let this buffer's session reach the network when ON, else not."
   (interactive (list (not (harness-ui-access--true-p (plist-get harness-ui-access--describe :network)))))
-  (harness-ui-call "_harness/access/set-network" (list :session-id (harness-ui-access--session) :on (if on t :false))
+  (harness-ui-request-held "_harness/access/set-network" (list :session-id (harness-ui-access--session) :on (if on t :false))
                    (harness-ui-access--after (if on "Network on" "Network off"))))
 
 (defun harness-ui-access-toggle-network ()
@@ -1818,7 +1835,7 @@ a kernel without Landlock."
 
 (defun harness-ui-access-set-read-only (on)
   "Keep this buffer's session from writing when ON, else let it write."
-  (harness-ui-call "_harness/access/set-read-only" (list :session-id (harness-ui-access--session) :on (if on t :false))
+  (harness-ui-request-held "_harness/access/set-read-only" (list :session-id (harness-ui-access--session) :on (if on t :false))
                    (harness-ui-access--after (if on "Writing off" "Writing on"))))
 
 (defun harness-ui-access-stop-job (id)
@@ -1839,7 +1856,7 @@ Its sandbox ends with it, so every process the job started goes too."
 
 (defun harness-ui-access-set-tool (tool on)
   "Turn TOOL on for this buffer's session when ON, else off."
-  (harness-ui-call "_harness/access/set-tool" (list :session-id (harness-ui-access--session) :tool tool :on (if on t :false))
+  (harness-ui-request-held "_harness/access/set-tool" (list :session-id (harness-ui-access--session) :tool tool :on (if on t :false))
                    (harness-ui-access--after (format "%s turned %s" tool (if on "on" "off")))))
 
 (defun harness-ui-access-toggle-tool (tool)
@@ -1860,7 +1877,7 @@ This buffer's session is the one.  NAME is `all' to take every one
 away.  It takes effect at once, from the next bash or elisp command on;
 the harness refuses to give one the sandbox would not pass on, and the
 echo area says so."
-  (harness-ui-call "_harness/access/set-capability"
+  (harness-ui-request-held "_harness/access/set-capability"
                    (list :session-id (harness-ui-access--session) :name name :on (if on t :false))
                    (harness-ui-access--after
                     (cond ((equal name "all") "No capability left for the session's commands")
@@ -2251,6 +2268,10 @@ show the pages, q goes back to the Overview.
   (setq truncate-lines t)
   (setq header-line-format '(:eval (harness-ui-access--header)))
   (add-hook 'window-buffer-change-functions #'harness-ui-access--shown nil t)
+  ;; A choice or a button pushed here shows held down until the harness
+  ;; answers, which means the page is drawn again when one is pushed and
+  ;; when it is let go.
+  (add-hook 'harness-ui-held-changed-functions #'harness-ui-access--held-changed nil t)
   ;; Says [Suspended: resume] if a window shows it before it caught up.
   (harness-ui-view-adopt #'harness-ui-access-refresh))
 

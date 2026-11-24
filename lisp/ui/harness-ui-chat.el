@@ -361,6 +361,11 @@ the panels this buffer draws and for redraw decisions.")
 (defvar-local harness-chat--loading nil "Non-nil while the transcript is being fetched.")
 (defvar-local harness-chat--fetching nil "Non-nil while an older page is being fetched.")
 (defvar-local harness-chat--history-timer nil "Timer of the pending `harness-chat--manage-history'.")
+(defvar-local harness-chat--history-error nil
+  "Why the earlier messages could not be loaded, or nil.
+It shows at the top of the transcript with [Retry], and the next page
+that loads clears it.")
+
 (defvar-local harness-chat--deferred nil "Updates that arrived while loading, newest first.")
 (defvar-local harness-chat--coalescable nil "Names of coalescable tools.")
 (defvar-local harness-chat--turn-start nil "Float time the running turn started.")
@@ -401,6 +406,17 @@ They are the steering messages (sent while a turn ran) of the turn that
 goes on, or, once it is over, the ones nothing answered.
 `harness-chat--refresh-sending' keeps the list, and draws the blocks
 again as the turn goes on and ends (`harness-chat--delivery-note').")
+(defvar-local harness-chat--in-flight nil
+  "The messages sent from this buffer the harness has not taken yet.
+Each is a plist as `harness-queued-message-node' reads it -- `:id',
+`:text', `:attachments' -- and is drawn above the compose box as the
+queued messages are, with the word \"sending\" in place of \"queued\":
+the request is out and the harness, slow or busy, has not recorded the
+message as a node of the transcript.  Without it the message the box
+gave up is nowhere on screen, and looks lost in the ether for as long
+as the harness takes.  The node that arrives with its id
+\\(`harness-chat--on-node') takes it out: the message stands in the
+transcript from then on.")
 (defvar-local harness-chat--queue-running nil
   "Whether a turn ran when the queue was last drawn.
 The buttons of a queued message say what sending it now does, which
@@ -1861,6 +1877,16 @@ HELP, the tooltip of the word, says what the message waits for."
   (concat (propertize (harness-ui-icon 'harness-icon-caution) 'face 'harness-dim-face)
           " "
           (propertize "queued" 'face 'harness-dim-face 'help-echo help)))
+
+(defun harness-chat--sending-mark (help)
+  "Return the mark of a message sent, which the harness has not taken yet.
+It reads \"sending\", dim, after the same grey circle a queued message
+carries: the request is out, and the harness -- slow, restarting or
+busy -- has not recorded the message as a node of the transcript.
+HELP is the tooltip of the word."
+  (concat (propertize (harness-ui-icon 'harness-icon-caution) 'face 'harness-dim-face)
+          " "
+          (propertize "sending" 'face 'harness-dim-face 'help-echo help)))
 
 (defun harness-chat--queued-buttons (specs)
   "Return the buttons of a queued message, two spaces apart.
@@ -3718,12 +3744,17 @@ text struck through, in the one that goes back to it, [Go post-compaction]
     (harness-chat--margin (harness-chat--face body 'harness-chat-plan-face) 'harness-chat-plan-face)))
 
 (defun harness-chat--render-error (block)
-  "Return the body of local error BLOCK."
-  (harness-chat--margin
-   (propertize (concat (harness-ui-icon 'harness-icon-warning) " "
-                       (harness-chat--page block) "\n"
-                       (harness-chat--more-line block))
-               'face 'error)))
+  "Return the body of local error BLOCK.
+A failure the buffer can try again follows its words with [Retry],
+which runs what the block was given (`harness-chat--append-local-block')."
+  (let* ((retry (plist-get (harness-chat-block-node block) :retry))
+         (text (propertize (concat (harness-ui-icon 'harness-icon-warning) " "
+                                   (harness-chat--page block))
+                           'face 'error)))
+    (harness-chat--margin
+     (concat (if retry (harness-ui-failure-string text (car retry) (cdr retry)) text)
+             "\n"
+             (harness-chat--more-line block)))))
 
 (defun harness-chat--render-failed (block err)
   "Return the body of BLOCK, whose renderer signalled ERR, as plain text.
@@ -4735,6 +4766,10 @@ both places."
          (block (gethash id harness-chat--blocks))
          (call (and (equal kind "tool-result") (not block)
                     (gethash (gethash (plist-get node :call-id) harness-chat--calls) harness-chat--blocks))))
+    ;; A message sent stands above the box until the harness records it;
+    ;; this is that record, and from here the message is the transcript's.
+    (when (equal kind "user")
+      (harness-chat--taken-sending-by-node node))
     (cond
      ;; A tool result joins its call's block.
      (call
@@ -4854,6 +4889,11 @@ both places."
     (let ((waiting (harness-chat--waiting-items (plist-get session :steering))))
       (unless (equal waiting harness-chat--steering)
         (setq harness-chat--steering waiting changed t)))
+    ;; A message the session lists as waiting for the turn, or as queued,
+    ;; the harness has: it stands there, not above the box as "sending".
+    (when (harness-chat--settle-in-flight
+           (append (plist-get session :steering) (plist-get session :queue)))
+      (setq changed t))
     ;; The queue's buttons say what sending now does, and a turn running changes it.
     (when (harness-chat--queue-stale-p)
       (setq changed t))
@@ -4927,11 +4967,15 @@ buttons say what sending a message now does."
   (when (harness-chat--queue-stale-p)
     (harness-chat--render-tail)))
 
-(defun harness-chat--append-local-block (kind text)
-  "Append a block of KIND with TEXT that exists only in this buffer."
-  (let ((windows (harness-chat--bottom-windows)))
-    (harness-chat--append-block
-     (harness-chat--new-block (list :id (concat "local-" (harness-short-id 6)) :kind kind :content text)))
+(defun harness-chat--append-local-block (kind text &optional retry)
+  "Append a block of KIND with TEXT that exists only in this buffer.
+RETRY, when given, is (RELOAD . HELP): the failure the block reports
+can be tried again, and [Retry] does RELOAD, a command or a function of
+no arguments, as `harness-ui-retry' takes them."
+  (let ((windows (harness-chat--bottom-windows))
+        (node (list :id (concat "local-" (harness-short-id 6)) :kind kind :content text)))
+    (when retry (setq node (plist-put node :retry retry)))
+    (harness-chat--append-block (harness-chat--new-block node))
     (harness-chat--follow windows)))
 
 (defun harness-chat--buffer-name (session)
@@ -5156,6 +5200,34 @@ tells which kind of message point is on."
     ;; finds it; so does the box's key for a panel's keys.
     (harness-chat--queued-panel text id map property)
     (insert text)))
+
+(defun harness-chat--sending-note ()
+  "Return the note of a message sent that the harness has not taken yet.
+It reads \"sending\", after the same grey circle a queued message
+carries, and its tooltip says what it waits for.  No button: the
+request is out, and there is nothing to take back before the harness
+has the message."
+  (harness-chat--sending-mark
+   "Sent · not yet recorded by the harness"))
+
+(defun harness-chat--insert-sending ()
+  "Insert the messages sent, which the harness has not taken yet.
+They come above the compose box with the messages that wait, drawn as
+the user message each will be once the harness records it
+\(`harness-chat--insert-waiting'), and say \"sending\": the box gave the
+message up when it went out, and without this the transcript would show
+nothing of it until the harness answered, however slow it is.  Each is
+marked `harness-chat-queue' too, and `harness-chat-sending', its id."
+  (let ((start (point))
+        (blocks (make-hash-table :test 'equal)))
+    (dolist (item harness-chat--in-flight)
+      (let ((from (point)))
+        (harness-chat--insert-waiting
+         item (harness-chat--sending-note) nil
+         harness-chat-queued-map 'harness-chat-sending blocks)
+        (harness-chat--mark-tail-region from (point) (list 'sending (plist-get item :id)))))
+    (when (> (point) start)
+      (put-text-property start (point) 'harness-chat-queue t))))
 
 (defun harness-chat--insert-queue ()
   "Insert the messages that wait, each as the user message it will be.
@@ -5553,9 +5625,11 @@ box's words are kept for \[harness-chat-show-compose]."
       (goto-char harness-chat--transcript-end)
       (let ((start (point)))
         ;; First: what `harness-chat-top-functions' draw, so it stands on
-        ;; whatever comes next, then the queued messages, which read as the
-        ;; newest of the conversation.
+        ;; whatever comes next, then the messages the harness has not taken
+        ;; -- sent, and queued -- which read as the newest of the
+        ;; conversation.
         (harness-chat--insert-top)
+        (harness-chat--insert-sending)
         (harness-chat--insert-queue)
         (let ((pending-start (point)))
           (harness-ui-pending-insert-panels harness-ui-session-id)
@@ -5676,6 +5750,12 @@ with a draft of its own rather than a session id that answers nothing."
 (defun harness-chat--render-top ()
   "Render the region above the first block (its separator newline stays)."
   (let ((text (cond (harness-chat--loading (propertize " loading…" 'face 'harness-dim-face))
+                    (harness-chat--history-error
+                     (concat " " (harness-ui-failure-string
+                                  (propertize (format "Could not load the earlier messages: %s"
+                                                      harness-chat--history-error)
+                                              'face 'error)
+                                  #'harness-chat--retry-history "Load the earlier messages again")))
                     (harness-chat--has-more (propertize " loading earlier messages…" 'face 'harness-dim-face))
                     ((null harness-chat--order) (propertize " No messages yet." 'face 'harness-dim-face))
                     (t ""))))
@@ -5706,6 +5786,9 @@ and the redisplay hook drawing it signals a nil position
         harness-chat--compaction-toggle-id nil
         harness-chat--unfinished nil
         harness-chat--sending nil
+        ;; A message still in flight is not in the transcript the harness
+        ;; gave: it stays above the box, and the node that records it takes
+        ;; it out (`harness-chat--taken-sending-by-node').
         harness-chat--following-cache (make-hash-table :test 'eq)
         harness-compose-start nil
         harness-compose-end nil
@@ -5775,6 +5858,7 @@ and the redisplay hook drawing it signals a nil position
                          (with-current-buffer buf
                            (setq harness-chat--fetching nil)
                            (when (and (= gen harness-chat--generation) (equal before (harness-chat--oldest-id)))
+                             (setq harness-chat--history-error nil)
                              (harness-chat--prepend-keeping-view nodes)
                              (setq harness-chat--has-more (>= (length nodes) harness-chat--history-page))
                              (harness-chat--render-top)
@@ -5788,7 +5872,23 @@ and the redisplay hook drawing it signals a nil position
                            (setq harness-chat--fetching nil)
                            (when harness-chat--goto
                              (setq harness-chat--goto nil)
-                             (message "Could not load the earlier messages: %s" (harness-error-message err)))))))))
+                             (message "Could not load the earlier messages: %s" (harness-error-message err)))
+                           ;; The top of the transcript says it too, with the
+                           ;; way to try again: the echo area's line is gone
+                           ;; by the time a reader looks.
+                           (harness-chat--show-history-failure err)))))))
+
+(defun harness-chat--show-history-failure (err)
+  "Show at the top of the transcript that ERR stopped the earlier messages."
+  (setq harness-chat--history-error (harness-error-message err))
+  (harness-chat--render-top))
+
+(defun harness-chat--retry-history ()
+  "Load the page of earlier messages that failed again."
+  (interactive)
+  (setq harness-chat--history-error nil)
+  (harness-chat--render-top)
+  (harness-chat--load-earlier))
 
 (defun harness-chat--prepend-keeping-view (nodes)
   "Render NODES above the transcript without moving what the windows show.
@@ -6078,7 +6178,9 @@ end afterwards."
              ;; it redraws every buffer once it has.
              (unless (harness-ui-connection-replaced-p err)
                (harness-chat--render-nodes nil)
-               (harness-chat--append-local-block "error" (format "could not load the session: %s" (harness-error-message err)))
+               (harness-chat--append-local-block
+                "error" (format "could not load the session: %s" (harness-error-message err))
+                (cons #'harness-chat-redraw "Load the session again"))
                (harness-chat--render-top))
              (harness-chat--replay-deferred nil))))))))
 
@@ -6242,6 +6344,94 @@ connected again still runs its turn, as the redrawn transcript shows."
     (with-current-buffer buf
       (harness-chat--append-local-block "error" (format "%s failed: %s" what (harness-error-message err))))))
 
+;;;; A message that is on its way
+
+;; The box gives a message up the moment it is sent, and the harness
+;; records it as a node of the transcript when its turn reaches it.  On a
+;; harness that is slow, restarting or busy, that is a while, and the
+;; message was nowhere on screen: the box was empty and the transcript
+;; had nothing, so it looked lost in the ether.  A message sent is drawn
+;; above the box from the send until the node that records it arrives,
+;; as the user message it will be, saying "sending" -- the queued
+;; message's UI, for a message that waits on the harness rather than on
+;; the turn.
+
+(defun harness-chat--start-sending (text atts)
+  "Show TEXT with ATTS above the box as sent, until the harness has it.
+Return the item it drew, for `harness-chat--finish-sending'; nil when
+there is nothing to show -- the message is the harness's to record, and
+this buffer is not where it was sent from."
+  (when (and (or (not (string-blank-p (or text ""))) atts)
+             (not harness-chat--batch))
+    (let ((item (list :id (concat "sending-" (harness-short-id 6))
+                      :text text :attachments atts)))
+      (push item harness-chat--in-flight)
+      (harness-chat--render-tail)
+      item)))
+
+(defun harness-chat--finish-sending (buf item)
+  "Stop drawing ITEM above the box of BUF: the harness has it, or refused it.
+The node the harness records the message with takes it out too
+\(`harness-chat--taken-sending'); this is for a request that settled
+without one -- it failed, or the turn ended before the message became a
+node -- so that a message that never made it does not read \"sending\"
+forever.  The error block `harness-chat--report-error' appends says
+what became of it."
+  (when (and item (buffer-live-p buf))
+    (with-current-buffer buf
+      (when (member item harness-chat--in-flight)
+        (setq harness-chat--in-flight (delq item harness-chat--in-flight))
+        (unless (or harness-chat--batch harness-chat--loading)
+          (harness-chat--render-tail))))))
+
+(defun harness-chat--taken-sending (id)
+  "Stop drawing the message sent as ID above the box: the harness has it.
+A node of the transcript now records the message, so it stands where the
+model reads it; nothing waits on the harness any more."
+  (let ((item (cl-find id harness-chat--in-flight
+                       :key (lambda (i) (plist-get i :id)) :test #'equal)))
+    (when item
+      (setq harness-chat--in-flight (delq item harness-chat--in-flight))
+      (unless (or harness-chat--batch harness-chat--loading)
+        (harness-chat--render-tail)))))
+
+(defun harness-chat--settle-in-flight (items)
+  "Take out the messages in flight that ITEMS, the session's, say the harness has.
+ITEMS are the messages the session lists as waiting for the turn or as
+queued, each a plist with `:text' and `:attachments'.  A message sent
+shows above the box as \"sending\" until the harness has it, and this is
+the harness saying it does: from here it is drawn with the queue, or in
+the transcript once the turn takes it, so it must not also stand as
+\"sending\".  Return non-nil when one was taken out."
+  (let ((taken nil))
+    (dolist (item items)
+      (let* ((text (string-trim (or (plist-get item :text) "")))
+             (mine (cl-find-if (lambda (i)
+                                 (equal text (string-trim (or (plist-get i :text) ""))))
+                               (reverse harness-chat--in-flight))))
+        (when mine
+          (setq harness-chat--in-flight (delq mine harness-chat--in-flight)
+                taken t))))
+    taken))
+
+(defun harness-chat--taken-sending-by-node (node)
+  "Take out the message sent that NODE, a user node, records.
+The harness names the node it makes of a message its own way, not as the
+box that sent it did, so the message is found by what it says: the
+oldest one in flight whose text and attachments are NODE's.  Only the
+oldest matches, so two messages that read alike come out in the order
+they went out."
+  (when harness-chat--in-flight
+    (let* ((text (string-trim (or (plist-get node :content) "")))
+           (blocks (plist-get node :blocks))
+           (item (cl-find-if (lambda (i)
+                               (and (equal text (string-trim (or (plist-get i :text) "")))
+                                    (or (null blocks)
+                                        (equal (length blocks)
+                                               (length (plist-get i :attachments))))))
+                             (reverse harness-chat--in-flight))))
+      (when item (harness-chat--taken-sending (plist-get item :id))))))
+
 (defun harness-chat--answer-text (text atts)
   "Return TEXT, the box's words, with the replies in threads of ATTS after them.
 Each is its <thread> block (`harness-thread-text'): the answer to a
@@ -6324,14 +6514,22 @@ A module showing something of its own in this buffer
         (if harness-chat-send-function
             (funcall harness-chat-send-function text atts)
           (harness-chat--run-send-functions text atts)
-          (harness-compose-with-expanded-text
-           text
-           (lambda (expanded)
-             (let ((blocks (append (and (not (string-empty-p expanded)) (list (list :type "text" :text expanded)))
-                                   (mapcar #'harness-compose-attachment-block atts))))
-               (harness-ui-call-turn sid "session/prompt" (list :sessionId sid :prompt blocks)
-                                     #'ignore
-                                     (lambda (err) (harness-chat--report-error buf "send" err))))))))))))
+          ;; The box is empty and the harness has not answered: the message
+          ;; shows above it, as "sending", from here until the node that
+          ;; records it arrives.  Drawn before the skill references in it are
+          ;; expanded, so it appears as soon as the box gives it up.
+          (let ((in-flight (harness-chat--start-sending text atts)))
+            (harness-compose-with-expanded-text
+             text
+             (lambda (expanded)
+               (let ((blocks (append (and (not (string-empty-p expanded)) (list (list :type "text" :text expanded)))
+                                     (mapcar #'harness-compose-attachment-block atts))))
+                 (harness-ui-call-turn sid "session/prompt" (list :sessionId sid :prompt blocks)
+                                       (lambda (_result)
+                                         (harness-chat--finish-sending buf in-flight))
+                                       (lambda (err)
+                                         (harness-chat--finish-sending buf in-flight)
+                                         (harness-chat--report-error buf "send" err)))))))))))))
 
 
 (defun harness-chat-queue ()

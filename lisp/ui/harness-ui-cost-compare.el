@@ -249,8 +249,11 @@ money (`harness-format-cost'), never a share of a plan's quota."
     (insert "\n")
     (cond
      (harness-ui-cost-compare--error
-      (insert " " (propertize (format "Could not compare costs: %s" harness-ui-cost-compare--error)
-                              'face 'error) "\n"))
+      (insert " " (harness-ui-failure-string
+                   (propertize (format "Could not compare costs: %s" harness-ui-cost-compare--error)
+                               'face 'error)
+                   #'harness-ui-cost-compare-refresh "Compare the costs again")
+              "\n"))
      ((null harness-ui-cost-compare--data)
       (insert " " (propertize "Comparing costs…" 'face 'harness-dim-face) "\n"))
      (t (harness-ui-cost-compare--insert harness-ui-cost-compare--data)))

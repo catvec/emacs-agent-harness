@@ -124,6 +124,19 @@
     (should-not harness-ui-search--error)
     (buffer-string)))
 
+(ert-deftest harness-ui-search-a-failure-offers-retry ()
+  "A search that fails says so, and offers to run it again."
+  (harness-ui-search-test-with
+    (let ((harness-ui-search--query "anything"))
+      (setq harness-ui-search--loading nil harness-ui-search--result nil
+            harness-ui-search--error "Connection closed")
+      (harness-ui-search--render)
+      (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+        (should (equal " The search failed: Connection closed  [Retry]\n" text)))
+      (should (equal "Search again"
+                     (get-text-property (string-match (regexp-quote "[Retry]") (buffer-string))
+                                        'help-echo (buffer-string)))))))
+
 (defun harness-ui-search-test-search (query &optional mode)
   "Search for QUERY in MODE from the current buffer; return the results' text."
   (harness-search-sessions query mode)

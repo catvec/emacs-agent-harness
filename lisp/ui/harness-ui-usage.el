@@ -989,7 +989,10 @@ so neither a refresh nor a fold scrolls it."
      ((and (null data) harness-ui-usage--loading)
       (insert "\n " (propertize "Loading usage…" 'face 'harness-dim-face) "\n"))
      ((and (null data) harness-ui-usage--error)
-      (insert "\n " (propertize (format "Could not load usage: %s" harness-ui-usage--error) 'face 'error) "\n"))
+      (insert "\n " (harness-ui-failure-string
+                      (propertize (format "Could not load usage: %s" harness-ui-usage--error) 'face 'error)
+                      #'harness-ui-usage-refresh "Load the usage again")
+              "\n"))
      (t
       (let ((totals (plist-get data :totals)))
         (harness-ui-usage--insert-totals totals)

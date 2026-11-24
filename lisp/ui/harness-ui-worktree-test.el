@@ -124,6 +124,27 @@
           (should (keymapp (get-text-property 0 'local-map seg)))
           (should (get-text-property 0 'help-echo seg)))))))
 
+(ert-deftest harness-ui-worktree-a-failure-offers-retry ()
+  "A list that cannot be loaded says so, and offers to load it again."
+  (harness-ui-worktree-test-with
+    (harness-ui-worktree-test-open root 2)
+    (with-current-buffer harness-ui-worktree--buffer-name
+      (setq harness-ui-worktree--worktrees nil harness-ui-worktree--loading nil
+            harness-ui-worktree--error "Connection closed")
+      (harness-ui-worktree--redraw)
+      (should (equal "Worktree list failure: Connection closed  [Retry]\n"
+                     (buffer-substring-no-properties (point-min) (point-max))))
+      (should (equal "List the worktrees again"
+                     (get-text-property (string-match (regexp-quote "[Retry]") (buffer-string))
+                                        'help-echo (buffer-string))))
+      ;; The mode line says it too, with its own button.
+      (should (string-match-p (regexp-quote "error: Connection closed [Retry]")
+                              (harness-ui-worktree-test-mode-line)))
+      (let ((segments (mapconcat (lambda (x) (if (stringp x) x "")) mode-line-process "")))
+        (should (equal "List the worktrees again"
+                       (get-text-property (string-match (regexp-quote "[Retry]") segments)
+                                          'help-echo segments)))))))
+
 (ert-deftest harness-ui-worktree-status-fanout-bounded-and-coalesced ()
   "Hundreds of rows fetch their status a few at a time and redraw once."
   (harness-ui-worktree-test-with

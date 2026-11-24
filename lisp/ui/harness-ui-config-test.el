@@ -286,6 +286,23 @@ state directory, as they would the user's."
     (should (eq 'global harness-ui-config--scope))
     (should (string-match-p "Log level: " (buffer-substring-no-properties (point-min) (point-max))))))
 
+(ert-deftest harness-ui-config-a-failure-offers-retry ()
+  "Settings that cannot be loaded say so, and offer to load them again."
+  (skip-unless (executable-find "git"))
+  (harness-ui-config-test-with
+    (harness-ui-config-test-open root)
+    (let ((harness-ui-config--data nil))
+      (setq harness-ui-config--error "Connection closed")
+      (harness-ui-config--render)
+      (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+        (should (string-match-p (regexp-quote "Could not load the settings: Connection closed  [Retry]")
+                                text)))
+      ;; The page's buttons are widgets: the tooltip is the widget's.
+      (let* ((pos (+ (point-min) (string-match (regexp-quote "[Retry]") (buffer-string))))
+             (widget (widget-at pos)))
+        (should widget)
+        (should (equal "Load the settings again (g)" (widget-get widget :help-echo)))))))
+
 (ert-deftest harness-ui-config-saves-and-resets-global-values ()
   (skip-unless (executable-find "git"))
   (harness-ui-config-test-with
