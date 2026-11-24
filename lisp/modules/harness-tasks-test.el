@@ -8674,6 +8674,10 @@ all lets the queue go on, a project's tasks or everybody's."
           (harness-tasks-max-running 1)
           (other (harness-test-temp-dir))
           (harness-provider-demo-script-override '((:type wait :seconds 30))))
+      ;; Two independent projects even when the temporary parent is itself
+      ;; a project.  Otherwise all three tasks compete for the same slot.
+      (dolist (project (list default-directory other))
+        (harness-test-mark-project project))
       (let* ((a1 (harness-tasks-test-submit "here, working"))
              (a2 (harness-tasks-test-submit "here, waiting"))
              (b1 (harness-tasks-test-submit "there, working" other)))

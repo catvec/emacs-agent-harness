@@ -57,9 +57,11 @@ something to say."
       (call-process "git" nil nil nil "init" "-q" "-b" "main")
       (call-process "git" nil nil nil "config" "user.email" "test@example.invalid")
       (call-process "git" nil nil nil "config" "user.name" "Test")
+      (call-process "git" nil nil nil "config" "commit.gpgsign" "false")
       (with-temp-file (expand-file-name (or name "README") dir) (insert "hello\n"))
       (call-process "git" nil nil nil "add" "-A")
-      (call-process "git" nil nil nil "commit" "-q" "-m" "first"))
+      (unless (zerop (call-process "git" nil nil nil "commit" "-q" "-m" "first"))
+        (error "Could not create the git tool's fixture commit")))
     dir))
 
 (defmacro harness-tools-git-test--with-home (&rest body)
@@ -73,6 +75,25 @@ Nothing reads the real ~/.ssh: the tests make the files they are about."
      (make-directory (expand-file-name ".ssh" home) t)
      (unwind-protect (progn ,@body)
        (ignore-errors (delete-directory home t)))))
+
+(ert-deftest harness-tools-git-fixture-does-not-use-personal-commit-signing ()
+  "Repository fixtures must work when the user's Git configuration signs commits."
+  (harness-test-with-temp-state
+    (let* ((config (expand-file-name "gitconfig" dir))
+           (process-environment (cons (concat "GIT_CONFIG_GLOBAL=" config)
+                                      (cons "GIT_CONFIG_NOSYSTEM=1" process-environment)))
+           repo)
+      ;; A signing program that always refuses makes accidental signing
+      ;; deterministic, without prompting for a real key or passphrase.
+      (with-temp-file config
+        (insert (format "[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = %s\n"
+                        (executable-find "false"))))
+      (unwind-protect
+          (progn
+            (setq repo (harness-tools-git-test--repo))
+            (let ((default-directory repo))
+              (should (zerop (call-process "git" nil nil nil "rev-parse" "--verify" "HEAD")))))
+        (when repo (delete-directory repo t))))))
 
 (defun harness-tools-git-test--write (file text)
   "Write TEXT to FILE, making its directory."
