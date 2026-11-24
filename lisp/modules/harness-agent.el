@@ -242,6 +242,50 @@ the provider is sent it, say."
               (harness-log 'error "agent: %s failed: %s" ,what (harness-error-short-message ,err))
               nil))))
 
+(defvar harness-agent--finishing (make-hash-table :test 'eq :weakness 'key)
+  "Turns whose terminal bookkeeping is running, protected from reentry.")
+
+(defvar harness-agent--failing (make-hash-table :test 'eq :weakness 'key)
+  "Turns aborting after an internal error, protected from cancel callbacks.")
+
+(defun harness-agent--fail (turn err)
+  "Abort TURN after ERR at a lifecycle boundary.
+Logging a callback failure alone leaves the independent turn promise
+pending forever.  Stop this turn's provider and tools and settle that
+promise through the ordinary terminal path, so tasks and parents learn
+the failure too.  Never retry possibly executed work here."
+  (when (and (harness-agent--current-p turn)
+             (not (gethash turn harness-agent--failing)))
+    (puthash turn t harness-agent--failing)
+    (unwind-protect
+        (progn
+          (harness--report-error err "agent lifecycle")
+          (harness-log 'error "agent: turn %s failed: %s"
+                       (harness-agent-turn-session-id turn) (harness-error-short-message err))
+          ;; A synchronous cancel acknowledgement must not advance the loop.
+          (setf (harness-agent-turn-ending turn) t)
+          (harness-agent--try "cancelling the failed turn's provider"
+            (when-let* ((cancel (plist-get (harness-agent-turn-handle turn) :cancel)))
+              (funcall cancel)))
+          (harness-agent--try "cancelling the failed turn's tools"
+            (harness-agent--cancel-tools turn))
+          (harness-agent--finalize-live turn)
+          (harness-agent--end turn 'error (harness-error-short-message err) 'internal))
+      (remhash turn harness-agent--failing))))
+
+(defmacro harness-agent--guard (turn &rest body)
+  "Run BODY for TURN; an internal error terminates it instead of stranding it."
+  (declare (indent 1) (debug (form body)))
+  (let ((err (make-symbol "err")))
+    `(condition-case ,err (progn ,@body)
+       (error (harness-agent--fail ,turn ,err)))))
+
+(defun harness-agent--observe (turn promise)
+  "Observe the entire continuation PROMISE owned by TURN.
+The rejection handler must follow the success callback: ON-ERR on the
+same `harness-then' does not catch errors raised by ON-OK."
+  (harness-catch promise (lambda (err) (harness-agent--fail turn err))))
+
 ;;;; Activity
 ;;
 ;; What a running turn is doing right now, so a UI can say so while
@@ -1523,6 +1567,18 @@ reads where the message came from in the transcript itself."
                  (list :meta (append (and from (list :from from))
                                      meta))))))
 
+(defun harness-agent--flush-opening (turn)
+  "Record TURN's opening message once, unless withdrawn or its session is gone.
+Also used when a turn terminates before its opening gate settles."
+  (let ((entry (gethash turn harness-agent--opening))
+        (sid (harness-agent-turn-session-id turn)))
+    (when (and entry (not (gethash turn harness-agent--withdrawn))
+               (harness-call 'session/exists-p sid))
+      (when-let* ((stored (harness-call 'session/append sid (harness-agent--opening-node entry))))
+        (harness-agent--receipt-fresh turn (list (plist-get stored :id)))))
+    (remhash turn harness-agent--opening)
+    (remhash turn harness-agent--withdrawn)))
+
 (defun harness-agent--flush-held (turn)
   "Record the messages held for TURN, oldest first, as ordinary user messages.
 Called once the gate that held the turn lets it go on, right after the
@@ -1700,8 +1756,7 @@ META extra metadata for the node the message becomes."
          (harness-error-report-session session-id)
          (promise (harness-make-promise))
          (turn (make-harness-agent-turn :session-id session-id :promise promise :started (float-time)))
-         (entry (harness-agent--message-entry blocks from meta))
-         (node (harness-agent--opening-node entry)))
+         (entry (harness-agent--message-entry blocks from meta)))
     (puthash session-id turn harness-agent--turns)
     (harness-agent--control-turn turn)
     (puthash turn entry harness-agent--opening)
@@ -1721,43 +1776,36 @@ META extra metadata for the node the message becomes."
     ;; sent to the turn while the gate holds it for work that replaces the
     ;; conversation waits with it (`harness-agent--hold-message') and
     ;; follows this one.
-    (harness-then
-     (harness-then (harness-agent--follow-head session-id)
-                   (lambda (_)
-                     (harness-run-filter-async 'agent/before-turn
-                                               (list :proceed t
-                                                     :message (list :text (harness-agent--blocks-text blocks)
-                                                                    :from from))
-                                               (if (harness-call 'session/exists-p session-id)
-                                                   (harness-call 'session/get session-id)
-                                                 session))))
-     (lambda (gate)
-       (remhash turn harness-agent--opening)
-       (remhash turn harness-agent--gated)
-       (if (harness-call 'session/exists-p session-id)
-           ;; A message the user took back while the gate held it
-           ;; (`agent/withdraw') is never recorded: it was deleted.
-           (progn (unless (gethash turn harness-agent--withdrawn)
-                    (when-let* ((stored (harness-call 'session/append session-id node)))
-                      ;; It goes in the turn's first request, whose receipt
-                      ;; says how far it got (`harness-agent--receipt-send').
-                      (harness-agent--receipt-fresh turn (list (plist-get stored :id)))))
-                  (harness-agent--flush-held turn))
-         (remhash turn harness-agent--held))
-       (remhash turn harness-agent--withdrawn)
-       (cond
-        ;; Cancelled while a gate held it (one asking the user, say): the
-        ;; message stays, the turn is over, or ends now.
-        ((not (harness-agent--current-p turn)) nil)
-        ((harness-agent-turn-cancelled turn) (harness-agent--end turn 'cancelled))
-        ((not (plist-get gate :proceed))
-         (when (plist-get gate :reason)
-           (harness-call 'session/hint session-id (format "Turn not started: %s" (plist-get gate :reason))))
-         (harness-agent--end turn 'blocked (plist-get gate :reason)))
-        (t
-         (harness-call 'session/set-status session-id 'running)
-         (harness-emit 'agent/turn-started session-id)
-         (harness-agent--step turn)))))
+    (harness-agent--observe turn
+                            (harness-then
+                             (harness-then (harness-agent--follow-head session-id)
+                                           (lambda (_)
+                       (when (harness-agent--current-p turn)
+                         (harness-run-filter-async 'agent/before-turn
+                                                  (list :proceed t
+                                                        :message (list :text (harness-agent--blocks-text blocks)
+                                                                       :from from))
+                                                  (if (harness-call 'session/exists-p session-id)
+                                                      (harness-call 'session/get session-id)
+                                                    session)))))
+                             (lambda (gate)
+                               (when (harness-agent--current-p turn)
+                                 (remhash turn harness-agent--gated)
+                                 (harness-agent--flush-opening turn)
+                                 (harness-agent--flush-held turn)
+                                 (cond
+                                  ;; Cancelled while a gate held it (one asking the user, say): the
+                                  ;; message stays, the turn is over, or ends now.
+                                  ((not (harness-agent--current-p turn)) nil)
+                                  ((harness-agent-turn-cancelled turn) (harness-agent--end turn 'cancelled))
+                                  ((not (plist-get gate :proceed))
+                                   (when (plist-get gate :reason)
+                                     (harness-call 'session/hint session-id (format "Turn not started: %s" (plist-get gate :reason))))
+                                   (harness-agent--end turn 'blocked (plist-get gate :reason)))
+                                  (t
+                                   (harness-call 'session/set-status session-id 'running)
+                                   (harness-emit 'agent/turn-started session-id)
+                                   (harness-agent--step turn)))))))
     promise))
 
 ;;;; Steps
@@ -1845,6 +1893,11 @@ the payload)."
       (harness-agent--replay-messages request))))
 
 (defun harness-agent--step (turn)
+  "Start TURN's next provider request, or terminate it on an internal failure."
+  (when (harness-agent--current-p turn)
+    (harness-agent--guard turn (harness-agent--run-step turn))))
+
+(defun harness-agent--run-step (turn)
   "Call the provider once for TURN."
   (let ((sid (harness-agent-turn-session-id turn)))
     (cond
@@ -2129,6 +2182,10 @@ stamp the turn's own requests made (`cache-stamp')."
           (harness-agent--add-usage sid ev model))))))
 
 (defun harness-agent--on-event (turn ev &optional model)
+  "Deliver EV to TURN without losing turn completion on a consumer failure."
+  (harness-agent--guard turn (harness-agent--dispatch-event turn ev model)))
+
+(defun harness-agent--dispatch-event (turn ev &optional model)
   "Handle EV from TURN's provider; late events of a finished turn are dropped.
 MODEL is the model the step was sent to: the provider state it reports
 is that model's provider's, whatever the session's model is by now.  The
@@ -2650,7 +2707,8 @@ as a thinking block without text, has none to show."
 
 (defun harness-agent--current-p (turn)
   "Non-nil while TURN is its session's running turn."
-  (eq (gethash (harness-agent-turn-session-id turn) harness-agent--turns) turn))
+  (and (eq (gethash (harness-agent-turn-session-id turn) harness-agent--turns) turn)
+       (not (gethash turn harness-agent--finishing))))
 
 (defun harness-agent--builtin-call (turn ev)
   "Record the call EV of a tool that TURN's provider runs itself.
@@ -2822,17 +2880,20 @@ hold, say) ends the turn `blocked', with its reason as a hint.  The
 messages sent to the turn while a filter held it for a compaction are
 recorded once they let it go (`harness-agent--flush-held'), whether it
 goes on or not, so the step that follows reads them."
-  (let ((sid (harness-agent-turn-session-id turn)))
-    (puthash turn t harness-agent--gated)
-    (harness-then
-     (harness-run-filter-async 'agent/step (list :proceed t) (harness-call 'session/get sid))
-     (lambda (gate)
-       (remhash turn harness-agent--gated)
-       (harness-agent--flush-held turn)
-       (if (plist-get gate :proceed)
-           (harness-agent--step turn)
-         (when (plist-get gate :reason) (harness-call 'session/hint sid (plist-get gate :reason)))
-         (harness-agent--end turn 'blocked (plist-get gate :reason)))))))
+  (harness-agent--guard turn
+    (let ((sid (harness-agent-turn-session-id turn)))
+      (puthash turn t harness-agent--gated)
+      (harness-agent--observe turn
+                              (harness-then
+                               (harness-run-filter-async 'agent/step (list :proceed t) (harness-call 'session/get sid))
+                               (lambda (gate)
+                                 (remhash turn harness-agent--gated)
+                                 (when (harness-agent--current-p turn)
+                                   (harness-agent--flush-held turn)
+                                   (if (plist-get gate :proceed)
+                                       (harness-agent--step turn)
+                                     (when (plist-get gate :reason) (harness-call 'session/hint sid (plist-get gate :reason)))
+                                     (harness-agent--end turn 'blocked (plist-get gate :reason))))))))))
 
 (defun harness-agent--maybe-continue (turn)
   "Decide what happens to TURN once its provider is done and no tool runs."
@@ -2898,13 +2959,14 @@ turn meanwhile gets its step even when the answer is to stop."
             (not (memq 'agent/stop (harness-filters)))
             (not (harness-call 'session/exists-p sid)))
         (harness-agent--end turn 'end-turn)
-      (harness-then
-       (harness-run-filter-async 'agent/stop (list :stop t) (harness-call 'session/get sid))
-       (lambda (decision) (harness-agent--stop-decided turn decision))
-       (lambda (err)
-         (harness-log 'error "agent: agent/stop for %s failed: %S" sid err)
-         (when (harness-agent--current-p turn)
-           (harness-agent--end turn 'end-turn)))))))
+      (harness-agent--observe turn
+                              (harness-then
+                               (harness-run-filter-async 'agent/stop (list :stop t) (harness-call 'session/get sid))
+                               (lambda (decision) (harness-agent--stop-decided turn decision))
+                               (lambda (err)
+                                 (harness-log 'error "agent: agent/stop for %s failed: %S" sid err)
+                                 (when (harness-agent--current-p turn)
+                                   (harness-agent--end turn 'end-turn))))))))
 
 (defun harness-agent--stop-continue (turn decision)
   "Send TURN on past its model's stop as DECISION says; non-nil when it goes on.
@@ -2987,32 +3049,33 @@ Otherwise, and once the turn was cancelled, it ends with `error'."
             (>= count harness-agent--max-error-retries)
             (not (harness-call 'session/exists-p sid)))
         (harness-agent--end turn 'error error kind)
-      (harness-then
-       (harness-run-filter-async 'agent/step-error (list :retry nil)
-                                 (harness-call 'session/get sid) failure)
-       (lambda (decision)
-         (when (harness-agent--current-p turn)
-           (if (and (plist-get decision :retry)
-                    (not (harness-agent-turn-cancelled turn))
-                    (harness-call 'session/exists-p sid))
-               (progn (harness-agent--rewind-step turn)
-                      (puthash sid (1+ count) harness-agent--retries)
-                      ;; The step that follows repeats the request that
-                      ;; The same logical step, tried again: it stays open,
-                      ;; and its next attempt adds to its counts.
-                      ;; failed, with what it spent and what authorised it.
-                      ;; The messages it carried go out in it again, and
-                      ;; their receipts say a try is under way.
-                      (setf (harness-agent-turn-retry turn)
-                            (plist-get decision :state))
-                      (harness-agent--receipt-retrying turn)
-                      (harness-agent--step turn))
-             ;; Its fate is known: it ends the turn, and is reported once.
-             (harness-agent--end turn 'error error kind))))
-       (lambda (err)
-         (harness-log 'error "agent: agent/step-error for %s failed: %S" sid err)
-         (when (harness-agent--current-p turn)
-           (harness-agent--end turn 'error error kind)))))))
+      (harness-agent--observe turn
+                              (harness-then
+                               (harness-run-filter-async 'agent/step-error (list :retry nil)
+                                                         (harness-call 'session/get sid) failure)
+                               (lambda (decision)
+                                 (when (harness-agent--current-p turn)
+                                   (if (and (plist-get decision :retry)
+                                            (not (harness-agent-turn-cancelled turn))
+                                            (harness-call 'session/exists-p sid))
+                                       (progn (harness-agent--rewind-step turn)
+                                              (puthash sid (1+ count) harness-agent--retries)
+                                              ;; The step that follows repeats the request that
+                                              ;; The same logical step, tried again: it stays open,
+                                              ;; and its next attempt adds to its counts.
+                                              ;; failed, with what it spent and what authorised it.
+                                              ;; The messages it carried go out in it again, and
+                                              ;; their receipts say a try is under way.
+                                              (setf (harness-agent-turn-retry turn)
+                                                    (plist-get decision :state))
+                                              (harness-agent--receipt-retrying turn)
+                                              (harness-agent--step turn))
+                                     ;; Its fate is known: it ends the turn, and is reported once.
+                                     (harness-agent--end turn 'error error kind))))
+                               (lambda (err)
+                                 (harness-log 'error "agent: agent/step-error for %s failed: %S" sid err)
+                                 (when (harness-agent--current-p turn)
+                                   (harness-agent--end turn 'error error kind))))))))
 
 (defun harness-agent--end (turn reason &optional error kind)
   "End TURN with stop REASON, and ERROR when it failed, of KIND.
@@ -3024,76 +3087,100 @@ messages next.  KIND is the failure's kind, for the report of a step the
 turn ends with (`agent/step-ended'); it is read from the failure when
 not given."
   (let ((sid (harness-agent-turn-session-id turn)))
-    (when (eq (gethash sid harness-agent--turns) turn)
-      ;; A turn cancelled before its provider was done.
-      (when (harness-call 'session/exists-p sid)
-        (harness-agent--close-builtins turn reason))
-      ;; What became of the messages a request still in flight carried when
-      ;; the turn ended: one it ends with an error on never got an answer,
-      ;; and one it cuts short -- a cancellation, a tool handing the work in
-      ;; -- leaves the provider's reading unknown, which is what the receipt
-      ;; then says.  An answered request settled them already, and a
-      ;; `delivered' receipt is never taken back.
-      (harness-agent--receipt-settle
-       turn (pcase reason
-              ('error 'failed)
-              (_ 'unconfirmed)))
-      ;; A step still open ended with the turn: a cancellation, or a failure
-      ;; that is not tried again.  It is reported before `agent/turn-ended',
-      ;; so a subscriber sees the step end before the turn does.
-      (harness-agent--report-step
-       turn reason
-       (and (eq reason 'error)
-            (or kind
-                (plist-get (gethash sid harness-agent--failures) :error-kind)
-                'error)))
-      (remhash sid harness-agent--turns)
-      (remhash sid harness-agent--step-models)
-      (remhash sid harness-agent--step-usage)
-      (remhash sid harness-agent--step-started-at)
-      (remhash sid harness-agent--step-attempts)
-      (remhash sid harness-agent--last-requests)
-      (remhash sid harness-agent--failures)
-      (remhash sid harness-agent--retries)
-      (remhash sid harness-agent--stop-continues)
-      (harness-agent--clear-activity sid)
-      ;; What the model never got: the next turn reads it.
-      (harness-agent--try (format "recording the messages %s never took" sid)
-        (harness-agent--flush-steering turn))
-      (when (harness-call 'session/exists-p sid)
-        (harness-call 'session/usage-add sid (list :turns 1))
-        ;; How the turn ended, kept on the session for whatever follows it:
-        ;; a subscriber sees `agent/turn-ended' with the reason and nothing
-        ;; else, and the error a turn stopped on is what makes the next
-        ;; incident answerable from the session alone.
-        (harness-agent--try (format "recording how the turn of %s ended" sid)
-          (harness-call 'session/runtime sid :last-turn
-                        (list :reason reason :error error :kind kind :at (float-time))))
-        ;; With the turn over, a session that stops waiting for the user
-        ;; goes back to idle, not to the running it was blocked in.
-        (harness-call 'session/runtime sid :status-before-block 'idle)
-        ;; What the turn's tool calls waited on goes with it: a question
-        ;; or a permission prompt nobody answered (the turn was cancelled)
-        ;; has nothing left to go on, and would keep the session blocked.
-        ;; After the turn is no longer current, so that the calls that end
-        ;; with them find nothing to continue.
-        (harness-agent--try (format "dismissing what the turn of %s waited on" sid)
-          (harness-call 'session/pending-dismiss sid
-                        "the turn ended before anyone answered" t))
-        (let ((session (harness-call 'session/get sid)))
-          ;; The provider conversation got this far: a head moved off it
-          ;; later makes the next turn cut it (`harness-agent--follow-head').
-          (harness-call 'session/set-provider-node sid (plist-get session :head))
-          (unless (eq (plist-get session :status) 'inactive)
-            (harness-call 'session/set-status sid (if (plist-get session :pending) 'blocked 'idle)))))
-      (harness-emit 'agent/turn-ended sid reason)
-      (harness-resolve (harness-agent-turn-promise turn)
-                       (list :stop-reason reason :error error
-                             :duration (- (float-time) (harness-agent-turn-started turn))))
-      (when (and (eq reason 'end-turn)
-                 (harness-call 'session/exists-p sid)
-                 (plist-get (harness-call 'session/get sid) :queue))
-        (harness-run-soon #'harness-agent--send-queued sid)))))
+    (when (harness-agent--current-p turn)
+      (puthash turn t harness-agent--finishing)
+      (unwind-protect
+          (harness-agent--try "terminal bookkeeping"
+            ;; A turn cancelled before its provider was done.
+            (harness-agent--try "closing built-in calls"
+              (when (harness-call 'session/exists-p sid)
+                (harness-agent--close-builtins turn reason)))
+            ;; What became of the messages a request still in flight carried when
+            ;; the turn ended: one it ends with an error on never got an answer,
+            ;; and one it cuts short -- a cancellation, a tool handing the work in
+            ;; -- leaves the provider's reading unknown, which is what the receipt
+            ;; then says.  An answered request settled them already, and a
+            ;; `delivered' receipt is never taken back.
+            (harness-agent--try "settling message receipts"
+              (harness-agent--receipt-settle
+               turn (pcase reason
+                      ('error 'failed)
+                      (_ 'unconfirmed))))
+            ;; A step still open ended with the turn: a cancellation, or a failure
+            ;; that is not tried again.  It is reported before `agent/turn-ended',
+            ;; so a subscriber sees the step end before the turn does.
+            (harness-agent--try "reporting the terminal step"
+              (harness-agent--report-step
+               turn reason
+               (and (eq reason 'error)
+                    (or kind
+                        (plist-get (gethash sid harness-agent--failures) :error-kind)
+                        'error))))
+            ;; Preserve messages before another turn can start.  A gate released
+            ;; later has no ownership of this session's transcript or UI state.
+            (harness-agent--try "recording the opening message"
+              (harness-agent--flush-opening turn))
+            (harness-agent--try "recording held messages"
+              (harness-agent--flush-held turn))
+            (dolist (table (list harness-agent--gated harness-agent--shown
+                                 harness-agent--withdrawn))
+              (remhash turn table))
+            ;; What the model never got: the next turn reads it.
+            (harness-agent--try (format "recording the messages %s never took" sid)
+              (harness-agent--flush-steering turn))
+            (when (harness-call 'session/exists-p sid)
+              (harness-agent--try "counting the completed turn"
+                (harness-call 'session/usage-add sid (list :turns 1)))
+              ;; How the turn ended, kept on the session for whatever follows it:
+              ;; a subscriber sees `agent/turn-ended' with the reason and nothing
+              ;; else, and the error a turn stopped on is what makes the next
+              ;; incident answerable from the session alone.
+              (harness-agent--try (format "recording how the turn of %s ended" sid)
+                (harness-call 'session/runtime sid :last-turn
+                              (list :reason reason :error error :kind kind :at (float-time))))
+              ;; With the turn over, a session that stops waiting for the user
+              ;; goes back to idle, not to the running it was blocked in.
+              (harness-agent--try "resetting blocked status"
+                (harness-call 'session/runtime sid :status-before-block 'idle))
+              ;; What the turn's tool calls waited on goes with it: a question
+              ;; or a permission prompt nobody answered (the turn was cancelled)
+              ;; has nothing left to go on, and would keep the session blocked.
+              ;; After the turn is marked finishing, so the calls that end
+              ;; with them find nothing to continue.
+              (harness-agent--try (format "dismissing what the turn of %s waited on" sid)
+                (harness-call 'session/pending-dismiss sid
+                              "the turn ended before anyone answered" t))
+              (harness-agent--try "recording the provider's final node"
+                (harness-call 'session/set-provider-node sid
+                              (plist-get (harness-call 'session/get sid) :head)))
+              (harness-agent--try "making the completed session idle"
+                (let ((session (harness-call 'session/get sid)))
+                  ;; The provider conversation got this far: a head moved off it
+                  ;; later makes the next turn cut it (`harness-agent--follow-head').
+                  (unless (eq (plist-get session :status) 'inactive)
+                    (harness-call 'session/set-status sid (if (plist-get session :pending) 'blocked 'idle)))))))
+        (remhash sid harness-agent--turns)
+        (remhash sid harness-agent--step-open)
+        (remhash sid harness-agent--step-models)
+        (remhash sid harness-agent--step-usage)
+        (remhash sid harness-agent--step-started-at)
+        (remhash sid harness-agent--step-attempts)
+        (remhash sid harness-agent--last-requests)
+        (remhash sid harness-agent--failures)
+        (remhash sid harness-agent--retries)
+        (remhash sid harness-agent--stop-continues)
+        (harness-agent--try "clearing terminal activity"
+          (harness-agent--clear-activity sid))
+        (remhash turn harness-agent--finishing)
+        (harness-emit 'agent/turn-ended sid reason)
+        (harness-resolve (harness-agent-turn-promise turn)
+                         (list :stop-reason reason :error error
+                               :duration (- (float-time) (harness-agent-turn-started turn)))))
+      (harness-agent--try "scheduling queued messages"
+        (when (and (eq reason 'end-turn)
+                   (harness-call 'session/exists-p sid)
+                   (plist-get (harness-call 'session/get sid) :queue))
+          (harness-run-soon #'harness-agent--send-queued sid))))))
 
 (defun harness-agent--send-queued (session-id)
   "Send the queue of SESSION-ID as a turn of its own, after a turn ended.
