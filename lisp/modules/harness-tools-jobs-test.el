@@ -272,15 +272,16 @@ be asking."
 
 (ert-deftest harness-jobs-a-refused-backend-says-why ()
   "Where the sandbox cannot hold a job, the tool says why and starts nothing.
-MXC has no handle to end one command, OpenShell a sandbox per command
-that its wrapper deletes, systemd-run no PID namespace to verify a stop
-in, the `off' policy no jail and no backend none at all: a job there
-would be a process nothing confines or nothing ends.  Every answer is the
-generic sandbox layer's (`sandbox/hold'), so a backend added there is
-refused or allowed by what it promises rather than by a list here."
+OpenShell makes a sandbox per command that its wrapper deletes, systemd-run
+has no PID namespace to verify a stop in, the `off' policy no jail and no
+backend none at all: a job there would be a process nothing confines or
+nothing ends.  Every answer is the generic sandbox layer's
+\(`sandbox/hold'), so a backend added there is refused or allowed by what it
+promises rather than by a list here -- which is why MXC, whose supervisor
+finds and ends a run's processes on macOS, is not among them (see
+`harness-sandbox--hold-facts')."
   (harness-tools-jobs-test--setup)
-  (dolist (pair '((mxc . "Seatbelt has no handle to end one command of it")
-                  (openshell . "its wrapper deletes the sandbox with the command that made it")
+  (dolist (pair '((openshell . "its wrapper deletes the sandbox with the command that made it")
                   (systemd . "its unit has no PID namespace of its own")))
     (harness-tools-jobs-test-with-methods
         (list (cons 'sandbox/status
@@ -312,8 +313,9 @@ refused or allowed by what it promises rather than by a list here."
   ;; And a start there leaves no job behind.
   (harness-tools-jobs-test-with-methods
       (list (cons 'sandbox/status
-                  (lambda () (list :backend 'mxc :available '(mxc) :policy 'preferred :limits nil)))
-            (cons 'sandbox/hold (lambda (&rest _) (harness-tools-jobs-test--hold-of 'mxc))))
+                  (lambda () (list :backend 'openshell :available '(openshell)
+                                   :policy 'preferred :limits nil)))
+            (cons 'sandbox/hold (lambda (&rest _) (harness-tools-jobs-test--hold-of 'openshell))))
     (harness-tools-jobs-test-in-dir
       (let* ((sid (plist-get (harness-call 'session/create :cwd root) :id))
              (r (harness-tools-jobs-test--call sid :action "start" :command "sleep 30")))

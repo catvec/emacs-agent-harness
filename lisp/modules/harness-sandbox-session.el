@@ -91,16 +91,20 @@
 ;; supervisor's standard input, which the sandbox cannot reach.
 ;;
 ;; **Cancel is not destroy.**  A run's processes inherit `HARNESS_RUN' and
-;; the instance's id, so the supervisor finds every one of them by the
-;; `/proc' entry it inherits -- a `setsid' child and a double-forked daemon
-;; included -- and cancel sends TERM to each, waits, then KILLs what
-;; ignored it, and says how many are still alive when it replies.  A run
-;; is cancelled only when that count is zero; a run that cannot be
-;; emptied ends its whole runtime instead, which the kernel does terminate.
-;; Destroy ends the instance: the supervisor goes, the namespace with it,
-;; and the harness waits for its own process to be gone before it says so.
-;; An ordinary call that leaves a process running is neither: the process
-;; survives, it is counted (`P'), and it keeps the runtime alive.
+;; the instance's id, so the supervisor finds every one of them by what
+;; they inherited -- a `setsid' child and a double-forked daemon included
+;; -- reading it from `/proc' on Linux and from the process table
+;; (`ps -E', `ps e') where there is none, as on macOS; and cancel sends
+;; TERM to each, waits, then KILLs what ignored it, and says how many are
+;; still alive when it replies.  A run is cancelled only when that count
+;; is zero; a run that cannot be emptied ends its whole runtime instead.
+;; Destroy ends the instance: the supervisor ends every process of the
+;; instance before it says it is going -- the kernel does that with the
+;; namespace where there is one, and the supervisor does it itself where
+;; there is not -- and the harness waits for its own process to be gone
+;; before it says so.  An ordinary call that leaves a process running is
+;; neither: the process survives, it is counted (`P'), and it keeps the
+;; runtime alive.
 ;;
 ;; **Bounds.**  One instance per session, one supervisor in it, one
 ;; command per run: `harness-sandbox-session-max-commands' concurrent runs
@@ -220,7 +224,7 @@ lease, so a heartbeat at the lease would be no heartbeat at all.")
    '("set +e"
      "version=$1 instance=$2 scratch=$3 beat=${4:-10}"
      "missing="
-     "for p in timeout setsid base64 grep sed mkfifo dd tr; do"
+     "for p in base64 grep sed mkfifo dd tr ps sleep; do"
      "  command -v \"$p\" >/dev/null 2>&1 || missing=\"$missing $p\""
      "done"
      "if [ -n \"$missing\" ]; then printf 'R %s %s\\n' \"$version\" \"$missing\"; exit 3; fi"
@@ -229,8 +233,89 @@ lease, so a heartbeat at the lease would be no heartbeat at all.")
      ;; A nested runtime inherits its caller's run tag.  Only commands,
      ;; not the new supervisor's helpers, belong to a run.
      "unset HARNESS_RUN"
+     ;; The supervisor's own helpers carry this; a command is started
+     ;; with it empty, so what the instance runs can be told from what
+     ;; runs it (`alive_of_instance').
+     "export HARNESS_SUPERVISOR=$$"
      "live="
      "say() { printf '%s\\n' \"$*\"; }"
+     ;; Where a run's processes are found.  `/proc' is the exact answer
+     ;; and GNU/Linux has it; macOS has no /proc, so there the process
+     ;; table is asked for each process's environment (`ps -E' on BSD,
+     ;; `ps e' elsewhere), and a process belongs to the instance by the
+     ;; HARNESS_INSTANCE it inherited -- which is what makes a `setsid'
+     ;; child and a double-forked daemon findable, since a process
+     ;; group or a session can be left and an environment cannot.
+     ;; HARNESS_SUPERVISOR_PROCS forces one way, so the way a Mac uses
+     ;; is measured on a Linux host by its own tests.
+     "procs=${HARNESS_SUPERVISOR_PROCS:-}"
+     "ps_style="
+     "if [ \"$procs\" = ps ]; then"
+     "  if ps -A -E -ww -o pid=,command= 2>/dev/null | grep -Fq \"HARNESS_INSTANCE=$instance\"; then ps_style=bsd"
+     "  elif ps -A -ww -o pid=,command= e 2>/dev/null | grep -Fq \"HARNESS_INSTANCE=$instance\"; then ps_style=gnu"
+     "  else ps_style=none; fi"
+     "  if [ \"$ps_style\" = none ]; then"
+     "    printf 'R %s %s\\n' \"$version\" \" ps-with-environment\"; exit 3"
+     "  fi"
+     "elif [ \"$procs\" = proc ] || [ -r /proc/self/environ ]; then"
+     "  procs=proc"
+     "else"
+     "  procs=ps"
+     "  if ps -A -E -ww -o pid=,command= 2>/dev/null | grep -Fq \"HARNESS_INSTANCE=$instance\"; then ps_style=bsd"
+     "  elif ps -A -ww -o pid=,command= e 2>/dev/null | grep -Fq \"HARNESS_INSTANCE=$instance\"; then ps_style=gnu"
+     "  else ps_style=none; fi"
+     "  if [ \"$ps_style\" = none ]; then"
+     "    printf 'R %s %s\\n' \"$version\" \" ps-with-environment\"; exit 3"
+     "  fi"
+     "fi"
+     "ps_lines() {"
+     "  case \"$ps_style\" in"
+     "    bsd) ps -A -E -ww -o pid=,command= 2>/dev/null ;;"
+     "    gnu) ps -A -ww -o pid=,command= e 2>/dev/null ;;"
+     "  esac"
+     "}"
+     ;; Every process of the instance, one per line, as the backend lets
+     ;; it be seen: a path to its environment under /proc, or its whole
+     ;; line of the process table.
+     "instance_environs() {"
+     "  case \"$procs\" in"
+     "    proc) grep -Flzx \"HARNESS_INSTANCE=$instance\" /proc/[0-9]*/environ 2>/dev/null ;;"
+     "    ps) ps_lines | while IFS= read -r line; do"
+     "          case \" $line \" in *\" HARNESS_INSTANCE=$instance \"*) printf '%s\\n' \"$line\" ;; esac"
+     "        done ;;"
+     "  esac"
+     "}"
+     ;; The pids carrying RUN's token.  A tag matches whole, so one
+     ;; instance's `-foreign' namesake and one run's `r1' beside `r12'
+     ;; are not taken for each other.
+     "pids_of() {"
+     "  case \"$procs\" in"
+     "    proc)"
+     "      local f"
+     "      for f in $(instance_environs); do"
+     "        grep -Fqzx \"HARNESS_RUN=$1\" \"$f\" 2>/dev/null || continue"
+     "        f=${f#/proc/}"
+     "        printf '%s\\n' \"${f%/environ}\""
+     "      done ;;"
+     "    ps)"
+     "      instance_environs | while IFS= read -r line; do"
+     "        case \" $line \" in *\" HARNESS_RUN=$1 \"*) ;; *) continue ;; esac"
+     "        read -r pid rest <<< \"$line\""
+     "        printf '%s\\n' \"$pid\""
+     "      done ;;"
+     "  esac"
+     "}"
+     ;; The state of every process, from the process table: a zombie is
+     ;; no process of the run, whatever it is still listed as.
+     "states() { ps -A -o pid=,stat= 2>/dev/null; }"
+     "alive_of() {"
+     "  local p st table"
+     "  table=$(states)"
+     "  for p in $(pids_of \"$1\"); do"
+     "    st=$(printf '%s\\n' \"$table\" | sed -n \"s/^ *$p  *//p\" | head -1)"
+     "    case \"$st\" in Z*) ;; '') ;; *) printf '%s ' \"$p\" ;; esac"
+     "  done"
+     "}"
      ;; One block, one frame, one write(): `dd' returns on the first short
      ;; read, so a block is in a frame as it arrives rather than when the
      ;; stream closes, and `base64' makes it ASCII, NUL and newline
@@ -244,29 +329,56 @@ lease, so a heartbeat at the lease would be no heartbeat at all.")
      "draw() {"
      "  local chunk"
      "  exec 9< \"$3\""
-     "  while chunk=$(dd bs=384 count=1 <&9 2>/dev/null | base64 -w0); do"
+     "  while chunk=$(dd bs=384 count=1 <&9 2>/dev/null | base64 | tr -d '\\n'); do"
      "    [ -n \"$chunk\" ] || break"
      "    say \"$1\" \"$2\" \"$chunk\""
      "  done"
      "  exec 9<&-"
      "}"
-     ;; Even when /proc includes another runtime, a run token alone is
-     ;; not ownership: status and cancellation both require this instance.
-     "environs_of() { grep -Flzx \"HARNESS_INSTANCE=$instance\" /proc/[0-9]*/environ 2>/dev/null; }"
-     "pids_of() {"
-     "  local f"
-     "  for f in $(environs_of); do"
-     "    grep -Fqzx \"HARNESS_RUN=$1\" \"$f\" 2>/dev/null || continue"
-     "    f=${f#/proc/}"
-     "    printf '%s\\n' \"${f%/environ}\""
+     ;; The run token of every process of the instance, one line each, so
+     ;; `status' can tell a process of a run in flight from one left over.
+     "run_tokens() {"
+     "  case \"$procs\" in"
+     "    proc)"
+     "      local f"
+     "      for f in $(instance_environs); do"
+     "        tr '\\0' '\\n' < \"$f\" 2>/dev/null | sed -n 's/^HARNESS_RUN=//p' | head -1"
+     "      done ;;"
+     "    ps)"
+     "      instance_environs | while IFS= read -r line; do"
+     "        case \" $line \" in *\" HARNESS_RUN=\"*) ;; *) continue ;; esac"
+     "        printf '%s\\n' \"$line\" | sed -n 's/.* HARNESS_RUN=\\([^ ]*\\).*/\\1/p' | head -1"
+     "      done ;;"
+     "  esac"
+     "}"
+     ;; Every process of the instance, whatever run it belongs to.  The
+     ;; supervisor and the helpers it starts carry HARNESS_SUPERVISOR with
+     ;; its pid; a command is started with that name empty, so what is
+     ;; left is exactly what the instance runs.
+     "alive_of_instance() {"
+     "  local p st table"
+     "  table=$(states)"
+     "  for p in $(pids_of_instance); do"
+     "    st=$(printf '%s\\n' \"$table\" | sed -n \"s/^ *$p  *//p\" | head -1)"
+     "    case \"$st\" in Z*) ;; '') ;; *) printf '%s ' \"$p\" ;; esac"
      "  done"
      "}"
-     "alive_of() {"
-     "  local p st"
-     "  for p in $(pids_of \"$1\"); do"
-     "    st=$(sed -n 's/^[0-9]* (.*) \\(.\\).*/\\1/p' \"/proc/$p/stat\" 2>/dev/null)"
-     "    case \"$st\" in Z|'') ;; *) printf '%s ' \"$p\" ;; esac"
-     "  done"
+     "pids_of_instance() {"
+     "  case \"$procs\" in"
+     "    proc)"
+     "      local f"
+     "      for f in $(instance_environs); do"
+     "        if grep -Fqzx \"HARNESS_SUPERVISOR=$$\" \"$f\" 2>/dev/null; then continue; fi"
+     "        f=${f#/proc/}"
+     "        printf '%s\\n' \"${f%/environ}\""
+     "      done ;;"
+     "    ps)"
+     "      instance_environs | while IFS= read -r line; do"
+     "        case \" $line \" in *\" HARNESS_SUPERVISOR=$$ \"*) continue ;; esac"
+     "        read -r pid rest <<< \"$line\""
+     "        printf '%s\\n' \"$pid\""
+     "      done ;;"
+     "  esac"
      "}"
      "count_of() { printf '%s' \"$1\" | tr -s ' ' '\\n' | grep -c .; }"
      "untag() {"
@@ -276,20 +388,34 @@ lease, so a heartbeat at the lease would be no heartbeat at all.")
      "}"
      "start_one() {"
      "  local token=$1 secs=$2 dir=$scratch/$1"
-     "  mkdir -p \"$dir\" && rm -f \"$dir/o\" \"$dir/e\" && mkfifo \"$dir/o\" \"$dir/e\" \\"
+     "  mkdir -p \"$dir\" && rm -f \"$dir/o\" \"$dir/e\" \"$dir/timed-out\" && mkfifo \"$dir/o\" \"$dir/e\" \\"
      "    || { say X \"$token\" 126 0; return 1; }"
      "  say S \"$token\""
      "  live=\"$live $token\""
      "  return 0"
      "}"
+     ;; A command runs in a process group of its own (`set -m'), so the
+     ;; run's own watchdog can end every process of it -- a `setsid' child
+     ;; that left the group is found by its tag instead (`alive_of').  The
+     ;; watchdog is the shell's own, not coreutils `timeout', which macOS
+     ;; does not ship; it says it fired with a file, because a finished
+     ;; child is a zombie until it is waited for and would still answer
+     ;; `kill -0'.  A run ended at its time says 124, as `timeout' said.
      "run_one() {"
-     "  local token=$1 secs=$2 dir=$scratch/$1 op ep rp st left"
+     "  local token=$1 secs=$2 dir=$scratch/$1 op ep rp wp st left"
      "  draw O \"$token\" \"$dir/o\" & op=$!"
      "  draw E \"$token\" \"$dir/e\" & ep=$!"
      "  printf '%s' \"$3\" | base64 -d > \"$dir/cmd\" 2>/dev/null"
-     "  HARNESS_RUN=$token timeout --signal=TERM --kill-after=3s \"${secs}s\" \\"
-     "    bash \"$dir/cmd\" </dev/null >\"$dir/o\" 2>\"$dir/e\" & rp=$!"
+     "  set -m"
+     "  HARNESS_SUPERVISOR= HARNESS_RUN=$token bash \"$dir/cmd\" </dev/null >\"$dir/o\" 2>\"$dir/e\" & rp=$!"
+     "  ( sleep \"$secs\"; : > \"$dir/timed-out\"; kill -TERM -- \"-$rp\" 2>/dev/null"
+     "    sleep 3; kill -KILL -- \"-$rp\" 2>/dev/null ) >/dev/null 2>&1 & wp=$!"
+     "  set +m"
      "  wait $rp; st=$?"
+     "  kill -TERM -- \"-$wp\" 2>/dev/null; kill -TERM \"$wp\" 2>/dev/null"
+     "  wait $wp 2>/dev/null"
+     "  if [ -f \"$dir/timed-out\" ]; then st=124; fi"
+     "  rm -f \"$dir/timed-out\""
      "  wait $op $ep"
      "  rm -f \"$dir/cmd\""
      "  live=$(untag \"$token\" \"$live\")"
@@ -315,10 +441,25 @@ lease, so a heartbeat at the lease would be no heartbeat at all.")
      "  pids=$(alive_of \"$1\")"
      "  say K \"$1\" \"$(count_of \"$pids\")\""
      "}"
+     ;; Ending the instance ends what it runs, and says how many would not
+     ;; go: under bwrap the kernel ends them with the namespace, and a
+     ;; backend that only confines the process tree (MXC) has this to end
+     ;; them with instead.
+     "kill_all() {"
+     "  local pids p i"
+     "  pids=$(alive_of_instance)"
+     "  for p in $pids; do kill -TERM -- \"-$p\" 2>/dev/null; kill -TERM \"$p\" 2>/dev/null; done"
+     "  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do"
+     "    sleep 0.25"
+     "    pids=$(alive_of_instance)"
+     "    [ -z \"$pids\" ] && break"
+     "    for p in $pids; do kill -KILL -- \"-$p\" 2>/dev/null; kill -KILL \"$p\" 2>/dev/null; done"
+     "  done"
+     "  printf '%s' \"$(count_of \"$(alive_of_instance)\")\""
+     "}"
      "status_all() {"
-     "  local n=0 f tok seq=$1"
-     "  for f in $(environs_of); do"
-     "    tok=$(tr '\\0' '\\n' < \"$f\" 2>/dev/null | sed -n 's/^HARNESS_RUN=//p' | head -1)"
+     "  local n=0 tok seq=$1"
+     "  for tok in $(run_tokens); do"
      "    [ -n \"$tok\" ] || continue"
      ;; A run in flight is the one whose command file is still there:
      ;; `run_one' writes it before the command starts and removes it
@@ -367,31 +508,43 @@ lease, so a heartbeat at the lease would be no heartbeat at all.")
      "    run) if start_one \"$a\" \"$b\"; then run_one \"$a\" \"$b\" \"$c\" & fi ;;"
      "    kill) kill_one \"$a\" & ;;"
      "    status) status_all \"$a\" & ;;"
-     "    quit) say D; exit 0 ;;"
+     ;; Ending the instance ends what it runs.  Under bwrap the kernel
+     ;; does that when the namespace's init goes, and MXC -- whose
+     ;; confinement is a process tree, not a namespace -- is asked to:
+     ;; the `D' frame comes after every process of the instance has been
+     ;; sent TERM and then KILL, so a caller that sees it knows the
+     ;; instance is empty, not only that the supervisor is leaving.
+     "    quit) kill_all >/dev/null; say D; exit 0 ;;"
      "  esac"
      "done"
      "exit 0")
    "\n")
   "The program the init of a session's runtime runs.
 
-  bash supervisor.sh VERSION INSTANCE SCRATCH
+  bash supervisor.sh VERSION INSTANCE SCRATCH BEAT
 
 It writes the frames the module's commentary lists on standard output and
-reads `run TOKEN SECONDS BASE64', `kill TOKEN', `status' and `quit' on
+reads `run TOKEN SECONDS BASE64', `kill TOKEN', `status N' and `quit' on
 standard input.  Its output is a pipe the sandbox cannot reach, and it
 writes no file the harness reads: what a command prints is drawn into a
 frame as it arrives, one `write()' each, below `PIPE_BUF', so a frame is
 whole in the pipe and cannot be forged from a command's bytes.
 
-It needs `timeout', `setsid', `base64', `grep', `sed', `mkfifo', `dd' and
-`tr'; it names in its `R' frame whichever is missing and exits, so a backend
-that gives fewer tools says so rather than hang.")
+It needs `base64', `grep', `sed', `mkfifo', `dd', `tr', `ps' and
+`sleep' -- the programs a Mac and a Linux both have -- and names in its
+`R' frame whichever is missing, so a backend that gives fewer tools says
+so rather than hang.  Coreutils' `timeout' and `setsid' are not among
+them: macOS has neither, so a run's own time is kept by a shell watchdog
+and its processes are found by the environment they inherited, from
+`/proc' on Linux and from the process table (`ps -E', `ps e') where
+there is none.  HARNESS_SUPERVISOR_PROCS=ps forces the second way, which
+is how the tests measure the way a Mac finds them.")
 
 (defconst harness-sandbox-session--runtime-keys
   '(:session :instance :dir :scratch :process :buffer :partial :state
     :reason :since :started :checked :idle-since :owned :asked
     :epoch :profile
-    :cwd :generation :backend :capabilities :runs)
+    :cwd :generation :backend :capabilities :runs :going)
   "Every key a runtime's plist is given when it is made.
 It is not documentation only: `harness-sandbox-session--runtime' builds
 the record from it, and a test reads this module's source and holds every
@@ -596,7 +749,14 @@ beside \"Not held\", and a job's reason shows it in the transcript."
      (scratch "directory for one call")
      ((null profile)
       (format "no sandbox profile for %s" (harness-abbreviate-file-name cwd)))
-     (t (plist-get (harness-sandbox-session--hold ctx cwd) :why)))))
+     (t (let ((held (harness-sandbox-session--hold ctx cwd)))
+          (or (plist-get held :why)
+              (when-let* ((missing (harness-sandbox-session--missing-capabilities held)))
+                (format "%s cannot promise %s, which a runtime's cancel and end need"
+                        (or (plist-get held :backend) "the backend")
+                        (string-join (mapcar (lambda (fact) (substring (symbol-name fact) 1))
+                                             missing)
+                                     ", ")))))))))
 
 (defun harness-sandbox-session-available-p (ctx cwd)
   "Non-nil when CTX's session can share one runtime for CWD."
@@ -845,7 +1005,11 @@ With SETTLE, wait for the supervisor's process to be gone first."
     ;; The runtime reads as ended before its process is asked to go: the
     ;; sentinel runs while this waits for it, and a runtime still marked
     ;; running would have its commands called broken rather than stopped.
+    ;; `:going' says the same to everything that runs in between -- a
+    ;; `R' frame that arrives while the supervisor is closing must not put
+    ;; it back to running, and a run's last report is the teardown's.
     (setf (plist-get runtime :state) (if failure 'failed 'stopped)
+          (plist-get runtime :going) (if failure 'failed 'stopped)
           (plist-get runtime :reason) (or reason (plist-get runtime :reason)))
     (when (and proc (process-live-p proc))
       (harness-log 'debug "sandbox: stopping %s (%s)" (plist-get runtime :instance)
@@ -982,9 +1146,12 @@ believed until it is a frame of this protocol."
 (defun harness-sandbox-session--ready (runtime parts)
   "Record that RUNTIME's supervisor said it is up, from PARTS.
 When it names programs it lacks, the runtime is not one this module can
-use: its runs are failed with that reason and it is ended."
+use: its runs are failed with that reason and it is ended.  A runtime
+that is going stays going: its `R' frame may arrive while it is being
+closed, and saying it is up would read the end of its runs as a failure."
   (let ((missing (cdr (cdr parts))))
-    (setf (plist-get runtime :state) 'running)
+    (unless (plist-get runtime :going)
+      (setf (plist-get runtime :state) 'running))
     (if missing
         (let ((why (format "the sandbox lacks %s" (string-join missing ", "))))
           (harness-sandbox-session--fail-runs runtime why 'failed)
@@ -1008,8 +1175,9 @@ the epoch it carries is no longer the runtime's own."
   (when (and (stringp epoch)
              (equal epoch (number-to-string (or (plist-get runtime :epoch) 0))))
     (setf (plist-get runtime :owned) (string-to-number (or count "0"))
-          (plist-get runtime :asked) (float-time)
-          (plist-get runtime :state) 'running)))
+          (plist-get runtime :asked) (float-time))
+    (unless (plist-get runtime :going)
+      (setf (plist-get runtime :state) 'running))))
 
 (defun harness-sandbox-session--ask (runtime)
   "Ask RUNTIME how many processes it holds, and number the question.
@@ -1120,9 +1288,21 @@ within the log limit, and given to the caller's function as text."
     (let* ((code (string-to-number (or status "0")))
            (survivors (string-to-number (or live "0")))
            (wanted (plist-get run :cancelled))
-           (state (cond ((or wanted (memq code '(124 137))) 'stopped)
-                        ((eql code 0) 'exited)
-                        (t 'failed))))
+           ;; A runtime that is going takes its runs with it, and the
+           ;; supervisor ends their processes before it says `D' -- which
+           ;; is what a backend without a namespace to end them with needs
+           ;; (MXC).  So a run's report that arrives after the harness
+           ;; ended the runtime is the teardown's doing, not the
+           ;; command's: 143 is not a command that failed, and the run is
+           ;; `stopped' with the runtime's reason.  `:going' is read
+           ;; rather than the state: a `R' or `P' frame can arrive while
+           ;; the supervisor is closing, and a run's own end is the last
+           ;; thing it says.
+           (ended-with (plist-get runtime :going))
+           (state (or ended-with
+                      (cond ((or wanted (memq code '(124 137))) 'stopped)
+                            ((eql code 0) 'exited)
+                            (t 'failed)))))
       ;; What the supervisor reports is recorded even when the harness
       ;; has already ended the run itself: the deadline kill and the
       ;; report race, and the report is the only thing that says how the
@@ -1138,11 +1318,14 @@ within the log limit, and given to the caller's function as text."
         (setf (plist-get run :reason)
               ;; A run the harness asked to stop is a cancellation, whatever
               ;; code the kill left: the supervisor's kill loop sends TERM and
-              ;; then KILL, and `timeout --kill-after' turns the same pair into
+              ;; then KILL, and a run's own watchdog turns the same pair into
               ;; 124 and then 137.  Reading the code first called an explicit
               ;; cancellation a timeout whenever a process ignored TERM, which
-              ;; is exactly when a stop takes the longer road.
+              ;; is exactly when a stop takes the longer road.  A run its
+              ;; runtime's end took says that, not its exit code.
               (cond (wanted (plist-get run :cancelled-reason))
+                    (ended-with (or (plist-get runtime :reason)
+                                    "its runtime stopped"))
                     ((memq code '(124 137))
                      (format "it reached its timeout of %s"
                              (harness-format-duration (plist-get run :seconds)))))))
@@ -1156,6 +1339,7 @@ within the log limit, and given to the caller's function as text."
       (harness-sandbox-session--end-run
        run state code
        (cond (wanted (plist-get run :cancelled-reason))
+             (ended-with (or (plist-get runtime :reason) "its runtime stopped"))
              ((memq code '(124 137))
               (format "it reached its timeout of %s"
                       (harness-format-duration (plist-get run :seconds))))))

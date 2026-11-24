@@ -62,8 +62,12 @@ was shown; a listener it started is gone.  That is per backend, and the
   and stops the unit when the command exits, so what the command started
   ends with it.  It sets no `PrivatePIDs`, so that is the cgroup's
   lifetime, not a PID namespace's.
-- **MXC** has no PID namespace and no unit, so a background process
-  there is not ended with its call.
+- **MXC** has no PID namespace and no unit, so a background process a
+  one-shot command leaves there is not ended with its call.  A runtime
+  held on it is the exception: the supervisor finds what the instance
+  runs by the environment it inherited — `/proc` on Linux, the process
+  table where there is none — and ends every one of them before it says
+  it is going.
 - A command run unconfined or on another host is in no namespace of the
   harness's at all, and nothing stops what it leaves, then or later.
 
@@ -88,15 +92,18 @@ A directory a session lost stops its job rather than being mounted again,
 and a change to any access input — the mount lists, the read-only
 directories, the policy, the network, writing — rebuilds it in the new
 sandbox or stops it.  Which backends answer is asked of
-`harness-sandbox--hold-facts`, not of a program name, and only bwrap was
-measured: it promises every fact, because it is the process the harness
-has and ending it ends the namespace.  systemd-run's adapter declares all
-of them but `:enumerate` — its unit is given no `PrivatePIDs`, so it has
-no PID namespace of its own to list what a command left — and a job is
-refused there for the fact it lacks.  MXC and OpenShell declare neither a
-way to end one command nor a namespace to enumerate, and are refused
-likewise, as are the `off` policy, a remote directory and a read-only
-session.  A long-lived machine
+`harness-sandbox--hold-facts`, not of a program name: bwrap promises
+every fact, because it is the process the harness has and ending it ends
+the namespace; MXC promises every fact too, because its supervisor finds
+what the instance runs by the inherited environment — from `/proc`, or
+from the process table where there is none — and ends them before it
+says it is going, which is measured against a stand-in executor, not a
+Mac.  systemd-run's adapter declares all of them but `:enumerate` — its
+unit is given no `PrivatePIDs`, so it has no PID namespace of its own to
+list what a command left — and a job is refused there for the fact it
+lacks.  OpenShell declares neither a way to end one command nor a
+namespace to enumerate, and is refused likewise, as are the `off` policy,
+a remote directory and a read-only session.  A long-lived machine
 for a workflow that needs one is still a workspace computer's box
 (`docs/workspace-mode.md`), which belongs to the workspace rather than
 to a session and is not bounded by its permissions.  **A job's network is

@@ -122,7 +122,7 @@ What each backend promises today, and what was measured:
 |---|---|---|---|---|
 | `bwrap` | yes | yes | yes (`/proc` is the namespace's) | yes, real |
 | `systemd-run` | yes | yes (cgroup) | **no**: no `PrivatePIDs`, so `/proc` is the machine's | not measured |
-| `mxc` (macOS) | yes | **no**: no handle to end one command | no | not available |
+| `mxc` (macOS) | yes, when its executor carries the pipe | yes | yes: the inherited environment, from the process table | against a stand-in executor |
 | `openshell` | **no**: its wrapper deletes the sandbox with the command | -- | -- | not available |
 | none / `off` / remote | **no** | -- | -- | -- |
 
@@ -131,6 +131,21 @@ with `sandbox/hold`'s own reason.  That is a limitation *of this
 implementation*, not a proof that persistence is impossible there: a
 systemd adapter that named its unit could supply the missing fact, which
 is where the next work is.
+
+MXC is the one whose facts are conditional.  It has no PID namespace and
+no handle on a command, so what it can promise is the supervisor's own:
+the supervisor finds a run's processes by the environment they inherited
+-- `/proc` on Linux, the process table (`ps -E` on BSD, `ps e` elsewhere)
+where there is none -- sends TERM to each, waits, then KILLs what ignored
+it, and ends every process of the instance before it says it is going.
+What that needs of the executor is that the supervisor's standard input
+and output are the harness's pipe while it runs; an executor that collects
+a command's output into a file and hands it over at the end, or that
+closes its standard input, can run a command but cannot hold one.  So
+`sandbox/hold` measures it once (`harness-sandbox--mxc-streaming`, a
+command that reads a line and echoes it back before it ends), keeps the
+answer, and refuses with it where it does not hold; `sandbox/status`'s
+`:limits` says the same once it has been asked, without asking itself.
 
 ### Every spawn is checked, not only the first
 
@@ -328,10 +343,18 @@ above it names a backend.
   cancel could not be verified.  Refused, with that reason.  A named unit
   and `systemctl --user stop` would supply it; that adapter change is not
   made here.
-- **MXC** (macOS): holds an instance (`Seatbelt exec` runs one program),
-  but there is no second operation to end part of it and no PID namespace
-  to enumerate it by.  Refused, with that reason.  Not available on this
-  machine to measure either way.
+- **MXC** (macOS): holds an instance where its executor carries the pipe.
+  `Seatbelt exec` runs one program -- the supervisor -- and confines what
+  it does; the supervisor is the second operation, since it finds a run's
+  processes by the environment they inherited, from `/proc` or from the
+  process table where there is none, and ends them on `kill`, verifies
+  that none is left, and ends every process of the instance before it says
+  it is going.  What that turns on is measured once by
+  `harness-sandbox--mxc-streaming`: an executor that collects a command's
+  output and hands it over when the command ends, or that closes its
+  standard input, can run a command but cannot hold one, and is refused
+  with that reason.  Measured here against a stand-in executor, not on a
+  Mac.
 - **OpenShell**: refused.  Its wrapper deletes the sandbox with the
   command that made it, so a held instance would go with its first command.
 - **No backend, the `off` policy** (globally or for the project), **a
@@ -491,8 +514,10 @@ does not prove a window manager path.
 
 ## What is not done, and what remains unsupported
 
-- bwrap is the only backend this implementation holds a runtime on.
-  systemd-run, MXC, OpenShell, no backend, the `off` policy and remote
+- bwrap is the backend this implementation holds a runtime on and has
+  measured with a real one.  MXC holds one too, but it was measured
+  against a stand-in executor rather than on a Mac.  systemd-run,
+  OpenShell, no backend, the `off` policy and remote
   directories are refused, each with its reason in code, in
   `sandbox/hold`'s `:why` and in the tool's description.  systemd-run is
   the nearest to support: it promises everything but `:enumerate`, and

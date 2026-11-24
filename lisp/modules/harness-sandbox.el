@@ -57,10 +57,12 @@
 ;; be shown that way, and keeps the private /tmp.
 ;; A command that changes nothing (`:read-only') and one that must not
 ;; see what the session left behind (the `locked' profile) keep a
-;; private empty /tmp.  bwrap and systemd-run give it; MXC has no
-;; mount namespace and cannot write /tmp at all, and OpenShell's /tmp
-;; is the image's, so both keep their own and a command there leaves
-;; nothing to find.
+;; private empty /tmp.  bwrap and systemd-run give it; OpenShell's /tmp
+;; is the image's, so it keeps its own and a command there leaves
+;; nothing to find.  MXC has no /tmp to mount at all: `:tmp' there names
+;; the command's $TMPDIR itself, which is where a command on macOS goes,
+;; so the session's own directory serves and nothing of what a command
+;; leaves is thrown away with it (see "On macOS" below).
 ;;
 ;; A confined command has HARNESS_SANDBOX set to the backend's name,
 ;; `bwrap', `systemd', `mxc' or `openshell', so a script can tell it
@@ -78,26 +80,30 @@
 ;; `harness-sandbox--mxc-system-dirs' (Homebrew, MacPorts, Nix,
 ;; /Applications) and `harness-sandbox-extra-read-only-dirs', all
 ;; read-only; the working directory read-write; the `:writable' and
-;; `:readable' directories as they are given; and a private $TMPDIR,
-;; made for the command and removed when it ends.  $HOME keeps its
-;; path, but nothing in it can be read except what is shown there.
+;; `:readable' directories as they are given; and a $TMPDIR that is the
+;; caller's own temporary directory when it gave one -- nothing removes
+;; it, so what a command leaves there is the session's to find -- and a
+;; private one, made for the command and removed when it ends, when it
+;; did not.  $HOME keeps its path, but nothing in it can be read except
+;; what is shown there.
 ;; That includes the ~/Library that Cocoa programs look in on their
 ;; own, without asking $HOME: the NS build of Emacs, which loads its
 ;; color list from ~/Library/Colors and writes it when it is short,
 ;; aborts at startup if it cannot, even in a --batch process such as
 ;; the file tools' worker and the elisp tool's child.  So Cocoa's home
-;; (CFFIXED_USER_HOME, which moves nothing else) is that same private
-;; directory, where such a program finds nothing and makes what it
-;; needs.  MXC passes on none of the harness's environment, so the
+;; (CFFIXED_USER_HOME, which moves nothing else) is that same $TMPDIR,
+;; where such a program finds nothing and makes what it needs.  MXC
+;; passes on none of the harness's environment, so the
 ;; command's is written out whole: `process-environment' as it is when
 ;; the command is wrapped, with TMPDIR, CFFIXED_USER_HOME, PWD,
 ;; HARNESS_SANDBOX=mxc and a worktree's commit identity set.
 ;; `:network nil' denies the network, loopback included; otherwise it
 ;; is open both ways, as bwrap leaves it.  `:read-only' leaves nothing
 ;; writable but that $TMPDIR.  Unlike bwrap, MXC gives the command no
-;; PID namespace of its own; /tmp cannot be written there (a command
-;; uses $TMPDIR); and MXC hands the command's output on only when it
-;; ends, so the note under a running bash call shows none until then.
+;; PID namespace of its own and /tmp cannot be written there (a command
+;; uses $TMPDIR).  Whether its executor hands a command's output on as
+;; it arrives, which a held runtime needs, is measured rather than
+;; assumed (see "MXC: whether its executor holds an instance" below).
 ;;
 ;; NVIDIA OpenShell (https://github.com/NVIDIA/OpenShell, see
 ;; `harness-sandbox-openshell-program') is a different kind of backend,
@@ -131,7 +137,12 @@
 ;; its own scope, say) would not be ended by it.  That is a narrower
 ;; guarantee than bwrap's, and it is the one the backend has.  MXC has no
 ;; PID namespace and no unit: a background process there can outlive the
-;; call.  OpenShell's ephemeral sandbox is deleted after the command, by
+;; call that started it.  A runtime held on it is not a one-shot command
+;; though, and its end is the harness's own: the supervisor finds what
+;; the instance runs by the environment it inherited, from `/proc' or
+;; from the process table where there is none, and ends every one of
+;; them before it says it is going (see "Holding an instance" below).
+;; OpenShell's ephemeral sandbox is deleted after the command, by
 ;; the gateway, which is the same bound by another rule.
 ;;
 ;; What a command leaves for a later tool call is therefore the files it
@@ -468,6 +479,14 @@ as always.  `harness-sandbox--problem' says why.")
 (defvar harness-sandbox--problem nil
   "Why `harness-sandbox--requested' could not be used, as text, or nil.")
 
+(defvar harness-sandbox--mxc-stream nil
+  "The answer of MXC's streaming probe, or nil when it has not been asked.
+It is `t' when the executor couples standard input and output to the
+command it runs, a plist (:why TEXT) when it does not, and nil before the
+question is asked (see `harness-sandbox--mxc-streaming').  It is forgotten
+by `harness-sandbox-detect', so a newly installed executor is asked
+again.")
+
 (defconst harness-sandbox--auto-backends '(bwrap systemd mxc)
   "The backends `auto' chooses among, in the order of preference.
 OpenShell is not one: it needs a gateway and an image set up on purpose,
@@ -510,6 +529,9 @@ the one `auto' picks, and `harness-sandbox--problem' says why."
                           (and mxc (cons 'mxc mxc))
                           (and openshell (cons 'openshell openshell)))))
     (setq harness-sandbox--available (mapcar #'car harness-sandbox--programs))
+    ;; The streaming probe is about the executor that was found, so a new
+    ;; one is asked again rather than believed from the last one's answer.
+    (setq harness-sandbox--mxc-stream nil)
     (setq harness-sandbox--requested nil
           harness-sandbox--problem nil)
     (setq harness-sandbox--backend
@@ -1048,6 +1070,35 @@ sandbox's own private /tmp, as it had before there was one to show."
                   "it is, holds or lies in a directory the sandbox mounts its own"))))
       (when why
         (harness-log 'warn "sandbox: not showing %s as /tmp: %s" tmp why))
+      (unless why real))))
+
+(defun harness-sandbox--mxc-tmp-directory (tmp)
+  "Return the directory a command's $TMPDIR shows for `:tmp' TMP, or nil.
+MXC has no /tmp to mount: `:tmp' names the command's `$TMPDIR' itself,
+so the directory is shown where it is, at its own path, and the rule
+that keeps bwrap from showing one in /tmp at /tmp -- that its own path
+would be lost -- does not apply.  What does apply is what would show
+more than the caller meant to give: no local directory, the root
+directory, and one that is, holds or lies in a directory the sandbox
+mounts its own (`harness-sandbox--system-paths'), each with a line in
+the log saying why.  The home directory is not excluded here: bwrap's
+$HOME is a tmpfs over it and MXC's is hidden anyway, so a session whose
+temporary directory lies in its home has nothing left to lose by it."
+  (when (and (stringp tmp) (not (file-remote-p tmp)))
+    (let* ((named (expand-file-name tmp))
+           (real (and (file-directory-p named)
+                      (directory-file-name (file-truename named))))
+           (why (cond
+                 ((null real) "it is no local directory")
+                 ((equal real "/") "it is the root directory")
+                 ((cl-some (lambda (system)
+                             (or (harness-path-within-p system real)
+                                 (harness-path-within-p real system)))
+                           harness-sandbox--system-paths)
+                  "it is, holds or lies in a directory the sandbox mounts its own"))))
+      (when why
+        (harness-log 'warn "sandbox: not showing %s as the command's temporary directory: %s"
+                     tmp why))
       (unless why real))))
 
 (defun harness-sandbox--tmp-path-mounts (mounts tmp)
@@ -1756,7 +1807,7 @@ temporary directory (see `harness-sandbox--mxc-command').")
   (directory-file-name (file-truename (expand-file-name path))))
 
 (cl-defun harness-sandbox--mxc-command (program cwd command &key (network t) writable readable read-only tmp
-                                                 scratch extra-env profile hide (cwd-writable t))
+                                                 keep-tmp scratch extra-env profile hide (cwd-writable t))
   "Build the MXC command line running COMMAND in CWD, on macOS.
 PROGRAM is MXC's executor, mxc-exec-mac, given the whole description
 of the command as base64-encoded JSON (`--config-base64').  NETWORK,
@@ -1766,11 +1817,13 @@ WRITABLE, READABLE and READ-ONLY are as for
 PROFILE, when `locked', builds the environment from EXTRA-ENV (an
 alist) and nothing of the harness's, denies the network, and refuses
 when HIDE names a path the sandbox shows: MXC cannot hide a file inside
-a directory it mounts.  TMP is the command's private
-temporary directory, which `sandbox/wrap' makes: $TMPDIR names it, so
-does the command's Cocoa home (see below), it is writable, and the
-command line removes it when COMMAND ends.  The SCRATCH directories
-are writable too, whatever READ-ONLY says (see
+a directory it mounts.  TMP is the command's temporary directory:
+$TMPDIR names it, so does the command's Cocoa home (see below), and it
+is writable.  With KEEP-TMP it is the caller's own -- the session's
+temporary directory, whose files are for the next command -- and is
+left as it is; without it, `sandbox/wrap' makes it for the one command
+and the command line removes it when COMMAND ends.  The SCRATCH
+directories are writable too, whatever READ-ONLY says (see
 `harness-sandbox--scratch-mounts').
 
 Seatbelt allows what it is told and denies the rest, on top of MXC's
@@ -1849,12 +1902,14 @@ This only reads the file system: it writes nothing, TMP included."
                                                 (funcall sources 'ro)
                                                 system protected))))
          ;; The command's status is the command line's, after the
-         ;; private TMPDIR is gone.  A command killed by a signal leaves
-         ;; it behind; macOS clears what is old in its temporary
-         ;; directories itself.
+         ;; private TMPDIR is gone.  A directory the caller keeps -- the
+         ;; session's own -- is left as it is.  A command killed by a
+         ;; signal leaves a private one behind; macOS clears what is old
+         ;; in its temporary directories itself.
          (command-line (concat (mapconcat #'harness-sandbox--sh-quote command " ")
-                               (and tmp (concat "; s=$?; rm -rf -- " (harness-sandbox--sh-quote tmp)
-                                                "; exit $s"))))
+                               (and tmp (not keep-tmp)
+                                    (concat "; s=$?; rm -rf -- " (harness-sandbox--sh-quote tmp)
+                                            "; exit $s"))))
          (env (if locked
                   (append (list (concat "PATH=" (or (getenv "PATH")
                                                     "/usr/local/bin:/usr/bin:/bin"))
@@ -2511,6 +2566,23 @@ Nil for a backend that gives it whole."
             "No PID namespace of its own, and /tmp cannot be written (a command uses $TMPDIR)."))
     (_ nil)))
 
+(defun harness-sandbox--mxc-limits ()
+  "Return what MXC cannot do of holding a session's runtime, as lines, or nil.
+The lifecycle is the supervisor's, not a namespace's: its processes are
+found by the environment they inherited, from the process table, and it
+ends them before it goes.  What is left to say is what an executor that
+cannot carry a command's standard input and output costs -- no runtime is
+held there, and every command gets a sandbox of its own.  Only an answer
+already measured is shown: the probe runs when a runtime is asked for
+(`sandbox/hold'), not when the backend is described, so asking for the
+status of a Mac never waits on an executor."
+  (when (and (eq harness-sandbox--backend 'mxc)
+             harness-sandbox--mxc-stream
+             (not (eq harness-sandbox--mxc-stream t)))
+    (list (format "No runtime can be held: %s, so each command gets a sandbox of its own."
+                  (or (plist-get harness-sandbox--mxc-stream :why)
+                      "its executor does not carry a command's standard input and output")))))
+
 ;;;###autoload
 (defun harness-sandbox-openshell-check ()
   "Run a command in a throwaway OpenShell sandbox and say whether that worked.
@@ -2766,19 +2838,26 @@ stage by stage."
       (when containers
         (harness-sandbox--refuse-containers
          command "MXC confines with Seatbelt, which has no mount namespace and no Linux socket to show an engine at"))
-      ;; The command's own $TMPDIR, private as bwrap's /tmp is: MXC
-      ;; shows no shared temporary directory.
-      (when tmp
-        (harness-log 'debug "sandbox: MXC cannot show %s as /tmp; a command there uses $TMPDIR" tmp))
-      (let ((tmp (with-file-modes #o700 (make-temp-file "harness-sandbox-" t))))
+      ;; MXC shows no /tmp: the command's $TMPDIR is where it goes, and
+      ;; the caller's own temporary directory serves when it gave one,
+      ;; so that what a command leaves there is the session's to find --
+      ;; the same rule as bwrap's `:tmp', by the path the backend can
+      ;; show.  Without one, the command gets a private directory, which
+      ;; the command line removes when it ends; a `:read-only' command
+      ;; keeps one too, since it writes nothing else.
+      (let* ((kept (and tmp (not read-only)
+                        (harness-sandbox--mxc-tmp-directory tmp)))
+             (private (unless kept
+                        (with-file-modes #o700 (make-temp-file "harness-sandbox-" t)))))
         (condition-case err
             (harness-sandbox--mxc-command (alist-get 'mxc harness-sandbox--programs) cwd command
                                           :network network :writable writable :readable readable
-                                          :read-only read-only :tmp tmp
+                                          :read-only read-only :tmp (or kept private)
+                                          :keep-tmp (and kept t)
                                           :scratch scratch :extra-env env
                                           :profile profile :hide hide
                                           :cwd-writable cwd-writable)
-          (error (ignore-errors (delete-directory tmp t))
+          (error (when private (ignore-errors (delete-directory private t)))
                  (signal (car err) (cdr err))))))
      (read-only
       (harness-sandbox--refuse-read-only command (harness-sandbox--missing-programs)))
@@ -2793,6 +2872,112 @@ stage by stage."
       (when capabilities
         (harness-log 'debug "sandbox: no backend, so %S runs with its user's own capabilities" (car command)))
       command))))
+
+;;;; MXC: whether its executor holds an instance
+
+;; MXC's `mxc-exec-mac' confines a process tree with Seatbelt and ends it
+;; when the command it was given ends.  What it does with standard input
+;; and output is the question a held instance turns on: a runtime is one
+;; long command whose standard input carries control lines and whose
+;; standard output carries frames, and a backend that collects a command's
+;; output into a file and hands it over at the end -- or that closes its
+;; standard input -- can run a command but cannot hold one.  Its own
+;; documentation says the CLI couples stdio to the workload ("the child
+;; always starts from a cleared environment", "SDK inherited stdio keeps
+;; the caller's terminal session"), but that is a claim about a program
+;; this file cannot read, so it is measured: a command that reads a line
+;; and writes it back is run through `sandbox/wrap' itself, and its answer
+;; is what `sandbox/hold' says of the backend afterwards.
+;;
+;; The probe runs once and its answer is kept for the life of the harness,
+;; a failure included: a Mac whose MXC is older than the CLI coupling, or
+;; one whose executor cannot start at all, would otherwise pay for the
+;; probe on every call that asks.  `harness-sandbox-detect' forgets it, so
+;; a freshly installed executor is asked again -- and nothing is asked at
+;; all where the backend is not MXC.
+
+(defconst harness-sandbox--mxc-probe-seconds 20
+  "Seconds MXC's streaming probe has to answer.")
+
+(defconst harness-sandbox--mxc-probe-command
+  ;; No quote of any kind in the command: it is written into MXC's JSON
+  ;; configuration and, in the tests, read back out of it by a stand-in.
+  '("sh" "-c" "read line; echo harness-mxc-stream $line; sleep 5")
+  "The command MXC's streaming probe runs.
+It answers only if the executor both hands it a standard input that
+carries the caller's bytes and returns its standard output while the
+command is still running: the sleep after the answer is what tells an
+executor that streams from one that collects the output and hands it
+over when the command has ended.")
+
+(defun harness-sandbox--mxc-streaming (&optional program)
+  "Return non-nil when MXC's executor can hold a long-running instance.
+PROGRAM is its path (default: the one `sandbox/detect' found).  The
+answer is measured once by `harness-sandbox--mxc-probe' and kept in
+`harness-sandbox--mxc-stream'."
+  (unless harness-sandbox--mxc-stream
+    (setq harness-sandbox--mxc-stream
+          (harness-sandbox--mxc-probe
+           (or program (alist-get 'mxc harness-sandbox--programs)))))
+  harness-sandbox--mxc-stream)
+
+(defun harness-sandbox--mxc-probe (program)
+  "Return `t' when PROGRAM couples a command's standard input and output.
+Otherwise return (:why TEXT).  The command is built by
+`harness-sandbox--mxc-command', as a runtime's would be, in a directory of
+its own.  It reads a line, prints it, and then sleeps: the answer counts
+only when the line comes back before the command has ended, which is what
+an executor that streams does and one that collects its output into a file
+and hands it over at the end does not."
+  (let ((dir (file-name-as-directory (make-temp-file "harness-mxc-probe-" t)))
+        (default-directory (file-name-as-directory (make-temp-file "harness-mxc-probe-" t)))
+        proc status out)
+    (unwind-protect
+        (condition-case err
+            (progn
+              (setq out (generate-new-buffer " *harness-mxc-probe*" t)
+                    proc (make-process
+                          :name "harness-mxc-probe"
+                          :command (harness-sandbox--mxc-command
+                                    program dir harness-sandbox--mxc-probe-command :network nil)
+                          :connection-type 'pipe :noquery t :coding 'utf-8-unix
+                          :buffer out :sentinel #'ignore))
+              ;; The bytes go in as soon as the executor is up: an executor
+              ;; that reads them passes them on, and one that ignores them
+              ;; answers nothing, which is the answer.
+              (harness-process-send proc "alive\n")
+              (let ((deadline (+ (float-time) harness-sandbox--mxc-probe-seconds))
+                    (streamed nil))
+                (while (and (process-live-p proc) (< (float-time) deadline) (not streamed))
+                  (accept-process-output proc 0.05)
+                  ;; The answer counts only while the command is still
+                  ;; running: an executor that collects a command's output
+                  ;; and hands it over at the end writes the same bytes,
+                  ;; but only after the command has gone.
+                  (when (and (process-live-p proc)
+                             (string-search "harness-mxc-stream alive"
+                                            (with-current-buffer out (buffer-string))))
+                    (setq streamed t)))
+                (cond
+                 (streamed t)
+                 ((process-live-p proc)
+                  (delete-process proc)
+                  (list :why (format "its executor did not answer within %s seconds"
+                                     harness-sandbox--mxc-probe-seconds)))
+                 (t
+                  (setq status (process-exit-status proc))
+                  (accept-process-output proc 0.05)
+                  (list :why (format "its executor did not carry a command's standard input to it and its output back while it ran (exit %s%s)"
+                                     status
+                                     (let ((text (string-trim (with-current-buffer out (buffer-string)))))
+                                       (if (string-empty-p text) ""
+                                         (format ": %s" (harness-sandbox--first-lines text 2))))))))))
+          (error (list :why (format "its executor could not be run: %s"
+                                    (harness-error-message err)))))
+      (when (and proc (process-live-p proc)) (ignore-errors (delete-process proc)))
+      (when (buffer-live-p out) (kill-buffer out))
+      (ignore-errors (delete-directory dir t))
+      (ignore-errors (delete-directory default-directory t)))))
 
 ;;;; Holding an instance
 
@@ -2855,12 +3040,18 @@ nil, and `:why' for one that is missing when it can be said in a line.
      (list :exec t :stream t :cancel t :enumerate nil :destroy t
            :why "its unit has no PID namespace of its own"))
     ('mxc
-     ;; Seatbelt exec runs one program and confines what it does; it has no
-     ;; persistent handle of its own, so the supervisor can be that one
-     ;; program, but there is no second operation to end part of it and no
-     ;; PID namespace to enumerate it by.
-     (list :exec t :stream t :cancel nil :enumerate nil :destroy t
-           :why "Seatbelt has no handle to end one command of it"))
+     ;; Seatbelt exec runs one program -- the supervisor -- and confines
+     ;; what it does.  The supervisor is a shell program that finds a
+     ;; run's processes by the environment they inherited: from `/proc'
+     ;; where there is one, and from the process table (`ps -E') on macOS,
+     ;; which is why the adapter can enumerate them and end a run of them
+     ;; without ending the instance.  Ending the instance is the
+     ;; supervisor's own: it ends every process of the instance before it
+     ;; says `D' (see `harness-sandbox-session--supervisor-program').
+     ;; Its standard input and output are the harness's pipe only when the
+     ;; executor couples them, which `harness-sandbox--mxc-streaming'
+     ;; measures; `harness-sandbox--hold' asks that before it builds one.
+     (list :exec t :stream t :cancel t :enumerate t :destroy t))
     ('openshell
      ;; A sandbox created for the instance can run `sandbox exec' more than
      ;; once, but the harness's wrapper deletes it with the command that
@@ -2895,6 +3086,12 @@ profile."
       (list :command nil :backend backend :capabilities facts
             :why (or (plist-get facts :why)
                      (format "%s holds no instance" backend))))
+     ((and (eq backend 'mxc)
+           (not (eq (harness-sandbox--mxc-streaming) t)))
+      (list :command nil :backend backend :capabilities facts
+            :why (format "its executor cannot hold an instance: %s"
+                         (or (plist-get (harness-sandbox--mxc-streaming) :why)
+                             "it does not carry a command's standard input and output"))))
      (t
       (let ((wrapped
              (condition-case err
@@ -3085,7 +3282,8 @@ why, and `:backend' is what the harness fell back to."
   (append (list :backend (or harness-sandbox--backend 'none)
                 :available harness-sandbox--available
                 :policy (harness-sandbox--policy nil)
-                :limits (harness-sandbox--limits harness-sandbox--backend))
+                :limits (append (harness-sandbox--limits harness-sandbox--backend)
+                                (harness-sandbox--mxc-limits)))
           (and harness-sandbox--requested
                (list :requested harness-sandbox--requested
                      :problem harness-sandbox--problem))))

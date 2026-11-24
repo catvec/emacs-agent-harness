@@ -443,7 +443,19 @@ falls back to one sandbox per call rather than to no sandbox."
                       (list :session-id sid :cwd "/ssh:host:/tmp/") "/ssh:host:/tmp/")))
             (should (string-search
                      "no session"
-                     (harness-sandbox-session-problem (list :cwd root) root))))
+                     (harness-sandbox-session-problem (list :cwd root) root)))
+            ;; A backend that cannot promise a runtime's cancel and end is
+            ;; refused with the facts it lacks, rather than held and found
+            ;; out at the first command nothing can stop.
+            (cl-letf (((symbol-function 'harness-sandbox--hold-facts)
+                       (lambda (backend)
+                         (if (eq backend 'bwrap)
+                             (list :exec t :stream t :cancel nil :enumerate nil :destroy t
+                                   :why "Seatbelt has no handle to end one command of it")
+                           (list :exec t :stream t :cancel t :enumerate t :destroy t)))))
+              (let ((why (harness-sandbox-session-problem ctx root)))
+                (should (string-search "cannot promise cancel, enumerate" why))
+                (should (string-search "which a runtime's cancel and end need" why)))))
         (ignore-errors (harness-call 'session/delete sid))
         (ignore-errors (delete-directory root t))))))
 
@@ -587,7 +599,7 @@ the same run token.  Count the survivor, cancel only this instance's
 processes, and report zero afterwards while the foreign process lives."
   (harness-sandbox-session-test--setup)
   (skip-unless (file-readable-p "/proc/self/environ"))
-  (dolist (program '("bash" "timeout" "setsid" "base64" "grep" "sed" "mkfifo" "dd" "tr"))
+  (dolist (program '("bash" "base64" "grep" "sed" "mkfifo" "dd" "tr" "ps" "sleep"))
     (skip-unless (executable-find program)))
   (let* ((scratch (harness-test-temp-dir))
          (frames (generate-new-buffer " *supervisor-ownership-test*"))
@@ -666,6 +678,245 @@ processes, and report zero afterwards while the foreign process lives."
           (when (and proc (process-live-p proc)) (delete-process proc)))
         (kill-buffer frames)
         (delete-directory scratch t)))))
+
+(defun harness-sandbox-session-test--tagged (token)
+  "Return how many processes of this machine carry TOKEN as a run's own.
+It is read from the process table, as a Mac's supervisor reads it: no
+`/proc', and a match on whole `NAME=VALUE' words."
+  (let ((pattern (concat " HARNESS_RUN=" token " ")))
+    (with-temp-buffer
+      (call-process "ps" nil t nil "-A" "-ww" "-o" "pid=,command=" "e")
+      (goto-char (point-min))
+      (let ((n 0))
+        (while (re-search-forward "^ *[0-9]+ " nil t)
+          (when (string-search pattern (concat " " (buffer-substring-no-properties
+                                                   (line-beginning-position) (line-end-position))
+                                              " "))
+            (setq n (1+ n))))
+        n))))
+
+(ert-deftest harness-sandbox-session-a-supervisor-finds-runs-without-proc ()
+  "The supervisor finds and ends a run's processes the way macOS must.
+macOS has no `/proc' and ships no coreutils `timeout' or `setsid', so the
+program cannot read a process's environment from a file or lean on either
+program.  HARNESS_SUPERVISOR_PROCS=ps makes it take the path a Mac takes
+-- the process table, asked for each process's environment -- and the two
+programs a Mac lacks are hidden from its PATH, so a supervisor that still
+needed one would say so in its `R' frame instead of running.
+
+Then, over the protocol itself: a command's output and status are its
+own; a command that ignores TERM and leaves a child behind is cancelled,
+and both are found by the tag they inherited; a command that never ends is
+ended at its time with `timeout''s 124, with no `timeout' program to do
+it; and `quit' ends what the instance runs before it says it is going,
+which is the whole of what a backend without a namespace to end them with
+needs."
+  (harness-sandbox-session-test--setup)
+  (dolist (program '("bash" "base64" "grep" "sed" "mkfifo" "dd" "tr" "ps" "sleep"))
+    (skip-unless (executable-find program)))
+  (let* ((scratch (harness-test-temp-dir))
+         ;; A PATH with the supervisor's own programs and without the two a
+         ;; Mac does not ship.
+         (bare (make-temp-file "supervisor-bin-" t))
+         (frames (generate-new-buffer " *supervisor-ps-test*"))
+         (instance (concat "test-" (harness-short-id)))
+         (token (concat "run-" (harness-short-id)))
+         (process-environment (copy-sequence process-environment))
+         supervisor)
+    (unwind-protect
+        (progn
+          (dolist (program '("bash" "base64" "grep" "sed" "mkfifo" "dd" "tr" "ps" "sleep"
+                             "mkdir" "rm" "cat" "head"))
+            (let ((path (executable-find program)))
+              (when path
+                (ignore-errors
+                  (make-symbolic-link path (expand-file-name program bare))))))
+          (setenv "PATH" bare)
+          (setenv "HARNESS_SUPERVISOR_PROCS" "ps")
+          (setq supervisor
+                (make-process
+                 :name "ps-supervisor" :buffer frames :noquery t :connection-type 'pipe
+                 ;; The program takes VERSION INSTANCE SCRATCH BEAT, as
+                 ;; `harness-sandbox-session--hold-command' gives them.
+                 :command (list (expand-file-name "bash" bare)
+                                (harness-sandbox-session--write-supervisor scratch)
+                                (number-to-string harness-sandbox-session--protocol)
+                                instance scratch "1")
+                 :coding 'utf-8-unix))
+          (cl-labels ((frame (regexp)
+                        (with-current-buffer frames
+                          (cl-find-if (lambda (line)
+                                        (and (not (equal line "H"))
+                                             (string-match-p regexp line)))
+                                      (split-string (buffer-string) "\n"))))
+                      (await-frame (regexp)
+                        (harness-test-wait (lambda () (frame regexp)) 40 regexp))
+                      (send (fmt &rest args)
+                        (process-send-string supervisor (apply #'format fmt args))))
+            ;; It is up, and it did not name a program a Mac lacks.
+            (should (equal (format "R %s" harness-sandbox-session--protocol)
+                           (await-frame "^R [0-9]+$")))
+            ;; A command's output and its status are its own.
+            (send "run %s 60 %s\n" token
+                  (base64-encode-string "echo hello-from-the-run; exit 7" t))
+            (should (await-frame (format "^O %s " token)))
+            (should (string-match-p
+                     (format "^X %s 7 0$" token)
+                     (await-frame (format "^X %s [0-9]+ [0-9]+$" token))))
+            ;; A command that ignores TERM and leaves a child behind is
+            ;; cancelled, and both are found by what they inherited.
+            (send "run %s 120 %s\n" (concat token "k")
+                  (base64-encode-string
+                   "trap '' TERM\nbash -c 'trap \"\" TERM; sleep 300' &\nsleep 300" t))
+            (should (await-frame (format "^S %s" (concat token "k"))))
+            (harness-test-wait
+             (lambda () (>= (harness-sandbox-session-test--tagged (concat token "k")) 2))
+             30 "the run's two processes to carry its tag")
+            (send "kill %s\n" (concat token "k"))
+            (should (equal (format "K %s 0" (concat token "k"))
+                           (await-frame (format "^K %s [0-9]+$" (concat token "k")))))
+            (should (string-match-p
+                     " 0$" (await-frame (format "^X %s [0-9]+ [0-9]+$" (concat token "k")))))
+            (with-current-buffer frames (erase-buffer))
+            (send "status 1\n")
+            (should (equal "P 0 1" (await-frame "^P [0-9]+ [0-9]+$")))
+            ;; A command that never ends is ended at its time, and says 124
+            ;; as `timeout' did -- there is no `timeout' here to do it.
+            (with-current-buffer frames (erase-buffer))
+            (send "run %s 1 %s\n" (concat token "t")
+                  (base64-encode-string "sleep 300" t))
+            (should (string-match-p
+                     (format "^X %s 124 0$" (concat token "t"))
+                     (await-frame (format "^X %s [0-9]+ [0-9]+$" (concat token "t")))))
+            ;; `quit' ends what the instance runs before it says it is
+            ;; going: a process the session left behind is gone by `D'.
+            (with-current-buffer frames (erase-buffer))
+            (send "run %s 120 %s\n" (concat token "q")
+                  (base64-encode-string "sleep 300 & echo left-a-process" t))
+            (should (await-frame (format "^O %s " (concat token "q"))))
+            (send "quit\n")
+            (should (equal "D" (await-frame "^D$")))
+            (harness-test-wait (lambda () (not (process-live-p supervisor))) 15
+                               "the supervisor to go")
+            (should (eql 0 (harness-sandbox-session-test--tagged (concat token "q"))))))
+      (when (and supervisor (process-live-p supervisor))
+        (ignore-errors (delete-process supervisor)))
+      (kill-buffer frames)
+      (ignore-errors (delete-directory bare t))
+      (ignore-errors (delete-directory scratch t)))))
+
+(defun harness-sandbox-session-test--mxc-stand-in (dir)
+  "Write a streaming stand-in for mxc-exec-mac in DIR, and return its path.
+It couples its standard input and output to the command MXC's
+configuration names, as an executor that can hold an instance does (see
+`harness-sandbox-test--mxc-stand-in'), and takes the command out of the
+configuration as that one does."
+  (let ((script (expand-file-name "mxc-exec-mac" dir)))
+    (with-temp-file script
+      (insert "#!/bin/sh\n"
+              "cfg=$(printf '%s' \"$2\" | base64 -d)\n"
+              "cmd=$(printf '%s' \"$cfg\" | sed -e 's/.*\\\"commandLine\\\":\\\"//' -e 's/\\\",\\\"cwd\\\".*//')\n"
+              "exec sh -c \"$cmd\"\n"))
+    (set-file-modes script #o755)
+    script))
+
+(ert-deftest harness-sandbox-session-a-runtime-is-held-without-proc ()
+  "A session holds its runtime on the backend macOS has, and it ends it.
+macOS confines with MXC and has no `/proc', so a runtime there is the
+supervisor's own: it finds a run's processes by the environment they
+inherited, read from the process table, and ends them.  This runs the
+whole manager that way -- a stand-in executor for mxc-exec-mac and
+HARNESS_SUPERVISOR_PROCS=ps -- and holds a real session's runtime on it:
+a command's output and status come back as in any runtime, a process a
+call leaves running is the next call's, one command is cancelled without
+the runtime, and ending the runtime ends the process the session left --
+which is what a backend with no namespace to end it with needs, and the
+whole of what was missing."
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (harness-sandbox-session-test--setup t)
+    (dolist (program '("bash" "base64" "grep" "sed" "mkfifo" "dd" "tr" "ps" "sleep"))
+      (skip-unless (executable-find program)))
+    (skip-unless (file-executable-p "/bin/sh"))
+    (let* ((bin (harness-test-temp-dir))
+           (executor (harness-sandbox-session-test--mxc-stand-in bin))
+           (root (file-name-as-directory (harness-test-temp-dir)))
+           (harness-sandbox-policy 'required)
+           (harness-sandbox-session-idle-seconds nil)
+           (process-environment (cons "HARNESS_SUPERVISOR_PROCS=ps"
+                                      (copy-sequence process-environment)))
+           (default-directory root)
+           sid ctx runtime)
+      (unwind-protect
+          (progn
+            (let ((system-type 'darwin))
+              (cl-letf (((symbol-function 'executable-find)
+                         (lambda (name &optional _remote)
+                           (and (equal name harness-sandbox-mxc-program) executor))))
+                (harness-sandbox-detect)))
+            (should (eq 'mxc (plist-get (harness-call 'sandbox/status) :backend)))
+            (setq sid (plist-get (harness-call 'session/create :cwd root) :id)
+                  ctx (list :session-id sid :cwd root))
+            ;; A runtime is held, and it is MXC's.
+            (setq runtime (harness-sandbox-session-ensure ctx root))
+            (should (eq 'mxc (plist-get runtime :backend)))
+            (should (process-live-p (plist-get runtime :process)))
+            (harness-test-wait
+             (lambda () (eq 'running (harness-sandbox-session-state runtime)))
+             20 "the runtime to say it is up")
+            ;; A command's output and status are its own, as in any runtime.
+            (let ((result (harness-sandbox-session-test-run
+                           ctx "echo held-on-mxc; exit 5" 30)))
+              (should (string-search "held-on-mxc" (plist-get result :stdout)))
+              (should (eql 5 (plist-get result :exit))))
+            ;; A process a call leaves running is still there after it, and
+            ;; it is this instance's: it carries the run's tag.  Its output
+            ;; is not the run's, as with any run: a child that kept the
+            ;; fifo open would hold the run's own frames.
+            (let ((run (harness-sandbox-session-start-run
+                        ctx root "sleep 300 >/dev/null 2>&1 & echo left-a-process"
+                        :seconds 30 :done #'ignore)))
+              (should (string-search "left-a-process"
+                                     (plist-get (harness-test-await
+                                                 (harness-sandbox-session-wait run) 60)
+                                                :stdout)))
+              (harness-test-wait
+               (lambda () (>= (harness-sandbox-session-test--tagged (plist-get run :token)) 1))
+               20 "the process the call left to carry its tag")
+              (should (>= (harness-sandbox-session-test--tagged (plist-get run :token)) 1))
+              ;; One command is cancelled without the runtime: the
+              ;; supervisor finds the processes of that run alone and ends
+              ;; them, and says none is left.
+              (let ((doomed (harness-sandbox-session-start-run
+                             ctx root "trap '' TERM\nbash -c 'trap \"\" TERM; sleep 300' &\nsleep 300"
+                             :seconds 120 :done #'ignore)))
+                (harness-test-wait
+                 (lambda () (>= (harness-sandbox-session-test--tagged (plist-get doomed :token)) 2))
+                 20 "the run's two processes to carry its tag")
+                (harness-sandbox-session-kill-run doomed)
+                (let ((result (harness-test-await (harness-sandbox-session-wait doomed) 90)))
+                  (should (eq 'stopped (plist-get result :state)))
+                  (should (eql 0 (or (plist-get result :owned) 0))))
+                (should (eql 0 (harness-sandbox-session-test--tagged (plist-get doomed :token)))))
+              ;; The runtime is still the session's, and it still runs
+              ;; commands: cancelling one did not end the instance.
+              (should (process-live-p (plist-get runtime :process)))
+              (should (string-search "still-here"
+                                     (plist-get (harness-sandbox-session-test-run
+                                                 ctx "echo still-here" 30)
+                                                :stdout)))
+              ;; Ending the runtime ends what the session left in it: the
+              ;; supervisor ends them before it says it is going, which is
+              ;; what a backend without a namespace to end them with has.
+              (harness-sandbox-session-stop-session sid "a test ended it")
+              (harness-test-wait
+               (lambda () (eql 0 (harness-sandbox-session-test--tagged (plist-get run :token))))
+               30 "the runtime to leave nothing behind"))
+        (ignore-errors (harness-call 'session/delete sid))
+        (harness-sandbox-session-shutdown-for-tests)
+        (harness-sandbox-detect)
+        (ignore-errors (delete-directory root t))
+        (ignore-errors (delete-directory bin t)))))))
 
 (ert-deftest harness-sandbox-session-the-poll-does-not-wait-for-a-runtime-to-go ()
   "Looking at the runtimes never waits on one, so the loop keeps running.

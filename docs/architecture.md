@@ -4953,10 +4953,15 @@ decisions.
   `/tmp`.  A `:read-only` command keeps it too, as does the `locked`
   profile, which refuses `:tmp`: a command that must change nothing and
   one that must not see what the session left behind write only what
-  they throw away.  MXC has no mount namespace and cannot write `/tmp`
-  at all, and OpenShell's `/tmp` is the image's, so neither shows it;
-  a command there finds the directory at its real path and, under MXC,
-  its private `$TMPDIR`.
+  they throw away.  MXC has no `/tmp` to mount, so there `:tmp` names
+  the command's `$TMPDIR` itself (`harness-sandbox--mxc-tmp-directory`):
+  a directory the session keeps is shown where it is and nothing removes
+  it, and one the sandbox must not show -- no local directory, `/`, or
+  one that is, holds or lies in `/usr`, `/etc`, `/proc`, `/dev` or
+  `/sys` -- gives way to a private one the command line removes.
+  OpenShell's `/tmp` is the image's, so it shows nothing of the
+  session's: a command there finds the directory at its real path and,
+  under MXC, its `$TMPDIR`.
 - `:read-only`, for a caller that needs a command to change nothing (a
   supervising session's shell, which only looks), mounts the working
   directory, the git directories and every `:writable` entry read-only
@@ -5183,16 +5188,19 @@ decisions.
   inside the writable git directory (the deepest rule wins; the
   registrations' rules are written to the configuration and tested
   there, a macOS host has not run them).  MXC's own baseline gives the system (/bin, /usr, /System,
-  /Library, /private/etc…).  `sandbox/wrap` makes a private 0700
-  directory the command's `$TMPDIR`, writable, and the command line
-  removes it after the command, keeping its status (a command killed by
-  a signal leaves it for macOS to clear).  MXC passes no environment on:
+  /Library, /private/etc…).  `sandbox/wrap` gives the command a
+  `$TMPDIR` of the session's own when the caller passed one that can be
+  shown (nothing removes it, so what the command leaves there is the
+  session's to find), and otherwise makes a private 0700 directory,
+  writable, which the command line removes after the command, keeping
+  its status (a command killed by a signal leaves it for macOS to
+  clear).  MXC passes no environment on:
   the command gets `process-environment` (the first entry of a name
   wins, a bare name unsets it, an entry JSON cannot carry is left out)
   with `TMPDIR`, `CFFIXED_USER_HOME`, `PWD`, `HARNESS_SANDBOX=mxc` and
   the git identity set; `$HOME` keeps its path, unreadable but for what
   is shown.  `CFFIXED_USER_HOME`, where Cocoa looks for `~/Library`
-  (and nothing else), is the same private directory as `$TMPDIR`: Cocoa
+  (and nothing else), is the same directory as `$TMPDIR`: Cocoa
   programs ignore `$HOME`, `~/Library` is hidden, and the NS build of
   Emacs, which loads its color list from `~/Library/Colors` and writes
   it there when it is short (`ns_init_colors`, which runs for `--batch`
@@ -5203,10 +5211,16 @@ decisions.
   MXC takes only with ingress) or denied all ways.  `:read-only` leaves
   only `$TMPDIR` writable and shows CWD, the writable directories and
   the common git directory read-only.  Unlike bwrap the command gets no
-  PID namespace (only a session of its own), `/tmp` cannot be written,
-  and MXC hands the output over only when the command exits, so the
-  bash tool's live note shows nothing until then.  MXC needs macOS 15
-  or later.
+  PID namespace (only a session of its own) and `/tmp` cannot be
+  written.  Whether `mxc-exec-mac` hands a command's output over as it
+  arrives, which a held runtime needs, is not assumed: `sandbox/hold`
+  runs `harness-sandbox--mxc-streaming`'s probe once -- a command that
+  reads a line and echoes it back while it is still running -- keeps the
+  answer in `harness-sandbox--mxc-stream`, and refuses to hold an
+  instance with it when the executor collects the output until the
+  command ends.  `sandbox/status` adds a `:limits` line saying so once
+  the question has been asked, and never asks it itself.  MXC needs
+  macOS 15 or later.
 - NVIDIA OpenShell (`harness-sandbox--openshell-command`; setup in
   [openshell.md](openshell.md)), asked for with
   `harness-sandbox-backend`, never picked by `auto`.  It is a runtime,
@@ -11396,10 +11410,18 @@ instance's standard input and standard output are the only channel
 between it and the harness: a command's output comes back as framed
 lines the supervisor writes, never as a file the harness reads, so a
 path a sandbox command can write cannot make the harness read the host's
-file.  The namespace is the runtime's, not the call's, and it is still a
-namespace: a daemon, a background `&` job and a `nohup` or `setsid` child
-all inherit the run's token, are enumerated by it in `/proc`, and end
-with the runtime.
+file.  Under bwrap the namespace is the runtime's, not the call's, and
+it is still a namespace: a daemon, a background `&` job and a `nohup` or
+`setsid` child all inherit the run's token, are enumerated by it in
+`/proc`, and end with the runtime.  A backend without a namespace of its
+own is not left with nothing: the supervisor reads the same token out of
+the environment each process inherited -- `/proc` on Linux, the process
+table (`ps -E` on BSD, `ps e` elsewhere) where there is none -- so a run's
+processes are found, TERM and then KILL are sent to each, the count of
+those still alive is what `kill` answers with, and `quit` ends every
+process of the instance before it says `D`.  That is what makes MXC, whose
+confinement is a process tree rather than a namespace, able to hold a
+runtime at all.
 
 Persistence sits above the generic sandbox API, not in a backend's name.
 `sandbox/hold` returns the command line that holds an instance and the
@@ -11410,7 +11432,10 @@ testing a program's name.  bwrap promises all five: its instance is a PID
 namespace, so a run's processes are in `/proc` there and ending the init
 ends them.  systemd-run holds a unit and can stop its cgroup, but it sets
 no `PrivatePIDs`, so it cannot promise `:enumerate` and is refused for
-that.  MXC has no handle to end one command of an instance; OpenShell's
+that.  MXC promises all five too, but only where its executor couples a
+command's standard input and output to the harness's pipe, which
+`sandbox/hold` measures once (`harness-sandbox--mxc-streaming`) and
+refuses with the reason where it does not; OpenShell's
 wrapper deletes its sandbox with the command that made it; no backend,
 the `off` policy, a remote directory and a read-only session hold
 nothing.  Each refusal is what this implementation can verify, not a

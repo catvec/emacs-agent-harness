@@ -2353,6 +2353,182 @@ which Seatbelt hides.  $HOME is left as it was."
                              (plist-get r :stdout)))))
         (delete-directory cwd t)))))
 
+(defun harness-sandbox-test--mxc-stand-in (dir name streaming)
+  "Write a stand-in for mxc-exec-mac in DIR, named NAME, and return its path.
+With STREAMING it couples its own standard input and output to the
+command it is asked to run, as an executor that can hold an instance
+does: the probe's command reads a line and answers it while it is still
+running.  Without it, the stand-in collects the command's output and
+prints it when the command has ended -- the other thing an executor can
+do with it, and the one a runtime cannot be held over.
+
+The command is taken from the configuration as `harness-sandbox--mxc-command'
+writes it: its `commandLine' is the first member of `process', and the
+value is everything between its quotes and the one that ends it.  A
+stand-in is no JSON parser, so it is given commands without a quote in
+them, which is what the probe runs."
+  (let ((script (expand-file-name name dir)))
+    (with-temp-file script
+      (insert "#!/bin/sh\n"
+              "cfg=$(printf '%s' \"$2\" | base64 -d)\n"
+              "cmd=$(printf '%s' \"$cfg\" | sed -e 's/.*\\\"commandLine\\\":\\\"//' -e 's/\\\",\\\"cwd\\\".*//')\n"
+              (if streaming
+                  ;; Its standard input is the caller's and its output goes
+                  ;; back as the command writes it.
+                  "exec sh -c \"$cmd\"\n"
+                ;; Its output is kept until the command has ended.
+                "sh -c \"$cmd\" </dev/null > \"$0.out\" 2>&1\n"
+                "st=$?\n"
+                "cat \"$0.out\"\n"
+                "rm -f \"$0.out\"\n"
+                "exit $st\n")))
+    (set-file-modes script #o755)
+    script))
+
+(ert-deftest harness-sandbox-mxc-holds-an-instance ()
+  "On macOS MXC holds a session's runtime, and says so only when it can.
+The supervisor the runtime manager runs is a shell program: its standard
+input carries control lines and its standard output frames, and it finds
+and ends a run's processes itself, so what MXC must give is a long
+command whose standard input and output are the harness's pipe.  That is
+measured, not assumed: a stand-in executor that couples them is `t', one
+that collects the command's output and prints it when it has ended is
+refused with the reason, and a refused executor is never handed a
+runtime to hold."
+  (harness-sandbox-test--setup)
+  (skip-unless (file-executable-p "/bin/sh"))
+  (let* ((bin (harness-test-temp-dir))
+         (cwd (harness-test-temp-dir))
+         (streaming (harness-sandbox-test--mxc-stand-in bin "mxc-exec-mac" t))
+         (buffered (harness-sandbox-test--mxc-stand-in bin "mxc-exec-mac-buffered" nil))
+         (harness-sandbox-policy 'preferred)
+         (harness-sandbox-backend 'auto)
+         (harness-sandbox--mxc-system-dirs nil))
+    (unwind-protect
+        (progn
+          ;; The facts are the adapter's: what a Mac's supervisor can do,
+          ;; with the executor that carries its pipe.
+          (let ((facts (harness-sandbox--hold-facts 'mxc)))
+            (dolist (key '(:exec :stream :cancel :enumerate :destroy))
+              (should (eq t (plist-get facts key)))))
+          ;; The stand-in couples the pipe, so the probe says it holds one.
+          (setq harness-sandbox--mxc-stream nil)
+          (should (eq t (harness-sandbox--mxc-probe streaming)))
+          ;; One that keeps the output until the command ends does not.
+          (let ((answer (harness-sandbox--mxc-probe buffered)))
+            (should (consp answer))
+            (should (string-search "did not carry a command's standard input"
+                                   (or (plist-get answer :why) ""))))
+          ;; The probe is asked once: a second question is answered from
+          ;; the first, and `sandbox/detect' is what asks again.
+          (harness-sandbox-test--detect-on-macos (list (cons "mxc-exec-mac" streaming)))
+          (should (eq 'mxc (plist-get (harness-call 'sandbox/status) :backend)))
+          (let ((asked 0))
+            (cl-letf (((symbol-function 'harness-sandbox--mxc-probe)
+                       (lambda (&rest _) (setq asked (1+ asked)) t)))
+              (setq harness-sandbox--mxc-stream nil)
+              (should (eq t (harness-sandbox--mxc-streaming)))
+              (should (eq t (harness-sandbox--mxc-streaming)))
+              (should (eql 1 asked))
+              (harness-sandbox-test--detect-on-macos (list (cons "mxc-exec-mac" streaming)))
+              (should (eq t (harness-sandbox--mxc-streaming)))
+              (should (eql 2 asked))))
+          ;; Holding one gives the command `sandbox/wrap' builds for the
+          ;; profile, with every fact the runtime manager needs.  The
+          ;; session's temporary directory is given to both, as the
+          ;; runtime manager gives it: without one each call makes a
+          ;; private directory of its own, and the two lines would differ
+          ;; by that path alone.
+          (let* ((session-tmp (file-name-as-directory (harness-test-temp-dir)))
+                 (held (harness-call 'sandbox/hold cwd (list "bash" "-c" "true")
+                                     :tmp session-tmp))
+                 (command (plist-get held :command)))
+            (should (eq 'mxc (plist-get held :backend)))
+            (should (equal (harness-call 'sandbox/wrap cwd (list "bash" "-c" "true")
+                                         :tmp session-tmp)
+                           command))
+            (dolist (key '(:exec :stream :cancel :enumerate :destroy))
+              (should (eq t (plist-get (plist-get held :capabilities) key))))
+            (delete-directory session-tmp t))
+          ;; An executor that cannot carry the pipe is refused, with why,
+          ;; and the backend says so in what it cannot do.
+          (harness-sandbox-test--detect-on-macos (list (cons "mxc-exec-mac" buffered)))
+          (setq harness-sandbox--mxc-stream nil)
+          (let ((held (harness-call 'sandbox/hold cwd (list "bash" "-c" "true"))))
+            (should-not (plist-get held :command))
+            (should (string-search "its executor cannot hold an instance"
+                                   (or (plist-get held :why) ""))))
+          (should (string-search "No runtime can be held"
+                                 (string-join (plist-get (harness-call 'sandbox/status)
+                                                         :limits)
+                                              " "))))
+      (harness-sandbox-detect)
+      (setq harness-sandbox--mxc-stream nil)
+      (delete-directory bin t)
+      (delete-directory cwd t))))
+
+(ert-deftest harness-sandbox-mxc-shows-the-sessions-temporary-directory ()
+  "On macOS a command's $TMPDIR is the session's own when it gave one.
+MXC has no /tmp to mount, so $TMPDIR is the only place a command goes;
+making a private directory for each call left what a command wrote in it
+unreachable to the next call, and made the runtime's probe leak one per
+question.  A directory the session keeps is left as it is -- the command
+line does not remove it -- and one it cannot be given (the `off' profile,
+a read-only command) keeps a private directory that the command line
+does remove."
+  (harness-sandbox-test--setup)
+  (skip-unless (file-executable-p "/bin/sh"))
+  (let* ((cwd (harness-test-temp-dir))
+         (session-tmp (file-name-as-directory (harness-test-temp-dir)))
+         (harness-sandbox-policy 'preferred)
+         (harness-sandbox-backend 'auto))
+    (unwind-protect
+        (harness-sandbox-test--detect-on-macos
+         (list (cons "mxc-exec-mac" (harness-sandbox-test--fake-mxc cwd))))
+      (let* ((config (harness-sandbox-test--mxc-config
+                      (harness-call 'sandbox/wrap cwd (list "sh" "-c" "true") :tmp session-tmp)))
+             (env (lambda (name) (harness-sandbox-test--mxc-env config name))))
+        ;; The command's temporary directory, and Cocoa's home, are the
+        ;; session's own; nothing removes it afterwards.
+        (should (equal (list (file-name-as-directory (directory-file-name session-tmp)))
+                       (funcall env "TMPDIR")))
+        (should (equal (list (directory-file-name session-tmp)) (funcall env "CFFIXED_USER_HOME")))
+        (should (member (directory-file-name session-tmp)
+                        (harness-plist-get-in config '(:filesystem :readwritePaths))))
+        (should-not (string-search "rm -rf" (harness-plist-get-in config '(:process :commandLine))))
+        (should (equal "'sh' '-c' 'true'"
+                       (harness-plist-get-in config '(:process :commandLine)))))
+      ;; One in the machine's /tmp is shown as it is: MXC mounts no /tmp,
+      ;; so nothing of its own path is lost -- which is what keeps bwrap
+      ;; from showing one there.
+      (let* ((in-tmp (file-name-as-directory (make-temp-file "mxc-in-tmp-" t)))
+             (config (harness-sandbox-test--mxc-config
+                      (harness-call 'sandbox/wrap cwd (list "sh" "-c" "true") :tmp in-tmp))))
+        (should (equal (list (file-name-as-directory (directory-file-name in-tmp)))
+                       (harness-sandbox-test--mxc-env config "TMPDIR")))
+        (should-not (string-search "rm -rf" (harness-plist-get-in config '(:process :commandLine))))
+        (delete-directory in-tmp t))
+      ;; A directory that would show more than the caller gave -- here the
+      ;; root directory -- gives way to a private one, which is removed.
+      (let* ((config (harness-sandbox-test--mxc-config
+                      (harness-call 'sandbox/wrap cwd (list "sh" "-c" "true") :tmp "/")))
+             (tmp (car (harness-sandbox-test--mxc-env config "TMPDIR"))))
+        (should tmp)
+        (should-not (equal "/" (directory-file-name tmp)))
+        (should (string-search "rm -rf" (harness-plist-get-in config '(:process :commandLine)))))
+      ;; A read-only command keeps a private one too: it writes nothing
+      ;; else, and the session's directory is not its to change.
+      (let* ((config (harness-sandbox-test--mxc-config
+                      (harness-call 'sandbox/wrap cwd (list "sh" "-c" "true")
+                                    :tmp session-tmp :read-only t)))
+             (tmp (car (harness-sandbox-test--mxc-env config "TMPDIR"))))
+        (should tmp)
+        (should-not (equal (directory-file-name session-tmp) tmp))
+        (should (string-search "rm -rf" (harness-plist-get-in config '(:process :commandLine)))))
+      (harness-sandbox-detect)
+      (delete-directory cwd t)
+      (delete-directory session-tmp t))))
+
 ;;;; Scratch directories
 
 (ert-deftest harness-sandbox-scratch-bwrap-arguments ()

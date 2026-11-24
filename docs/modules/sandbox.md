@@ -67,10 +67,12 @@ file tools name leads to the same files; a directory in /tmp cannot
 be shown that way, and keeps the private /tmp.
 A command that changes nothing (`:read-only`) and one that must not
 see what the session left behind (the `locked` profile) keep a
-private empty /tmp.  bwrap and systemd-run give it; MXC has no
-mount namespace and cannot write /tmp at all, and OpenShell's /tmp
-is the image's, so both keep their own and a command there leaves
-nothing to find.
+private empty /tmp.  bwrap and systemd-run give it; OpenShell's /tmp
+is the image's, so it keeps its own and a command there leaves
+nothing to find.  MXC has no /tmp to mount at all: `:tmp` there names
+the command's $TMPDIR itself, which is where a command on macOS goes,
+so the session's own directory serves and nothing of what a command
+leaves is thrown away with it (see "On macOS" below).
 
 A confined command has HARNESS_SANDBOX set to the backend's name,
 `bwrap`, `systemd`, `mxc` or `openshell`, so a script can tell it
@@ -88,26 +90,30 @@ MXC's baseline of system directories (/bin, /usr/bin, /usr/lib,
 `harness-sandbox--mxc-system-dirs` (Homebrew, MacPorts, Nix,
 /Applications) and `harness-sandbox-extra-read-only-dirs`, all
 read-only; the working directory read-write; the `:writable` and
-`:readable` directories as they are given; and a private $TMPDIR,
-made for the command and removed when it ends.  $HOME keeps its
-path, but nothing in it can be read except what is shown there.
+`:readable` directories as they are given; and a $TMPDIR that is the
+caller's own temporary directory when it gave one -- nothing removes
+it, so what a command leaves there is the session's to find -- and a
+private one, made for the command and removed when it ends, when it
+did not.  $HOME keeps its path, but nothing in it can be read except
+what is shown there.
 That includes the ~/Library that Cocoa programs look in on their
 own, without asking $HOME: the NS build of Emacs, which loads its
 color list from ~/Library/Colors and writes it when it is short,
 aborts at startup if it cannot, even in a --batch process such as
 the file tools' worker and the elisp tool's child.  So Cocoa's home
-(CFFIXED_USER_HOME, which moves nothing else) is that same private
-directory, where such a program finds nothing and makes what it
-needs.  MXC passes on none of the harness's environment, so the
+(CFFIXED_USER_HOME, which moves nothing else) is that same $TMPDIR,
+where such a program finds nothing and makes what it needs.  MXC
+passes on none of the harness's environment, so the
 command's is written out whole: `process-environment` as it is when
 the command is wrapped, with TMPDIR, CFFIXED_USER_HOME, PWD,
 HARNESS_SANDBOX=mxc and a worktree's commit identity set.
 `:network nil` denies the network, loopback included; otherwise it
 is open both ways, as bwrap leaves it.  `:read-only` leaves nothing
 writable but that $TMPDIR.  Unlike bwrap, MXC gives the command no
-PID namespace of its own; /tmp cannot be written there (a command
-uses $TMPDIR); and MXC hands the command's output on only when it
-ends, so the note under a running bash call shows none until then.
+PID namespace of its own and /tmp cannot be written there (a command
+uses $TMPDIR).  Whether its executor hands a command's output on as
+it arrives, which a held runtime needs, is measured rather than
+assumed (see "MXC: whether its executor holds an instance" below).
 
 NVIDIA OpenShell (https://github.com/NVIDIA/OpenShell, see
 `harness-sandbox-openshell-program`) is a different kind of backend,
@@ -141,7 +147,12 @@ with its own PID, and a process that escaped the cgroup (by starting
 its own scope, say) would not be ended by it.  That is a narrower
 guarantee than bwrap's, and it is the one the backend has.  MXC has no
 PID namespace and no unit: a background process there can outlive the
-call.  OpenShell's ephemeral sandbox is deleted after the command, by
+call that started it.  A runtime held on it is not a one-shot command
+though, and its end is the harness's own: the supervisor finds what
+the instance runs by the environment it inherited, from `/proc` or
+from the process table where there is none, and ends every one of
+them before it says it is going (see "Holding an instance" below).
+OpenShell's ephemeral sandbox is deleted after the command, by
 the gateway, which is the same bound by another rule.
 
 What a command leaves for a later tool call is therefore the files it

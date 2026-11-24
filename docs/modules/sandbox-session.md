@@ -98,16 +98,20 @@ stays whole in the pipe.  Control goes the other way on the
 supervisor's standard input, which the sandbox cannot reach.
 
 **Cancel is not destroy.**  A run's processes inherit `HARNESS_RUN` and
-the instance's id, so the supervisor finds every one of them by the
-`/proc` entry it inherits -- a `setsid` child and a double-forked daemon
-included -- and cancel sends TERM to each, waits, then KILLs what
-ignored it, and says how many are still alive when it replies.  A run
-is cancelled only when that count is zero; a run that cannot be
-emptied ends its whole runtime instead, which the kernel does terminate.
-Destroy ends the instance: the supervisor goes, the namespace with it,
-and the harness waits for its own process to be gone before it says so.
-An ordinary call that leaves a process running is neither: the process
-survives, it is counted (`P`), and it keeps the runtime alive.
+the instance's id, so the supervisor finds every one of them by what
+they inherited -- a `setsid` child and a double-forked daemon included
+-- reading it from `/proc` on Linux and from the process table
+(`ps -E`, `ps e`) where there is none, as on macOS; and cancel sends
+TERM to each, waits, then KILLs what ignored it, and says how many are
+still alive when it replies.  A run is cancelled only when that count
+is zero; a run that cannot be emptied ends its whole runtime instead.
+Destroy ends the instance: the supervisor ends every process of the
+instance before it says it is going -- the kernel does that with the
+namespace where there is one, and the supervisor does it itself where
+there is not -- and the harness waits for its own process to be gone
+before it says so.  An ordinary call that leaves a process running is
+neither: the process survives, it is counted (`P`), and it keeps the
+runtime alive.
 
 **Bounds.**  One instance per session, one supervisor in it, one
 command per run: `harness-sandbox-session-max-commands` concurrent runs

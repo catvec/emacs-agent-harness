@@ -82,12 +82,22 @@ containment is drawn around the runtime, which is bounded and owned,
 instead of being removed.  A job is one run in that runtime.
 See [`tool-call-persistent-jobs.md`](tool-call-persistent-jobs.md).
 
-MXC on macOS has no PID namespace, so a background process there can
-outlive its call; the harness then neither ends it at the call's end nor
-stops it later. That asymmetry is a backend limit: `sandbox/status`'s
-`:limits` line for MXC already says it has no PID namespace, and the
-module commentary now says what that means for a background process.  A
-job is refused there for the same reason: nothing would end it.
+MXC on macOS has no PID namespace, so a background process a one-shot
+command leaves there can outlive its call; the harness then neither ends
+it at the call's end nor stops it later. That asymmetry is a backend
+limit, and `sandbox/status`'s `:limits` line for MXC still says the
+namespace is missing.  What changed is the held runtime: a job there is
+not one command but the supervisor, which finds what the instance runs
+by the environment it inherited -- from `/proc` on Linux and from the
+process table (`ps -E`, `ps e`) where there is none -- and ends every
+process of it before it says it is going, so the end of a job on MXC is
+verified rather than hoped.  That path is measured against a stand-in
+executor (`harness-sandbox-session-a-supervisor-finds-runs-without-proc`)
+rather than on a Mac, and the fact it turns on -- that MXC's executor
+carries a command's standard input and output as it runs -- is probed
+once and kept (`harness-sandbox--mxc-streaming`); an executor that does
+not carry them is refused by `sandbox/hold` with that reason, and a job
+there gets a sandbox per call.
 `systemd-run` was called a PID namespace here and is not one: it is a
 unit and a cgroup, stopped when the command exits, and it sets no
 `PrivatePIDs`.  What it gives a command is the unit's lifetime, which is

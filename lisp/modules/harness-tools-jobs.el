@@ -93,8 +93,16 @@
 ;; `systemctl --user stop`, a second authority the harness does not have
 ;; here.  A job under systemd-run would therefore outlive every stop the
 ;; harness makes, so it is refused rather than offered with a bound that
-;; does not hold.  MXC has no PID namespace, so nothing would end a job's
-;; processes with it; OpenShell makes a sandbox per command.  All of them
+;; does not hold.  MXC has no PID namespace either, so a one-shot command
+;; there can leave a process behind; a job is not one-shot.  It runs in a
+;; runtime the harness holds, whose supervisor finds what the instance
+;; runs by the inherited environment -- from `/proc', or from the process
+;; table on macOS -- and ends every one of them before it says it is
+;; going.  So MXC is a job's backend where its executor couples the
+;; command's standard input and output (`harness-sandbox--mxc-streaming'),
+;; which is measured rather than assumed; where it does not, `sandbox/hold'
+;; refuses with that reason and a job says so.  OpenShell makes a sandbox
+;; per command.  All of them
 ;; refuse a job with the reason, as do the `off' policy (globally or for
 ;; the directory), no backend, a remote directory and a read-only session
 ;; -- there a job would be a process outside the jail that outlives its
