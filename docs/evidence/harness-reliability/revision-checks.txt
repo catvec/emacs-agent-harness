@@ -1,0 +1,10 @@
+b444511      hydration  exit=0 expected=0
+ac3fb53^     hydration  exit=0 expected=0
+ac3fb53      hydration  exit=1 expected=1
+3f784e3      hydration  exit=0 expected=0
+b444511      routing    exit=0 expected=0
+0a85222^     routing    exit=0 expected=0
+0a85222      routing    exit=1 expected=1
+c546c72      routing    exit=1 expected=1
+working tree hydration  exit=0 expected=0
+working tree routing    exit=0 expected=0

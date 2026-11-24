@@ -1,0 +1,21 @@
+;;; restart-repro.el --- Restart persistence reproduction -*- lexical-binding: t; -*-
+(require 'harness-test-helpers)
+(ert-deftest quality-restart-retains-canonical-session ()
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (dolist (m '(store project config provider session replay))
+      (harness-test-load-module m))
+    (clrhash harness-sessions)
+    (let* ((session (harness-call 'session/create :cwd dir :model "demo:scripted"))
+           (id (plist-get session :id))
+           (node (harness-call 'session/append id '(:kind user :content "keep this"))))
+      (harness-session-flush)
+      (when (harness-method-exists-p 'replay/frozen-record)
+        (harness-call 'replay/frozen-record id
+                      '(:model "demo:scripted" :messages [(:role "user" :content "keep this")])
+                      "demo:scripted" "demo"))
+      (clrhash harness-sessions)
+      (harness-session--load-all)
+      (should (equal dir (plist-get (harness-call 'session/get id) :cwd)))
+      (should (equal (plist-get node :id) (plist-get (harness-call 'session/get id) :head))))))
+(ert-run-tests-batch-and-exit t)

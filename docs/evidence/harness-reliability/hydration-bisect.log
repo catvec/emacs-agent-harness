@@ -1,0 +1,14 @@
+# bad: [ac3fb53c31667c3923a5b219337da6742c4e6d5f] Investigate overnight ChatGPT quota consumption
+# good: [b44451108a0366b06dd6dfbc878718981d0f13c0] Fix malformed permission judge responses
+git bisect start 'ac3fb53' 'b444511'
+# good: [b661a8aeb7d53d5bc887b12c5da97508ab96aa56] Implement real mobile computer capture
+git bisect good b661a8aeb7d53d5bc887b12c5da97508ab96aa56
+# good: [d5288c2ba616a39b2d508c5a7a18271b13c5eddb] Recover premature voice submission with grace window
+git bisect good d5288c2ba616a39b2d508c5a7a18271b13c5eddb
+# good: [1a3c967679cb500dc070df106a5bb699ab5d0c1b] Fix task-board write backlog overflow
+git bisect good 1a3c967679cb500dc070df106a5bb699ab5d0c1b
+# good: [03b3e9c26b469eda130c28b7130d1ab1633088d9] Add all-reviewed system message
+git bisect good 03b3e9c26b469eda130c28b7130d1ab1633088d9
+# good: [78f0ada5abfe3054a41b08f32eab2eb9da148625] Restore voice input across compose surfaces
+git bisect good 78f0ada5abfe3054a41b08f32eab2eb9da148625
+# first 'bad' commit: [ac3fb53c31667c3923a5b219337da6742c4e6d5f] Investigate overnight ChatGPT quota consumption

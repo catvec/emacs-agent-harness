@@ -1,0 +1,18 @@
+# bad: [c546c72afe010b0e348869a80dbe9fbf67a5bc98] Fix chat scroll End of buffer
+# good: [b44451108a0366b06dd6dfbc878718981d0f13c0] Fix malformed permission judge responses
+git bisect start 'c546c72' 'b444511'
+# good: [03551fd45249c879206ac24ce53b464cb8cb7200] Remove merge conflict timeout deadline
+git bisect good 03551fd45249c879206ac24ce53b464cb8cb7200
+# bad: [d09dd9ebe85c214feec8e35fc0f30962f6c9d231] Load the checkout's modules as the harness's own in tests
+git bisect bad d09dd9ebe85c214feec8e35fc0f30962f6c9d231
+# good: [613c1ec446eba68f158d5f8297c00e2d60a40954] Merge commit '990288c0fe71' into task/recover-turns-from-openrouter-stalls-lndfp7k4
+git bisect good 613c1ec446eba68f158d5f8297c00e2d60a40954
+# bad: [27533a4a8f2b94d641f4f961737ab924a1260086] Merge branch 'task/recover-turns-from-openrouter-stalls-lndfp7k4'
+git bisect bad 27533a4a8f2b94d641f4f961737ab924a1260086
+# bad: [84c69a1766f845a34e191aff60749ec3a45c1692] Verified recap isolation and recovery 61c6622
+git bisect bad 84c69a1766f845a34e191aff60749ec3a45c1692
+# good: [d6a5d1ac7d80981ef9148f122ee7271df88b3164] Audited system transition recovery implementation for t-5ar04fw5
+git bisect good d6a5d1ac7d80981ef9148f122ee7271df88b3164
+# bad: [0a8522220be88e81697386c907c38bccf05bb262] Verified routing fix 989fec0
+git bisect bad 0a8522220be88e81697386c907c38bccf05bb262
+# first 'bad' commit: [0a8522220be88e81697386c907c38bccf05bb262] Verified routing fix 989fec0
