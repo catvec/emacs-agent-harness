@@ -160,6 +160,9 @@ creating its first commit, outside any asynchronous timeout. It now disables
 signing in its own repository and checks that creating the commit succeeds. A
 regression injects a Git configuration requiring signatures with a signing
 program that always fails; the old fixture fails it and the repair passes.
+The SSH fixture also no longer tries to create `/run/sshd` on the host: it
+starts its temporary daemon directly and uses its existing availability check
+where that daemon cannot run.
 
 Other tests of unrelated or absent projects saw `/tmp/` as their project during
 the run. The final full verification uses `TMPDIR=/var/tmp`, a clean temporary

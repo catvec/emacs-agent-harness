@@ -12,8 +12,8 @@
 ;; no shell reads and which closes the protocols and the prompts; the
 ;; repository it refuses to leave; and the sandbox options the material
 ;; becomes.  The calls themselves run for real, against a repository
-;; this suite makes, and against a local sshd when HARNESS_TEST_GIT_SSHD
-;; names one: nothing here needs a network or the user's own keys.
+;; this suite makes, and against a local sshd when one can be started:
+;; nothing here needs an external network or the user's own keys.
 
 ;;; Code:
 
@@ -493,7 +493,9 @@ setup is read: HOME is ROOT, which is what the tool then shows git."
        (expand-file-name "sshd_config" root)
        (format "Port %d\nListenAddress 127.0.0.1\nHostKey %s\nAuthorizedKeysFile %s.pub\nPidFile %s\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\n"
                port hostkey key (expand-file-name "sshd.pid" root)))
-      (make-directory "/run/sshd" t)
+      ;; An unprivileged fixture must not create the system daemon's
+      ;; privilege-separation directory.  Try our own daemon directly;
+      ;; an installation that cannot start it already returns nil below.
       (let ((process (make-process :name "harness-git-test-sshd"
                                    :command (list sshd "-f" (expand-file-name "sshd_config" root)
                                                   "-E" (expand-file-name "sshd.log" root) "-D")
@@ -534,7 +536,8 @@ ssh setup and nothing else: it is skipped where sshd cannot be started."
                (default-directory root))
           (call-process "git" nil nil nil "init" "-q" "--bare" remote)
           (call-process "git" nil nil nil "init" "-q" "-b" "main" repo)
-          (dolist (setting '(("user.email" "test@example.invalid") ("user.name" "Test")))
+          (dolist (setting '(("user.email" "test@example.invalid") ("user.name" "Test")
+                             ("commit.gpgsign" "false")))
             (call-process "git" nil nil nil "-C" repo "config" (car setting) (cadr setting)))
           (with-temp-file (expand-file-name "file.txt" repo) (insert "over ssh\n"))
           (call-process "git" nil nil nil "-C" repo "add" "-A")
