@@ -241,7 +241,8 @@ stock one.
 
 ### 4. A pinned session: revalidated on every dispatch, never moved
 
-Selection happens for a new session only.  A pinned session runs
+Selection happens for a new session, or for a session whose pin the
+policy has dropped (section 4.1).  A pinned session runs
 `harness-openrouter--pin-refusal` before every dispatch, and again at
 the moment the body is built (`harness-openrouter--dispatch`), so a
 policy edited or a price that moved in between stops the request instead
@@ -309,6 +310,40 @@ neither is a rewrite of a field this module does not read.
 This covers a new session's first pin, a pinned session's refreshed
 reading, and the synchronous path, which has the same window between
 its checks and the body being built.
+
+### 4.1 A pin the policy dropped pins again
+
+A pin whose provider the policy no longer lists names an endpoint no
+request may go to any more.  Every check in section 4 refuses it, and
+nothing can ever change that: the endpoint is outside the allowlist, so
+there is no request that could clear it, and `harness-openrouter-switch`
+cannot help either when the policy lists no provider the session could
+move to.  Left refused, the session never works again and the task
+behind it waits in the board's "Your input" for a person to find a
+switch it never names — a wedge, not a protection.
+
+So a pin the policy has dropped is selected for again, exactly as a new
+session's is: the price rule runs under the policy in force, inside its
+limits, and the session is pinned to what it chooses.  The session says
+it did (`OpenRouter endpoint deepinfra/fp8 is no longer allowed by the
+policy; pinning a new one`), and the new pin is recorded with
+`basis "chosen"` as any selection is.  The conversation starts a new
+provider's cache cold; there is no cache left to protect, because the
+endpoint the old pin named cannot be reached again.
+
+This is deliberately narrower than "the pin was refused".  A pin that is
+still the policy's provider but not the endpoint it was vetted as, a
+recorded price over the limit, and a reading too old to be evidence are
+all refused as before: each can be answered without moving the
+conversation off the endpoint it was disclosed to, and each may clear on
+its own.  Only a provider the policy no longer lists at all is a
+selection.
+
+A route the session acquired while the re-selection was reading the
+catalogue is still another request's choice: the re-selection refuses
+with `routing-changed` rather than overwriting it.  The one route it may
+replace is the dropped pin it set out to replace, which is what makes
+the re-selection reach the send at all.
 
 A session the policy routes is also guarded from `harness-fallback`, at
 both its before-turn and its step-error paths, including budget, quota

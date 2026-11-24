@@ -993,11 +993,15 @@ switch is cache-cold and the user's decision, so the session waits."
             (should (cl-find-if (lambda (h) (string-match-p "dearer" h))
                                 harness-openrouter-test--hints))))))))
 
-(ert-deftest harness-provider-openrouter-a-pin-the-policy-dropped-pauses ()
-  "A pin whose provider the policy no longer allows is not sent.
-The provider was allowed once; a policy that no longer names it says the
-pin is no longer allowed, and the request waits rather than going to an
-endpoint the allowlist dropped -- or to the other provider."
+(ert-deftest harness-provider-openrouter-a-pin-the-policy-dropped-pins-again ()
+  "A pin whose provider the policy no longer allows pins a new endpoint.
+The provider was allowed once; a policy that no longer names it leaves
+the pin naming an endpoint no request may go to, so it can never be sent
+again.  Refusing every request forever would wedge the session and the
+task behind it -- the pin names no provider the allowlist admits, so no
+dispatch and no switch by hand can reach it.  The session therefore pins
+again exactly as a new one does, under the policy in force and inside its
+limits, and the work carries on."
   (let* ((policy (harness-openrouter-test-policy :providers '("Cohere")))
          (route (harness-openrouter-test--route '(:catalogue-at (float-time))))
          (session (harness-openrouter-test--session
@@ -1005,13 +1009,60 @@ endpoint the allowlist dropped -- or to the other provider."
     (harness-openrouter-test-with-policy policy
       (harness-openrouter-test-with-session session
         (harness-openrouter-test-with-fake
-            (list (harness-openrouter-test--completion-response))
+            (list (cons (harness-openrouter-test--catalogue-url-regexp)
+                        `(:body ,(harness-openrouter-test--catalogue-json)))
+                  ;; The answer names the provider the policy pins now, as
+                  ;; a real one from that endpoint would.
+                  (harness-openrouter-test--answer-from "Cohere"))
           (let ((events (harness-openrouter-test--run (harness-openrouter-test--request session))))
-            (should (eq 'error (plist-get (car (last events)) :stop-reason)))
-            (should (eq 'pin-not-vetted (plist-get (car (last events)) :error-kind)))
-            (should-not (cl-find-if (lambda (r) (string-match-p "chat/completions"
-                                                                (plist-get r :url)))
-                                    harness-openrouter-test--requests))))))))
+            (should (cl-find-if (lambda (r) (string-match-p "chat/completions"
+                                                            (plist-get r :url)))
+                                harness-openrouter-test--requests))
+            (should-not (eq 'error (plist-get (car (last events)) :stop-reason)))
+            ;; The new pin is the provider the policy names now, not the
+            ;; one it dropped.
+            (should (equal "Cohere" (plist-get harness-openrouter-test--stored :provider)))
+            (should (cl-find-if (lambda (h) (string-match-p "no longer allowed" h))
+                                harness-openrouter-test--hints))))))))
+
+(ert-deftest harness-provider-openrouter-a-re-pin-keeps-a-route-chosen-beside-it ()
+  "A re-selection does not overwrite a route another request chose meanwhile.
+The pin a re-selection replaces is the dropped one it read; a route the
+session acquired while the catalogue was being read is another request's
+choice, and the re-selection refuses rather than racing it.  Otherwise
+two dispatches of one session could pin it twice, and the loser would
+send on an endpoint the winner had already moved it off."
+  (let* ((policy (harness-openrouter-test-policy :providers '("Cohere")))
+         (dropped (harness-openrouter-test--route '(:catalogue-at (float-time))))
+         (chosen (harness-openrouter-test--route
+                  '(:provider "Cohere" :slug "cohere/fp8"
+                    :catalogue-at (float-time))))
+         ;; The session is pinned to the dropped endpoint when the
+         ;; re-selection starts, and to CHOSEN by the time it would store.
+         (session (harness-openrouter-test--session
+                   "s-pinned" (list :openrouter-route chosen)))
+         (events nil))
+    (harness-openrouter-test-with-policy policy
+      (harness-openrouter-test-with-session session
+        (harness-openrouter-test-with-fake
+            (list (cons (harness-openrouter-test--catalogue-url-regexp)
+                        `(:body ,(harness-openrouter-test--catalogue-json)))
+                  (harness-openrouter-test--answer-from "Cohere"))
+          (harness-openrouter--complete-new
+           policy "s-pinned"
+           (harness-openrouter-test--request session)
+           (lambda (e) (push e events))
+           dropped)
+          (harness-test-wait
+           (lambda () (harness-openrouter-test--done-events events)) 10 "the refusal")
+          (let ((done (car (last events))))
+            (should (eq 'error (plist-get done :stop-reason)))
+            (should (eq 'routing-changed (plist-get done :error-kind))))
+          ;; Nothing was pinned over the route the other request chose.
+          (should-not harness-openrouter-test--stored)
+          (should-not (cl-find-if (lambda (r) (string-match-p "chat/completions"
+                                                              (plist-get r :url)))
+                                  harness-openrouter-test--requests)))))))
 
 (ert-deftest harness-provider-openrouter-a-lowered-limit-stops-a-fresh-pin ()
   "A pin whose recorded price is over the maximum now is not sent.

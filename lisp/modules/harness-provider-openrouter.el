@@ -2590,6 +2590,21 @@ request is the same, the operator has edited nothing that matters."
     (let ((change (harness-openrouter--policy-change authorising now)))
       (when change (cons 'policy-changed change)))))
 
+(defun harness-openrouter--pin-dropped-p (policy route)
+  "Non-nil when POLICY names no provider that could serve ROUTE at all.
+That is a pin whose provider the policy no longer lists -- the allowlist
+was narrowed, or the operator replaced the policy -- as against a pin
+that is merely not the endpoint it was vetted as.  The difference
+matters because only the first can never be sent again: the pin names an
+endpoint no policy in force admits, so every request the session makes
+from now on is refused, and no switch by hand reaches it either when the
+policy lists no other provider for the session to move to."
+  (and (listp policy)
+       (let ((provider (plist-get route :provider)))
+         (and (stringp provider)
+              (not (member provider (plist-get policy :providers)))
+              t))))
+
 (defun harness-openrouter--pin-allowed (policy route)
   "Non-nil when POLICY still allows ROUTE, by provider and exact identity.
 The pin names a provider; the policy's `:providers' says whether that
@@ -3238,6 +3253,27 @@ Neither path changes the conversation or weakens the replay guard."
           (harness-openrouter--complete-pinned
            (plist-get repeat :policy) session-id (plist-get repeat :route)
            request on-event))
+         ;; A pin the policy has dropped names a provider no request may go
+         ;; to any more, so it can never be sent again and no cache is left
+         ;; to keep: the endpoint it names is not one the allowlist admits.
+         ;; Refusing every request forever is not a protection but a
+         ;; wedge -- the session never works again, and the task behind it
+         ;; waits in the board's "Your input" for a person to find a
+         ;; switch it never names.  So the session pins again exactly as a
+         ;; new one would, under the policy in force and inside its limits,
+         ;; and says it did.  Only a provider the policy no longer lists is
+         ;; this: a pin that is still the policy's provider but not the
+         ;; endpoint it was vetted as, a price over the limit, or a stale
+         ;; reading is refused as before, because each of those can be
+         ;; answered without moving the conversation off its endpoint.
+         ((let ((route (harness-openrouter--route-of session)))
+            (and route (harness-openrouter--pin-dropped-p policy route)))
+          (let ((dropped (harness-openrouter--route-of session)))
+            (harness-openrouter--hint
+             session-id
+             (format "OpenRouter endpoint %s is no longer allowed by the policy; pinning a new one"
+                     (or (plist-get dropped :slug) "?")))
+            (harness-openrouter--complete-new policy session-id request on-event dropped)))
          ((harness-openrouter--route-of session)
           (harness-openrouter--complete-pinned
            policy session-id (harness-openrouter--route-of session) request on-event))
@@ -3433,9 +3469,17 @@ with no slug is audited strictly, as it is for any dispatch
             (harness-openrouter--cancel-handle state)
             t))))))
 
-(defun harness-openrouter--complete-new (policy session-id request on-event)
+(defun harness-openrouter--complete-new (policy session-id request on-event &optional replacing)
   "Complete REQUEST in a new SESSION-ID: choose an endpoint, then send it.
-Nothing is sent until the pin exists."
+Nothing is sent until the pin exists.
+
+REPLACING, when given, is the route the session is pinned to now, which
+this dispatch has already found the policy no longer allows
+\(`harness-openrouter--pin-dropped-p').  A pin that names no provider the
+policy lists can never be sent again, so pinning again is the only way
+the session works at all.  Any other route the session acquired while
+the catalogue was being read is still another request's choice, and the
+request is refused rather than racing it."
   (let ((state (list nil nil nil)))
     (harness-then
      (harness-openrouter--state-wait
@@ -3458,7 +3502,14 @@ Nothing is sent until the pin exists."
                 (decision (and (not refusal)
                                (harness-openrouter--select-decision
                                 in-force (plist-get reading :endpoints)
-                                (plist-get reading :at)))))
+                                (plist-get reading :at))))
+                ;; Read only when the decision would send: a refusal above
+                ;; is the whole answer, and a session the test bus cannot
+                ;; produce must not turn a named block into a generic one.
+                (selected (and (not refusal) (plist-get decision :ok)
+                               (not (plist-get request :ephemeral))
+                               (harness-openrouter--route-of
+                                (harness-openrouter--live-session request)))))
            (cond
             (refusal (harness-openrouter--refuse session-id on-event refusal))
             ((not (plist-get decision :ok))
@@ -3466,8 +3517,13 @@ Nothing is sent until the pin exists."
               session-id on-event
               (cons (or (plist-get decision :reason) 'route-paused)
                     (plist-get decision :detail))))
-            ((and (not (plist-get request :ephemeral))
-                  (harness-openrouter--route-of (harness-openrouter--live-session request)))
+            ;; A route chosen while this dispatch was reading the catalogue
+            ;; is another request's, and this one does not overwrite it.
+            ;; The one exception is the route this dispatch set out to
+            ;; replace: it is still the dropped pin, and leaving it is what
+            ;; this request is for.
+            ((and selected
+                  (not (and replacing (equal selected replacing))))
              (harness-openrouter--refuse session-id on-event
                                         '(routing-changed . "another request selected the session endpoint")))
             (t
