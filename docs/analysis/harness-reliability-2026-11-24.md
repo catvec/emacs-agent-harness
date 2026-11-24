@@ -168,7 +168,12 @@ Other tests of unrelated or absent projects saw `/tmp/` as their project during
 the run. The final full verification uses `TMPDIR=/var/tmp`, a clean temporary
 parent, without changing the user's Git configuration or deleting that parent
 project. These environment-sensitive results are kept distinct from passing
-full-suite verification.
+full-suite verification. The clean-parent run also exposed two stale test
+assumptions about `TMPDIR`: the access-view test hardcoded `/tmp` in its expected
+path, and a sandbox test used the default temporary directory when its case
+specifically required a file under the literal `/tmp` mount. The former now
+checks the actual path prefix while retaining its width, ellipsis, suffix and
+button assertions; the latter explicitly creates its test file under `/tmp`.
 
 ## Reliability boundaries that remain
 

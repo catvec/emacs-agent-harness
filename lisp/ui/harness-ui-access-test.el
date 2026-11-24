@@ -1549,7 +1549,10 @@ are drawn for.  The path of a directory is cut in the middle, where its end is
 kept.  Where that leaves too little of it beside the buttons, the source and
 the buttons go on a line under the path; a wide window keeps them in one row."
   (harness-ui-access-test-with
-    (let ((long (concat (harness-test-temp-dir) "a-directory-with-a-rather-long-name/inside/it/and/again/project/")))
+    (let* ((long (concat (harness-test-temp-dir) "a-directory-with-a-rather-long-name/inside/it/and/again/project/"))
+           ;; TMPDIR is not necessarily /tmp.  The rendered path must keep
+           ;; its own beginning as well as the end, at either row width.
+           (prefix (regexp-quote (substring long 0 8))))
       (make-directory long t)
       (harness-call 'permission/allow-dir sid long)
       ;; Wide: a row is one line.
@@ -1558,14 +1561,14 @@ the buttons go on a line under the path; a wide window keeps them in one row."
         (harness-ui-access-test-wait-text "granted to this session")
         (harness-ui-access-test-fit 110 'setting 'dir 'detail 'section)
         (let ((row (harness-ui-access-test-row long)))
-          (should (string-match-p "^  rw  /tmp/harness-tmp-[^ ]*…[^ ]*again/project/ +granted to this session +\\[Revoke\\] \\[Read only\\]" row))))
+          (should (string-match-p (concat "^  rw  " prefix "[^ ]*…[^ ]*again/project/ +granted to this session +\\[Revoke\\] \\[Read only\\]") row))))
       ;; Narrow: the path has a line, and the source and the buttons the next.
       (let ((harness-ui-access-test-width 56))
         (harness-ui-access-refresh)
         (harness-ui-access-test-wait-text "^      granted to this session  \\[Revoke\\] \\[Read only\\]$")
         (harness-ui-access-test-fit 56 'setting 'dir 'detail 'section)
         (let ((row (harness-ui-access-test-row long)))
-          (should (string-match-p "^  rw  /tmp/[^ ]*…[^ ]*again/project/$" row))
+          (should (string-match-p (concat "^  rw  " prefix "[^ ]*…[^ ]*again/project/$") row))
           (should (<= (string-width row) 56)))
         ;; The choices of a setting, and its note, wrap under each other.
         (let ((start (harness-ui-access--find-anchor '(setting . mode))))

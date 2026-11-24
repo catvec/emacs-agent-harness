@@ -201,7 +201,8 @@ not lead to is not hidden at all, since hiding it would make an empty
 file in the caller's directory."
   (harness-sandbox-test--setup)
   (let* ((tmp (harness-sandbox-test--dir-outside-tmp))
-         (under-tmp (make-temp-file "sandbox-under-tmp-")))
+         ;; This case tests the literal /tmp mount, regardless of TMPDIR.
+         (under-tmp (make-temp-file "/tmp/sandbox-under-tmp-")))
     (unless tmp (ert-skip "no directory outside /tmp"))
     (unwind-protect
         (let* ((secret (expand-file-name "secret.txt" tmp))
