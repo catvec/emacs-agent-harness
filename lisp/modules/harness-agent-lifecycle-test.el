@@ -16,9 +16,9 @@
             (sid (plist-get (harness-call 'session/create :cwd dir :model "demo:scripted") :id)))
        ,@body)))
 
-(defun harness-agent-lifecycle-test-turn (sid)
+(defun harness-agent-lifecycle-test-turn (sid &optional handle)
   (let ((turn (make-harness-agent-turn :session-id sid :started (float-time)
-                                       :promise (harness-make-promise))))
+                                       :promise (harness-make-promise) :handle handle)))
     (puthash sid turn harness-agent--turns)
     (harness-call 'session/set-status sid 'running)
     turn))
@@ -178,6 +178,41 @@
           (should (eq 'error (plist-get (harness-test-await promise) :stop-reason)))
           (should (= 1 cancelled))
           (should-not (harness-agent-running-p sid)))))))
+
+(ert-deftest harness-agent-lifecycle-log-observer-failure-cannot-strand-internal-error ()
+  (harness-agent-lifecycle-test-with
+    (let ((turn (harness-agent-lifecycle-test-turn sid))
+          (call (symbol-function 'harness-call)) (ended 0))
+      (harness-on 'agent/turn-ended (lambda (&rest _) (cl-incf ended)))
+      (let ((harness-log-hook (list (lambda (&rest _) (error "log forwarding disconnected")))))
+        (cl-letf (((symbol-function 'harness-call)
+                   (lambda (method &rest args)
+                     (if (eq method 'session/hint) (error "transcript write failed")
+                       (apply call method args)))))
+          (harness-agent--on-event turn '(:type hint :text "a valid event"))))
+      (should (harness-promise-settled-p (harness-agent-turn-promise turn)))
+      (should (eq 'error (plist-get (harness-test-await (harness-agent-turn-promise turn)) :stop-reason)))
+      (should (= 1 ended))
+      (should-not (harness-agent-running-p sid))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt sid "recover"))
+                                      :stop-reason))))))
+
+(ert-deftest harness-agent-lifecycle-log-observer-failure-cannot-disable-cancellation ()
+  (harness-agent-lifecycle-test-with
+    (let ((turn (harness-agent-lifecycle-test-turn sid (list :cancel #'ignore))) (ended 0))
+      (harness-on 'agent/cancelling (lambda (&rest _) (error "cancellation observer failed")))
+      (harness-on 'agent/turn-ended (lambda (&rest _) (cl-incf ended)))
+      (let* ((harness-log-hook (list (lambda (&rest _) (error "log forwarding disconnected"))))
+             (timer (harness-test-capture-timer harness-agent--cancel-grace
+                                               (lambda () (harness-call 'agent/cancel sid)))))
+        (unwind-protect (timer-event-handler timer)
+          (cancel-timer timer)))
+      (should (harness-promise-settled-p (harness-agent-turn-promise turn)))
+      (should (eq 'cancelled (plist-get (harness-test-await (harness-agent-turn-promise turn)) :stop-reason)))
+      (should (= 1 ended))
+      (should-not (harness-agent-running-p sid))
+      (should (eq 'end-turn (plist-get (harness-test-await (harness-call 'agent/prompt sid "recover"))
+                                      :stop-reason))))))
 
 (provide 'harness-agent-lifecycle-test)
 ;;; harness-agent-lifecycle-test.el ends here

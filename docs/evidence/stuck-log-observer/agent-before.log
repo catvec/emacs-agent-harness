@@ -1,0 +1,92 @@
+Running 2 tests (2026-11-24 22:34:18-0500, selector ‘"log-observer"’)
+Test harness-agent-lifecycle-log-observer-failure-cannot-disable-cancellation backtrace:
+  error("log forwarding disconnected")
+  #f(lambda (&rest _) [t] (error "log forwarding disconnected"))(error
+  run-hook-with-args(#f(lambda (&rest _) [t] (error "log forwarding di
+  (let ((msg (harness--log-filtered (harness--log-short (apply #'forma
+  (progn (let ((msg (harness--log-filtered (harness--log-short (apply 
+  (if (>= (or (alist-get level harness--log-levels) 1) (or (alist-get 
+  harness-log(error "subscriber %S for %s failed: %S" #f(lambda (&rest
+  (condition-case err (apply (cdr sub) args) (error (harness--report-e
+  (let ((harness-error-report--depth (1+ harness-error-report--depth))
+  (let ((sub (car tail))) (setq n (+ n 1)) (let ((harness-error-report
+  (while tail (let ((sub (car tail))) (setq n (+ n 1)) (let ((harness-
+  (let ((tail (gethash event harness--subscribers))) (while tail (let 
+  (let ((n 0)) (let ((tail (gethash event harness--subscribers))) (whi
+  harness-emit(agent/cancelling "a5147491-21fa-4ae7-9c41-2a09847956e2"
+  harness-method/agent/cancel("a5147491-21fa-4ae7-9c41-2a09847956e2")
+  apply(harness-method/agent/cancel "a5147491-21fa-4ae7-9c41-2a0984795
+  (if m (apply (progn (or (and (memq (type-of m) cl-struct-harness-met
+  (let ((m (gethash name harness--methods))) (if m (apply (progn (or (
+  harness-call(agent/cancel "a5147491-21fa-4ae7-9c41-2a09847956e2")
+  #f(lambda () [(sid "a5147491-21fa-4ae7-9c41-2a09847956e2")] (harness
+  funcall(#f(lambda () [(sid "a5147491-21fa-4ae7-9c41-2a09847956e2")] 
+  (progn (fset 'run-at-time vnew) (funcall fn))
+  (unwind-protect (progn (fset 'run-at-time vnew) (funcall fn)) (fset 
+  (let* ((vnew #'(lambda (time repeat function &rest args) (let ((sche
+  (let ((original (symbol-function 'run-at-time)) timer) (let* ((vnew 
+  harness-test-capture-timer(3 #f(lambda () [(sid "a5147491-21fa-4ae7-
+  (let* ((harness-log-hook (list #'(lambda (&rest _) (error "log forwa
+  (let ((turn (harness-agent-lifecycle-test-turn sid (list :cancel #'i
+  (let* ((default-directory dir) (harness-provider-demo--delay 0.001) 
+  (progn (harness-test-reset-bus) (let ((tail '(store project config p
+  (unwind-protect (progn (harness-test-reset-bus) (let ((tail '(store 
+  (let* ((dir (file-name-as-directory (make-temp-file "harness-test-" 
+  #f(lambda () [t] (let* ((dir (file-name-as-directory ...)) (harness-
+  #f(compiled-function () #<bytecode -0x14094972bfaac67a>)()
+  handler-bind-1(#f(compiled-function () #<bytecode -0x14094972bfaac67
+  ert--run-test-internal(#s(ert--test-execution-info :test #s(ert-test
+  ert-run-test(#s(ert-test :name harness-agent-lifecycle-log-observer-
+  ert-run-or-rerun-test(#s(ert--stats :selector "log-observer" :tests 
+  ert-run-tests("log-observer" #f(compiled-function (event-type &rest 
+  ert-run-tests-batch("log-observer")
+  ert-run-tests-batch-and-exit("log-observer")
+  eval((ert-run-tests-batch-and-exit "log-observer") t)
+  command-line-1(("-L" "/var/tmp/harness-lifecycle-base/lisp" "-L" "/v
+  command-line()
+  normal-top-level()
+Test harness-agent-lifecycle-log-observer-failure-cannot-disable-cancellation condition:
+    (error "log forwarding disconnected")
+   FAILED  1/2  harness-agent-lifecycle-log-observer-failure-cannot-disable-cancellation (0.534535 sec) at lisp/modules/harness-agent-lifecycle-test.el:200
+Test harness-agent-lifecycle-log-observer-failure-cannot-strand-internal-error backtrace:
+  error("log forwarding disconnected")
+  #f(lambda (&rest _) [t] (error "log forwarding disconnected"))(error
+  run-hook-with-args(#f(lambda (&rest _) [t] (error "log forwarding di
+  (let ((msg (harness--log-filtered (harness--log-short (apply #'forma
+  (progn (let ((msg (harness--log-filtered (harness--log-short (apply 
+  (if (>= (or (alist-get level harness--log-levels) 1) (or (alist-get 
+  harness-log(error "agent: turn %s failed: %s" "9c4ca547-2b9b-4e04-8d
+  harness-agent--fail(#s(harness-agent-turn :session-id "9c4ca547-2b9b
+  harness-agent--on-event(#s(harness-agent-turn :session-id "9c4ca547-
+  (progn (fset 'harness-call vnew) (harness-agent--on-event turn '(:ty
+  (unwind-protect (progn (fset 'harness-call vnew) (harness-agent--on-
+  (let* ((vnew #'(lambda (method &rest args) (if (eq method 'session/h
+  (let ((harness-log-hook (list #'(lambda (&rest _) (error "log forwar
+  (let ((turn (harness-agent-lifecycle-test-turn sid)) (call (symbol-f
+  (let* ((default-directory dir) (harness-provider-demo--delay 0.001) 
+  (progn (harness-test-reset-bus) (let ((tail '(store project config p
+  (unwind-protect (progn (harness-test-reset-bus) (let ((tail '(store 
+  (let* ((dir (file-name-as-directory (make-temp-file "harness-test-" 
+  #f(lambda () [t] (let* ((dir (file-name-as-directory ...)) (harness-
+  #f(compiled-function () #<bytecode -0x14094972bfaac67a>)()
+  handler-bind-1(#f(compiled-function () #<bytecode -0x14094972bfaac67
+  ert--run-test-internal(#s(ert--test-execution-info :test #s(ert-test
+  ert-run-test(#s(ert-test :name harness-agent-lifecycle-log-observer-
+  ert-run-or-rerun-test(#s(ert--stats :selector "log-observer" :tests 
+  ert-run-tests("log-observer" #f(compiled-function (event-type &rest 
+  ert-run-tests-batch("log-observer")
+  ert-run-tests-batch-and-exit("log-observer")
+  eval((ert-run-tests-batch-and-exit "log-observer") t)
+  command-line-1(("-L" "/var/tmp/harness-lifecycle-base/lisp" "-L" "/v
+  command-line()
+  normal-top-level()
+Test harness-agent-lifecycle-log-observer-failure-cannot-strand-internal-error condition:
+    (error "log forwarding disconnected")
+   FAILED  2/2  harness-agent-lifecycle-log-observer-failure-cannot-strand-internal-error (0.048674 sec) at lisp/modules/harness-agent-lifecycle-test.el:182
+
+Ran 2 tests, 0 results as expected, 2 unexpected (2026-11-24 22:34:19-0500, 0.694278 sec)
+
+2 unexpected results:
+   FAILED  harness-agent-lifecycle-log-observer-failure-cannot-disable-cancellation
+   FAILED  harness-agent-lifecycle-log-observer-failure-cannot-strand-internal-error
+

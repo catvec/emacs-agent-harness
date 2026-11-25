@@ -1,0 +1,8 @@
+== test.sh 2026-11-24 22:32:10 (2 files)
+ok    harness-core-test.el                                 Ran 5 tests, 5 results as expected, 0 unexpected (2026-11-24 22:32:10-0500, 0.000677 sec)
+ok    harness-agent-lifecycle-test.el                      Ran 2 tests, 2 results as expected, 0 unexpected (2026-11-24 22:32:10-0500, 0.593775 sec)
+
+TEST RESULT: PASS (selected run)
+result record: /home/noah/documents/ai/emacs-agent-harness/scripts/.dev/test-stamp.json
+full logs: /home/noah/documents/ai/emacs-agent-harness/scripts/.dev/test-logs
+test.sh: 2 files, 0 failed, 1s wall (4 at a time)

@@ -1,0 +1,132 @@
+lisp/harness-core-test.el: Warning: ‘when-let’ is an obsolete macro (as of 31.1); use ‘when-let*’ or ‘and-let*’ instead.
+Running 5 tests (2026-11-24 22:34:18-0500, selector ‘"log-observer"’)
+Test harness-core-log-observer-failure-cannot-break-event-isolation backtrace:
+  signal(error ("broken log destination"))
+  apply(signal (error ("broken log destination")))
+  (setq value-230 (apply fn-228 args-229))
+  (unwind-protect (setq value-230 (apply fn-228 args-229)) (setq form-
+  (if (unwind-protect (setq value-230 (apply fn-228 args-229)) (setq f
+  (let (form-description-232) (if (unwind-protect (setq value-230 (app
+  (let ((value-230 'ert-form-evaluation-aborted-231)) (let (form-descr
+  (let* ((fn-228 #'=) (args-229 (condition-case err (list 2 (harness-e
+  (let ((harness-log-hook (list #'(lambda (&rest _) (error "broken log
+  (let ((harness-log-level 'info) (delivered 0)) (harness-on 'test/obs
+  #f(lambda () [t] (harness-test-reset-bus) (let ((harness-log-level '
+  #f(compiled-function () #<bytecode 0x1e5a719d30f47fff>)()
+  handler-bind-1(#f(compiled-function () #<bytecode 0x1e5a719d30f47fff
+  ert--run-test-internal(#s(ert--test-execution-info :test #s(ert-test
+  ert-run-test(#s(ert-test :name harness-core-log-observer-failure-can
+  ert-run-or-rerun-test(#s(ert--stats :selector "log-observer" :tests 
+  ert-run-tests("log-observer" #f(compiled-function (event-type &rest 
+  ert-run-tests-batch("log-observer")
+  ert-run-tests-batch-and-exit("log-observer")
+  eval((ert-run-tests-batch-and-exit "log-observer") t)
+  command-line-1(("-L" "/var/tmp/harness-lifecycle-base/lisp" "-L" "/v
+  command-line()
+  normal-top-level()
+Test harness-core-log-observer-failure-cannot-break-event-isolation condition:
+    (error "broken log destination")
+   FAILED  1/5  harness-core-log-observer-failure-cannot-break-event-isolation (0.000184 sec) at lisp/harness-core-test.el:88
+Test harness-core-log-observer-failure-cannot-break-other-observers backtrace:
+  signal(error ("broken log destination"))
+  apply(signal (error ("broken log destination")))
+  (setq value-200 (apply fn-198 args-199))
+  (unwind-protect (setq value-200 (apply fn-198 args-199)) (setq form-
+  (if (unwind-protect (setq value-200 (apply fn-198 args-199)) (setq f
+  (let (form-description-202) (if (unwind-protect (setq value-200 (app
+  (let ((value-200 'ert-form-evaluation-aborted-201)) (let (form-descr
+  (let* ((fn-198 #'equal) (args-199 (condition-case err (list "origina
+  (let ((harness-log-hook (list #'(lambda (&rest _) (error "broken log
+  (let ((harness-log-level 'info) seen) (let ((harness-log-hook (list 
+  #f(lambda () [t] (let ((harness-log-level 'info) seen) (let ((harnes
+  #f(compiled-function () #<bytecode 0x1e5a719d30f47fff>)()
+  handler-bind-1(#f(compiled-function () #<bytecode 0x1e5a719d30f47fff
+  ert--run-test-internal(#s(ert--test-execution-info :test #s(ert-test
+  ert-run-test(#s(ert-test :name harness-core-log-observer-failure-can
+  ert-run-or-rerun-test(#s(ert--stats :selector "log-observer" :tests 
+  ert-run-tests("log-observer" #f(compiled-function (event-type &rest 
+  ert-run-tests-batch("log-observer")
+  ert-run-tests-batch-and-exit("log-observer")
+  eval((ert-run-tests-batch-and-exit "log-observer") t)
+  command-line-1(("-L" "/var/tmp/harness-lifecycle-base/lisp" "-L" "/v
+  command-line()
+  normal-top-level()
+Test harness-core-log-observer-failure-cannot-break-other-observers condition:
+    (error "broken log destination")
+   FAILED  2/5  harness-core-log-observer-failure-cannot-break-other-observers (0.000175 sec) at lisp/harness-core-test.el:68
+Test harness-core-log-observer-failure-cannot-strand-promise-rejection backtrace:
+  error("broken log destination")
+  #f(lambda (&rest _) [t] (error "broken log destination"))(error "pro
+  run-hook-with-args(#f(lambda (&rest _) [t] (error "broken log destin
+  (let ((msg (harness--log-filtered (harness--log-short (apply #'forma
+  (progn (let ((msg (harness--log-filtered (harness--log-short (apply 
+  (if (>= (or (alist-get level harness--log-levels) 1) (or (alist-get 
+  harness-log(error "promise callback failed: %s%s" "broken log destin
+  (condition-case err (if (and (harness--debug-p) (fboundp 'handler-bi
+  (let ((harness-error-report-session (or (progn (or (and (memq ... cl
+  (progn (let ((harness-error-report-session (or (progn (or (and ... t
+  (if fn (progn (let ((harness-error-report-session (or (progn (or ...
+  (let ((fn (if (eq (progn (or (and ... t) (signal ... ...)) (aref pro
+  harness--promise-dispatch(#s(harness-promise :state resolved :value 
+  (let ((harness--dispatch-depth (1+ harness--dispatch-depth))) (harne
+  (if (>= harness--dispatch-depth harness--dispatch-max-depth) (harnes
+  harness--promise-enqueue(#s(harness-promise :state resolved :value r
+  (let ((cb (car tail))) (harness--promise-enqueue promise cb) (setq t
+  (while tail (let ((cb (car tail))) (harness--promise-enqueue promise
+  (let ((tail callbacks)) (while tail (let ((cb (car tail))) (harness-
+  (let ((callbacks (nreverse (progn (or (and (memq ... cl-struct-harne
+  (progn (progn (progn (or (and (memq (type-of promise) cl-struct-harn
+  (if (eq (progn (or (and (memq (type-of promise) cl-struct-harness-pr
+  harness--promise-settle(#s(harness-promise :state resolved :value re
+  (if (and (memq (type-of value) cl-struct-harness-promise-tags) t) (p
+  harness-resolve(#s(harness-promise :state resolved :value ready :cal
+  (let* ((source (harness-make-promise)) (next (harness-then source #'
+  #f(lambda () [t] (let* ((source (harness-make-promise)) (next (harne
+  #f(compiled-function () #<bytecode 0x1e5a719d30f47fff>)()
+  handler-bind-1(#f(compiled-function () #<bytecode 0x1e5a719d30f47fff
+  ert--run-test-internal(#s(ert--test-execution-info :test #s(ert-test
+  ert-run-test(#s(ert-test :name harness-core-log-observer-failure-can
+  ert-run-or-rerun-test(#s(ert--stats :selector "log-observer" :tests 
+  ert-run-tests("log-observer" #f(compiled-function (event-type &rest 
+  ert-run-tests-batch("log-observer")
+  ert-run-tests-batch-and-exit("log-observer")
+  eval((ert-run-tests-batch-and-exit "log-observer") t)
+  command-line-1(("-L" "/var/tmp/harness-lifecycle-base/lisp" "-L" "/v
+  command-line()
+  normal-top-level()
+Test harness-core-log-observer-failure-cannot-strand-promise-rejection condition:
+    (error "broken log destination")
+   FAILED  3/5  harness-core-log-observer-failure-cannot-strand-promise-rejection (0.000222 sec) at lisp/harness-core-test.el:97
+   passed  4/5  harness-core-log-observer-local-and-global-hooks-keep-their-semantics (0.000116 sec)
+Test harness-core-log-observer-recursion-does-not-reenter-notification backtrace:
+  ert-fail(((should (= 1 calls)) :form (= 1 2) :value nil))
+  (if (unwind-protect (setq value-215 (apply fn-213 args-214)) (setq f
+  (let (form-description-217) (if (unwind-protect (setq value-215 (app
+  (let ((value-215 'ert-form-evaluation-aborted-216)) (let (form-descr
+  (let* ((fn-213 #'=) (args-214 (condition-case err (list 1 calls) (er
+  (let ((harness-log-level 'info) (calls 0) seen) (let ((harness-log-h
+  #f(lambda () [t] (let ((harness-log-level 'info) (calls 0) seen) (le
+  #f(compiled-function () #<bytecode 0x1e5a719d30f47fff>)()
+  handler-bind-1(#f(compiled-function () #<bytecode 0x1e5a719d30f47fff
+  ert--run-test-internal(#s(ert--test-execution-info :test #s(ert-test
+  ert-run-test(#s(ert-test :name harness-core-log-observer-recursion-d
+  ert-run-or-rerun-test(#s(ert--stats :selector "log-observer" :tests 
+  ert-run-tests("log-observer" #f(compiled-function (event-type &rest 
+  ert-run-tests-batch("log-observer")
+  ert-run-tests-batch-and-exit("log-observer")
+  eval((ert-run-tests-batch-and-exit "log-observer") t)
+  command-line-1(("-L" "/var/tmp/harness-lifecycle-base/lisp" "-L" "/v
+  command-line()
+  normal-top-level()
+Test harness-core-log-observer-recursion-does-not-reenter-notification condition:
+    (ert-test-failed ((should (= 1 calls)) :form (= 1 2) :value nil))
+   FAILED  5/5  harness-core-log-observer-recursion-does-not-reenter-notification (0.000109 sec) at lisp/harness-core-test.el:76
+
+Ran 5 tests, 1 results as expected, 4 unexpected (2026-11-24 22:34:18-0500, 0.206969 sec)
+
+4 unexpected results:
+   FAILED  harness-core-log-observer-failure-cannot-break-event-isolation
+   FAILED  harness-core-log-observer-failure-cannot-break-other-observers
+   FAILED  harness-core-log-observer-failure-cannot-strand-promise-rejection
+   FAILED  harness-core-log-observer-recursion-does-not-reenter-notification
+

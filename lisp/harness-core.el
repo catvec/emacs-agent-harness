@@ -96,7 +96,12 @@ A value logged with `%s' can be a whole transcript or request body; it
 is cut rather than repeated in *Messages* and the log buffer.")
 
 (defvar harness-log-hook nil
-  "Functions called with (LEVEL MESSAGE) for every log entry.")
+  "Functions called with (LEVEL MESSAGE) for each outermost log entry.
+Observer failures are contained independently.  A log written by an
+observer is retained locally without recursively notifying observers.")
+
+(defvar harness--log-notifying nil
+  "Non-nil while log observers run, so their own logs cannot reenter them.")
 
 (defvar harness-log-filter-function nil
   "Function that filters every log message before it is kept, or nil.
@@ -178,7 +183,23 @@ The message is cut to `harness--log-entry-chars' and goes through
       (with-current-buffer (get-buffer-create harness-log-buffer-name)
         (let ((inhibit-read-only t))
           (harness--log-trim level msg)))
-      (run-hook-with-args 'harness-log-hook level msg)
+      (unless harness--log-notifying
+        (let ((harness--log-notifying t))
+          (run-hook-wrapped
+           'harness-log-hook
+           (lambda (observer level message)
+             (condition-case err
+                 (funcall observer level message)
+               (error
+                ;; Logging is also the failure path of promises, filters,
+                ;; events and cancellation.  A broken destination must not
+                ;; unwind those paths or prevent the next observer running.
+                ;; This diagnostic remains filtered/bounded, but is not
+                ;; sent back through the observer that failed.
+                (ignore-errors
+                  (harness-log 'error "log observer failed: %s" (harness--short-error-text err)))))
+             nil)
+           level msg)))
       msg)))
 
 ;;;; Error details

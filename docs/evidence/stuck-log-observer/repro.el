@@ -1,0 +1,13 @@
+;;; -*- lexical-binding: t; -*-
+(condition-case err (require 'harness-core)
+  (error (princ (format "Cannot load this revision: %S\n" err)) (kill-emacs 125)))
+(unless (fboundp 'harness-log)
+  (princ "log observer API absent at this revision\n")
+  (kill-emacs 0))
+(defvar harness-log-hook)
+(let ((harness-log-hook (list (lambda (&rest _) (error "log destination disconnected"))))
+      (harness-log-level 'info) failure)
+  (condition-case err (harness-log 'error "Original subsystem failure")
+    (error (setq failure err)))
+  (princ (format "logging-escaped=%S\n" failure))
+  (kill-emacs (if failure 1 0)))

@@ -1,0 +1,26 @@
+# bad: [f6b65b62faa339231168769ba4e465f0409034e6] Document conservative lifecycle migration and ACP compatibility evidence
+# good: [5dbb5aa2c7e12bb386eb0b4a35afd41ac028fd87] docs: a first-page README with screenshots and a demo video
+git bisect start 'f6b65b6' '45d67bb^'
+# bad: [c89c0b3ccbd686b711883db3b8508f0ee2b9d209] Merge commit '1788d2732c49' into task/design-and-implement-a-supervisor-6afvwh9q
+git bisect bad c89c0b3ccbd686b711883db3b8508f0ee2b9d209
+# bad: [bce730fe1a3aa7750f8f2f27fa1ea4133c8d3c7f] Merge branch 'task/the-deepseek-pricing-seems-quite-fbb1gpm9'
+git bisect bad bce730fe1a3aa7750f8f2f27fa1ea4133c8d3c7f
+# bad: [dcd09c73ec846de5f8a7a26f7092da2c9d3d2ec4] Merge branch 'task/persist-tasks-as-markdown-files-xqfzbvp2'
+git bisect bad dcd09c73ec846de5f8a7a26f7092da2c9d3d2ec4
+# bad: [fb217c3b5e446029facdb78184a59d7cdddd787f] Merge branch 'worktree-task-mode'
+git bisect bad fb217c3b5e446029facdb78184a59d7cdddd787f
+# bad: [1aceafabb8705f81ed8b1de40428a8037d2a00d1] Merge branch 'worktree-pretty-model-names'
+git bisect bad 1aceafabb8705f81ed8b1de40428a8037d2a00d1
+# bad: [05471400740c323558a523d6d30caf71fa10dbff] Merge branch 'main' into worktree-chat-ui-polish
+git bisect bad 05471400740c323558a523d6d30caf71fa10dbff
+# bad: [8d3df4286b9a23503d79b7827e8e9c6d9c72ec65] Merge branch 'main' into worktree-menu-side-window
+git bisect bad 8d3df4286b9a23503d79b7827e8e9c6d9c72ec65
+# bad: [09dd8c30516bfc5ab57dd4e0dd0a24b2436153b3] chat: anchor the compose box to the bottom, shorten its hint
+git bisect bad 09dd8c30516bfc5ab57dd4e0dd0a24b2436153b3
+# good: [01177f77c5e381469e4ada3a3688477cd1062106] harness-ui: send on RET, grow the input, dismiss answered requests
+git bisect good 01177f77c5e381469e4ada3a3688477cd1062106
+# bad: [a1824a773b3b45e0e8b6d99da3d44dc1324f63f5] Merge branch 'v3' into main
+git bisect bad a1824a773b3b45e0e8b6d99da3d44dc1324f63f5
+# bad: [45d67bb833b53b6f59a3a89230f0158070595d3a] update
+git bisect bad 45d67bb833b53b6f59a3a89230f0158070595d3a
+# first 'bad' commit: [45d67bb833b53b6f59a3a89230f0158070595d3a] update

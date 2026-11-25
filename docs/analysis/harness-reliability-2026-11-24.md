@@ -294,3 +294,45 @@ universal fault-isolation guarantee for every provider. In particular:
   conformance/fault-injection checks are still needed for the other adapters and
   their real incident traces. Every saved finding should become a deterministic
   regression before broadening mutation budgets.
+
+
+### Stability follow-up: logging could defeat failure containment
+
+A deterministic reproduction found another core route to stuck sessions:
+`harness-log-hook` observers could throw through `harness-log`. Error handling in
+promises, event subscribers and agent turn cleanup calls that logger before
+completing recovery. A broken diagnostic destination therefore could prevent the
+original error from settling its promise. During cancellation, an event observer
+failure followed by a log observer failure could unwind before the fallback timer
+was installed. The turn had already claimed cancellation, so repeated cancellation
+could not install the missing timer. Recursive observer logging also recursively
+notified observers.
+
+The systemic defect is that diagnostics were a fallible dependency of recovery.
+Catching the initial component error did not establish a containment boundary
+when reporting that error could itself abort the handler. Adding more catches at
+individual provider sites would leave the shared defect intact.
+
+The fix isolates each log observer independently and suppresses recursive
+notification while retaining nested diagnostic entries in the existing filtered,
+bounded local buffer. It preserves native buffer-local/global hook semantics,
+continues to later observers and leaves failed destinations installed so they can
+recover. There are no new timeouts, retry policies, threads or persistence formats.
+
+A portable logger reproduction and `git bisect run` identify
+`45d67bb833b53b6f59a3a89230f0158070595d3a` (September 30) as the first bad commit;
+the parent passes. Its core change introduced the unguarded observer hook. This
+is a latent weakness preceding the recent two-week window, rather than proof of
+a recent introduction or attribution of every reported live incident. Revisions
+without the observer API are classified as unaffected by this specific defect;
+load failures exit 125. An initial exploratory bisect incorrectly classified an
+absent API as a failure; the retained bisect is the corrected run.
+
+Six fault-injection regressions fail on `f6b65b6`: observer isolation, recursive
+notification, event delivery, promise rejection, internal turn error cleanup and
+cancellation fallback. A seventh compatibility test passes before and after.
+All seven pass with the fix. The agent tests require exactly one terminal event,
+a settled promise, removal of the running turn and acceptance of a new prompt.
+The cancellation test fires the actual captured grace timer deterministically.
+No live session data is changed. Reproduction, historical bisect and before/after
+results are retained in [the evidence directory](../evidence/stuck-log-observer/).

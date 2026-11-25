@@ -65,6 +65,51 @@ reached over ACP, as a client does, never through `harness-call')."
   "Return the harness log buffer's text."
   (with-current-buffer harness-log-buffer-name (buffer-string)))
 
+(ert-deftest harness-core-log-observer-failure-cannot-break-other-observers ()
+  (let ((harness-log-level 'info) seen)
+    (let ((harness-log-hook (list (lambda (&rest _) (error "broken log destination"))
+                                  (lambda (_level text) (push text seen) t))))
+      (should (equal "original message" (harness-log 'info "original message"))))
+    (should (equal '("original message") seen))
+    (should (string-search "broken log destination" (harness-core-test--log-text)))))
+
+(ert-deftest harness-core-log-observer-recursion-does-not-reenter-notification ()
+  (let ((harness-log-level 'info) (calls 0) seen)
+    (let ((harness-log-hook
+           (list (lambda (_level text)
+                   (cl-incf calls)
+                   (when (equal text "outer log") (harness-log 'info "nested log")))
+                 (lambda (_level text) (push text seen)))))
+      (harness-log 'info "outer log"))
+    (should (= 1 calls))
+    (should (equal '("outer log") seen))
+    (should (string-search "nested log" (harness-core-test--log-text)))))
+
+(ert-deftest harness-core-log-observer-failure-cannot-break-event-isolation ()
+  (harness-test-reset-bus)
+  (let ((harness-log-level 'info) (delivered 0))
+    (harness-on 'test/observer-failure (lambda () (error "broken subscriber")) 10)
+    (harness-on 'test/observer-failure (lambda () (cl-incf delivered)) 20)
+    (let ((harness-log-hook (list (lambda (&rest _) (error "broken log destination")))))
+      (should (= 2 (harness-emit 'test/observer-failure))))
+    (should (= 1 delivered))))
+
+(ert-deftest harness-core-log-observer-failure-cannot-strand-promise-rejection ()
+  (let* ((source (harness-make-promise))
+         (next (harness-then source (lambda (_) (error "original callback failure"))))
+         (harness-log-hook (list (lambda (&rest _) (error "broken log destination")))))
+    (harness-resolve source 'ready)
+    (should (eq 'rejected (harness-promise-state next)))
+    (should (equal '(error "original callback failure") (harness-promise-value next)))))
+
+(ert-deftest harness-core-log-observer-local-and-global-hooks-keep-their-semantics ()
+  (let ((harness-log-level 'info) seen)
+    (let ((harness-log-hook (list (lambda (&rest _) (push 'global seen) t))))
+      (with-temp-buffer
+        (setq-local harness-log-hook (list (lambda (&rest _) (push 'local seen) t) t))
+        (harness-log 'info "buffer-local observation")))
+    (should (equal '(global local) seen))))
+
 (ert-deftest harness-core-log-filter-changes-what-the-log-keeps ()
   "`harness-log-filter-function' filters a message before it is kept or hooked.
 Both the buffer and the hook get the filtered text, and the message

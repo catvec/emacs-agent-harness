@@ -1,0 +1,247 @@
+running '/var/tmp/harness-log-observer-bisect.sh'
+logging-escaped=(error "log destination disconnected")
+Bisecting: 337 revisions left to test after this (roughly 8 steps)
+[bce730fe1a3aa7750f8f2f27fa1ea4133c8d3c7f] Merge branch 'task/the-deepseek-pricing-seems-quite-fbb1gpm9'
+running '/var/tmp/harness-log-observer-bisect.sh'
+logging-escaped=(error "log destination disconnected")
+Bisecting: 167 revisions left to test after this (roughly 7 steps)
+[dcd09c73ec846de5f8a7a26f7092da2c9d3d2ec4] Merge branch 'task/persist-tasks-as-markdown-files-xqfzbvp2'
+running '/var/tmp/harness-log-observer-bisect.sh'
+logging-escaped=(error "log destination disconnected")
+Bisecting: 83 revisions left to test after this (roughly 6 steps)
+[fb217c3b5e446029facdb78184a59d7cdddd787f] Merge branch 'worktree-task-mode'
+running '/var/tmp/harness-log-observer-bisect.sh'
+logging-escaped=(error "log destination disconnected")
+Bisecting: 42 revisions left to test after this (roughly 5 steps)
+[1aceafabb8705f81ed8b1de40428a8037d2a00d1] Merge branch 'worktree-pretty-model-names'
+running '/var/tmp/harness-log-observer-bisect.sh'
+logging-escaped=(error "log destination disconnected")
+Bisecting: 19 revisions left to test after this (roughly 4 steps)
+[05471400740c323558a523d6d30caf71fa10dbff] Merge branch 'main' into worktree-chat-ui-polish
+running '/var/tmp/harness-log-observer-bisect.sh'
+logging-escaped=(error "log destination disconnected")
+Bisecting: 9 revisions left to test after this (roughly 4 steps)
+[8d3df4286b9a23503d79b7827e8e9c6d9c72ec65] Merge branch 'main' into worktree-menu-side-window
+running '/var/tmp/harness-log-observer-bisect.sh'
+logging-escaped=(error "log destination disconnected")
+Bisecting: 5 revisions left to test after this (roughly 3 steps)
+[09dd8c30516bfc5ab57dd4e0dd0a24b2436153b3] chat: anchor the compose box to the bottom, shorten its hint
+running '/var/tmp/harness-log-observer-bisect.sh'
+logging-escaped=(error "log destination disconnected")
+Bisecting: 2 revisions left to test after this (roughly 2 steps)
+[01177f77c5e381469e4ada3a3688477cd1062106] harness-ui: send on RET, grow the input, dismiss answered requests
+running '/var/tmp/harness-log-observer-bisect.sh'
+log observer API absent at this revision
+Bisecting: 0 revisions left to test after this (roughly 1 step)
+[a1824a773b3b45e0e8b6d99da3d44dc1324f63f5] Merge branch 'v3' into main
+running '/var/tmp/harness-log-observer-bisect.sh'
+logging-escaped=(error "log destination disconnected")
+Bisecting: 0 revisions left to test after this (roughly 0 steps)
+[45d67bb833b53b6f59a3a89230f0158070595d3a] update
+running '/var/tmp/harness-log-observer-bisect.sh'
+logging-escaped=(error "log destination disconnected")
+45d67bb833b53b6f59a3a89230f0158070595d3a is the first 'bad' commit
+commit 45d67bb833b53b6f59a3a89230f0158070595d3a
+Author: Noah Huppert <contact@noahh.io>
+Date:   Wed Sep 30 17:06:10 2026 -0400
+
+    update
+
+ DESIGN.md                                    |    2 +-
+ README.md                                    |  420 +--
+ docs/architecture.md                         |  888 +++---
+ docs/dev-loop.md                             |  102 +-
+ docs/media/chat-dark.png                     |  Bin 0 -> 64691 bytes
+ docs/media/chat-permission.png               |  Bin 0 -> 80625 bytes
+ docs/media/chat-question.png                 |  Bin 0 -> 69010 bytes
+ docs/media/chat-tour.png                     |  Bin 0 -> 71553 bytes
+ docs/media/chat.png                          |  Bin 81100 -> 0 bytes
+ docs/media/demo.gif                          |  Bin 211323 -> 0 bytes
+ docs/media/demo.mp4                          |  Bin 161284 -> 0 bytes
+ docs/media/permissions.png                   |  Bin 82833 -> 0 bytes
+ docs/media/plan.png                          |  Bin 89996 -> 0 bytes
+ docs/media/sessions.png                      |  Bin 70907 -> 0 bytes
+ docs/media/tree.png                          |  Bin 0 -> 127673 bytes
+ docs/media/usage.png                         |  Bin 111754 -> 87350 bytes
+ docs/media/worktrees.png                     |  Bin 15479 -> 38673 bytes
+ docs/module-guide.md                         |  179 --
+ docs/ui-guide.md                             |   47 +
+ harness.el                                   |  470 ++--
+ lisp/harness-acp.el                          |  862 ------
+ lisp/harness-core.el                         | 1493 +++++------
+ lisp/harness-http.el                         |  230 ++
+ lisp/harness-util.el                         |  353 +++
+ lisp/modules/harness-acp.el                  | 1139 ++++++++
+ lisp/modules/harness-agent.el                | 1436 +++-------
+ lisp/modules/harness-compaction.el           |  270 ++
+ lisp/modules/harness-config.el               |  374 ++-
+ lisp/modules/harness-http.el                 |  455 ----
+ lisp/modules/harness-merge.el                |  626 +++--
+ lisp/modules/harness-naming.el               |  176 ++
+ lisp/modules/harness-perms-jail.el           |   94 -
+ lisp/modules/harness-perms.el                |  799 +++---
+ lisp/modules/harness-plan.el                 |   89 -
+ lisp/modules/harness-project.el              |   62 +
+ lisp/modules/harness-provider-claude.el      |  952 +++++--
+ lisp/modules/harness-provider-demo.el        |  130 +
+ lisp/modules/harness-provider-openai.el      | 1081 ++++----
+ lisp/modules/harness-provider.el             |  538 ++--
+ lisp/modules/harness-sandbox.el              |  629 ++---
+ lisp/modules/harness-search.el               |  206 --
+ lisp/modules/harness-session.el              | 1967 +++++---------
+ lisp/modules/harness-skills.el               |  631 +++--
+ lisp/modules/harness-store.el                |   96 +
+ lisp/modules/harness-subagents.el            |  200 --
+ lisp/modules/harness-tools-agent.el          |  375 +++
+ lisp/modules/harness-tools-emacs.el          |  790 ++----
+ lisp/modules/harness-tools-fs.el             |  615 +++++
+ lisp/modules/harness-tools-shell.el          |  224 ++
+ lisp/modules/harness-tools-web.el            |  243 ++
+ lisp/modules/harness-tools.el                |  598 ++---
+ lisp/modules/harness-usage.el                |  929 +++++--
+ lisp/modules/harness-worktree.el             |  434 +--
+ lisp/transports/harness-acp-inprocess.el     |   80 -
+ lisp/transports/harness-acp-tcp.el           |  136 -
+ lisp/ui/harness-ui-ask.el                    |  309 ---
+ lisp/ui/harness-ui-btw.el                    |  104 +
+ lisp/ui/harness-ui-chat.el                   | 3701 ++++++++++++++------------
+ lisp/ui/harness-ui-config.el                 |  135 -
+ lisp/ui/harness-ui-markdown.el               |  281 ++
+ lisp/ui/harness-ui-media.el                  |  576 ++++
+ lisp/ui/harness-ui-notifier.el               |  121 -
+ lisp/ui/harness-ui-notify.el                 |  132 +
+ lisp/ui/harness-ui-sessions.el               |  434 ++-
+ lisp/ui/harness-ui-tree.el                   |  825 ++++--
+ lisp/ui/harness-ui-usage.el                  |  961 +++++--
+ lisp/ui/harness-ui-worktree.el               |  626 +++--
+ lisp/ui/harness-ui.el                        | 1023 ++++---
+ scripts/demo.sh                              |   37 -
+ scripts/dev.sh                               |  140 +-
+ scripts/harness-acp-stdio                    |   23 +
+ scripts/harness-dev.el                       |  318 +--
+ scripts/harness-gui-demo.el                  |  200 --
+ scripts/lint.sh                              |   63 +-
+ scripts/media.sh                             |  329 ---
+ scripts/test.sh                              |   48 +-
+ test/fixtures/fake-claude.py                 |  268 ++
+ test/fixtures/harness-fixture-alpha.el       |   50 -
+ test/fixtures/harness-fixture-beta.el        |   32 -
+ test/fixtures/harness-fixture-old-alpha.el   |   21 -
+ test/fixtures/harness-fixture-reload.el      |   44 -
+ test/fixtures/harness-fixture-tools.el       |   34 -
+ test/harness-acp-agent-integration-test.el   |  203 --
+ test/harness-acp-session-integration-test.el |  198 --
+ test/harness-acp-tcp-test.el                 |  314 ++-
+ test/harness-acp-test.el                     |  741 +++---
+ test/harness-agent-test.el                   |  600 +----
+ test/harness-compaction-test.el              |  225 ++
+ test/harness-config-test.el                  |  191 --
+ test/harness-core-test.el                    |  419 ++-
+ test/harness-http-test.el                    |  176 --
+ test/harness-merge-test.el                   |  457 ++--
+ test/harness-naming-test.el                  |  241 ++
+ test/harness-openai-integration-test.el      |  195 --
+ test/harness-perms-test.el                   |  592 ++--
+ test/harness-plan-test.el                    |   81 -
+ test/harness-provider-claude-test.el         |  491 +++-
+ test/harness-provider-openai-test.el         |  759 ++++--
+ test/harness-provider-test.el                |  176 --
+ test/harness-reload-test.el                  |  316 ---
+ test/harness-sandbox-test.el                 |  370 ++-
+ test/harness-search-test.el                  |  146 -
+ test/harness-session-test.el                 |  565 ++--
+ test/harness-skills-test.el                  |  292 +-
+ test/harness-subagents-test.el               |  179 --
+ test/harness-test-helpers.el                 |  166 +-
+ test/harness-tools-agent-test.el             |  234 ++
+ test/harness-tools-emacs-test.el             |  391 +--
+ test/harness-tools-fs-test.el                |  349 +++
+ test/harness-tools-shell-test.el             |  171 ++
+ test/harness-tools-test.el                   |  239 --
+ test/harness-tools-web-test.el               |  181 ++
+ test/harness-tramp-test.el                   |   53 +
+ test/harness-ui-ask-test.el                  |  184 --
+ test/harness-ui-chat-test.el                 | 1314 ++++-----
+ test/harness-ui-markdown-test.el             |   46 +
+ test/harness-ui-media-test.el                |  204 ++
+ test/harness-ui-test.el                      |  179 --
+ test/harness-ui-tree-test.el                 |  172 ++
+ test/harness-ui-usage-test.el                |  272 +-
+ test/harness-ui-worktree-test.el             |  259 +-
+ test/harness-usage-test.el                   |  482 ++--
+ test/harness-worktree-test.el                |  269 +-
+ 123 files changed, 23490 insertions(+), 21857 deletions(-)
+ create mode 100644 docs/media/chat-dark.png
+ create mode 100644 docs/media/chat-permission.png
+ create mode 100644 docs/media/chat-question.png
+ create mode 100644 docs/media/chat-tour.png
+ delete mode 100644 docs/media/chat.png
+ delete mode 100644 docs/media/demo.gif
+ delete mode 100644 docs/media/demo.mp4
+ delete mode 100644 docs/media/permissions.png
+ delete mode 100644 docs/media/plan.png
+ delete mode 100644 docs/media/sessions.png
+ create mode 100644 docs/media/tree.png
+ delete mode 100644 docs/module-guide.md
+ create mode 100644 docs/ui-guide.md
+ delete mode 100644 lisp/harness-acp.el
+ create mode 100644 lisp/harness-http.el
+ create mode 100644 lisp/harness-util.el
+ create mode 100644 lisp/modules/harness-acp.el
+ create mode 100644 lisp/modules/harness-compaction.el
+ delete mode 100644 lisp/modules/harness-http.el
+ create mode 100644 lisp/modules/harness-naming.el
+ delete mode 100644 lisp/modules/harness-perms-jail.el
+ delete mode 100644 lisp/modules/harness-plan.el
+ create mode 100644 lisp/modules/harness-project.el
+ create mode 100644 lisp/modules/harness-provider-demo.el
+ delete mode 100644 lisp/modules/harness-search.el
+ create mode 100644 lisp/modules/harness-store.el
+ delete mode 100644 lisp/modules/harness-subagents.el
+ create mode 100644 lisp/modules/harness-tools-agent.el
+ create mode 100644 lisp/modules/harness-tools-fs.el
+ create mode 100644 lisp/modules/harness-tools-shell.el
+ create mode 100644 lisp/modules/harness-tools-web.el
+ delete mode 100644 lisp/transports/harness-acp-inprocess.el
+ delete mode 100644 lisp/transports/harness-acp-tcp.el
+ delete mode 100644 lisp/ui/harness-ui-ask.el
+ create mode 100644 lisp/ui/harness-ui-btw.el
+ delete mode 100644 lisp/ui/harness-ui-config.el
+ create mode 100644 lisp/ui/harness-ui-markdown.el
+ create mode 100644 lisp/ui/harness-ui-media.el
+ delete mode 100644 lisp/ui/harness-ui-notifier.el
+ create mode 100644 lisp/ui/harness-ui-notify.el
+ delete mode 100755 scripts/demo.sh
+ create mode 100755 scripts/harness-acp-stdio
+ delete mode 100644 scripts/harness-gui-demo.el
+ delete mode 100755 scripts/media.sh
+ create mode 100755 test/fixtures/fake-claude.py
+ delete mode 100644 test/fixtures/harness-fixture-alpha.el
+ delete mode 100644 test/fixtures/harness-fixture-beta.el
+ delete mode 100644 test/fixtures/harness-fixture-old-alpha.el
+ delete mode 100644 test/fixtures/harness-fixture-reload.el
+ delete mode 100644 test/fixtures/harness-fixture-tools.el
+ delete mode 100644 test/harness-acp-agent-integration-test.el
+ delete mode 100644 test/harness-acp-session-integration-test.el
+ create mode 100644 test/harness-compaction-test.el
+ delete mode 100644 test/harness-config-test.el
+ delete mode 100644 test/harness-http-test.el
+ create mode 100644 test/harness-naming-test.el
+ delete mode 100644 test/harness-openai-integration-test.el
+ delete mode 100644 test/harness-plan-test.el
+ delete mode 100644 test/harness-provider-test.el
+ delete mode 100644 test/harness-reload-test.el
+ delete mode 100644 test/harness-search-test.el
+ delete mode 100644 test/harness-subagents-test.el
+ create mode 100644 test/harness-tools-agent-test.el
+ create mode 100644 test/harness-tools-fs-test.el
+ create mode 100644 test/harness-tools-shell-test.el
+ delete mode 100644 test/harness-tools-test.el
+ create mode 100644 test/harness-tools-web-test.el
+ create mode 100644 test/harness-tramp-test.el
+ delete mode 100644 test/harness-ui-ask-test.el
+ create mode 100644 test/harness-ui-markdown-test.el
+ create mode 100644 test/harness-ui-media-test.el
+ delete mode 100644 test/harness-ui-test.el
+ create mode 100644 test/harness-ui-tree-test.el
+bisect found first 'bad' commit
