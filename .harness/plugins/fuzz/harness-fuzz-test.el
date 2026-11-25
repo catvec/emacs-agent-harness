@@ -48,7 +48,7 @@ FORM is inserted as the body of the top-level definition."
   (harness-fuzz-test-with
     (let ((names (mapcar #'harness-fuzz-target-name (harness-fuzz-targets))))
       (dolist (name '(mcp-serve mcp-result mcp-line acp-lines acp-params
-                      acp-normalise links search-query http-headers provider-events openai-sse))
+                      acp-normalise links search-query http-headers provider-events openai-sse acp-conversation))
         (should (memq name names)))
       (dolist (target (harness-fuzz-targets t))
         (should (functionp (harness-fuzz-target-check target)))
@@ -75,6 +75,16 @@ FORM is inserted as the body of the top-level definition."
     (should-error (harness-fuzz-define-target 'fuzz-test-invalid
                     :check #'identity :seeds '(1 2)))
     (should-not (harness-fuzz-target-get 'fuzz-test-invalid))))
+
+(ert-deftest harness-fuzz-reload-recovers-the-source-directory-from-an-old-cache-path ()
+  (harness-test-with-temp-state
+    (harness-test-reset-bus)
+    (let ((harness-fuzz-directory dir))
+      (harness-test-load-module 'fuzz)
+      (should (file-exists-p (expand-file-name "harness-fuzz-acp.el" harness-fuzz-directory)))
+      (should (equal (file-truename harness-fuzz-directory)
+                     (file-name-as-directory
+                      (file-truename (expand-file-name ".harness/plugins/fuzz" harness-test-root))))))))
 
 (ert-deftest harness-fuzz-provider-target-delivers-malformed-envelopes-to-the-guard ()
   "Malformed shapes must reach the boundary, not be discarded by the fuzzer."

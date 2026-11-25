@@ -1409,18 +1409,22 @@ The finished flag claims ownership before hooks or consumers can
 reenter.  A claim is not delivery: the terminal event is unconditional
 cleanup, independent of usage, tool decoding and diagnostics."
   (unless (harness-openai--stream-finished stream)
-    (setf (harness-openai--stream-finished stream) t)
-    (let ((done (list :type 'done :stop-reason 'error :error-kind 'protocol
-                      :error "Provider completion interrupted")))
-      (unwind-protect
-          (condition-case err
-              (setq done (harness-openai--stream-result stream reason error))
-            (error
-             (setq done (list :type 'done :stop-reason 'error :error-kind 'protocol
-                              :error (format "Provider completion failed: %s"
-                                             (harness-error-message err))))
-             (harness-log 'error "%s" (plist-get done :error))))
-        (funcall (harness-openai--stream-on-event stream) done)))))
+    ;; Keep the existing stream slot for in-flight/reloaded transports.
+    ;; The shared control owns the mechanics of this terminal invocation;
+    ;; the outer provider request owns its caller-facing event boundary.
+    (harness-request-lifecycle-finish
+     (harness-request-lifecycle-create)
+     (lambda (event) (funcall (harness-openai--stream-on-event stream) event))
+     (lambda ()
+       (setf (harness-openai--stream-finished stream) t)
+       (harness-openai--stream-result stream reason error))
+     (list :type 'done :stop-reason 'error :error-kind 'protocol
+           :error "Provider completion interrupted")
+     (lambda (err)
+       (let ((done (list :type 'done :stop-reason 'error :error-kind 'protocol
+                         :error (format "Provider completion failed: %s" (harness-error-message err)))))
+         (harness-log 'error "%s" (plist-get done :error))
+         done)))))
 
 (defun harness-openai--stream-result (stream reason error)
   "Process STREAM's terminal data and return its done event.

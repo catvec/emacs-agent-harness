@@ -5,8 +5,8 @@
 ;; The fuzzer is AFL++ (https://github.com/AFLplusplus/AFLplusplus): the
 ;; mutations, the corpus, the crash detection and the minimiser are its
 ;; own.  This file is only the adapter that lets AFL++ fuzz Emacs Lisp.
-;; It does not generate input and it does not decide what a likely input
-;; is; the seed corpus and AFL++ do that.
+;; AFL++ mutates the input.  Most targets consume raw bytes; the ACP
+;; conversation target decodes action bytes into valid protocol commands.
 ;;
 ;; A target is a pure check over one input's bytes, plus a few seed
 ;; inputs AFL++ starts from:
@@ -51,9 +51,9 @@
 ;;
 ;; A target's check runs in the adapter process, never in the harness
 ;; Emacs: an input that takes Emacs down takes only the adapter with it.
-;; The built-in targets are pure parsers and protocol halves -- they
-;; touch no session, file, process or network.  A target another
-;; project's plugin adds is that plugin's business.
+;; Most targets are pure parsers and protocol halves.  The ACP conversation
+;; target instead boots a temporary state layer inside the isolated adapter;
+;; it never uses a real provider, tool process or user session.
 ;;
 ;; No target runs unless a tool asks for it.  A project enables the
 ;; plugin in its .dir-locals.el, names module tools-fuzz in
@@ -102,10 +102,15 @@ confused with Emacs's own exit codes, which are 0 and 1 here.")
 AFL++ treats it as an ordinary run, so a campaign probes its seeds
 before it starts and refuses to call a broken adapter a clean run.")
 
-(defvar harness-fuzz-directory
-  (file-name-directory (or load-file-name buffer-file-name
-                           (locate-library "harness-fuzz")))
-  "Directory harness-fuzz.el was loaded from, for the adapter's -L.")
+(defvar harness-fuzz-directory nil
+  "Source directory of harness-fuzz.el, refreshed when the module reloads.")
+
+(setq harness-fuzz-directory
+  (file-name-directory
+   (or (and (bound-and-true-p harness--defining-file)
+            (equal (file-name-base harness--defining-file) "harness-fuzz")
+            harness--defining-file)
+       (locate-library "harness-fuzz") load-file-name buffer-file-name)))
 
 ;;;; Options
 
@@ -1532,6 +1537,8 @@ event once `done' has gone through."
               "(42 [] (:type . text) (:type text :delta) (:type done :stop-reason [bad]))"
               "(#1=(:unknown t . #1#) (:type done :stop-reason \"end-turn\"))")
  :check #'harness-fuzz--check-provider-events)
+
+(load (expand-file-name "harness-fuzz-acp.el" harness-fuzz-directory) nil t)
 
 (harness-define-module 'fuzz
   :doc "AFL++ fuzzing of the harness's protocol boundaries, through an adapter.")

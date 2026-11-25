@@ -52,6 +52,7 @@
 (require 'cl-lib)
 (require 'harness-core)
 (require 'harness-util)
+(require 'harness-request-lifecycle)
 (require 'harness-policy)
 ;; Whether provider requests are let in through their provider's pool
 ;; (see harness-admission.el).  Declared here because `provider/complete'
@@ -1359,21 +1360,26 @@ leave consumers with an unusable completion they cannot replace."
           (plist-put (copy-sequence event) :stop-reason (or reason 'end-turn))))
        (t event)))))
 
-(defun harness-provider--guard-events (on-event &optional on-protocol-error)
+(defun harness-provider--guard-events (on-event &optional on-protocol-error control)
   "Wrap ON-EVENT so errors are contained and done is delivered once.
 ON-PROTOCOL-ERROR stops the producer when a malformed control event
 was converted to a terminal error.  It runs after the guard has closed,
-so a synchronous cancel acknowledgement cannot replace that error."
-  (let ((done nil))
+so a synchronous cancel acknowledgement cannot replace that error.
+CONTROL, when supplied, owns this request's completion and cancellation."
+  (let* ((control (or control (harness-request-lifecycle-create)))
+         (deliver (lambda (event)
+                    (condition-case err
+                        (funcall on-event event)
+                      (error (harness-log 'error "provider event handler failed on %S: %S"
+                                          (plist-get event :type) err))))))
     (lambda (event)
-      (unless done
+      (when (harness-request-lifecycle-open-p control)
         (when-let* ((event (harness-provider--consumer-event event)))
-          (when (eq (plist-get event :type) 'done) (setq done t))
-          (condition-case err
-              (funcall on-event event)
-            (error (harness-log 'error "provider event handler failed on %S: %S"
-                                (plist-get event :type) err)))
-          (when (and on-protocol-error done (eq (plist-get event :error-kind) 'protocol))
+          (if (eq (plist-get event :type) 'done)
+              (harness-request-lifecycle-finish control deliver (lambda () event) event)
+            (funcall deliver event))
+          (when (and on-protocol-error (eq (plist-get event :type) 'done)
+                     (eq (plist-get event :error-kind) 'protocol))
             (condition-case err
                 (funcall on-protocol-error)
               (error (harness-log 'error "provider protocol cancellation failed: %s"
@@ -1537,27 +1543,15 @@ asked and answered."
                (provider (and pid (harness-provider-get pid)))
                (recorder (and job-id (harness-provider--job-recorder
                                       job-id (or (plist-get request :on-event) #'ignore))))
-               (transport-cancel nil) (cancelled nil) (bad-protocol nil)
+               (control (harness-request-lifecycle-create))
                (cancel-transport
-                (lambda ()
-                  (when (and transport-cancel (not cancelled))
-                    (let ((success nil))
-                      ;; Fence synchronous reentry, but permit retry if the
-                      ;; transport failed before it could stop the producer.
-                      (setq cancelled t)
-                      (unwind-protect
-                          (progn (funcall transport-cancel) (setq success t))
-                        (unless success (setq cancelled nil)))))))
-               (stop-bad-protocol
-                (lambda ()
-                  (setq bad-protocol t)
-                  (funcall cancel-transport)))
+                (lambda () (harness-request-lifecycle-cancel control)))
                (on-event (let ((caller (or (plist-get request :on-event) #'ignore)))
                            ;; Inside the guard, so the recording too sees
                            ;; `done' once.
                            (harness-provider--guard-events
                             (if recorder (plist-get recorder :on-event) caller)
-                            stop-bad-protocol)))
+                            cancel-transport control)))
                ;; One place bounds what a completion may ask a model to
                ;; write, and it does nothing unless the user set a ceiling
                ;; (`harness-provider-max-output-tokens'): an ordinary
@@ -1578,13 +1572,12 @@ asked and answered."
       (condition-case err
           (let ((handle (or (harness-provider--send provider pid request)
                             (list :cancel #'ignore))))
-            (setq transport-cancel (plist-get handle :cancel))
-            (when bad-protocol (funcall stop-bad-protocol))
             ;; A late handle and an asynchronous protocol failure both stop
             ;; this exact request, once, even if the caller cancels it too.
             ;; Preserve an absent or invalid cancel field: capability checks
             ;; must not mistake our wrapper for a working transport cancel.
-            (when (functionp transport-cancel)
+            (when (functionp (plist-get handle :cancel))
+              (harness-request-lifecycle-set-cancel control (plist-get handle :cancel))
               (setq handle
                     (plist-put (copy-sequence handle) :cancel
                                cancel-transport)))

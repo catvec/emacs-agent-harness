@@ -7,9 +7,10 @@ whatever comes out, and saves the inputs that break it.  This plugin is
 the adapter that lets it fuzz Emacs Lisp, and the report that says what
 broke.
 
-There is no generator and no grammar here.  A target is a pure check
-over one input's bytes plus a handful of seed inputs, as a normal fuzz
-target is.  AFL++ decides what to try next.
+Most targets check raw bytes. The `acp-conversation` target instead decodes
+AFL's bytes into valid ACP actions and supplies live session IDs and typed
+parameters. AFL++ decides which command sequences and arguments to try; it
+does not have to rediscover valid JSON syntax before reaching the state layer.
 
 This is not a working harness plugin: no `.dir-locals.el` here loads
 it.  A project (or a test) opts in by requiring
@@ -143,10 +144,47 @@ may segfault Emacs and the campaign survives it.
 | `http-headers` | HTTP headers, disposition and URL file names |
 | `provider-events` | raw event envelopes, terminal normalization and the exactly-once callback guard |
 | `openai-sse` | real SSE and OpenAI-compatible decoding, chunk invariance, mandatory terminal delivery and late-event fencing |
+| `acp-conversation` | valid standard ACP command sequences through real wire codecs, dispatch, sessions, turns, tools and cold reload |
 
-Each target is a pure boundary: it touches no session, file, process or
-network.  A check must treat malformed input as handled (return non-nil)
-and signal only when the harness itself breaks.
+The raw targets are pure boundaries. The conversation target uses the
+repository's test fixture helpers inside a fresh adapter and writes only to
+temporary state. It refuses a live harness. A check signals when the harness
+breaks an invariant; an inconsistency is saved as exit 42 even without a native
+crash. Raw targets treat handled malformed input as success.
+
+## Valid ACP conversations
+
+```sh
+TMPDIR=/var/tmp .harness/plugins/fuzz/run.sh acp-conversation 60 42
+```
+
+Each pair of bytes selects a command and its arguments, up to 32 actions.
+The first byte chooses among all nine currently implemented standard methods:
+initialize, authenticate, session/new, session/load, session/list,
+session/prompt, session/cancel, session/set_mode and session/set_model.
+The test suite checks that this catalog matches the server's standard-method
+registry. Internal `_harness/` extensions are not part of this grammar.
+
+The second byte selects a known session, a valid setting, a scripted model
+response, and whether to release a held provider callback. Replies can be
+released out of order across requests. All actions run on one thread with
+an explicit deferred-callback queue. Cancellation is an ACP notification;
+requests carry distinct IDs. Both directions use the actual JSON codecs and
+server dispatcher through an in-process wire peer, without a TCP socket.
+
+The state layer, agent and pure counting tool are real. The model is a fixture
+that emits text, errors or duplicate tool calls; it contacts no model service.
+Every scenario must have one reply per RPC, balanced turn starts/ends, no
+repeated tool effect, observable setting changes and correct session listing.
+After completion it checks for active turns and pending interactions, flushes
+the store, forgets sessions, reloads them, and requires a successful new prompt.
+Tests prove that the tool path actually executes and that the oracle fails on
+lost RPC delivery. A failure prints its decoded command sequence for replay.
+
+This is valid-command sequence fuzzing, not arbitrary parser fuzzing or a
+complete ACP conformance suite. It omits TCP behavior, external providers,
+real tools, permission-dialog interaction and extensions. The existing raw
+ACP targets remain separate to exercise malformed framing and parameter data.
 
 ## Adding a target
 
