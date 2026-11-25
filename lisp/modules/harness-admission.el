@@ -95,6 +95,7 @@
 (require 'harness-core)
 (require 'harness-util)
 (require 'harness-http)
+(require 'harness-request-lifecycle)
 ;; A failure is read the one way the harness reads one, so that a pool
 ;; rests on exactly what `harness-retry' would have tried again.
 (require 'harness-retry)
@@ -222,6 +223,21 @@ and its account's, so a pool made after the account rested inherits it."
   "One request asking its pool to be let in."
   pool request on-event start rank sequence session-id key account
   (started nil) (released nil) (cancelled nil) (handle nil) (timer nil))
+
+;; Keep the established entry layout: a reload may leave live entries in
+;; timer and provider closures compiled against it.  Ownership is keyed by
+;; their exact identity and disappears with them, not with a session ID.
+(defvar harness-admission--controls (make-hash-table :test 'eq :weakness 'key)
+  "Exact entry -> shared lifecycle, retained safely across reloads.")
+(defvar harness-admission--delivery-errors (make-hash-table :test 'eq :weakness 'key)
+  "Exact entry -> consumer exception, distinguished from producer startup failure.")
+
+(defun harness-admission--entry-control (entry)
+  "Return ENTRY's shared lifecycle, including entries retained across reload."
+  (or (gethash entry harness-admission--controls)
+      (puthash entry (harness-request-lifecycle-create
+                      :phase (and (harness-admission--entry-released entry) 'finished))
+               harness-admission--controls)))
 
 (defun harness-admission-enabled-p ()
   "Non-nil when requests are admitted through their provider's pool."
@@ -366,6 +382,7 @@ A request whose model names no provider, and every request while
           (harness-admission--arm-patience entry)
           (harness-admission--pump pool)
           (unless (harness-admission--entry-started entry)
+            (harness-retry-note-wait (harness-admission--entry-request entry))
             (harness-admission--announce-wait entry))
           (list :cancel (lambda () (harness-admission-cancel entry))
                 :admission (list :pool key
@@ -374,24 +391,15 @@ A request whose model names no provider, and every request while
                                  :rank (harness-admission--entry-rank entry))))))))
 
 (defun harness-admission-cancel (entry)
-  "Stop ENTRY, whether it waits for its pool or is already being sent.
-Nothing is sent for one that waited, and the provider is asked to stop
-one already in flight; either way the pool has its place back at once,
-and the caller is sent the `done' that ends the request."
-  (cond
-   ((harness-admission--entry-released entry) nil)
-   ((harness-admission--entry-started entry)
-    (when-let* ((handle (harness-admission--entry-handle entry)))
-      (when (functionp (plist-get handle :cancel))
-        (ignore-errors (funcall (plist-get handle :cancel)))))
-    ;; The provider's own `done' releases the place; a provider that
-    ;; says nothing does not, and releasing again is a no-op.
-    (harness-admission--release entry))
-   (t
-    (setf (harness-admission--entry-cancelled entry) t)
-    (harness-admission--release entry)
-    (funcall (harness-admission--entry-on-event entry)
-             (list :type 'done :stop-reason 'cancelled)))))
+  "Cancel ENTRY and stop its producer, even after terminal delivery.
+Protocol failure may have finished the caller before asking its producer to
+stop.  Terminal delivery stays fenced; cancellation still reaches that producer."
+  (unwind-protect
+      (unless (harness-admission--entry-released entry)
+        (setf (harness-admission--entry-cancelled entry) t)
+        (harness-admission--event entry '(:type done :stop-reason cancelled)))
+    (ignore-errors
+      (harness-request-lifecycle-cancel (harness-admission--entry-control entry)))))
 
 (defun harness-admission--arm-patience (entry)
   "Fail ENTRY if its pool has not let it in within `harness-admission-max-wait'."
@@ -415,13 +423,13 @@ pool that is still closed."
                            (harness-admission--entry-key entry)
                            (harness-admission--duration left)
                            (harness-admission--duration harness-admission-max-wait))))
-      (harness-log 'warn "admission: %s" reason)
-      (harness-admission--hint (harness-admission--entry-session-id entry) reason)
       (unwind-protect
-          (funcall (harness-admission--entry-on-event entry)
-                   (list :type 'done :stop-reason 'error :error-kind 'rate-limit
-                         :retry-after left :error reason))
-        (harness-admission--release entry)))))
+          (progn
+            (harness-log 'warn "admission: %s" reason)
+            (harness-admission--hint (harness-admission--entry-session-id entry) reason))
+        (harness-admission--event
+         entry (list :type 'done :stop-reason 'error :error-kind 'rate-limit
+                     :retry-after left :error reason))))))
 
 ;;;; A transport replay asks the same pool
 ;;
@@ -567,39 +575,49 @@ another request established meanwhile."
       (when-let* ((timer (harness-admission--entry-timer entry)))
         (cancel-timer timer)
         (setf (harness-admission--entry-timer entry) nil))
-      (setf (harness-admission--entry-handle entry)
-            (condition-case err
-                (funcall (harness-admission--entry-start entry) request)
-              (error
-               (harness-log 'error "admission: starting a request of %s failed: %s"
-                            (harness-admission--entry-key entry)
-                            (harness-error-short-message err))
-               (harness-admission--release entry)
-               (funcall (harness-admission--entry-on-event entry)
-                        (list :type 'done :stop-reason 'error
-                              :error (harness-error-message err)))
-               nil))))))
+      (condition-case err
+          (let ((handle (funcall (harness-admission--entry-start entry) request)))
+            (setf (harness-admission--entry-handle entry) handle)
+            (when (functionp (plist-get handle :cancel))
+              (harness-request-lifecycle-set-cancel
+               (harness-admission--entry-control entry) (plist-get handle :cancel))))
+        (error
+         (when (equal err (gethash entry harness-admission--delivery-errors))
+           (signal (car err) (cdr err)))
+         (harness-log 'error "admission: starting a request of %s failed: %s"
+                      (harness-admission--entry-key entry) (harness-error-short-message err))
+         (harness-admission--event entry
+                                  (list :type 'done :stop-reason 'error
+                                        :error (harness-error-message err))))))))
 
 (defun harness-admission--event (entry event)
-  "Account for EVENT of ENTRY's request, then hand it to its caller.
-The pool is told first and the caller second, and the caller's callback
-is the last thing that happens for a `done'.  A caller's terminal
-callback is allowed to start another request -- a reentrant callback is
-an ordinary thing, and the harness's own callers start the next step
-from one -- so by the time it runs, the pool must already be resting
-for a limit this request met.  Accounting afterwards would let that
-callback send into a pool this very event should have closed.
-
-The place is given back exactly once, after the caller has seen the
-event, and even when the callback signals: a failed callback is a
-failed caller, never a leaked place in the pool."
-  (if (eq (plist-get event :type) 'done)
-      (progn
-        (unless (harness-admission--entry-released entry)
-          (harness-admission--note entry event))
-        (unwind-protect (funcall (harness-admission--entry-on-event entry) event)
-          (harness-admission--release entry)))
-    (funcall (harness-admission--entry-on-event entry) event)))
+  "Deliver EVENT once, with unconditional terminal settlement and pool release."
+  (let ((control (harness-admission--entry-control entry)))
+    (when (harness-request-lifecycle-open-p control)
+      (if (eq (plist-get event :type) 'done)
+          (harness-request-lifecycle-finish
+           control
+           (lambda (result)
+             (unwind-protect
+                 (condition-case err
+                     (funcall (harness-admission--entry-on-event entry) result)
+                   (error
+                    (puthash entry err harness-admission--delivery-errors)
+                    (signal (car err) (cdr err))))
+               (harness-admission--release entry)))
+           (lambda ()
+             (when (and (harness-admission--entry-started entry)
+                        (not (harness-admission--entry-cancelled entry))
+                        (not (harness-admission--entry-released entry)))
+               (harness-admission--note entry event))
+             event)
+           event
+           (lambda (err)
+             ;; Accounting is independent of the consumer's terminal outcome.
+             (harness-log 'error "admission: terminal accounting failed: %s"
+                          (harness-error-short-message err))
+             event))
+        (funcall (harness-admission--entry-on-event entry) event)))))
 
 (defun harness-admission--release (entry)
   "Give ENTRY's place in its pool back, and let the next request in.
@@ -809,24 +827,22 @@ this, without asking the pool anything."
     (sort out (lambda (a b) (string< (plist-get a :key) (plist-get b :key))))))
 
 (defun harness-admission-reset ()
-  "Forget every pool, stopping the timers that would wake them.
-Requests already waiting are ended as cancelled, so no caller is left
-waiting for a pool that no longer exists."
-  (maphash
-   (lambda (_key pool)
-     (when-let* ((timer (harness-admission--pool-timer pool)))
-       (cancel-timer timer))
-     (setf (harness-admission--pool-timer pool) nil)
-     (dolist (entry (harness-admission--pool-queue pool))
-       (setf (harness-admission--entry-released entry) t)
-       (when-let* ((timer (harness-admission--entry-timer entry)))
-         (cancel-timer timer))
-       (funcall (harness-admission--entry-on-event entry)
-                (list :type 'done :stop-reason 'cancelled)))
-     (setf (harness-admission--pool-queue pool) nil))
-   harness-admission--pools)
-  (clrhash harness-admission--pools)
-  (clrhash harness-admission--accounts)
+  "Cancel queued requests, isolating their callbacks from each other.
+Detach old pools first: a cancellation observer may enqueue a successor,
+which belongs to the new pools and must not be erased by this reset."
+  (let ((pools (hash-table-values harness-admission--pools)))
+    (clrhash harness-admission--pools)
+    (clrhash harness-admission--accounts)
+    (dolist (pool pools)
+      (when-let* ((timer (harness-admission--pool-timer pool))) (cancel-timer timer))
+      (setf (harness-admission--pool-timer pool) nil)
+      (let ((queued (harness-admission--pool-queue pool)))
+        (setf (harness-admission--pool-queue pool) nil)
+        (dolist (entry queued)
+          (condition-case err
+              (harness-admission-cancel entry)
+            (error (harness-log 'error "admission: resetting a request failed: %s"
+                                (harness-error-short-message err))))))))
   nil)
 
 

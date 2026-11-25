@@ -1541,6 +1541,7 @@ event once `done' has gone through."
 
 (load (expand-file-name "harness-fuzz-acp.el" harness-fuzz-directory) nil t)
 (load (expand-file-name "harness-fuzz-session.el" harness-fuzz-directory) nil t)
+(load (expand-file-name "harness-fuzz-limits.el" harness-fuzz-directory) nil t)
 
 (harness-define-module 'fuzz
   :doc "AFL++ fuzzing of the harness's protocol boundaries, through an adapter.")

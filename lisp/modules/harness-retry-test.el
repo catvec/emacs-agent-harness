@@ -575,5 +575,42 @@ budget: nothing about it is kept by session."
         ;; Nothing about a request is kept by session.
         (should-not (harness-retry-state-of (harness-call 'session/get id)))))))
 
+(ert-deftest harness-retry-admission-failures-share-a-request-budget-not-a-session ()
+  (let* ((harness-retry-policy-functions (list (lambda (_) '(:owner "fixture" :count-sends t))))
+         (request '(:session (:id "same" :model "fixture:m")))
+         (first (harness-retry-prepare request))
+         (second (harness-retry-prepare request))
+         (state (harness-retry-state-of first))
+         failure)
+    (funcall (harness-retry-observe first (lambda (event) (setq failure event)))
+             '(:type done :stop-reason error))
+    (should-not (eq state (harness-retry-state-of second)))
+    (should (eq state (harness-retry-state-of failure)))
+    (should (= 0 (harness-retry--request-count state)))
+    (should (= 1 (harness-retry-request-attempts (plist-get request :session) first failure)))
+    (should (= 0 (harness-retry-request-attempts (plist-get request :session) second nil)))))
+
+(ert-deftest harness-retry-a-queued-request-cannot-start-its-clock-over-at-first-send ()
+  (let* ((harness-retry-policy-functions (list (lambda (_) '(:owner "fixture" :count-sends t))))
+         (harness-retry-max-seconds 3) (now 100.0)
+         (request (harness-retry-prepare '(:session (:id "s" :model "fixture:m")))))
+    (cl-letf (((symbol-function 'float-time) (lambda (&rest _) now)))
+      (should-not (harness-retry-elapsed (harness-retry-state-of request)))
+      (harness-retry-note-wait request)
+      (setq now 104.0)
+      (let* ((send (harness-retry-send request)) (state (harness-retry-state-of (plist-get send :request))))
+        (should (eq 'retry-budget (car (plist-get send :refusal))))
+        (should (= 0 (harness-retry--request-count state)))
+        (should (= 4 (harness-retry-elapsed state)))))))
+
+(ert-deftest harness-retry-terminal-accounting-cannot-suppress-delivery ()
+  (let* ((harness-retry-policy-functions (list (lambda (_) '(:count-sends t))))
+         (request (harness-retry-prepare '(:session (:id "s")))) events
+         (observe (harness-retry-observe request (lambda (event) (push event events)))))
+    (cl-letf (((symbol-function 'harness-retry-attempts) (lambda (_) (error "accounting failed"))))
+      (funcall observe '(:type done :stop-reason error :error "original failure")))
+    (should (= 1 (length events)))
+    (should (equal "original failure" (plist-get (car events) :error)))))
+
 (provide 'harness-retry-test)
 ;;; harness-retry-test.el ends here

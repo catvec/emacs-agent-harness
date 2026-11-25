@@ -1,0 +1,15 @@
+
+debug-early-backtrace...done
+Rate-limit actions ((1 1) (0 0) (2 1) (0 1) (0 2) (0 3) (0 4) (0 5) (8 0) (2 4)): retry budget exceeded: 1 sends + 21 failed admissions across 7 requests
+
+Error: error ("Rate-limit actions ((1 1) (0 0) (2 1) (0 1) (0 2) (0 3) (0 4) (0 5) (8 0) (2 4)): retry budget exceeded: 1 sends + 21 failed admissions across 7 requests")
+  error("Rate-limit actions %S: %s" ((1 1) (0 0) (2 1) (0 1) (0 2) (0 3) (0 4) (0 5) (8 0) (2 4)) "retry budget exceeded: 1 sends + 21 failed admissions across 7 requests")
+  (condition-case err (harness-fuzz-limits--run actions dir) (error (error "Rate-limit actions %S: %s" actions (error-message-string err))))
+  (unwind-protect (condition-case err (harness-fuzz-limits--run actions dir) (error (error "Rate-limit actions %S: %s" actions (error-message-string err)))) (harness-test-reset-bus) (condition-case nil (progn (delete-directory dir t)) (error nil)))
+  (let* ((actions (harness-fuzz-limits-decode bytes)) (dir (file-name-as-directory (make-temp-file "harness-rate-fuzz-" t))) (harness-state-directory dir)) (unwind-protect (condition-case err (harness-fuzz-limits--run actions dir) (error (error "Rate-limit actions %S: %s" actions (error-message-string err)))) (harness-test-reset-bus) (condition-case nil (progn (delete-directory dir t)) (error nil))))
+  harness-fuzz-limits--check("\1\1\0\0\2\1\0\1\0\2\0\3\0\4\0\5\10\0\2\4")
+  (prin1 (harness-fuzz-limits--check (unibyte-string 1 1 0 0 2 1 0 1 0 2 0 3 0 4 0 5 8 0 2 4)))
+  load-with-code-conversion("/var/tmp/harness-limits-repro.el" "/var/tmp/harness-limits-repro.el" nil t)
+  command-line-1(("-L" "/var/tmp/harness-lifecycle-base/lisp" "-L" "/var/tmp/harness-lifecycle-base/lisp/modules" "-L" "/var/tmp/harness-lifecycle-base/test" "-L" "/var/tmp/harness-lifecycle-base" "-l" "/var/tmp/harness-limits-repro.el"))
+  command-line()
+  normal-top-level()

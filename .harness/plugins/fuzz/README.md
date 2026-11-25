@@ -144,6 +144,8 @@ may segfault Emacs and the campaign survives it.
 | `http-headers` | HTTP headers, disposition and URL file names |
 | `provider-events` | raw event envelopes, terminal normalization and the exactly-once callback guard |
 | `openai-sse` | real SSE and OpenAI-compatible decoding, chunk invariance, mandatory terminal delivery and late-event fencing |
+| `cache-prefix` | exact stable prompt values and append-only message prefixes across routine changes |
+| `shared-rate-limits` | eight persisted OpenRouter sessions sharing DeepInfra/Cohere limits, retries, catalogue outages and recovery |
 | `session-turns` | ordinary text/tool turns with inert implementations; every turn must succeed |
 | `session-soak` | ordinary multi-step turns through real encoding, tool dispatch and persistence; cache changes between turns |
 | `acp-conversation` | valid standard ACP command sequences through real wire codecs, dispatch, sessions, turns, tools and cold reload |
@@ -292,3 +294,69 @@ It does not test actual tool implementations, real provider outages, network
 sockets, process crashes or every compaction/permission workflow. Stock Emacs
 is not AFL-instrumented, and a whole session per input is relatively slow.
 AFL's crash exit 42 also represents the logical cannot-continue failures above.
+
+
+## Cache preservation, rather than just turn survival
+
+```sh
+TMPDIR=/var/tmp .harness/plugins/fuzz/run.sh cache-prefix 60 42
+```
+
+This target fails on a client-side prefix rewrite even if every turn succeeds.
+It compares exact serialized model/tool/reasoning fields, the settled system
+message and the already-sent conversation. Its reader retains original JSON
+value slices, independently of the production replay comparator. Re-encoding
+old values, changing their field order, or silently resetting the replay store
+cannot make the oracle accept a replaced prefix.
+
+Routine mutations include todos, plans, hints, runtime metadata, session names,
+usage updates, a changed default system prompt, registering a late tool and cold
+session loads. The existing session must retain its settled system and tool
+list. Output-token ceilings may change metadata without changing its prefix.
+Tool calls and results are real up to the inert implementation hooks. Legitimate
+appends are allowed, including appending another block to the final user message
+when the serializer coalesces adjacent user nodes; replacing its old content is
+not allowed. Tests reject healthy-looking turns with a deliberately rewritten
+tool prefix, as well as byte changes to otherwise equivalent JSON.
+
+The target does not promise a provider cache hit. TTL, eviction, routing within
+the provider and its prompt processing are not observable control we own.
+Explicitly changing a session's model, system or offered schema necessarily
+changes its prefix; those deliberately changed requests remain in the separate
+`session-soak` recovery target. `cache-prefix` exercises routine changes that
+must not do so.
+
+## Many sessions during a rate-limit episode
+
+```sh
+TMPDIR=/var/tmp .harness/plugins/fuzz/run.sh shared-rate-limits 60 42
+```
+
+Eight persisted sessions use the actual OpenRouter adapter, routing decisions,
+OpenAI encoding/SSE decoding, shared retry module, shared admission pools and
+replay store. Six are pinned to DeepInfra and two to Cohere using a synthetic
+catalogue. One-off calls share the same pools while retaining separate logical
+request budgets, even when they name the same session.
+
+AFL chooses prompts, caller cancellation, queue reset, catalogue outage and
+invalidation, endpoint/account-wide limits, elapsed time and response modes.
+Responses include HTTP 429 with a numeric, HTTP-date or zero Retry-After,
+streamed rate-limit errors, partial responses followed by connection reset,
+HTTP 502 and a silent producer. HTTP and the catalogue are local fixtures;
+no real provider, credentials or network connection are used.
+
+Time advances deterministically on one thread. Fixture timer objects remain
+real Emacs timers so cancellation and timer ownership are exercised, but a
+bounded virtual event queue invokes their callbacks without sleeping through
+minutes of cooldown. The initial outage must spend bounded request attempts;
+finite episodes must settle their callers. A silent producer is explicitly
+cancelled. After recovery every original session must complete another prompt,
+with no busy/queued pool entries or unbalanced turn events. The target also
+checks each substantive request's prefix across retries and recovery; one-off
+prompts are kept separate and must not replace its baseline.
+
+This tests in-process coordination, not several Emacs servers sharing a
+provider account, real curl/socket behavior or actual provider caching. The
+oracle deliberately rejects lost retry budgets and caller promises left pending
+after the underlying work has finished. Inputs print their decoded actions for
+replay. No new threads or production scheduling policy are introduced.

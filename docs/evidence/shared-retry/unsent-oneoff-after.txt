@@ -1,0 +1,14 @@
+== test.sh 2026-11-25 00:43:48 (1 files)
+== lisp/modules/harness-admission-test.el
+Running 1 tests (2026-11-25 00:43:48-0500, selector ‘"counted-one-off"’)
+   passed  1/1  harness-admission-counted-one-off-calls-exhaust-the-unsent-budget (0.790658 sec)
+
+Ran 1 tests, 1 results as expected, 0 unexpected (2026-11-25 00:43:48-0500, 0.790797 sec)
+
+
+== lisp/modules/harness-admission-test.el exit 0 2026-11-25 00:43:48 ==
+
+TEST RESULT: PASS (selected run)
+result record: /home/noah/documents/ai/emacs-agent-harness/scripts/.dev/test-stamp.json
+full logs: /home/noah/documents/ai/emacs-agent-harness/scripts/.dev/test-logs
+test.sh: 1 files, 0 failed, 2s wall (4 at a time)

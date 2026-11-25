@@ -1,0 +1,1 @@
+(:run "local-stability" :seed 20261128 :afl "/usr/bin/afl-fuzz" :mode dumb :targets (cache-prefix) :executions 19 :crashes nil :by-target ((cache-prefix :executions 19 :execs-per-sec 0.17411417080093217 :crashes 0 :hangs 0)) :skipped nil :stopped seconds :elapsed 116.0710232257843 :work-directory "/var/tmp/harness-fuzz-N2llli")

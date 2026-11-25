@@ -66,5 +66,33 @@ producer.  A control cannot be reassigned to another producer."
   (when (harness-request-lifecycle-cancel-requested control)
     (harness-request-lifecycle-cancel control)))
 
+(cl-defstruct (harness-request-cancel-scope
+               (:constructor harness-request-cancel-scope-create) (:copier nil))
+  "Cancellation ownership for a request's independently acquired resources."
+  requested controls)
+
+(defun harness-request-cancel-scope-add (scope key function)
+  "Attach FUNCTION for resource KEY, honoring cancellation before acquisition.
+Each key owns one producer; adding a different producer to it is an error."
+  (let ((control (alist-get key (harness-request-cancel-scope-controls scope))))
+    (unless control
+      (setq control (harness-request-lifecycle-create))
+      (push (cons key control) (harness-request-cancel-scope-controls scope)))
+    (when (harness-request-cancel-scope-requested scope)
+      (harness-request-lifecycle-cancel control))
+    (harness-request-lifecycle-set-cancel control function)))
+
+(defun harness-request-cancel-scope-cancel (scope)
+  "Cancel every resource of SCOPE, even when another resource signals.
+A failed canceller may be tried again.  Late resources are cancelled when
+attached, and reentrant callbacks cannot cancel a producer twice."
+  (setf (harness-request-cancel-scope-requested scope) t)
+  (let (failure)
+    (dolist (entry (harness-request-cancel-scope-controls scope))
+      (condition-case err
+          (harness-request-lifecycle-cancel (cdr entry))
+        (error (unless failure (setq failure err)))))
+    (when failure (signal (car failure) (cdr failure)))))
+
 (provide 'harness-request-lifecycle)
 ;;; harness-request-lifecycle.el ends here

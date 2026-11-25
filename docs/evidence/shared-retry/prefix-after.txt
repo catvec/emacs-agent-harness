@@ -1,0 +1,8 @@
+== test.sh 2026-11-25 00:52:07 (2 files)
+ok    harness-fuzz-limits-test.el                          Ran 5 tests, 5 results as expected, 0 unexpected (2026-11-25 00:51:44-0500, 2.833746 sec)
+ok    harness-fuzz-session-test.el                         Ran 11 tests, 11 results as expected, 0 unexpected (2026-11-25 00:52:07-0500, 25.576542 sec)
+
+TEST RESULT: PASS (selected run)
+result record: /home/noah/documents/ai/emacs-agent-harness/scripts/.dev/test-stamp.json
+full logs: /home/noah/documents/ai/emacs-agent-harness/scripts/.dev/test-logs
+test.sh: 2 files, 0 failed, 26s wall (4 at a time)

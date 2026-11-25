@@ -1,0 +1,58 @@
+Running 2 tests (2026-11-25 00:24:10-0500, selector ‘"harness-provider-openrouter-\\(cancel-failure\\|cancellation-reaches\\)"’)
+Test harness-provider-openrouter-cancel-failure-still-releases-catalogue-wait backtrace:
+  ert-fail(((should (harness-promise-settled-p wait)) :form (harness-p
+  (if (unwind-protect (setq value-3589 (apply fn-3587 args-3588)) (set
+  (let (form-description-3591) (if (unwind-protect (setq value-3589 (a
+  (let ((value-3589 'ert-form-evaluation-aborted-3590)) (let (form-des
+  (let* ((fn-3587 #'harness-promise-settled-p) (args-3588 (condition-c
+  (let ((state (list nil nil nil)) (wait (harness-make-promise))) (let
+  #f(lambda () [t] (let ((state (list nil nil nil)) (wait (harness-mak
+  #f(compiled-function () #<bytecode 0x1a23a6d3f0606162>)()
+  handler-bind-1(#f(compiled-function () #<bytecode 0x1a23a6d3f0606162
+  ert--run-test-internal(#s(ert--test-execution-info :test #s(ert-test
+  ert-run-test(#s(ert-test :name harness-provider-openrouter-cancel-fa
+  ert-run-or-rerun-test(#s(ert--stats :selector "harness-provider-open
+  ert-run-tests("harness-provider-openrouter-\\(cancel-failure\\|cance
+  ert-run-tests-batch("harness-provider-openrouter-\\(cancel-failure\\
+  ert-run-tests-batch-and-exit("harness-provider-openrouter-\\(cancel-
+  eval((ert-run-tests-batch-and-exit "harness-provider-openrouter-\\(c
+  command-line-1(("-L" "lisp" "-L" "lisp/modules" "-L" "test" "-l" "te
+  command-line()
+  normal-top-level()
+Test harness-provider-openrouter-cancel-failure-still-releases-catalogue-wait condition:
+    (ert-test-failed
+     ((should (harness-promise-settled-p wait)) :form
+      (harness-promise-settled-p
+       #s(harness-promise pending nil nil nil nil))
+      :value nil))
+   FAILED  1/2  harness-provider-openrouter-cancel-failure-still-releases-catalogue-wait (0.000176 sec) at lisp/modules/harness-provider-openrouter-test.el:4616
+Test harness-provider-openrouter-cancellation-reaches-late-transport-handle backtrace:
+  ert-fail(((should (= 1 cancelled)) :form (= 1 0) :value nil))
+  (if (unwind-protect (setq value-3594 (apply fn-3592 args-3593)) (set
+  (let (form-description-3596) (if (unwind-protect (setq value-3594 (a
+  (let ((value-3594 'ert-form-evaluation-aborted-3595)) (let (form-des
+  (let* ((fn-3592 #'=) (args-3593 (condition-case err (list 1 cancelle
+  (let ((state (list nil nil nil)) (cancelled 0)) (let* ((vnew #'(lamb
+  #f(lambda () [t] (let ((state (list nil nil nil)) (cancelled 0)) (le
+  #f(compiled-function () #<bytecode 0x1a23a6d3f0606162>)()
+  handler-bind-1(#f(compiled-function () #<bytecode 0x1a23a6d3f0606162
+  ert--run-test-internal(#s(ert--test-execution-info :test #s(ert-test
+  ert-run-test(#s(ert-test :name harness-provider-openrouter-cancellat
+  ert-run-or-rerun-test(#s(ert--stats :selector "harness-provider-open
+  ert-run-tests("harness-provider-openrouter-\\(cancel-failure\\|cance
+  ert-run-tests-batch("harness-provider-openrouter-\\(cancel-failure\\
+  ert-run-tests-batch-and-exit("harness-provider-openrouter-\\(cancel-
+  eval((ert-run-tests-batch-and-exit "harness-provider-openrouter-\\(c
+  command-line-1(("-L" "lisp" "-L" "lisp/modules" "-L" "test" "-l" "te
+  command-line()
+  normal-top-level()
+Test harness-provider-openrouter-cancellation-reaches-late-transport-handle condition:
+    (ert-test-failed ((should (= 1 cancelled)) :form (= 1 0) :value nil))
+   FAILED  2/2  harness-provider-openrouter-cancellation-reaches-late-transport-handle (0.000212 sec) at lisp/modules/harness-provider-openrouter-test.el:4625
+
+Ran 2 tests, 0 results as expected, 2 unexpected (2026-11-25 00:24:10-0500, 0.136870 sec)
+
+2 unexpected results:
+   FAILED  harness-provider-openrouter-cancel-failure-still-releases-catalogue-wait
+   FAILED  harness-provider-openrouter-cancellation-reaches-late-transport-handle
+

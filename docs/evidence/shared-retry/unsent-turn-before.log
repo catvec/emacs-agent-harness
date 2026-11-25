@@ -1,0 +1,38 @@
+Running 1 tests (2026-11-25 00:23:22-0500, selector ‘"counted-requests-cannot"’)
+Test harness-admission-counted-requests-cannot-retry-unsent-waits-forever backtrace:
+  ert-fail(((should (= 3 wait-failures)) :form (= 3 9) :value nil))
+  (if (unwind-protect (setq value-679 (apply fn-677 args-678)) (setq f
+  (let (form-description-681) (if (unwind-protect (setq value-679 (app
+  (let ((value-679 'ert-form-evaluation-aborted-680)) (let (form-descr
+  (let* ((fn-677 #'=) (args-678 (condition-case err (list 3 wait-failu
+  (let ((result (let* ((vnew #'(lambda ... ... ...)) (old (symbol-func
+  (let* ((default-directory dir) (harness-retry-policy-functions (list
+  (progn (let ((tail '(tools session agent))) (while tail (let ((modul
+  (unwind-protect (progn (let ((tail '(tools session agent))) (while t
+  (let ((harness-admission t) (harness-admission-delay 0.02) (harness-
+  (progn (harness-test-reset-bus) (let ((tail '(store project config p
+  (unwind-protect (progn (harness-test-reset-bus) (let ((tail '(store 
+  (let* ((dir (file-name-as-directory (make-temp-file "harness-test-" 
+  #f(lambda () [t] (let* ((dir (file-name-as-directory ...)) (harness-
+  #f(compiled-function () #<bytecode -0xdaecc61cce74621>)()
+  handler-bind-1(#f(compiled-function () #<bytecode -0xdaecc61cce74621
+  ert--run-test-internal(#s(ert--test-execution-info :test #s(ert-test
+  ert-run-test(#s(ert-test :name harness-admission-counted-requests-ca
+  ert-run-or-rerun-test(#s(ert--stats :selector "counted-requests-cann
+  ert-run-tests("counted-requests-cannot" #f(compiled-function (event-
+  ert-run-tests-batch("counted-requests-cannot")
+  ert-run-tests-batch-and-exit("counted-requests-cannot")
+  eval((ert-run-tests-batch-and-exit "counted-requests-cannot") t)
+  command-line-1(("-L" "/var/tmp/harness-lifecycle-base/lisp" "-L" "/v
+  command-line()
+  normal-top-level()
+Test harness-admission-counted-requests-cannot-retry-unsent-waits-forever condition:
+    (ert-test-failed
+     ((should (= 3 wait-failures)) :form (= 3 9) :value nil))
+   FAILED  1/1  harness-admission-counted-requests-cannot-retry-unsent-waits-forever (0.947270 sec) at lisp/modules/harness-admission-test.el:1005
+
+Ran 1 tests, 0 results as expected, 1 unexpected (2026-11-25 00:23:23-0500, 1.030744 sec)
+
+1 unexpected results:
+   FAILED  harness-admission-counted-requests-cannot-retry-unsent-waits-forever
+

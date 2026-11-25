@@ -1,0 +1,211 @@
+== test.sh 2026-11-25 00:18:00 (1 files)
+== lisp/modules/harness-admission-test.el (exit 1); full log: /home/noah/documents/ai/emacs-agent-harness/scripts/.dev/test-logs/harness-admission-test.log
+   Running 5 tests (2026-11-25 00:18:00-0500, selector ‘"harness-admission-\\(terminal-accounting\\|cancellation-\\|start-failure-after\\|reset-isolates\\)"’)
+   Test harness-admission-cancellation-reaches-a-queued-starts-late-handle backtrace:
+     ert-fail(((should (= 1 cancelled)) :form (= 1 0) :value nil))
+     (if (unwind-protect (setq value-642 (apply fn-640 args-641)) (setq f
+     (let (form-description-644) (if (unwind-protect (setq value-642 (app
+     (let ((value-642 'ert-form-evaluation-aborted-643)) (let (form-descr
+     (let* ((fn-640 #'=) (args-641 (condition-case err (list 1 cancelled)
+     (let ((harness-admission-max-concurrent 1) first queued (cancelled 0
+     (progn (let ((harness-admission-max-concurrent 1) first queued (canc
+     (unwind-protect (progn (let ((harness-admission-max-concurrent 1) fi
+     (let ((harness-admission t) (harness-admission-delay 0.02) (harness-
+     (progn (harness-test-reset-bus) (let ((tail '(store project config p
+     (unwind-protect (progn (harness-test-reset-bus) (let ((tail '(store 
+     (let* ((dir (file-name-as-directory (make-temp-file "harness-test-" 
+     #f(lambda () [t] (let* ((dir (file-name-as-directory ...)) (harness-
+     #f(compiled-function () #<bytecode -0xe486b4f3e803568>)()
+     handler-bind-1(#f(compiled-function () #<bytecode -0xe486b4f3e803568
+     ert--run-test-internal(#s(ert--test-execution-info :test #s(ert-test
+     ert-run-test(#s(ert-test :name harness-admission-cancellation-reache
+     ert-run-or-rerun-test(#s(ert--stats :selector "harness-admission-\\(
+     ert-run-tests("harness-admission-\\(terminal-accounting\\|cancellati
+     ert-run-tests-batch("harness-admission-\\(terminal-accounting\\|canc
+     ert-run-tests-batch-and-exit("harness-admission-\\(terminal-accounti
+     eval((ert-run-tests-batch-and-exit '"harness-admission-\\(terminal-a
+     command-line-1(("-L" "lisp" "-L" "lisp/modules" "-L" "lisp/ui" "-L" 
+     command-line()
+     normal-top-level()
+   Test harness-admission-cancellation-reaches-a-queued-starts-late-handle condition:
+       (ert-test-failed ((should (= 1 cancelled)) :form (= 1 0) :value nil))
+      FAILED  1/5  harness-admission-cancellation-reaches-a-queued-starts-late-handle (0.167512 sec) at lisp/modules/harness-admission-test.el:956
+   Test harness-admission-cancellation-settles-and-fences-a-silent-producer backtrace:
+     ert-fail(((should (equal '((:type done :stop-reason cancelled)) even
+     (if (unwind-protect (setq value-632 (apply fn-630 args-631)) (setq f
+     (let (form-description-634) (if (unwind-protect (setq value-632 (app
+     (let ((value-632 'ert-form-evaluation-aborted-633)) (let (form-descr
+     (let* ((fn-630 #'equal) (args-631 (condition-case err (list '((:type
+     (let ((handle (harness-admission-admit (harness-admission-test--requ
+     (let (emit events (cancelled 0)) (let ((handle (harness-admission-ad
+     (progn (let (emit events (cancelled 0)) (let ((handle (harness-admis
+     (unwind-protect (progn (let (emit events (cancelled 0)) (let ((handl
+     (let ((harness-admission t) (harness-admission-delay 0.02) (harness-
+     (progn (harness-test-reset-bus) (let ((tail '(store project config p
+     (unwind-protect (progn (harness-test-reset-bus) (let ((tail '(store 
+     (let* ((dir (file-name-as-directory (make-temp-file "harness-test-" 
+     #f(lambda () [t] (let* ((dir (file-name-as-directory ...)) (harness-
+     #f(compiled-function () #<bytecode -0xe486b4f3e803568>)()
+     handler-bind-1(#f(compiled-function () #<bytecode -0xe486b4f3e803568
+     ert--run-test-internal(#s(ert--test-execution-info :test #s(ert-test
+     ert-run-test(#s(ert-test :name harness-admission-cancellation-settle
+     ert-run-or-rerun-test(#s(ert--stats :selector "harness-admission-\\(
+     ert-run-tests("harness-admission-\\(terminal-accounting\\|cancellati
+     ert-run-tests-batch("harness-admission-\\(terminal-accounting\\|canc
+     ert-run-tests-batch-and-exit("harness-admission-\\(terminal-accounti
+     eval((ert-run-tests-batch-and-exit '"harness-admission-\\(terminal-a
+     command-line-1(("-L" "lisp" "-L" "lisp/modules" "-L" "lisp/ui" "-L" 
+     command-line()
+     normal-top-level()
+   Test harness-admission-cancellation-settles-and-fences-a-silent-producer condition:
+       (ert-test-failed
+        ((should (equal '(...) events)) :form
+         (equal ((:type done :stop-reason cancelled))
+   	     ((:type done :stop-reason error :error-kind rate-limit
+   		     :retry-after 99)
+   	      (:type text :delta "late")))
+         :value nil :explanation
+         (proper-lists-of-different-length 1 2
+   					((:type done :stop-reason
+   						cancelled))
+   					((:type done :stop-reason error
+   						:error-kind rate-limit
+   						:retry-after 99)
+   					 (:type text :delta "late"))
+   					first-mismatch-at 0)))
+      FAILED  2/5  harness-admission-cancellation-settles-and-fences-a-silent-producer (0.006243 sec) at lisp/modules/harness-admission-test.el:940
+   Test harness-admission-reset-isolates-callbacks-and-reentrant-successors backtrace:
+     error("broken cancelled caller")
+     #f(lambda (_) [(successor (:cancel #f(compiled-function () #<bytecod
+     #f(compiled-function (key pool) #<bytecode 0x4bcf5c4fad58b1d>)("admi
+     maphash(#f(compiled-function (key pool) #<bytecode 0x4bcf5c4fad58b1d
+     harness-admission-reset()
+     (unwind-protect (progn (let ((harness-admission-max-concurrent 0) ev
+     (let ((harness-admission t) (harness-admission-delay 0.02) (harness-
+     (progn (harness-test-reset-bus) (let ((tail '(store project config p
+     (unwind-protect (progn (harness-test-reset-bus) (let ((tail '(store 
+     (let* ((dir (file-name-as-directory (make-temp-file "harness-test-" 
+     #f(lambda () [t] (let* ((dir (file-name-as-directory ...)) (harness-
+     #f(compiled-function () #<bytecode -0xe486b4f3e803568>)()
+     handler-bind-1(#f(compiled-function () #<bytecode -0xe486b4f3e803568
+     ert--run-test-internal(#s(ert--test-execution-info :test #s(ert-test
+     ert-run-test(#s(ert-test :name harness-admission-reset-isolates-call
+     ert-run-or-rerun-test(#s(ert--stats :selector "harness-admission-\\(
+     ert-run-tests("harness-admission-\\(terminal-accounting\\|cancellati
+     ert-run-tests-batch("harness-admission-\\(terminal-accounting\\|canc
+     ert-run-tests-batch-and-exit("harness-admission-\\(terminal-accounti
+     eval((ert-run-tests-batch-and-exit '"harness-admission-\\(terminal-a
+     command-line-1(("-L" "lisp" "-L" "lisp/modules" "-L" "lisp/ui" "-L" 
+     command-line()
+     normal-top-level()
+   Test harness-admission-reset-isolates-callbacks-and-reentrant-successors condition:
+       (error "broken cancelled caller")
+      FAILED  3/5  harness-admission-reset-isolates-callbacks-and-reentrant-successors (0.006280 sec) at lisp/modules/harness-admission-test.el:985
+   Test harness-admission-start-failure-after-terminal-cannot-redeliver backtrace:
+     ert-fail(((should (equal '((:type done :stop-reason end-turn)) event
+     (if (unwind-protect (setq value-657 (apply fn-655 args-656)) (setq f
+     (let (form-description-659) (if (unwind-protect (setq value-657 (app
+     (let ((value-657 'ert-form-evaluation-aborted-658)) (let (form-descr
+     (let* ((fn-655 #'equal) (args-656 (condition-case err (list '((:type
+     (let (events) (harness-admission-admit (harness-admission-test--requ
+     (progn (let (events) (harness-admission-admit (harness-admission-tes
+     (unwind-protect (progn (let (events) (harness-admission-admit (harne
+     (let ((harness-admission t) (harness-admission-delay 0.02) (harness-
+     (progn (harness-test-reset-bus) (let ((tail '(store project config p
+     (unwind-protect (progn (harness-test-reset-bus) (let ((tail '(store 
+     (let* ((dir (file-name-as-directory (make-temp-file "harness-test-" 
+     #f(lambda () [t] (let* ((dir (file-name-as-directory ...)) (harness-
+     #f(compiled-function () #<bytecode -0xe486b4f3e803568>)()
+     handler-bind-1(#f(compiled-function () #<bytecode -0xe486b4f3e803568
+     ert--run-test-internal(#s(ert--test-execution-info :test #s(ert-test
+     ert-run-test(#s(ert-test :name harness-admission-start-failure-after
+     ert-run-or-rerun-test(#s(ert--stats :selector "harness-admission-\\(
+     ert-run-tests("harness-admission-\\(terminal-accounting\\|cancellati
+     ert-run-tests-batch("harness-admission-\\(terminal-accounting\\|canc
+     ert-run-tests-batch-and-exit("harness-admission-\\(terminal-accounti
+     eval((ert-run-tests-batch-and-exit '"harness-admission-\\(terminal-a
+     command-line-1(("-L" "lisp" "-L" "lisp/modules" "-L" "lisp/ui" "-L" 
+     command-line()
+     normal-top-level()
+   Test harness-admission-start-failure-after-terminal-cannot-redeliver condition:
+       (ert-test-failed
+        ((should (equal '(...) events)) :form
+         (equal ((:type done :stop-reason end-turn))
+   	     ((:type done :stop-reason error :error
+   		     "producer failed after its terminal callback")
+   	      (:type done :stop-reason end-turn)))
+         :value nil :explanation
+         (proper-lists-of-different-length 1 2
+   					((:type done :stop-reason end-turn))
+   					((:type done :stop-reason error
+   						:error
+   						"producer failed after its terminal callback")
+   					 (:type done :stop-reason end-turn))
+   					first-mismatch-at 0)))
+      FAILED  4/5  harness-admission-start-failure-after-terminal-cannot-redeliver (0.006307 sec) at lisp/modules/harness-admission-test.el:975
+   Test harness-admission-terminal-accounting-cannot-strand-its-caller backtrace:
+     error("accounting unavailable")
+     harness-admission--note(#s(harness-admission--entry :pool #s(harness
+     harness-admission--event(#s(harness-admission--entry :pool #s(harnes
+     #f(compiled-function (event) #<bytecode -0x1bd09feaf222bc8d>)((:type
+     funcall(#f(compiled-function (event) #<bytecode -0x1bd09feaf222bc8d>
+     (progn (fset 'harness-admission--note vnew) (funcall emit '(:type do
+     (unwind-protect (progn (fset 'harness-admission--note vnew) (funcall
+     (let* ((vnew #'(lambda (&rest _) (error "accounting unavailable"))) 
+     (let (emit events) (harness-admission-admit (harness-admission-test-
+     (progn (let (emit events) (harness-admission-admit (harness-admissio
+     (unwind-protect (progn (let (emit events) (harness-admission-admit (
+     (let ((harness-admission t) (harness-admission-delay 0.02) (harness-
+     (progn (harness-test-reset-bus) (let ((tail '(store project config p
+     (unwind-protect (progn (harness-test-reset-bus) (let ((tail '(store 
+     (let* ((dir (file-name-as-directory (make-temp-file "harness-test-" 
+     #f(lambda () [t] (let* ((dir (file-name-as-directory ...)) (harness-
+     #f(compiled-function () #<bytecode -0xe486b4f3e803568>)()
+     handler-bind-1(#f(compiled-function () #<bytecode -0xe486b4f3e803568
+     ert--run-test-internal(#s(ert--test-execution-info :test #s(ert-test
+     ert-run-test(#s(ert-test :name harness-admission-terminal-accounting
+     ert-run-or-rerun-test(#s(ert--stats :selector "harness-admission-\\(
+     ert-run-tests("harness-admission-\\(terminal-accounting\\|cancellati
+     ert-run-tests-batch("harness-admission-\\(terminal-accounting\\|canc
+     ert-run-tests-batch-and-exit("harness-admission-\\(terminal-accounti
+     eval((ert-run-tests-batch-and-exit '"harness-admission-\\(terminal-a
+     command-line-1(("-L" "lisp" "-L" "lisp/modules" "-L" "lisp/ui" "-L" 
+     command-line()
+     normal-top-level()
+   Test harness-admission-terminal-accounting-cannot-strand-its-caller condition:
+       (error "accounting unavailable")
+      FAILED  5/5  harness-admission-terminal-accounting-cannot-strand-its-caller (0.006049 sec) at lisp/modules/harness-admission-test.el:928
+   
+   Ran 5 tests, 0 results as expected, 5 unexpected (2026-11-25 00:18:00-0500, 0.463499 sec)
+   
+   5 unexpected results:
+      FAILED  harness-admission-cancellation-reaches-a-queued-starts-late-handle
+      FAILED  harness-admission-cancellation-settles-and-fences-a-silent-producer
+      FAILED  harness-admission-reset-isolates-callbacks-and-reentrant-successors
+      FAILED  harness-admission-start-failure-after-terminal-cannot-redeliver
+      FAILED  harness-admission-terminal-accounting-cannot-strand-its-caller
+   
+   
+   == lisp/modules/harness-admission-test.el exit 1 2026-11-25 00:18:00 ==
+
+TEST FAILURES: investigate and repair EVERY one of them.
+  A suite that fails here is a defect in this tree, whether this branch made it
+  or it was already on main: leave the code better than you found it.  A failure
+  that also fails at the branch's base is still a failure -- never a pass, a
+  waiver, a baseline note or somebody else's to leave alone -- and the run stays
+  failed until it is mended.
+  Read each failing suite's whole log below, find the cause, and fix the code
+  (or the stale test, when the test is what is wrong) with a regression that
+  fails before the fix and passes after it.  Do not skip, delete, weaken or
+  relabel a test to get green, and do not rerun a narrower selection in place of
+  this run.
+
+
+TEST RESULT: FAIL (selected run)
+result record: /home/noah/documents/ai/emacs-agent-harness/scripts/.dev/test-stamp.json
+full logs: /home/noah/documents/ai/emacs-agent-harness/scripts/.dev/test-logs
+  harness-admission-test log: /home/noah/documents/ai/emacs-agent-harness/scripts/.dev/test-logs/harness-admission-test.log
+test.sh: 1 files, 1 failed, 0s wall (4 at a time)
+failed: lisp/modules/harness-admission-test.el
+failed suites, each to be repaired (a baseline failure is still a failure):
+  harness-admission-test.el

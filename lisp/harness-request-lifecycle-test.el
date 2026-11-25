@@ -66,5 +66,17 @@
     (harness-request-lifecycle-cancel control)
     (should (= 2 attempts))))
 
+(ert-deftest harness-request-cancel-scope-isolates-failures-and-late-acquisition ()
+  (let ((scope (harness-request-cancel-scope-create)) (first 0) (second 0) (late 0))
+    (harness-request-cancel-scope-add scope 'second (lambda () (cl-incf second)))
+    (harness-request-cancel-scope-add scope 'first (lambda () (cl-incf first) (error "cancel failed")))
+    (should-error (harness-request-cancel-scope-cancel scope))
+    (should (= 1 second))
+    (harness-request-cancel-scope-add scope 'late (lambda () (cl-incf late)))
+    (should (= 1 late))
+    (should-error (harness-request-cancel-scope-cancel scope))
+    (should (= 2 first))
+    (should (= 1 second late))))
+
 (provide 'harness-request-lifecycle-test)
 ;;; harness-request-lifecycle-test.el ends here

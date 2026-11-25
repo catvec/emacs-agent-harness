@@ -922,5 +922,169 @@ next goes when the first is done."
       (harness-test-wait (lambda () (= 2 (harness-admission-test--sent-count)))
                          5 "the second request"))))
 
+
+;;;; Failure ownership across queued and cancelled requests
+
+(ert-deftest harness-admission-terminal-accounting-cannot-strand-its-caller ()
+  (harness-admission-test-with
+    (let (emit events)
+      (harness-admission-admit
+       (harness-admission-test--request (list :on-event (lambda (e) (push e events))))
+       (lambda (request) (setq emit (plist-get request :on-event)) (list :cancel #'ignore)))
+      (cl-letf (((symbol-function 'harness-admission--note)
+                 (lambda (&rest _) (error "accounting unavailable"))))
+        (funcall emit '(:type done :stop-reason end-turn)))
+      (should (= 1 (length events)))
+      (should (= 0 (plist-get (harness-admission-test--pool) :busy))))))
+
+(ert-deftest harness-admission-cancellation-settles-and-fences-a-silent-producer ()
+  (harness-admission-test-with
+    (let (emit events (cancelled 0))
+      (let ((handle (harness-admission-admit
+                     (harness-admission-test--request (list :on-event (lambda (e) (push e events))))
+                     (lambda (request)
+                       (setq emit (plist-get request :on-event))
+                       (list :cancel (lambda () (cl-incf cancelled)))))))
+        (funcall (plist-get handle :cancel))
+        (funcall (plist-get handle :cancel))
+        (funcall emit '(:type text :delta "late"))
+        (funcall emit '(:type done :stop-reason error :error-kind rate-limit :retry-after 99))
+        (should (= 1 cancelled))
+        (should (equal '((:type done :stop-reason cancelled)) events))
+        (should (= 0 (plist-get (harness-admission-test--pool) :busy)))))))
+
+(ert-deftest harness-admission-cancellation-reaches-a-queued-starts-late-handle ()
+  (harness-admission-test-with
+    (let ((harness-admission-max-concurrent 1) first queued (cancelled 0) events)
+      (harness-admission-admit
+       (harness-admission-test--request)
+       (lambda (request) (setq first (plist-get request :on-event)) (list :cancel #'ignore)))
+      (setq queued
+            (harness-admission-admit
+             (harness-admission-test--request (list :on-event (lambda (e) (push e events))))
+             (lambda (_request)
+               ;; The request already returned its queue handle.  A callback
+               ;; cancels it while the provider is still constructing its handle.
+               (funcall (plist-get queued :cancel))
+               (list :cancel (lambda () (cl-incf cancelled))))))
+      (funcall first '(:type done :stop-reason end-turn))
+      (should (= 1 cancelled))
+      (should (equal '((:type done :stop-reason cancelled)) events))
+      (should (= 0 (plist-get (harness-admission-test--pool) :busy))))))
+
+(ert-deftest harness-admission-start-failure-after-terminal-cannot-redeliver ()
+  (harness-admission-test-with
+    (let (events)
+      (harness-admission-admit
+       (harness-admission-test--request (list :on-event (lambda (e) (push e events))))
+       (lambda (request)
+         (funcall (plist-get request :on-event) '(:type done :stop-reason end-turn))
+         (error "producer failed after its terminal callback")))
+      (should (equal '((:type done :stop-reason end-turn)) events)))))
+
+(ert-deftest harness-admission-reset-isolates-callbacks-and-reentrant-successors ()
+  (harness-admission-test-with
+    (let ((harness-admission-max-concurrent 0) events successor)
+      (harness-admission-admit
+       (harness-admission-test--request (list :on-event (lambda (_) (push 'healthy events)))) #'ignore)
+      (harness-admission-admit
+       (harness-admission-test--request
+        (list :on-event (lambda (_)
+                          (setq successor (harness-admission-admit
+                                           (harness-admission-test--request
+                                            (list :on-event (lambda (_) (push 'successor events)))) #'ignore))
+                          (error "broken cancelled caller")))) #'ignore)
+      (harness-admission-reset)
+      (should (memq 'healthy events))
+      (should successor)
+      ;; Reset cannot erase a new queue created by a cancellation observer.
+      (should (= 1 (plist-get (harness-admission-test--pool) :queued)))
+      (funcall (plist-get successor :cancel))
+      (should (memq 'successor events)))))
+
+(ert-deftest harness-admission-counted-requests-cannot-retry-unsent-waits-forever ()
+  (harness-admission-test-with
+    (dolist (module '(tools session agent)) (harness-test-load-module module))
+    (harness-module-start 'retry)
+    (let* ((default-directory dir)
+           (harness-retry-policy-functions
+            (list (lambda (_) '(:owner "Counted fixture" :count-sends t))))
+           (harness-retry-max-attempts 2) (harness-retry-max-delay 0.001)
+           (harness-admission-max-wait 0.005)
+           (wait-failures 0) (give-up (symbol-function 'harness-admission--give-up))
+           (sid (plist-get (harness-call 'session/create :cwd dir :model "admission-stub:m") :id)))
+      (harness-define-provider 'admission-stub :complete #'harness-admission-test--stub)
+      (let ((pool (harness-admission--pool-of "admission-stub")))
+        (setf (harness-admission--pool-until pool) (+ (float-time) 1000)))
+      (let ((result
+             (cl-letf (((symbol-function 'harness-admission--give-up)
+                        (lambda (entry) (cl-incf wait-failures) (funcall give-up entry))))
+               (harness-test-await (harness-call 'agent/prompt sid "ordinary work") 2))))
+        (should (= 3 wait-failures))
+        (should (eq 'error (plist-get result :stop-reason)))
+        (should (string-match-p "rate limited" (or (plist-get result :error) "")))
+        (should-not (harness-agent-running-p sid))
+        (should (= 0 (harness-admission-test--sent-count)))
+        (should (= 0 (plist-get (harness-admission-test--pool) :queued)))))))
+
+(ert-deftest harness-admission-reload-keeps-live-queue-and-cancel-ownership ()
+  (harness-admission-test-with
+    (let ((harness-admission-max-concurrent 0) events)
+      (let ((handle (harness-admission-admit
+                     (harness-admission-test--request (list :on-event (lambda (e) (push e events)))) #'ignore)))
+        (harness-test-load-module 'admission)
+        (should (= 1 (plist-get (harness-admission-test--pool) :queued)))
+        (funcall (plist-get handle :cancel))
+        (should (equal '((:type done :stop-reason cancelled)) events))
+        (should (= 0 (plist-get (harness-admission-test--pool) :queued)))))))
+
+(ert-deftest harness-admission-a-protocol-terminal-can-still-stop-its-producer ()
+  (harness-admission-test-with
+    (let ((cancelled 0) events)
+      (let ((handle (harness-admission-admit
+                     (harness-admission-test--request (list :on-event (lambda (event) (push event events))))
+                     (lambda (request)
+                       (funcall (plist-get request :on-event) '(:type done :stop-reason error :error-kind protocol))
+                       (list :cancel (lambda () (cl-incf cancelled)))))))
+        (funcall (plist-get handle :cancel))
+        (should (= 1 cancelled))
+        (should (= 1 (length events)))))))
+
+(ert-deftest harness-admission-counted-one-off-calls-exhaust-the-unsent-budget ()
+  (harness-admission-test-with
+    (require 'harness-small)
+    (dolist (module '(tools session agent)) (harness-test-load-module module))
+    (harness-module-start 'retry)
+    (let* ((default-directory dir)
+           (harness-retry-policy-functions (list (lambda (_) '(:owner "fixture" :count-sends t))))
+           (harness-retry-max-attempts 2) (harness-retry-max-delay 0.001)
+           (harness-admission-max-wait 0.005)
+           (sid (plist-get (harness-call 'session/create :cwd dir :model "admission-stub:m") :id))
+           (promise (harness-make-promise)) handle)
+      (harness-define-provider 'admission-stub :complete #'harness-admission-test--stub)
+      (setf (harness-admission--pool-until (harness-admission--pool-of "admission-stub"))
+            (+ (float-time) 1000))
+      (unwind-protect
+          (progn
+            (setq handle (harness-small-ask
+                          (list :model "admission-stub:m" :session (harness-call 'session/get sid)
+                                :ephemeral t :prompts '(recap-system))
+                          (list :on-event (lambda (event)
+                                            (when (eq 'done (plist-get event :type))
+                                              (harness-resolve promise event))))))
+            (should (eq 'error (plist-get (harness-test-await promise 0.3) :stop-reason)))
+            (should (= 0 (harness-admission-test--sent-count)))
+            (should (= 0 (plist-get (harness-admission-test--pool) :queued))))
+        (when handle (funcall (plist-get handle :cancel)))))))
+
+(ert-deftest harness-admission-queue-cancellation-is-not-provider-recovery ()
+  (harness-admission-test-with
+    (let ((pool (harness-admission--pool-of "admission-stub")))
+      (setf (harness-admission--pool-until pool) (+ (float-time) 10)
+            (harness-admission--pool-streak pool) 3)
+      (let ((handle (harness-admission-test--admit)))
+        (funcall (plist-get handle :cancel))
+        (should (= 3 (harness-admission--pool-streak pool)))))))
+
 (provide 'harness-admission-test)
 ;;; harness-admission-test.el ends here

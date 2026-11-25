@@ -57,5 +57,36 @@
   (should (= 24 (length (harness-fuzz-session-decode (make-string 1024 255)))))
   (let ((harness-started t)) (should-error (harness-fuzz-session--check ""))))
 
+(ert-deftest harness-fuzz-session-routine-state-cannot-invalidate-the-wire-prefix ()
+  (let ((summary (harness-fuzz-session--check
+                  (apply #'unibyte-string (cl-loop for i below 12 append (list i (+ 40 i)))) 'prefix)))
+    (should (= (plist-get summary :requests) (plist-get summary :prefix-checks)))
+    (should (> (plist-get summary :prefix-checks) 20))))
+
+(ert-deftest harness-fuzz-session-prefix-oracle-rejects-healthy-turns-with-rewritten-prompts ()
+  (let ((body (symbol-function 'harness-openai--body)) (count 0))
+    (cl-letf (((symbol-function 'harness-openai--body)
+               (lambda (&rest args)
+                 (let ((value (apply body args)))
+                   (plist-put value :tools
+                              (append (plist-get value :tools)
+                                      (list (list :type "function" :function
+                                                  (list :name (format "gratuitous_%d" (cl-incf count)))))))))))
+      (should-error (harness-fuzz-session--check "" 'prefix)))))
+
+(ert-deftest harness-fuzz-session-prefix-oracle-detects-byte-changes-not-just-json-values ()
+  (let ((before (harness-fuzz-session-prefix-check
+                 nil "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")))
+    (should-error (harness-fuzz-session-prefix-check
+                   before "{\"model\":\"m\",\"messages\":[{\"content\":\"hello\",\"role\":\"user\"}]}"))))
+
+(ert-deftest harness-fuzz-session-prefix-allows-append-only-coalescing-not-replacement ()
+  (let ((before (harness-fuzz-session-prefix-check
+                 nil "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"old\"}]}]}")))
+    (should (harness-fuzz-session-prefix-check
+             before "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"old\"},{\"type\":\"text\",\"text\":\"new\"}]}]}"))
+    (should-error (harness-fuzz-session-prefix-check
+                   before "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"edited\"}]}]}"))))
+
 (provide 'harness-fuzz-session-test)
 ;;; harness-fuzz-session-test.el ends here

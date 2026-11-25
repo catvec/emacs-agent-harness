@@ -5,6 +5,7 @@
 ;; and tool implementation hooks are inert; no network or user state is used.
 (require 'cl-lib)
 (defvar harness-fuzz-directory)
+(defvar harness-agent--base-system-prompt)
 (declare-function harness-fuzz-define-target "harness-fuzz" (name &rest arguments))
 
 (defconst harness-fuzz-session-actions
@@ -13,10 +14,91 @@
 
 (defun harness-fuzz-session-decode (bytes &optional ordinary-only)
   "Decode BYTES into at most 24 pairs; ORDINARY-ONLY selects text/tools only."
-  (let ((catalog (if ordinary-only [prompt tools] harness-fuzz-session-actions)))
+  (let ((catalog (cond ((eq ordinary-only 'prefix)
+                        [prompt tools history todos plan runtime name global-system late-tools usage reload token-budget])
+                       (ordinary-only [prompt tools]) (t harness-fuzz-session-actions))))
     (cl-loop for i from 0 below (min 48 (length bytes)) by 2
            collect (list (aref catalog (mod (aref bytes i) (length catalog)))
                          (if (< (1+ i) (length bytes)) (aref bytes (1+ i)) 0)))))
+
+(defun harness-fuzz-session--raw-fields (text &optional array)
+  "Read exact JSON value slices from TEXT, an object or ARRAY.
+Use json.el only to advance over a value: never re-encode it for comparison."
+  (with-temp-buffer
+    (insert (if (multibyte-string-p text) text (decode-coding-string text 'utf-8)))
+    (goto-char (point-min))
+    (let ((json-object-type 'hash-table) (json-array-type 'vector)
+          (close (if array ?\] ?\})) fields)
+      (unless (= (char-after) (if array ?\[ ?\{)) (error "Expected a wire container"))
+      (forward-char)
+      (skip-chars-forward " \n\r\t")
+      (while (/= (char-after) close)
+        (let ((key (unless array (json-read))))
+          (unless array
+            (skip-chars-forward " \n\r\t")
+            (unless (= (char-after) ?:) (error "Missing wire colon"))
+            (forward-char))
+          (skip-chars-forward " \n\r\t")
+          (let ((start (point)))
+            (json-read)
+            (push (cons key (buffer-substring-no-properties start (point))) fields)))
+        (skip-chars-forward " \n\r\t")
+        (when (= (char-after) ?,) (forward-char) (skip-chars-forward " \n\r\t")))
+      (nreverse fields))))
+
+(defun harness-fuzz-session--extends (before after &optional field)
+  "Non-nil when AFTER only appends content to BEFORE's final wire value.
+Chat serializers coalesce adjacent user messages.  Appending a new content
+block to that final message preserves its old content; replacing it does not."
+  (or (equal before after)
+      (and (stringp before) (stringp after)
+           (pcase (aref before 0)
+             (?\[
+              (let ((old (mapcar #'cdr (harness-fuzz-session--raw-fields before t)))
+                    (new (mapcar #'cdr (harness-fuzz-session--raw-fields after t))))
+                (and (>= (length new) (length old))
+                     (equal (butlast old) (take (max 0 (1- (length old))) new))
+                     (or (null old)
+                         (harness-fuzz-session--extends (car (last old)) (nth (1- (length old)) new) field)))))
+             (?\{
+              (let ((old (harness-fuzz-session--raw-fields before))
+                    (new (harness-fuzz-session--raw-fields after)))
+                (and (equal (mapcar #'car old) (take (length old) (mapcar #'car new)))
+                     (cl-loop for pair in old for index from 0
+                              always (if (= index (1- (length old)))
+                                         (harness-fuzz-session--extends (cdr pair) (cdr (nth index new)) (car pair))
+                                       (equal (cdr pair) (cdr (nth index new))))))))
+             (?\" (and (member field '("content" "text" "arguments"))
+                         (string-prefix-p (substring before 0 -1) after)))))))
+
+(defun harness-fuzz-session-prefix-check (before bytes)
+  "Require that BYTES preserves BEFORE's exact prompt fields and message prefix.
+Return the new wire snapshot.  This oracle is independent of the production
+replay comparator, so a silently reset or re-encoded prefix is still a failure."
+  (let* ((fields (harness-fuzz-session--raw-fields bytes))
+         (messages (mapcar #'cdr (harness-fuzz-session--raw-fields
+                                 (cdr (assoc "messages" fields)) t)))
+         (stable (cl-remove-if-not
+                  (lambda (field) (member (car field)
+                                         '("model" "tools" "reasoning" "reasoning_effort" "response_format")))
+                  fields))
+         (snapshot (list :fields stable :messages messages)))
+    (when before
+      (unless (equal stable (plist-get before :fields))
+        (error "Cache prefix changed outside appended conversation messages"))
+      (unless (and (>= (length messages) (length (plist-get before :messages)))
+                   (equal (butlast (plist-get before :messages))
+                          (take (max 0 (1- (length (plist-get before :messages)))) messages))
+                   (let ((old (plist-get before :messages)))
+                     (or (null old)
+                         (harness-fuzz-session--extends (car (last old)) (nth (1- (length old)) messages)))))
+        (let* ((old (plist-get before :messages))
+               (index (cl-loop for item in old for i from 0
+                               unless (equal item (nth i messages)) return i)))
+          (error "Cache prefix rewrote sent message %S: %s -> %s" index
+                 (truncate-string-to-width (or (nth index old) "missing") 300 nil nil "…")
+                 (truncate-string-to-width (or (nth index messages) "missing") 300 nil nil "…")))))
+    snapshot))
 
 (defun harness-fuzz-session--input (schema argument &optional depth)
   "Build inert input for SCHEMA, bounded by DEPTH, varying ARGUMENT."
@@ -57,12 +139,12 @@
     (unwind-protect
         (condition-case err
             (let ((harness-state-directory dir))
-              (harness-fuzz-session--run actions dir))
+              (harness-fuzz-session--run actions dir (eq ordinary-only 'prefix)))
           (error (error "Session actions %S: %s" actions (error-message-string err))))
       (harness-test-reset-bus)
       (ignore-errors (delete-directory dir t)))))
 
-(defun harness-fuzz-session--run (actions dir)
+(defun harness-fuzz-session--run (actions dir &optional preserve-prefix)
   "Run ACTIONS through a real persisted session under DIR."
   (harness-test-reset-bus)
   (dolist (module '(store project config provider tools session agent replay))
@@ -85,6 +167,9 @@
                      :dialect (:reasoning-object t)))
          (starts 0) (ends 0) (requests 0) (executions 0) (turns 0)
          (remaining 0) (batch 0) (argument 0) (serial 0) (reloads 0)
+         (harness-agent--base-system-prompt harness-agent--base-system-prompt)
+         (harness-provider-max-output-tokens harness-provider-max-output-tokens)
+         (prefix nil) (prefix-checks 0)
          (changed nil) system-revision tool-errors called efforts handler sid)
     (setq handler
           (lambda (name _input _context)
@@ -119,6 +204,9 @@
         ((frame (value) (concat "data: " (harness-json-encode value) "\n\n"))
          (wire (_url &rest args)
            (cl-incf requests)
+           (when preserve-prefix
+             (setq prefix (harness-fuzz-session-prefix-check prefix (plist-get args :body)))
+             (cl-incf prefix-checks))
            ;; Decode the actual frozen wire body, rather than bypassing replay
            ;; with an accepting canonical-event fake.
            (let* ((body (harness-json-parse (decode-coding-string (plist-get args :body) 'utf-8)))
@@ -208,7 +296,18 @@
                                        (when (cl-evenp arg) '(:reasoning-object t)))))
             ('reload (reload))
             ('reset-schema (harness-call 'session/set-tool-schema sid nil))
-            ('history (harness-call 'session/hint sid (format "ordinary background hint %d" arg))))
+            ('history (harness-call 'session/hint sid (format "ordinary background hint %d" arg)))
+            ('todos (harness-call 'session/set-todos sid
+                                  (list (list :id "fixture" :content "ordinary task" :status "pending"))))
+            ('plan (harness-call 'session/set-plan sid (format "Plan revision %d" arg)))
+            ('runtime (harness-call 'session/runtime sid :fixture arg))
+            ('name (harness-call 'session/update sid :name (format "Renamed %d" arg)))
+            ('global-system
+             (setq harness-agent--base-system-prompt (format "New default system %d" arg)))
+            ('late-tools (harness-define-tool (format "late_tool_%d" arg) :label "Late tool"
+                          :handler (lambda (&rest _) "inert late result")))
+            ('usage (harness-call 'session/usage-add sid (list :input arg :output 1)))
+            ('token-budget (setq harness-provider-max-output-tokens (+ 100 arg))))
           (unless (memq action '(prompt tools)) (push action changed))
           (turn arg (eq action 'prompt)))
         (reload)
@@ -217,7 +316,7 @@
       (unless (= starts ends turns) (error "Unbalanced turns: %d/%d/%d" starts ends turns))
       (list :turns turns :requests requests :executions executions
             :tools (hash-table-count harness-tools) :called (delete-dups called)
-            :efforts (reverse efforts) :reloads reloads :changes (delete-dups changed)))))
+            :prefix-checks prefix-checks :efforts (reverse efforts) :reloads reloads :changes (delete-dups changed)))))
 
 (harness-fuzz-define-target
  'session-soak
@@ -238,6 +337,14 @@
               (apply #'unibyte-string (cl-loop for i below 24 append (list 1 (+ 2 (* 3 i)))))
               (unibyte-string 1 74 1 77))
  :check (lambda (bytes) (harness-fuzz-session--check bytes t)))
+
+(harness-fuzz-define-target
+ 'cache-prefix
+ :description "Exact serialized prefix preservation across ordinary turns, tools and routine state changes."
+ :timeout 30
+ :seeds (list "" (unibyte-string 1 19 7 11 8 9 10 2 1 77)
+              (apply #'unibyte-string (cl-loop for i below 12 append (list i (+ 40 i)))))
+ :check (lambda (bytes) (harness-fuzz-session--check bytes 'prefix)))
 
 (provide 'harness-fuzz-session)
 ;;; harness-fuzz-session.el ends here

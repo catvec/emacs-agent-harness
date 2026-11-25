@@ -1,0 +1,9 @@
+== test.sh 2026-11-25 00:57:51 (3 files)
+ok    harness-retry-test.el                                Ran 24 tests, 24 results as expected, 0 unexpected (2026-11-25 00:57:50-0500, 2.931290 sec)
+ok    harness-admission-test.el                            Ran 39 tests, 39 results as expected, 0 unexpected (2026-11-25 00:57:51-0500, 4.319186 sec)
+ok    harness-fuzz-limits-test.el                          Ran 5 tests, 5 results as expected, 0 unexpected (2026-11-25 00:57:50-0500, 2.903250 sec)
+
+TEST RESULT: PASS (selected run)
+result record: /home/noah/documents/ai/emacs-agent-harness/scripts/.dev/test-stamp.json
+full logs: /home/noah/documents/ai/emacs-agent-harness/scripts/.dev/test-logs
+test.sh: 3 files, 0 failed, 5s wall (4 at a time)

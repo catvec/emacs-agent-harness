@@ -1,0 +1,59 @@
+Fuzz run local-stability with AFL++ dumb mode (seed 20261129): 53 inputs across 1 target in 107.5s [stopped: seconds]
+  shared-rate-limits: 53 inputs at 0.7/s, 14 crashes
+  1. shared-rate-limits: crash (exit 42)
+     shared-rate-limits: error: Rate-limit actions ((1 1) (0 0) (2 1) (0 1) (0 2) (0 3) (0 4) (0 5) (8 0) (2 4)): Session cannot continue after provider recovery: (:stop-reason error :error "Cache prefix rewrote already-sent messages (including system prompt)" :duration 0.0)
+     input: "\001\001\000\000\002\001\000\001\000\002\000\003\000\004\000\005\010\000\002\004"
+     replay: fuzz_replay target: shared-rate-limits crash: 1
+  2. shared-rate-limits: crash (exit 42)
+     shared-rate-limits: error: Rate-limit actions ((1 2) (0 0) (0 6) (0 7) (3 0) (2 4) (1 0)): Session cannot continue after provider recovery: (:stop-reason error :error "Cache prefix rewrote already-sent messages (including system prompt)" :duration 0.0)
+     input: "\001\002\000\000\000\006\000\007\003\000\002\004\001\000"
+     replay: fuzz_replay target: shared-rate-limits crash: 2
+  3. shared-rate-limits: crash (exit 42)
+     shared-rate-limits: error: Rate-limit actions ((1 8) (0 0) (0 1) (3 0) (1 5) (0 2) (7 1) (2 4)): Session cannot continue after provider recovery: (:stop-reason error :error "Cache prefix rewrote already-sent messages (including system prompt)" :duration 0.0)
+     input: "\001\010\000\000\000\001\003\000\001\005\000\002\007\001\002\004"
+     replay: fuzz_replay target: shared-rate-limits crash: 3
+  4. shared-rate-limits: crash (exit 42), minimised
+     shared-rate-limits: error: Rate-limit actions ((3 48) (3 48) (3 48) (3 48) (3 48) (3 48) (1 48) (0 0)): Session cannot continue after provider recovery: (:stop-reason error :error "Cache prefix rewrote sent message 1: {\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Normal work 1\"}]} -> {\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Normal work 1\"},{\"type\":\"text\",\"text\":\"Recovery work\"}]}" :duration 0.0)
+     input: "000000000000\0010\000"
+     replay: fuzz_replay target: shared-rate-limits crash: 4
+  5. shared-rate-limits: crash (exit 42)
+     shared-rate-limits: error: Rate-limit actions ((4 242) (5 0) (5 0) (0 0) (1 3) (0 4) (7 2) (4 52) (2 0) (0 1) (3 0) (4 7) (2 4) (7 0)): Session cannot continue after provider recovery: (:stop-reason error :error "Cache prefix rewrote already-sent messages (including system prompt)" :duration 0.04999995231628418)
+     input: "\004\362\005\000\005\000\000\000\001\003\000\004\007\002\0044\354\000\000\001\003\000\004\007\002\004\020\000"
+     replay: fuzz_replay target: shared-rate-limits crash: 5
+  6. shared-rate-limits: crash (exit 42)
+     shared-rate-limits: error: Rate-limit actions ((1 2) (0 0) (0 1) (3 0) (4 0) (5 0) (0 0) (0 1) (3 0) (4 0) (0 243) (0 77)): Session cannot continue after provider recovery: (:stop-reason error :error "Cache prefix rewrote already-sent messages (including system prompt)" :duration 0.04999995231628418)
+     input: "\012\002\000\000\000\001\003\000\004\000\005\000\000\000\000\001\003\000\004\000\000\363\000M"
+     replay: fuzz_replay target: shared-rate-limits crash: 6
+  7. shared-rate-limits: crash (exit 42)
+     shared-rate-limits: error: Rate-limit actions ((0 0) (2 0) (0 0) (2 0) (0 202) (3 32) (0 0) (2 0) (1 10) (0 0) (1 1) (8 0) (4 255) (5 0) (5 0) (0 0) (0 4)): Session cannot continue after provider recovery: (:stop-reason error :error "Cache prefix rewrote already-sent messages (including system prompt)" :duration 0.0)
+     input: "\000\000\200\000\000\000\200\000\000\312\377 \000\000\200\000\001\012\000\000\001\001\032\000\312\377 \000\005\000\000\000\000\004"
+     replay: fuzz_replay target: shared-rate-limits crash: 7
+  8. shared-rate-limits: crash (exit 42)
+     shared-rate-limits: error: Rate-limit actions ((4 0) (3 1) (0 230) (3 0) (3 1) (1 8) (0 2) (4 4) (0 2) (4 4) (1 0)): Session cannot continue after provider recovery: (:stop-reason error :error "Cache prefix rewrote already-sent messages (including system prompt)" :duration 0.04999995231628418)
+     input: "\345\000\003\001\000\346\003\000\003\001\001\010\000\002\004\004\000\002\004\004\001"
+     replay: fuzz_replay target: shared-rate-limits crash: 8
+  9. shared-rate-limits: crash (exit 42)
+     shared-rate-limits: error: Rate-limit actions ((4 2) (2 5) (0 5) (0 0) (0 0) (1 8) (0 2) (0 0) (0 1) (2 0) (2 5) (0 0) (0 0) (1 8) (0 2) (4 4) (0 2) (0 2) (4 6) (0 5) (0 0) (0 255) (7 255) (3 255)): Session cannot continue after provider recovery: (:stop-reason error :error "Cache prefix rewrote sent message 1: {\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Normal work 4\"}]} -> {\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Normal work 4\"},{\"type\":\"text\",\"tex...
+     input: "\004\002\002\005\000\005\000\000\000\000\001\010\000\002\000\000\000\001\024\000&\005\000\000\000\000\001\010\000\002\004\004\000\002\000\002\004\006\000\005\000\000\000\377\372\377\377\377\377\002\001\005\000\000\000\000\001\010\000\002\004\004\000\002\004\004\006\000"
+     replay: fuzz_replay target: shared-rate-limits crash: 9
+  10. shared-rate-limits: crash (exit 42)
+     shared-rate-limits: error: Rate-limit actions ((5 2) (0 0) (0 0) (1 8) (0 2) (4 4) (0 2) (5 0) (0 0) (0 1) (3 31) (4 4) (2 4) (6 0)): Session cannot continue after provider recovery: (:stop-reason error :error "Cache prefix rewrote sent message 1: {\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Normal work 3\"}]} -> {\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Normal work 3\"},{\"type\":\"text\",\"text\":\"Recovery work\"}]}" :duration 0.0)
+     input: "\005\002\000\000\000\000\001\010\000\002\004\004\000\002\005\000\000\000\000\001\003\037\004\004\002\004\006\000"
+     replay: fuzz_replay target: shared-rate-limits crash: 10
+  11. shared-rate-limits: crash (exit 42)
+     shared-rate-limits: error: Rate-limit actions ((4 4) (1 5) (0 0) (0 0) (1 8) (0 0) (1 8) (0 2) (4 4) (0 1) (3 0) (4 0) (2 4) (5 0)): Session cannot continue after provider recovery: (:stop-reason error :error "Cache prefix rewrote sent message 1: {\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Normal work 2\"}]} -> {\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Normal work 2\"},{\"type\":\"text\",\"text\":\"Recovery work\"}]}" :duration 0.0)
+     input: "\004\004\001\005\000\000\000\000\001\010\000\000\001\010\000\002\004\004\000\001\003\000\004\000\002\004\005\000"
+     replay: fuzz_replay target: shared-rate-limits crash: 11
+  12. shared-rate-limits: crash (exit 42)
+     shared-rate-limits: error: Rate-limit actions ((4 2) (5 0) (0 0) (0 1) (3 0) (4 4) (2 5) (0 0) (0 0) (1 3) (0 4) (0 2) (4 6) (0 2) (4 6) (0 0)): Session cannot continue after provider recovery: (:stop-reason error :error "Cache prefix rewrote sent message 1: {\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Normal work 5\"}]} -> {\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Normal work 5\"},{\"type\":\"text\",\"text\":\"Recovery work\"}]}" :duration 0.0499999523162841...
+     input: "\004\002\005\000\000\000\000\001\003\000\004\004\002\005\000\000\000\000\001\003\000\004\000\002\004\006\000\002\004\006\000"
+     replay: fuzz_replay target: shared-rate-limits crash: 12
+  13. shared-rate-limits: crash (exit 42)
+     shared-rate-limits: error: Rate-limit actions ((4 2) (5 65) (5 0) (0 0) (0 1) (8 0) (2 4) (4 0) (2 4) (0 0) (0 0) (1 3) (0 4) (0 2) (4 6) (0 0)): Session cannot continue after provider recovery: (:stop-reason error :error "Cache prefix rewrote sent message 1: {\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Normal work 6\"}]} -> {\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Normal work 6\"},{\"type\":\"text\",\"text\":\"Recovery work\"}]}" :duration 0.049999952316284...
+     input: "\004\002\005A\005\000\000\000\000\001\010\000\002\004\004\000\002\004\000\000\000\000\001\003\000\004\000\002\004\006\000"
+     replay: fuzz_replay target: shared-rate-limits crash: 13
+  14. shared-rate-limits: crash (exit 42)
+     shared-rate-limits: error: Rate-limit actions ((4 2) (0 0) (0 0) (1 8) (0 2) (4 4) (0 2) (4 0)): Session cannot continue after provider recovery: (:stop-reason error :error "Cache prefix rewrote sent message 1: {\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Normal work 3\"}]} -> {\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Normal work 3\"},{\"type\":\"text\",\"text\":\"Recovery work\"}]}" :duration 0.04999995231628418)
+     input: "\004\002\000\000\000\000\001\010\000\002\004\004\000\002\004\000"
+     replay: fuzz_replay target: shared-rate-limits crash: 14
+A crash is a signal, a broken invariant or a hang at a boundary that must not break; afl-tmin minimised the ones marked so.

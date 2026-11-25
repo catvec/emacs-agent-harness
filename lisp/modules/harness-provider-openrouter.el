@@ -112,6 +112,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'harness-request-lifecycle)
 (require 'subr-x)
 (require 'harness-core)
 (require 'harness-util)
@@ -2869,53 +2870,41 @@ original request is sent intact through the ordinary strict replay seam."
   "Non-nil when STATE, a shared dispatch state, was cancelled."
   (car state))
 
+(defun harness-openrouter--cancel-scope (state)
+  "Return STATE's core-owned cancellation scope, upgrading an older state list."
+  (unless (nth 3 state)
+    (when (< (length state) 4)
+      (nconc state (make-list (- 4 (length state)) nil)))
+    (setf (nth 3 state) (harness-request-cancel-scope-create)))
+  ;; A handle constructed before reload still marks the legacy car.
+  (when (car state)
+    (setf (harness-request-cancel-scope-requested (nth 3 state)) t))
+  (nth 3 state))
+
 (defun harness-openrouter--cancel-handle (state)
-  "Return a cancel handle for STATE, the shared state of one dispatch.
-STATE is a list whose car is the cancelled flag, whose cadr is the
-transport's own cancel function, when the request reached one, and whose
-caddr is how to leave a wait for the catalogue
-\(`harness-openrouter--catalogue-wait-abandon'), when the request is
-waiting for one.
-Cancelling marks STATE first and is idempotent, so a repeated cancel, one
-before the catalogue resolves, or one during the transport all do the
-right thing, and a callback that arrives afterwards sees the flag and
-emits nothing.  A cancelled dispatch stops waiting at once, so a turn the
-user cancelled holds no timer and sends nothing when a reading arrives."
-  (list :cancel
-        (lambda ()
-          (unless (car state)
-            (setcar state t)
-            (let ((inner (cadr state)))
-              (when (functionp inner) (funcall inner)))
-            (let ((wait (nth 2 state)))
-              (when (functionp wait) (funcall wait))))
-          nil)))
+  "Return STATE's handle; shared core owns late and independently failing resources."
+  (list :cancel (lambda ()
+                  (setcar state t)
+                  (harness-request-cancel-scope-cancel
+                   (harness-openrouter--cancel-scope state)))))
 
 (defun harness-openrouter--state-wait (state promise &optional model)
-  "Record PROMISE, a wait for the catalogue, in STATE for a cancel to end.
-The wait belongs to this dispatch alone: cancelling rejects it here rather
-than at its bound, and MODEL's own wait, which the other steps share,
-carries on -- with one fewer step waiting, since this one has gone.
-
-MODEL, when given, is what the cancel returns the place in: the promise
-PROMISE is derived from the step's own wait by the time a cancel could
-reach it, so the place is dropped by model and not by looking PROMISE up."
-  (setcar (nthcdr 2 state)
-          (lambda ()
-            (harness-openrouter--catalogue-wait-abandon promise model)))
+  "Attach this dispatch's catalogue wait to its core cancellation scope."
+  (let ((cancel (lambda () (harness-openrouter--catalogue-wait-abandon promise model))))
+    ;; Old handles retained by an active request still read these two slots.
+    (setcar (nthcdr 2 state) cancel)
+    (harness-request-cancel-scope-add
+     (harness-openrouter--cancel-scope state) 'catalogue cancel))
   promise)
 
 (defun harness-openrouter--start-pinned (state snapshot request on-event)
-  "Send REQUEST under SNAPSHOT, keeping the transport handle in STATE.
-STATE is shared with the cancel handle.  A dispatch that is already
-cancelled sends nothing; otherwise the request goes through
-`harness-openrouter--dispatch', which checks the whole policy again at
-the moment the body is built.  The transport handle, when the request
-reaches one, is what a later cancel reaches; a cancel before this point
-has already set the flag, and nothing is sent."
-  (unless (car state)
-    (let ((sent (harness-openrouter--dispatch snapshot request on-event)))
-      (setcar (cdr state) (plist-get sent :cancel))))
+  "Send REQUEST under SNAPSHOT; core cancels a handle arriving after cancellation."
+  (unless (harness-openrouter--cancelled-p state)
+    (let ((handle (harness-openrouter--dispatch snapshot request on-event)))
+      (when (functionp (plist-get handle :cancel))
+        (setcar (cdr state) (plist-get handle :cancel))
+        (harness-request-cancel-scope-add
+         (harness-openrouter--cancel-scope state) 'transport (plist-get handle :cancel)))))
   nil)
 
 (defvar harness-openrouter--completed-sends (make-hash-table :test 'equal)

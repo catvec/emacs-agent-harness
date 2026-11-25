@@ -1,0 +1,41 @@
+Running 1 tests (2026-11-25 00:43:47-0500, selector ‘"counted-one-off"’)
+Test harness-admission-counted-one-off-calls-exhaust-the-unsent-budget backtrace:
+  signal(harness-error ("timed out after 0s waiting for the promise"))
+  apply(signal (harness-error ("timed out after 0s waiting for the pro
+  (setq value-734 (apply fn-732 args-733))
+  (unwind-protect (setq value-734 (apply fn-732 args-733)) (setq form-
+  (if (unwind-protect (setq value-734 (apply fn-732 args-733)) (setq f
+  (let (form-description-736) (if (unwind-protect (setq value-734 (app
+  (let ((value-734 'ert-form-evaluation-aborted-735)) (let (form-descr
+  (let* ((fn-732 #'eq) (args-733 (condition-case err (list 'error (pli
+  (progn (setq handle (harness-small-ask (list :model "admission-stub:
+  (unwind-protect (progn (setq handle (harness-small-ask (list :model 
+  (let* ((default-directory dir) (harness-retry-policy-functions (list
+  (progn (require 'harness-small) (let ((tail '(tools session agent)))
+  (unwind-protect (progn (require 'harness-small) (let ((tail '(tools 
+  (let ((harness-admission t) (harness-admission-delay 0.02) (harness-
+  (progn (harness-test-reset-bus) (let ((tail '(store project config p
+  (unwind-protect (progn (harness-test-reset-bus) (let ((tail '(store 
+  (let* ((dir (file-name-as-directory (make-temp-file "harness-test-" 
+  #f(lambda () [t] (let* ((dir (file-name-as-directory ...)) (harness-
+  #f(compiled-function () #<bytecode -0x10a970d8b33af6cd>)()
+  handler-bind-1(#f(compiled-function () #<bytecode -0x10a970d8b33af6c
+  ert--run-test-internal(#s(ert--test-execution-info :test #s(ert-test
+  ert-run-test(#s(ert-test :name harness-admission-counted-one-off-cal
+  ert-run-or-rerun-test(#s(ert--stats :selector "counted-one-off" :tes
+  ert-run-tests("counted-one-off" #f(compiled-function (event-type &re
+  ert-run-tests-batch("counted-one-off")
+  ert-run-tests-batch-and-exit("counted-one-off")
+  eval((ert-run-tests-batch-and-exit "counted-one-off") t)
+  command-line-1(("-L" "/var/tmp/harness-lifecycle-base/lisp" "-L" "/v
+  command-line()
+  normal-top-level()
+Test harness-admission-counted-one-off-calls-exhaust-the-unsent-budget condition:
+    (harness-error "timed out after 0s waiting for the promise")
+   FAILED  1/1  harness-admission-counted-one-off-calls-exhaust-the-unsent-budget (0.970677 sec) at lisp/modules/harness-admission-test.el:1053
+
+Ran 1 tests, 0 results as expected, 1 unexpected (2026-11-25 00:43:48-0500, 1.045430 sec)
+
+1 unexpected results:
+   FAILED  harness-admission-counted-one-off-calls-exhaust-the-unsent-budget
+

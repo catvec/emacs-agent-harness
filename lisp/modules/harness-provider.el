@@ -1534,7 +1534,8 @@ cancelled, for a provider whose cancel emits no `done'.  The provider
 never sees those keys, and the handle then carries the internal
 session's id as `:session', for a caller that shows what the call
 asked and answered."
-  (pcase-let* ((job-id (harness-provider--job-start request))
+  (pcase-let* ((request (if (fboundp 'harness-retry-prepare) (harness-retry-prepare request) request))
+               (job-id (harness-provider--job-start request))
                (request (if (or (plist-member request :job) (plist-member request :job-parent)
                                 (plist-member request :job-project))
                             (harness-plist-remove request :job :job-parent :job-project)
@@ -1550,7 +1551,10 @@ asked and answered."
                            ;; Inside the guard, so the recording too sees
                            ;; `done' once.
                            (harness-provider--guard-events
-                            (if recorder (plist-get recorder :on-event) caller)
+                            (let ((deliver (if recorder (plist-get recorder :on-event) caller)))
+                              (if (fboundp 'harness-retry-observe)
+                                  (harness-retry-observe request deliver)
+                                deliver))
                             cancel-transport control)))
                ;; One place bounds what a completion may ask a model to
                ;; write, and it does nothing unless the user set a ceiling

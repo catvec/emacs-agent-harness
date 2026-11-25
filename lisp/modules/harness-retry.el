@@ -83,8 +83,8 @@
 Counted per turn, so a turn that keeps failing ends however many steps
 it ran.  Nil or 0 never tries again.  For a provider that authorises
 and counts its own sends (`harness-retry-policy-functions') it is also
-the most times one request may be sent: the first attempt and the tries
-after it."
+the most retries of one logical request.  The first attempt and its retries
+count failed admissions as well as sends; the wire-send count remains separate."
   :type 'integer :group 'harness)
 
 (defcustom harness-retry-delay 1.0
@@ -113,8 +113,9 @@ It is measured from the request's first send, so an attempt's own
 duration counts, and a retry is scheduled only when its wait would start
 the next attempt inside what is left: a wait longer than that stops the
 request at once, with the reason, rather than sleeping first and finding
-the bound past at the next send.  Only a provider whose policy counts
-its sends (`harness-retry-policy-functions') has a clock here, so an
+the bound past at the next send.  A counted request's queued admission
+is measured too: waiting cannot restart its clock at the first send.
+Only a provider whose policy counts sends (`harness-retry-policy-functions') has a clock here, so an
 ordinary provider's requests are not measured."
   :type '(choice (const :tag "No bound" nil) (number :tag "Seconds"))
   :group 'harness)
@@ -246,6 +247,21 @@ the wire."
   (retrying nil)   ; the next send repeats this request, not a new one
   (authority nil)) ; the provider's own record of what authorised its last send
 
+;; Preserve the layout of budgets held by active requests during reload.
+;; This metadata belongs to each exact budget, not to its session, and is
+;; collected when its request and callbacks no longer reference it.
+(defvar harness-retry--admissions (make-hash-table :test 'eq :weakness 'key)
+  "Exact request budget -> admission count, preparation flag and wait clock.")
+
+(defun harness-retry--admission-state (state)
+  "Return shared-core admission metadata for STATE."
+  (or (gethash state harness-retry--admissions)
+      (puthash state (list :prepared nil :waits 0 :since nil :created (float-time)) harness-retry--admissions)))
+
+(defun harness-retry--request-waits (state)
+  "Return STATE's failed admission count, separate from its actual sends."
+  (plist-get (harness-retry--admission-state state) :waits))
+
 (defconst harness-retry--request-key :harness-retry-request
   "Key under which the state of a logical request travels on it.
 A request and the `done' event of its attempt both carry it, so a layer
@@ -255,8 +271,8 @@ much of its budget it spent.")
 (defun harness-retry-state-of (thing)
   "Return the `harness-retry--request' THING carries, or nil.
 THING is a request or the `done' event's keys, and both are plists: a
-request carries none until its first send, and one is never read from
-another request that happens to be nested inside it."
+a counted request carries its core budget before admission, and one is never
+read from another request that happens to be nested inside it."
   (when (listp thing)
     (let ((state (plist-get thing harness-retry--request-key)))
       (and (harness-retry--request-p state) state))))
@@ -283,13 +299,57 @@ provider's events are unchanged -- and no other event is touched."
                  (harness-retry-state-of request))
     event))
 
+(defun harness-retry-prepare (request)
+  "Attach one counted retry budget to REQUEST before admission can wait.
+A retry carries its previous budget; a fresh logical request gets its own.
+No send is counted here.  Providers still authorize actual sends themselves."
+  (if (not (harness-retry-counted-p (plist-get request :session))) request
+    (let ((state (harness-retry-state-of request)))
+      (unless (and state (harness-retry--request-retrying state))
+        (setq state (make-harness-retry--request)))
+      (let ((metadata (harness-retry--admission-state state)))
+        (setf (plist-get metadata :prepared) t))
+      (harness-retry-attach request state))))
+
+(defun harness-retry-observe (request deliver)
+  "Carry REQUEST's budget through normalized terminal events to DELIVER.
+A local failure before any authorized send must spend an attempt too.  The
+provider may attach authority, but may not lose the caller's retry budget."
+  (let* ((state (harness-retry-state-of request))
+         (spent (and state (harness-retry-attempts state))))
+    (lambda (event)
+      (unwind-protect
+          (condition-case err
+              (when (and state (eq (plist-get event :type) 'done))
+                (when (and (eq (plist-get event :stop-reason) 'error)
+                           (= spent (harness-retry-attempts state)))
+                  (let ((metadata (harness-retry--admission-state state)))
+                    (cl-incf (plist-get metadata :waits))
+                    (unless (plist-get metadata :since)
+                      (setf (plist-get metadata :since) (plist-get metadata :created)))))
+                (unless (harness-retry-state-of event)
+                  (setq event (harness-retry--carry event request))))
+            (error (harness-log 'error "retry: terminal accounting failed: %s"
+                                (harness-error-short-message err))))
+        (funcall deliver event)))))
+
+(defun harness-retry-note-wait (request)
+  "Start REQUEST's queued-admission clock without pretending it was sent."
+  (when-let* ((state (harness-retry-state-of request)))
+    (let ((metadata (harness-retry--admission-state state)))
+      (unless (plist-get metadata :since)
+        (setf (plist-get metadata :since) (float-time))))))
+
+(defun harness-retry-attempts (state)
+  "Count STATE's actual sends and failed admissions, keeping them distinct."
+  (+ (harness-retry--request-count state) (harness-retry--request-waits state)))
+
 (defun harness-retry-elapsed (state)
-  "Return how many seconds STATE's request has taken, or nil.
-Nil when no send was counted for it: nothing measured it, so no clock
-bounds it."
-  (when (and (harness-retry--request-p state)
-             (harness-retry--request-since state))
-    (- (float-time) (harness-retry--request-since state))))
+  "Return STATE's elapsed time since its first send or queued admission."
+  (when (harness-retry--request-p state)
+    (let ((times (delq nil (list (harness-retry--request-since state)
+                                (plist-get (harness-retry--admission-state state) :since)))))
+      (when times (max 0 (- (float-time) (apply #'min times)))))))
 
 (defun harness-retry-send (request)
   "Take REQUEST's next send from the budget of the request it belongs to.
@@ -320,9 +380,12 @@ module's (`harness-retry-counted-p')."
       ;; A carried state is the request in hand; one that was not carried
       ;; as a retry starts a budget of its own, so a fresh request is
       ;; never charged to another one that shares its session.
-      (unless (and state (harness-retry--request-retrying state))
+      (unless (and state (or (harness-retry--request-retrying state)
+                             (plist-get (harness-retry--admission-state state) :prepared)))
         (setq state (make-harness-retry--request)))
-      (setf (harness-retry--request-retrying state) nil)
+      (let ((metadata (harness-retry--admission-state state)))
+        (setf (harness-retry--request-retrying state) nil
+              (plist-get metadata :prepared) nil))
       (unless (harness-retry--request-since state)
         (setf (harness-retry--request-since state) (float-time)))
       (let ((refusal (harness-retry--send-refusal state policy)))
@@ -341,15 +404,19 @@ lowered while a retry waited refuses that retry here."
   (let* ((owner (or (plist-get policy :owner) "the provider"))
          (most (max 0 (or harness-retry-max-attempts 0)))
          (allowed (1+ most))
-         (count (harness-retry--request-count state))
+         (count (harness-retry-attempts state))
          (seconds harness-retry-max-seconds)
          (elapsed (harness-retry-elapsed state)))
     (cond
      ((>= count allowed)
       (cons 'retry-budget
-            (format "%s: one request may make %d send%s, and %d %s made"
-                    owner allowed (if (= allowed 1) "" "s")
-                    count (if (= count 1) "was" "were"))))
+            (if (> (harness-retry--request-waits state) 0)
+                (format "%s: one request may make %d attempts; %d sends and %d failed admissions used"
+                        owner allowed (harness-retry--request-count state)
+                        (harness-retry--request-waits state))
+              (format "%s: one request may make %d send%s, and %d %s made"
+                      owner allowed (if (= allowed 1) "" "s")
+                      count (if (= count 1) "was" "were")))))
      ((and (numberp seconds) (numberp elapsed) (>= elapsed seconds))
       (cons 'retry-budget
             (format "%s: one request and its retries may take %s s, and %d s passed"
@@ -526,7 +593,7 @@ than it was sent, and two requests of one session never share it."
   (if (harness-retry-counted-p session)
       (let ((state (or (harness-retry-state-of failure)
                        (harness-retry-state-of request))))
-        (if state (harness-retry--request-count state) 0))
+        (if state (harness-retry-attempts state) 0))
     (1+ (gethash (plist-get session :id) harness-retry--attempts 0))))
 
 (defun harness-retry--request-elapsed (session request failure)
@@ -620,7 +687,7 @@ SESSION, which is what a step of a turn uses."
   (if (harness-retry-counted-p session)
       (let ((state (or (harness-retry-state-of failure)
                        (harness-retry-state-of request))))
-        (if state (harness-retry--request-count state) 0))
+        (if state (harness-retry-attempts state) 0))
     (if fallback
         fallback
       (1+ (gethash (plist-get session :id) harness-retry--attempts 0)))))

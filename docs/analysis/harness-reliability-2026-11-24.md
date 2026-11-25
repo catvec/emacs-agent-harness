@@ -388,3 +388,84 @@ required successful admission. The repairs break that cycle by recording a
 fresh baseline for legitimate divergence. The normal-session target now catches
 that outcome directly, without requiring a native crash or a detailed oracle
 for every module.
+
+
+### November 25: shared retries, cancellation and prefix preservation
+
+The repeated `0 of 3` waits in the conflict-resolver evidence have a reproduced
+accounting explanation. Admission may reject a queued request before a provider
+sends it. The old counted retry budget was created by the adapter at the send,
+and an admission timeout returned no such state. Shared retry then read zero
+attempts and no elapsed clock. A turn with two retries configured failed
+admission nine times, until the agent's separate eight-retry safety cap stopped
+it. A one-off call has no agent cap: the matching regression timed out without a
+terminal reply while the pool remained closed. These tests fail at `fa19846`.
+This proves a mechanism matching the recorded messages; it does not retrospectively
+recover the missing terminal error of resolver `09661446`.
+
+The provider-independent request funnel now prepares the logical retry budget
+before admission, and its normalized terminal observer preserves that identity
+through local refusals as well as adapter responses. Failed admissions and local
+pre-send failures consume attempts separately from authorized sends. A queued
+request's elapsed bound includes its wait; it cannot start the clock again at
+its eventual first send. The first attempt plus the configured retry count is
+the bound for the whole logical request. Two requests of one session still own
+different budgets. Adapter policy/price/pin checks and send authorization remain
+in the provider that can interpret them.
+
+Five further admission regressions failed before repair: terminal accounting
+could interrupt delivery, cancellation could free a slot without settling its
+caller, a queued start could lose cancellation of its late producer handle,
+a producer that threw after completion could publish a second terminal event,
+and a reset's throwing observer could prevent other cancellations or erase a
+reentrant successor queue. Admission now uses the existing shared lifecycle for
+terminal claims, unconditional release, late cancellation and duplicate fencing.
+Reset detaches old queues before notifying observers and isolates those callbacks.
+A consumer exception still propagates to a direct caller as before, after cleanup;
+it is distinguished from producer startup failure.
+
+Two OpenRouter regressions also failed before repair: a throwing transport
+canceller skipped catalogue-wait cleanup, and cancellation while dispatch was
+constructing its handle missed that returned transport. Their resource ownership
+now uses the provider-independent cancellation scope in
+`harness-request-lifecycle.el`. Each resource cancels independently, failed
+cancellation can be retried, and resources acquired after cancellation are stopped
+when attached. Catalogue decoding, coalesced catalogue reads, routing identity,
+privacy, price and endpoint policy remain adapter-specific. This is a bounded
+migration of reproduced failure mechanics, not a new scheduler or a wholesale
+replacement of time-tested routing code.
+
+Reload compatibility is deliberate: existing entry and retry structs retain their
+layout. Core lifecycle/admission metadata is keyed weakly by each exact live
+object, so another session cannot acquire its state and unused metadata can be
+collected. Legacy OpenRouter cancellation slots remain populated for handles
+constructed before reload. Tests cover a retained queued handle and the legacy
+adapter handle. A terminal protocol error can still stop its producer after the
+consumer has already been finished, without publishing another terminal event.
+
+The new `shared-rate-limits` AFL target drives eight persisted sessions through
+the actual adapter and shared core, using local HTTP/catalogue fixtures and
+single-threaded virtual time. It includes one-off calls, DeepInfra/Cohere pools,
+Retry-After forms, streamed errors, resets, outages and cancellation. Its normal
+recovery requirement is another successful prompt on every original session,
+without clearing their persisted state. The target fails against `fa19846` on the
+aggregate retry bound. A deliberately lost budget and a stranded caller are also
+rejected by its oracle.
+
+The earlier cache soak proved continuation, not cache preservation. The new
+`cache-prefix` target independently compares exact serialized prompt values and
+append-only history through normal turns, tools, metadata changes, late tools,
+changed defaults and reload. It rejects prefix rewrites even when turns succeed;
+output-budget metadata is allowed to change. The combined rate-limit target also
+uses this oracle across retries and recovery. An initial composition reported
+legitimate coalescing of adjacent user messages: the old final content block was
+unchanged and a new one was appended. The detector now permits that append while
+still rejecting replacement/reordering, rather than changing the serializer to
+satisfy an over-strict assertion. Saved findings are replayed after this correction.
+TTL, provider eviction and provider-internal prefix behavior remain outside the
+client-side guarantee. Deliberate model/system/schema changes are separately
+labelled recovery cases, not evidence of preserved cache prefixes.
+
+Reproductions, before/after logs and AFL artifacts are retained in
+[the shared retry evidence](../evidence/shared-retry/README.md). Full committed-tree
+verification is checked by `scripts/test.sh --status`.
