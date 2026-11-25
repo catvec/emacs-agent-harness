@@ -144,6 +144,8 @@ may segfault Emacs and the campaign survives it.
 | `http-headers` | HTTP headers, disposition and URL file names |
 | `provider-events` | raw event envelopes, terminal normalization and the exactly-once callback guard |
 | `openai-sse` | real SSE and OpenAI-compatible decoding, chunk invariance, mandatory terminal delivery and late-event fencing |
+| `session-turns` | ordinary text/tool turns with inert implementations; every turn must succeed |
+| `session-soak` | ordinary multi-step turns through real encoding, tool dispatch and persistence; cache changes between turns |
 | `acp-conversation` | valid standard ACP command sequences through real wire codecs, dispatch, sessions, turns, tools and cold reload |
 
 The raw targets are pure boundaries. The conversation target uses the
@@ -242,3 +244,51 @@ malformed and seeded event sequences through the real agent and persistence,
 then checks another prompt and a cold load of the same session. It runs in the
 ordinary ERT suite without requiring AFL++. The provider-events target deliberately
 passes malformed envelopes to the guard rather than filtering them out first.
+
+
+## Ordinary session soak and cache breaks
+
+```sh
+TMPDIR=/var/tmp .harness/plugins/fuzz/run.sh session-turns 60 20261125
+TMPDIR=/var/tmp .harness/plugins/fuzz/run.sh session-soak 60 20261124
+```
+
+`session-turns` runs ordinary text/tool turns with no deliberate cache changes.
+`session-soak` adds the cache mutations below. Both use the same runner,
+not per-tool adapters. Each runs one persisted session through ordinary prompts, text replies,
+1–3 tool calls per step and 1–2 tool steps per turn. Each input controls up to
+24 between-turn actions, plus an initial prompt and two prompts after a cold
+session load. The main oracle is deliberately straightforward: **every turn
+must finish successfully and the next prompt must work**. An error, unresolved
+promise, tool error or leftover active interaction is a finding. Cancellation
+and expected provider failures belong to the separate adversarial targets.
+
+It loads the 78 built-in tool declarations currently in `lisp/modules`, replacing
+all their implementation hooks (handlers, path/subject resolvers and computer
+selectors) with inert handlers. Synchronous and deferred results both run through
+the actual permission filter, dispatcher, tool result storage and agent loop.
+Two corpus seeds together call every declaration, including `hand_in` under a
+fixture task association. No real command, edit, notification, computer action,
+subagent, task board or merge executes. Plugin tools and external MCP tools are
+not in this catalog; their declarations need a separate opt-in fixture.
+
+The provider uses the actual OpenAI body builder, tool-name mapping, frozen
+replay seam, SSE parser and event decoder. Only HTTP is fake: it reads the real
+serialized request and returns legal text or tool calls naming the offered
+tools, in variable chunk boundaries. Responses can use a reasoning object or a
+scalar reasoning field. No real model or network connection is used.
+
+The cache target can revise a tool schema or
+description under its settled name, deliver a late effort catalogue, change
+thinking/model/system rendering, reset the settled schema, append a hint, change
+the reasoning dialect or cold-load the session. These are valid state changes,
+not malformed response injections. The late-effort action reproduces the
+historical `reasoning.effort changed with no recorded reset` failure when the
+old replay module is substituted. The tool definitions are reread each run,
+so the catalog follows code changes without a bespoke adapter for each tool.
+
+This exercises short sessions and in-process async callbacks on one thread.
+It does not test actual tool implementations, real provider outages, network
+sockets, process crashes or every compaction/permission workflow. Stock Emacs
+is not AFL-instrumented, and a whole session per input is relatively slow.
+AFL's crash exit 42 also represents the logical cannot-continue failures above.

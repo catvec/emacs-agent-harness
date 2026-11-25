@@ -1,0 +1,87 @@
+running '/var/tmp/harness-cache-divergence-bisect.sh'
+Frozen transport seam absent; unaffected
+Bisecting: 20 revisions left to test after this (roughly 4 steps)
+[0ee609b18775493fb4c408ad16bc5580382b9dd8] Fix OpenRouter routing pause error
+running '/var/tmp/harness-cache-divergence-bisect.sh'
+Frozen transport seam absent; unaffected
+Bisecting: 10 revisions left to test after this (roughly 3 steps)
+[74611537ac261b8d6d01602721277a4ba3d2832a] Fix UI MCP host boundary
+running '/var/tmp/harness-cache-divergence-bisect.sh'
+Frozen transport seam absent; unaffected
+Bisecting: 5 revisions left to test after this (roughly 3 steps)
+[1a3c967679cb500dc070df106a5bb699ab5d0c1b] Fix task-board write backlog overflow
+running '/var/tmp/harness-cache-divergence-bisect.sh'
+Frozen transport seam absent; unaffected
+Bisecting: 2 revisions left to test after this (roughly 2 steps)
+[03b3e9c26b469eda130c28b7130d1ab1633088d9] Add all-reviewed system message
+running '/var/tmp/harness-cache-divergence-bisect.sh'
+Frozen transport seam absent; unaffected
+Bisecting: 0 revisions left to test after this (roughly 1 step)
+[78f0ada5abfe3054a41b08f32eab2eb9da148625] Restore voice input across compose surfaces
+running '/var/tmp/harness-cache-divergence-bisect.sh'
+Frozen transport seam absent; unaffected
+ac3fb53c31667c3923a5b219337da6742c4e6d5f is the first 'bad' commit
+commit ac3fb53c31667c3923a5b219337da6742c4e6d5f
+Author: Noah Huppert <contact@noahh.io>
+Date:   Tue Nov 17 23:37:57 2026 -0500
+
+    Investigate overnight ChatGPT quota consumption
+    
+    Changes:
+    - Add the overnight ChatGPT-plan quota investigation
+    - Correct the report's local timestamps and alert counts
+    - Record the check results in the report
+    - Align the baseline table to one clock slot
+    - Freeze the final provider body, field by field, and refuse an unexplained change
+    - Send the frozen body as bytes on every adapter, and say what the cache alert measured
+    - Cover two sessions interleaved, and report 42 replay tests
+    - Add the behaviour table as an image the review can read at a glance
+    - Freeze the prompt, not the request, and report the prefix decision content-free
+    - Hand t-jibzilj2 the commit ids, the prompt invariant and the telemetry contract
+    - Fix the lint warnings the new telemetry introduced
+    - Stop a one-off call or a cache refresh becoming the conversation's prefix
+    - Record this revision's full-suite status honestly: not completed
+    - Select bounded skill files in deterministic directory order
+    - Ask a sandbox runtime what it holds once per answer window, not every poll tick
+    - Count a runtime's leftovers by what it is running, not by a stale list
+    - Prove a cancel reaches only the run it names, in one shared runtime
+    - Believe a runtime's count only for the state it counted
+    - Record this revision's sandbox fix and the merge the queue owes
+    - Report the full suite as incomplete, and why
+    - … and 3 more
+    
+    24 files changed, 3973 insertions(+), 143 deletions(-)
+
+ docs/analysis/behaviour-table.png                  | Bin 0 -> 1185088 bytes
+ docs/analysis/behaviour-table.svg                  | 304 ++++++++
+ docs/analysis/chatgpt-quota-2026-11-13.md          | 708 ++++++++++++++++++
+ docs/design/frozen-prompt-prefix.md                | 248 +++++++
+ .../prefix-telemetry-contract-2026-11-14.md        |  82 +++
+ docs/modules/README.md                             |   8 +-
+ docs/modules/agent.md                              |   2 +
+ docs/modules/replay.md                             |  46 +-
+ docs/modules/sandbox-session.md                    |  13 +-
+ lisp/modules/harness-agent.el                      |   9 +-
+ lisp/modules/harness-cache-test.el                 |  38 +-
+ lisp/modules/harness-cache.el                      |   8 +-
+ lisp/modules/harness-provider-openai-test.el       |  44 +-
+ lisp/modules/harness-provider-openai.el            |  80 ++-
+ .../harness-provider-openrouter-test-helpers.el    |  33 +-
+ lisp/modules/harness-provider-responses-test.el    |  45 +-
+ lisp/modules/harness-provider-responses.el         | 221 ++++--
+ lisp/modules/harness-replay-test.el                | 710 +++++++++++++++++-
+ lisp/modules/harness-replay.el                     | 794 ++++++++++++++++++++-
+ lisp/modules/harness-sandbox-session-test.el       | 325 ++++++++-
+ lisp/modules/harness-sandbox-session.el            |  94 ++-
+ lisp/modules/harness-tools-agent-test.el           |  19 +-
+ scripts/analysis/chatgpt-quota-events.sh           |  51 ++
+ scripts/analysis/chatgpt-quota-query.py            | 234 ++++++
+ 24 files changed, 3973 insertions(+), 143 deletions(-)
+ create mode 100644 docs/analysis/behaviour-table.png
+ create mode 100644 docs/analysis/behaviour-table.svg
+ create mode 100644 docs/analysis/chatgpt-quota-2026-11-13.md
+ create mode 100644 docs/design/frozen-prompt-prefix.md
+ create mode 100644 docs/evidence/prefix-telemetry-contract-2026-11-14.md
+ create mode 100755 scripts/analysis/chatgpt-quota-events.sh
+ create mode 100755 scripts/analysis/chatgpt-quota-query.py
+bisect found first 'bad' commit

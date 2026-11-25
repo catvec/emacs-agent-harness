@@ -690,7 +690,8 @@ meaningless.  A crashing seed is removed from the corpus AFL++ sees."
                    :name (format "probe-%s-%02d" name position)
                    :command (harness-fuzz--adapter-command target file)
                    :buffer (generate-new-buffer " *harness-fuzz-probe*")
-                   :timeout (+ harness-fuzz-probe-seconds 5.0)
+                   :timeout (+ (max harness-fuzz-probe-seconds
+                                     (harness-fuzz-target-timeout target)) 5.0)
                    :data (list :target target :seed seed :file file))
                   jobs))
           (cl-incf position))))
@@ -1539,6 +1540,7 @@ event once `done' has gone through."
  :check #'harness-fuzz--check-provider-events)
 
 (load (expand-file-name "harness-fuzz-acp.el" harness-fuzz-directory) nil t)
+(load (expand-file-name "harness-fuzz-session.el" harness-fuzz-directory) nil t)
 
 (harness-define-module 'fuzz
   :doc "AFL++ fuzzing of the harness's protocol boundaries, through an adapter.")

@@ -336,3 +336,55 @@ a settled promise, removal of the running turn and acceptance of a new prompt.
 The cancellation test fires the actual captured grace timer deterministically.
 No live session data is changed. Reproduction, historical bisect and before/after
 results are retained in [the evidence directory](../evidence/stuck-log-observer/).
+
+
+### Attribution from retained task and runtime evidence
+
+A read-only inspection located the active server's state under
+`~/.emacs.d/.local/cache/harness`, rather than the older default state directory.
+Fifteen retained task error records match the recent failure families. One older
+merge record is retained separately as evidence that an error field can outlive
+a later successful operation. Their
+IDs, diagnostic hints and times are in
+[the incident snapshot](../evidence/session-soak/incident-diagnostics.json).
+These are historical task fields; their presence does not prove current failure.
+
+| Retained family | Tasks | Attribution and evidence |
+| --- | --- | --- |
+| `reasoning.effort changed with no recorded reset` | 6 | A late model effort ladder changes serialized bytes without changing the session setting. The frozen boundary refuses the new body; only a successful send can replace the old one, so retries repeat the refusal. The normal-turn soak reproduces this with the replay module from `a122507^`. The current replay code passes. |
+| Tool schema/name changed with no reset | 3 | Two records name `tools[46].function.parameters.properties`; one names `tools[57].function.name`. Settling tool names did not freeze their definitions. Reload changed bytes under the same settled list. The narrow tool-definition repair in `396fbdc` and general divergence reset in `7b05453`/`1616dfb` address this family; the soak now exercises definition changes through real requests. |
+| Dropped provider still pinned (`pin-not-vetted`) | 4 | All name DeepInfra/deepinfra/fp8 after the policy stopped admitting it. Their latest diagnostic hints are November 24 00:42–00:59. Repair `8b19e31` is dated 01:14 that day. The active server's separate checkout, HEAD `bbf50b13` (00:11), lacks `harness-openrouter--pin-dropped-p`; these records are not evidence of recurrence after that repair was deployed. The offline dropped-pin regression fails with the module from `8b19e31^` and passes with the current module. |
+| Generic `merge failed` | 2 recent, 1 older | The older October 3 transcript records uncommitted changes, then `MERGE_HEAD` still present, then a later successful merge. The two Harmony tasks reached real Git conflicts; their resolver sessions stopped with error before `merge_done`. Resolver `a007a91e` explicitly records terminal HTTP 429 from DeepInfra. Resolver `09661446` records repeated 429/backoff, but its exact terminal cause is not retained. These are a different stage from frozen prompt refusal. |
+
+The pure replay reproduction was bisected separately: in the investigated
+history `ac3fb53` introduces three consecutive refusals after one ordinary
+reasoning change, while its parent lacks the frozen transport seam. Direct
+current-source replay refuses zero of three. This bisect concerns the permanent
+refusal mechanism, not every specific tool or catalogue trigger. The full soak's
+historical comparison uses one old module in a current fixture and is labelled
+as such in [the evidence notes](../evidence/session-soak/README.md).
+
+There is a deployment distinction: this task branch and the active server's
+checkout are different repositories. The current live cache module was compiled
+November 24 at 00:41; the retained cache-refusal hints predate that. Compilation
+times are supporting chronology, not proof of which function ran in a particular
+older process. No active process was restarted, reloaded or repaired in memory,
+and no user's session, task, transcript or frozen body was modified during this
+inspection. The fixes in this branch must reach the serving checkout to affect
+that server.
+
+The retained error-report files also contain 1,372 repetitions of a recap
+rendering/truncation exception, 119 `lsp-bridge` `arrayp, nil` timer exceptions,
+and nine secret-source diagnostic truncation exceptions. These are distinct
+background/UI stacks, not attribution of the task refusals above. Rotation
+limits the retained window. The counts alone cannot establish a stuck turn,
+and the earlier log-observer containment reproduction must not be retroactively
+claimed as the cause of these actual incidents.
+
+The architectural recurrence is a frozen snapshot becoming a permanent admission
+lock: changes necessary for normal operation were allowed, while admission
+refused the resulting bytes and the only path that could update its snapshot
+required successful admission. The repairs break that cycle by recording a
+fresh baseline for legitimate divergence. The normal-session target now catches
+that outcome directly, without requiring a native crash or a detailed oracle
+for every module.

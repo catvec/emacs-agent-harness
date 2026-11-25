@@ -1,0 +1,45 @@
+Running 1 tests (2026-11-24 23:54:33-0500, selector ‘harness-provider-openrouter-a-pin-the-policy-dropped-pins-again’)
+Test harness-provider-openrouter-a-pin-the-policy-dropped-pins-again backtrace:
+  ert-fail(((should (cl-find-if (lambda (r) (string-match-p "chat/comp
+  (if (unwind-protect (setq value-1043 (apply fn-1041 args-1042)) (set
+  (let (form-description-1045) (if (unwind-protect (setq value-1043 (a
+  (let ((value-1043 'ert-form-evaluation-aborted-1044)) (let (form-des
+  (let* ((fn-1041 #'cl-find-if) (args-1042 (condition-case err (list #
+  (let ((events (harness-openrouter-test--run (harness-openrouter-test
+  (progn (fset 'harness-http-request #'harness-openrouter-test--fake-r
+  (unwind-protect (progn (fset 'harness-http-request #'harness-openrou
+  (let* ((old (symbol-function 'harness-http-request))) (unwind-protec
+  (let ((harness-openrouter-test--requests nil) (harness-openrouter-te
+  (progn (fset 'harness-call vnew) (let ((harness-openrouter-test--req
+  (unwind-protect (progn (fset 'harness-call vnew) (let ((harness-open
+  (let* ((vnew #'(lambda (method &rest args) (cond ((eq method ...) (l
+  (let ((harness-openrouter-test--stored nil) (harness-openrouter-test
+  (progn (let ((harness-openrouter-test--stored nil) (harness-openrout
+  (unwind-protect (progn (let ((harness-openrouter-test--stored nil) (
+  (let ((harness-openrouter-routing policy) (harness-openrouter--catal
+  (let* ((policy (harness-openrouter-test-policy :providers '("Cohere"
+  #f(lambda () [t] (let* ((policy (harness-openrouter-test-policy :pro
+  #f(compiled-function () #<bytecode 0x17f342e32bd9a2cf>)()
+  handler-bind-1(#f(compiled-function () #<bytecode 0x17f342e32bd9a2cf
+  ert--run-test-internal(#s(ert--test-execution-info :test ... :result
+  ert-run-test(#s(ert-test :name harness-provider-openrouter-a-pin-the
+  ert-run-or-rerun-test(#s(ert--stats :selector harness-provider-openr
+  ert-run-tests(harness-provider-openrouter-a-pin-the-policy-dropped-p
+  ert-run-tests-batch(harness-provider-openrouter-a-pin-the-policy-dro
+  ert-run-tests-batch-and-exit(harness-provider-openrouter-a-pin-the-p
+  eval((ert-run-tests-batch-and-exit 'harness-provider-openrouter-a-pi
+  command-line-1(("-L" "lisp" "-L" "lisp/modules" "-L" "test" "-l" "te
+  command-line()
+  normal-top-level()
+Test harness-provider-openrouter-a-pin-the-policy-dropped-pins-again condition:
+    (ert-test-failed
+     ((should
+       (cl-find-if (lambda ... ...) harness-openrouter-test--requests))
+      :form (cl-find-if #[(r) (...) (t)] nil) :value nil))
+   FAILED  1/1  harness-provider-openrouter-a-pin-the-policy-dropped-pins-again (0.000653 sec) at lisp/modules/harness-provider-openrouter-test.el:996
+
+Ran 1 tests, 0 results as expected, 1 unexpected (2026-11-24 23:54:33-0500, 0.102218 sec)
+
+1 unexpected results:
+   FAILED  harness-provider-openrouter-a-pin-the-policy-dropped-pins-again
+

@@ -1,0 +1,267 @@
+[
+  {
+    "task": "t-uqkzeolh",
+    "session": "13d6a1bf-a9da-4f74-a0e5-c42b55cc5828",
+    "error": "OpenRouter routing paused (pin-not-vetted): the pinned provider DeepInfra, at deepinfra/fp8, is not allowed by the policy now",
+    "state": "active",
+    "finished": null,
+    "hints": [
+      {
+        "at": "2026-11-24T00:43:13.156813",
+        "message": "Error: OpenRouter routing paused (pin-not-vetted): the pinned provider DeepInfra, at deepinfra/fp8, is not allowed by the policy now"
+      },
+      {
+        "at": "2026-11-24T00:43:13.323921",
+        "message": "turn ended: error \u2014 OpenRouter routing paused (pin-not-vetted): the pinned provider DeepInfra, at deepinfra/fp8, is not allowed by the policy now"
+      }
+    ]
+  },
+  {
+    "task": "t-p2wqgctz",
+    "session": "f8fd557f-0e80-44f4-9799-c9076cb4c56f",
+    "error": "merge failed",
+    "state": "done",
+    "finished": 1791011737.1910245,
+    "hints": []
+  },
+  {
+    "task": "t-0o8hfgqd",
+    "session": "1bb11684-434d-4cd8-8687-3a443610ff76",
+    "error": "OpenRouter routing paused (pin-not-vetted): the pinned provider DeepInfra, at deepinfra/fp8, is not allowed by the policy now",
+    "state": "active",
+    "finished": null,
+    "hints": [
+      {
+        "at": "2026-11-21T10:55:53.879477",
+        "message": "turn ended: error \u2014 prompt component tools[46].function.parameters.properties changed with no recorded reset"
+      },
+      {
+        "at": "2026-11-24T00:59:28.898559",
+        "message": "Error: OpenRouter routing paused (pin-not-vetted): the pinned provider DeepInfra, at deepinfra/fp8, is not allowed by the policy now"
+      },
+      {
+        "at": "2026-11-24T00:59:29.349307",
+        "message": "turn ended: error \u2014 OpenRouter routing paused (pin-not-vetted): the pinned provider DeepInfra, at deepinfra/fp8, is not allowed by the policy now"
+      }
+    ]
+  },
+  {
+    "task": "t-t4gvs7oi",
+    "session": "4503180a-69cd-4779-b992-a3770751892c",
+    "error": "prompt component tools[57].function.name changed with no recorded reset",
+    "state": "done",
+    "finished": 1795217701.3544502,
+    "hints": [
+      {
+        "at": "2026-11-20T18:33:58.258960",
+        "message": "Error: prompt component tools[57].function.name changed with no recorded reset"
+      },
+      {
+        "at": "2026-11-20T18:33:58.261151",
+        "message": "turn ended: error \u2014 prompt component tools[57].function.name changed with no recorded reset"
+      }
+    ]
+  },
+  {
+    "task": "t-obs1vhzx",
+    "session": "4a230e15-65d7-4353-b084-7ce9e6b1aa21",
+    "error": "OpenRouter routing paused (pin-not-vetted): the pinned provider DeepInfra, at deepinfra/fp8, is not allowed by the policy now",
+    "state": "active",
+    "finished": null,
+    "hints": [
+      {
+        "at": "2026-11-23T17:09:21.962184",
+        "message": "turn ended: error \u2014 prompt component tools[62].function.name changed with no recorded reset"
+      },
+      {
+        "at": "2026-11-24T00:42:05.991902",
+        "message": "Error: OpenRouter routing paused (pin-not-vetted): the pinned provider DeepInfra, at deepinfra/fp8, is not allowed by the policy now"
+      },
+      {
+        "at": "2026-11-24T00:42:06.211325",
+        "message": "turn ended: error \u2014 OpenRouter routing paused (pin-not-vetted): the pinned provider DeepInfra, at deepinfra/fp8, is not allowed by the policy now"
+      }
+    ]
+  },
+  {
+    "task": "t-p5u5y87y",
+    "session": "997e5497-55eb-4fac-80af-ada721678fac",
+    "error": "OpenRouter routing paused (pin-not-vetted): the pinned provider DeepInfra, at deepinfra/fp8, is not allowed by the policy now",
+    "state": "done",
+    "finished": 1795498965.9808292,
+    "hints": [
+      {
+        "at": "2026-11-24T00:42:11.216151",
+        "message": "turn ended: error \u2014 OpenRouter routing paused (pin-not-vetted): the pinned provider DeepInfra, at deepinfra/fp8, is not allowed by the policy now"
+      },
+      {
+        "at": "2026-11-24T00:42:25.693135",
+        "message": "Error: OpenRouter routing paused (pin-not-vetted): the pinned provider DeepInfra, at deepinfra/fp8, is not allowed by the policy now"
+      },
+      {
+        "at": "2026-11-24T00:42:25.696815",
+        "message": "turn ended: error \u2014 OpenRouter routing paused (pin-not-vetted): the pinned provider DeepInfra, at deepinfra/fp8, is not allowed by the policy now"
+      }
+    ]
+  },
+  {
+    "task": "t-7o697c09",
+    "session": "be97381f-ab36-4b51-8663-33e86652c605",
+    "error": "prompt component tools[46].function.parameters.properties changed with no recorded reset",
+    "state": "active",
+    "finished": null,
+    "hints": [
+      {
+        "at": "2026-11-21T03:09:21.717678",
+        "message": "turn ended: error \u2014 prompt component tools[46].function.parameters.properties changed with no recorded reset"
+      },
+      {
+        "at": "2026-11-23T17:09:42.900184",
+        "message": "Error: prompt component tools[46].function.parameters.properties changed with no recorded reset"
+      },
+      {
+        "at": "2026-11-23T17:09:43.200322",
+        "message": "turn ended: error \u2014 prompt component tools[46].function.parameters.properties changed with no recorded reset"
+      }
+    ]
+  },
+  {
+    "task": "t-saemd1ck",
+    "session": "84e4a544-65c8-438b-adda-fbe65d76104f",
+    "error": "prompt component tools[46].function.parameters.properties changed with no recorded reset",
+    "state": "active",
+    "finished": null,
+    "hints": [
+      {
+        "at": "2026-11-23T02:20:25.908085",
+        "message": "turn ended: error \u2014 prompt component tools[46].function.parameters.properties changed with no recorded reset"
+      },
+      {
+        "at": "2026-11-23T10:55:25.964839",
+        "message": "Error: prompt component tools[46].function.parameters.properties changed with no recorded reset"
+      },
+      {
+        "at": "2026-11-23T10:55:26.156004",
+        "message": "turn ended: error \u2014 prompt component tools[46].function.parameters.properties changed with no recorded reset"
+      }
+    ]
+  },
+  {
+    "task": "t-tgwdxb0e",
+    "session": "fa5e0fbc-6a63-439d-94c1-ed4299444641",
+    "error": "merge failed",
+    "state": "active",
+    "finished": 1795475959.5188837,
+    "hints": []
+  },
+  {
+    "task": "t-k4yz3u4n",
+    "session": "667e3d25-bff2-4828-b469-d0a1cd78ecae",
+    "error": "merge failed",
+    "state": "active",
+    "finished": 1795485039.8368287,
+    "hints": []
+  },
+  {
+    "task": "t-kcsk6268",
+    "session": "fbb8649a-0ff7-4cf7-be4d-53f4831550b2",
+    "error": "prompt component reasoning.effort changed with no recorded reset",
+    "state": "active",
+    "finished": null,
+    "hints": [
+      {
+        "at": "2026-11-23T21:48:05.505030",
+        "message": "Error: prompt component reasoning.effort changed with no recorded reset"
+      },
+      {
+        "at": "2026-11-23T21:48:05.979498",
+        "message": "turn ended: error \u2014 prompt component reasoning.effort changed with no recorded reset"
+      }
+    ]
+  },
+  {
+    "task": "t-0qt83qtf",
+    "session": "a25386a2-ca75-4ef5-9dd9-4ff7366721e2",
+    "error": "prompt component reasoning.effort changed with no recorded reset",
+    "state": "active",
+    "finished": null,
+    "hints": [
+      {
+        "at": "2026-11-23T21:48:07.330368",
+        "message": "Error: prompt component reasoning.effort changed with no recorded reset"
+      },
+      {
+        "at": "2026-11-23T21:48:07.575968",
+        "message": "turn ended: error \u2014 prompt component reasoning.effort changed with no recorded reset"
+      }
+    ]
+  },
+  {
+    "task": "t-4mnnp1q6",
+    "session": "ba50e0a0-f089-42a6-ac34-1a3a97ba43e9",
+    "error": "prompt component reasoning.effort changed with no recorded reset",
+    "state": "active",
+    "finished": null,
+    "hints": [
+      {
+        "at": "2026-11-23T21:48:06.016557",
+        "message": "Error: prompt component reasoning.effort changed with no recorded reset"
+      },
+      {
+        "at": "2026-11-23T21:48:06.231011",
+        "message": "turn ended: error \u2014 prompt component reasoning.effort changed with no recorded reset"
+      }
+    ]
+  },
+  {
+    "task": "t-p7hqlckq",
+    "session": "117056d3-42d7-4bcc-b85f-09b86f750229",
+    "error": "prompt component reasoning.effort changed with no recorded reset",
+    "state": "active",
+    "finished": null,
+    "hints": [
+      {
+        "at": "2026-11-23T21:48:06.264087",
+        "message": "Error: prompt component reasoning.effort changed with no recorded reset"
+      },
+      {
+        "at": "2026-11-23T21:48:06.525295",
+        "message": "turn ended: error \u2014 prompt component reasoning.effort changed with no recorded reset"
+      }
+    ]
+  },
+  {
+    "task": "t-a0y2sc3x",
+    "session": "9a107c5f-84de-42be-b32b-4241afe5165c",
+    "error": "prompt component reasoning.effort changed with no recorded reset",
+    "state": "active",
+    "finished": null,
+    "hints": [
+      {
+        "at": "2026-11-23T21:48:06.821262",
+        "message": "Error: prompt component reasoning.effort changed with no recorded reset"
+      },
+      {
+        "at": "2026-11-23T21:48:07.173596",
+        "message": "turn ended: error \u2014 prompt component reasoning.effort changed with no recorded reset"
+      }
+    ]
+  },
+  {
+    "task": "t-k0swoktv",
+    "session": "17643886-4f05-4839-91ef-9730be8a701d",
+    "error": "prompt component reasoning.effort changed with no recorded reset",
+    "state": "active",
+    "finished": null,
+    "hints": [
+      {
+        "at": "2026-11-20T00:14:56.576047",
+        "message": "Error: prompt component reasoning.effort changed with no recorded reset"
+      },
+      {
+        "at": "2026-11-20T00:14:56.749643",
+        "message": "turn ended: error \u2014 prompt component reasoning.effort changed with no recorded reset"
+      }
+    ]
+  }
+]

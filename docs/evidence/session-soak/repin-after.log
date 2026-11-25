@@ -1,0 +1,5 @@
+Running 1 tests (2026-11-24 23:54:40-0500, selector ‘harness-provider-openrouter-a-pin-the-policy-dropped-pins-again’)
+   passed  1/1  harness-provider-openrouter-a-pin-the-policy-dropped-pins-again (0.031310 sec)
+
+Ran 1 tests, 1 results as expected, 0 unexpected (2026-11-24 23:54:40-0500, 0.031467 sec)
+

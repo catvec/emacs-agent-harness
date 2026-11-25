@@ -1,0 +1,171 @@
+[
+  {
+    "task": "t-p2wqgctz",
+    "session": "f8fd557f-0e80-44f4-9799-c9076cb4c56f",
+    "merge-hints": [
+      {
+        "at": 1791003619.3203034,
+        "message": "Merge into Task merges finished: failed (error: Your local changes to the following files would be overwritten by merge:\n\tlisp/modules/harness-perms.el\n\ttest/harness-tasks-test.el\nPlease commit your changes or stash them before you merge.\nAborting\nMerge with strategy ort failed.)"
+      },
+      {
+        "at": 1791011351.2121348,
+        "message": "Merge into Task merges finished: failed (fatal: You have not concluded your merge (MERGE_HEAD exists).\nPlease, commit your changes before you merge.)"
+      },
+      {
+        "at": 1791011736.1076841,
+        "message": "Merge into Task merges finished: merged"
+      }
+    ]
+  },
+  {
+    "task": "t-tgwdxb0e",
+    "session": "fa5e0fbc-6a63-439d-94c1-ed4299444641",
+    "merge-hints": [
+      {
+        "at": 1795487642.0406976,
+        "message": "Merge into ~/documents/chat/harmony-android (branch main) has conflicts in docs/evidence/render/README.md; session Merge task/add-swipe-right-channel-list-gesture-tgwdxb0e resolves them in this worktree"
+      },
+      {
+        "at": 1795487802.0563583,
+        "message": "Merge into ~/documents/chat/harmony-android (branch main) finished: failed (the session resolving the conflicts stopped (error) without merge_done)"
+      },
+      {
+        "at": 1795487838.144178,
+        "message": "Merge into ~/documents/chat/harmony-android (branch main) has conflicts in docs/evidence/render/README.md; session Merge task/add-swipe-right-channel-list-gesture-tgwdxb0e resolves them in this worktree"
+      },
+      {
+        "at": 1795488032.1200714,
+        "message": "Merge into ~/documents/chat/harmony-android (branch main) finished: failed (the session resolving the conflicts stopped (error) without merge_done)"
+      }
+    ],
+    "resolvers": [
+      {
+        "session": "a007a91e-09aa-4c41-954c-ba78a0fbbb09",
+        "diagnostic-hints": [
+          {
+            "at": 1795487651.1836827,
+            "message": "openrouter/deepinfra/fp8: rate limited; waiting 4 s (6 waiting)"
+          },
+          {
+            "at": 1795487691.0653334,
+            "message": "Error: HTTP 429: Provider returned error (provider=DeepInfra)"
+          },
+          {
+            "at": 1795487691.0661025,
+            "message": "OpenRouter: rate limited: HTTP 429: Provider returned error (provider=DeepInfra); trying again in 2 s (2 of 3)"
+          },
+          {
+            "at": 1795487693.1595225,
+            "message": "openrouter/deepinfra/fp8: rate limited; waiting 28 s (9 waiting)"
+          },
+          {
+            "at": 1795487722.818663,
+            "message": "Error: HTTP 429: Provider returned error (provider=DeepInfra)"
+          },
+          {
+            "at": 1795487722.81925,
+            "message": "OpenRouter: rate limited: HTTP 429: Provider returned error (provider=DeepInfra); trying again in 5 s (3 of 3)"
+          },
+          {
+            "at": 1795487727.547106,
+            "message": "openrouter/deepinfra/fp8: rate limited; waiting 27 s (10 waiting)"
+          },
+          {
+            "at": 1795487802.0516784,
+            "message": "Error: HTTP 429: Provider returned error (provider=DeepInfra)"
+          }
+        ]
+      },
+      {
+        "session": "ae2bcb05-f2e5-48f0-9b9f-75ff6eea7b0a",
+        "diagnostic-hints": [
+          {
+            "at": 1795488023.878364,
+            "message": "OpenRouter: rate limited: openrouter/deepinfra/fp8: rate limited; 8 s still owed, past the 30 s wait; trying again in 8 s (0 of 3)"
+          },
+          {
+            "at": 1795488032.1163797,
+            "message": "Error: HTTP 429: Provider returned error (provider=DeepInfra)"
+          },
+          {
+            "at": 1795488062.103148,
+            "message": "openrouter/deepinfra/fp8: rate limited; 1 s still owed, past the 30 s wait"
+          },
+          {
+            "at": 1795488062.1056662,
+            "message": "OpenRouter: rate limited: openrouter/deepinfra/fp8: rate limited; 1 s still owed, past the 30 s wait; trying again in 1 s (0 of 3)"
+          },
+          {
+            "at": 1795488108.9061325,
+            "message": "openrouter/deepinfra/fp8: rate limited; 30 s still owed, past the 30 s wait"
+          },
+          {
+            "at": 1795488108.9074967,
+            "message": "OpenRouter: rate limited: openrouter/deepinfra/fp8: rate limited; 30 s still owed, past the 30 s wait; trying again in 30 s (0 of 3)"
+          },
+          {
+            "at": 1795488243.9029245,
+            "message": "openrouter/deepinfra/fp8: rate limited; 30 s still owed, past the 30 s wait"
+          },
+          {
+            "at": 1795488243.9050353,
+            "message": "OpenRouter: rate limited: openrouter/deepinfra/fp8: rate limited; 30 s still owed, past the 30 s wait; trying again in 30 s (0 of 3)"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "task": "t-k4yz3u4n",
+    "session": "667e3d25-bff2-4828-b469-d0a1cd78ecae",
+    "merge-hints": [
+      {
+        "at": 1795487575.7213326,
+        "message": "Merge into ~/documents/chat/harmony-android (branch main) has conflicts in docs/ux-fixes.md; session Merge task/fix-false-empty-channel-threads-k4yz3u4n resolves them in this worktree"
+      },
+      {
+        "at": 1795488064.5864704,
+        "message": "Merge into ~/documents/chat/harmony-android (branch main) finished: failed (the session resolving the conflicts stopped (error) without merge_done)"
+      }
+    ],
+    "resolvers": [
+      {
+        "session": "09661446-5ab5-425c-b869-2feac1fb17e6",
+        "diagnostic-hints": [
+          {
+            "at": 1795488243.9131353,
+            "message": "openrouter/deepinfra/fp8: rate limited; 30 s still owed, past the 30 s wait"
+          },
+          {
+            "at": 1795488243.9150286,
+            "message": "OpenRouter: rate limited: openrouter/deepinfra/fp8: rate limited; 30 s still owed, past the 30 s wait; trying again in 30 s (0 of 3)"
+          },
+          {
+            "at": 1795488311.5147004,
+            "message": "OpenRouter: rate limited: HTTP 429: Provider returned error (provider=DeepInfra); trying again in 1 s (1 of 3)"
+          },
+          {
+            "at": 1795488313.6890051,
+            "message": "openrouter/deepinfra/fp8: rate limited; waiting 28 s (4 waiting)"
+          },
+          {
+            "at": 1795488356.4672565,
+            "message": "OpenRouter: rate limited: HTTP 429: Provider returned error (provider=DeepInfra); trying again in 2 s (2 of 3)"
+          },
+          {
+            "at": 1795488359.0362008,
+            "message": "openrouter/deepinfra/fp8: rate limited; waiting 27 s (6 waiting)"
+          },
+          {
+            "at": 1795488439.3908877,
+            "message": "openrouter/deepinfra/fp8: rate limited; 0.0 s still owed, past the 30 s wait"
+          },
+          {
+            "at": 1795488439.393667,
+            "message": "OpenRouter: rate limited: openrouter/deepinfra/fp8: rate limited; 0.0 s still owed, past the 30 s wait; trying again in 1 s (0 of 3)"
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,20 @@
+== test.sh 2026-11-24 23:54:06 (1 files)
+== .harness/plugins/fuzz/harness-fuzz-session-test.el
+Running 7 tests (2026-11-24 23:53:45-0500, selector ‘t’)
+   passed  1/7  harness-fuzz-session-cache-mutations-survive-normal-turns-and-reload (5.520756 sec)
+   passed  2/7  harness-fuzz-session-input-is-bounded-and-live-state-is-refused (0.000064 sec)
+   passed  3/7  harness-fuzz-session-late-catalogue-changes-effort-on-the-wire (0.858473 sec)
+   passed  4/7  harness-fuzz-session-oracle-rejects-a-contained-turn-error (0.152541 sec)
+   passed  5/7  harness-fuzz-session-oracle-rejects-a-tool-error-even-if-turn-continues (0.446482 sec)
+   passed  6/7  harness-fuzz-session-oracle-rejects-an-unsettled-turn (0.201896 sec)
+   passed  7/7  harness-fuzz-session-ordinary-turns-exercise-the-real-tool-catalog (13.146404 sec)
+
+Ran 7 tests, 7 results as expected, 0 unexpected (2026-11-24 23:54:05-0500, 20.327127 sec)
+
+
+== .harness/plugins/fuzz/harness-fuzz-session-test.el exit 0 2026-11-24 23:54:06 ==
+
+TEST RESULT: PASS (selected run)
+result record: /home/noah/documents/ai/emacs-agent-harness/scripts/.dev/test-stamp.json
+full logs: /home/noah/documents/ai/emacs-agent-harness/scripts/.dev/test-logs
+test.sh: 1 files, 0 failed, 21s wall (4 at a time)

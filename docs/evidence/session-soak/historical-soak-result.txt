@@ -1,0 +1,3 @@
+
+Error: error ("Session actions ((effort 0)): Turn 2 cannot continue: (:stop-reason error :error \"prompt component reasoning.effort changed with no recorded reset\" :duration 0.17734980583190918)")
+  error("Session actions %S: %s" ((effort 0)) "Turn 2 cannot continue: (:stop-reason error :error \"prompt component reasoning.effort changed with no recorded reset\" :duration 0.17734980583190918)")
