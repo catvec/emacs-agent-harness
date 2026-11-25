@@ -404,9 +404,11 @@ and off.  Corporate mode refuses it."
   :type 'string :group 'harness)
 
 (defcustom harness-acp-remote-port 4276
-  "TCP port of the listener for other devices.
-A fixed port lets a phone's ACP client keep the address it saved
-across restarts of the harness."
+  "Preferred TCP port of the listener for other devices.
+A fixed port lets a phone keep its address across restarts.  If another
+application owns this port, use an available port instead; the remote
+control page reports the actual address.  A manually configured reverse
+proxy must target that port.  Zero always chooses an available port."
   :type 'integer :group 'harness)
 
 (defcustom harness-acp-remote-address nil
@@ -2062,14 +2064,28 @@ The sign-ins nobody finished are forgotten as well."
   "Start the listener for other devices."
   (harness-acp-remote--refuse-in-corporate-mode)
   (harness-acp-remote--load-sessions)
-  (setq harness-acp-remote--server
-        (make-network-process :name "harness-acp-remote"
-                              :server harness-listen-backlog
-                              :host harness-acp-remote-host :service harness-acp-remote-port
-                              :coding 'binary :noquery t
-                              :filter #'harness-acp-remote--filter
-                              :sentinel #'harness-acp-remote--sentinel
-                              :log #'harness-acp-remote--accept))
+  (cl-labels ((listen-on (port)
+                (make-network-process :name "harness-acp-remote"
+                                      :server harness-listen-backlog
+                                      :host harness-acp-remote-host :service port
+                                      :coding 'binary :noquery t
+                                      :filter #'harness-acp-remote--filter
+                                      :sentinel #'harness-acp-remote--sentinel
+                                      :log #'harness-acp-remote--accept)))
+    (setq harness-acp-remote--server
+          (condition-case err
+              (listen-on harness-acp-remote-port)
+            (file-error
+             ;; Only address-in-use warrants another port.  A bad host,
+             ;; missing interface or denied bind must retain retry/error
+             ;; reporting, rather than silently change exposure.
+             (if (and (not (zerop harness-acp-remote-port))
+                      (equal (caddr err) "Address already in use"))
+                 (progn
+                   (harness-log 'warn "acp-remote: port %s occupied; selecting an available port"
+                                harness-acp-remote-port)
+                   (listen-on 0))
+               (signal (car err) (cdr err)))))))
   (unless harness-acp-remote--sweep-timer
     (setq harness-acp-remote--sweep-timer (run-at-time 30 30 #'harness-acp-remote--sweep)))
   (harness-log 'info "acp-remote: serving other devices on %s:%s; they connect to %s"
@@ -2096,9 +2112,9 @@ for the next time."
 
 ;; `harness-acp-remote' being on is what makes the harness serve other
 ;; devices every time it starts, so that a device signs in once and finds
-;; the harness there on the next day.  Starting is not certain: another
-;; process may hold the port (the harness that this one replaces, still
-;; closing), or the address the listener binds may not exist yet (a VPN
+;; the harness there on the next day.  Starting is not certain: the
+;; preferred port may be occupied (then an available port is selected),
+;; or the address the listener binds may not exist yet (a VPN
 ;; that connects after Emacs starts).  The harness then tries again, after
 ;; a few seconds and then every minute, for as long as the option stays
 ;; on, and the remote control page says why it does not serve yet.

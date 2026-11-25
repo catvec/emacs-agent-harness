@@ -1706,6 +1706,23 @@ port, and the tries to start the listener come within a tenth of a second."
          (when (process-live-p squatter) (delete-process squatter))
          (harness-acp-remote--resume-cancel)))))
 
+(defmacro harness-acp-remote-test-with-unavailable-address (&rest body)
+  "Run BODY while an unavailable interface prevents binding.
+Set `unavailable' to nil to make the interface available again."
+  (declare (indent 0))
+  `(harness-acp-remote-test-with
+     (harness-acp-remote--stop)
+     (let ((harness-acp-remote t)
+           (harness-acp-remote--resume-delays '(0.05 0.1))
+           (unavailable t)
+           (listen (symbol-function 'make-network-process)))
+       (cl-letf (((symbol-function 'make-network-process)
+                  (lambda (&rest args)
+                    (if (and unavailable (equal (plist-get args :name) "harness-acp-remote"))
+                        (signal 'file-error '("Cannot bind server socket" "Cannot assign requested address"))
+                      (apply listen args)))))
+         ,@body))))
+
 (ert-deftest harness-acp-remote-serves-again-when-the-harness-starts ()
   "With the option on, a harness that starts serves again, and a device signed in before is still in."
   (harness-acp-remote-test-with
@@ -1729,9 +1746,22 @@ port, and the tries to start the listener come within a tenth of a second."
       (should-not (harness-acp-remote--running-p))
       (should-not harness-acp-remote--resume-timer))))
 
+(ert-deftest harness-acp-remote-occupied-port-selects-a-free-port ()
+  "Another application on the preferred port must not disable remote access."
+  (harness-acp-remote-test-with-held-port
+   (harness-acp-remote--init)
+   (should (harness-acp-remote--running-p))
+   (should (process-live-p squatter))
+   (should-not (= harness-acp-remote-port (harness-acp-remote--port)))
+   (setq harness-acp-remote-test-port (harness-acp-remote--port))
+   (should (string-match-p (format ":%d" harness-acp-remote-test-port)
+                           (harness-acp-remote--ws-url)))
+   (should (= 401 (car (harness-acp-remote-test-get "/"))))
+   (should-not harness-acp-remote--resume-timer)))
+
 (ert-deftest harness-acp-remote-tries-again-when-it-cannot-start ()
   "A listener that cannot start is tried again while the option is on, and the status says why."
-  (harness-acp-remote-test-with-held-port
+  (harness-acp-remote-test-with-unavailable-address
     (let ((changes nil))
       (harness-on 'acp/remote-changed (lambda (e) (push (plist-get e :what) changes)))
       (harness-acp-remote--init)
@@ -1740,14 +1770,14 @@ port, and the tries to start the listener come within a tenth of a second."
         (should (eq :false (plist-get status :running)))
         (should (eq t (plist-get status :enabled)))
         (should (eq t (plist-get status :resuming)))
-        (should (string-match-p "in use" (plist-get status :resume-error))))
+        (should (string-match-p "Cannot assign requested address" (plist-get status :resume-error))))
       (should (member "waiting" changes))
-      ;; Still held: tried again, and again, and nothing else changes.
+      ;; Missing interface: retry without hiding the error behind a new port.
       (harness-test-wait (lambda () (>= harness-acp-remote--resume-attempts 3)) 10 "three failed tries")
       (should harness-acp-remote--resume-timer)
       (should-not (harness-acp-remote--running-p))
-      ;; Let go of the port: the next try serves, and what was said is gone.
-      (delete-process squatter)
+      ;; The interface becomes available: the next try serves.
+      (setq unavailable nil)
       (harness-test-wait #'harness-acp-remote--running-p 10 "the listener to start")
       (setq harness-acp-remote-test-port (harness-acp-remote--port))
       (let ((status (harness-call 'acp/remote-status)))
@@ -1772,7 +1802,7 @@ port, and the tries to start the listener come within a tenth of a second."
 
 (ert-deftest harness-acp-remote-stopping-ends-the-tries ()
   "Turning serving off, from the page or by the policy of corporate mode, ends the tries."
-  (harness-acp-remote-test-with-held-port
+  (harness-acp-remote-test-with-unavailable-address
     (harness-acp-remote--init)
     (should harness-acp-remote--resume-timer)
     (let ((status (harness-call 'acp/remote-stop)))
@@ -1780,13 +1810,12 @@ port, and the tries to start the listener come within a tenth of a second."
       (should (eq :false (plist-get status :enabled)))
       (should-not (plist-get status :resume-error)))
     (should-not harness-acp-remote--resume-timer)
-    (delete-process squatter)
+    (setq unavailable nil)
     (sleep-for 0.4)
     (should-not (harness-acp-remote--running-p))
     ;; Corporate mode: what was planned is dropped, nothing starts.
     (setq harness-acp-remote t)
-    (setq squatter (make-network-process :name "squatter" :server t :host "127.0.0.1"
-                                         :service harness-acp-remote-port :noquery t))
+    (setq unavailable t)
     (harness-acp-remote--init)
     (should harness-acp-remote--resume-timer)
     (let ((harness-corporate-mode t))
@@ -1802,10 +1831,10 @@ port, and the tries to start the listener come within a tenth of a second."
 
 (ert-deftest harness-acp-remote-start-ends-the-tries-too ()
   "Starting serving from the page, while it is tried again, serves at once and plans nothing."
-  (harness-acp-remote-test-with-held-port
+  (harness-acp-remote-test-with-unavailable-address
     (harness-acp-remote--init)
     (should harness-acp-remote--resume-timer)
-    (delete-process squatter)
+    (setq unavailable nil)
     (let ((status (harness-call 'acp/remote-start)))
       (should (eq t (plist-get status :running)))
       (should (eq :false (plist-get status :resuming)))

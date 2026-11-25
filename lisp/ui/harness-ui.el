@@ -439,6 +439,8 @@ closed, so what the UI shows may need opening again.")
 (defvar harness-ui--server nil "The harness process this Emacs started, or nil.")
 (defvar harness-ui--server-address nil "(ADDRESS . TOKEN) of the running harness process.")
 (defvar harness-ui--server-stopping nil "Non-nil while the harness process is being stopped on purpose.")
+(defvar harness-ui--server-restart-pending nil
+  "Non-nil when a reconnect must wait for the stopping backend to exit.")
 (defvar harness-ui--server-restarts nil "Start times of recent unplanned restarts.")
 (defvar harness-ui--queue nil
   "Requests made before the harness process listened, newest first.
@@ -863,18 +865,22 @@ after the request went out, before this function returns."
 During init the start waits for `emacs-startup-hook', so settings made
 later in the init file still reach the process."
   (cond
-   ((and harness-ui--server (process-live-p harness-ui--server)))
+   ((and harness-ui--server (process-live-p harness-ui--server))
+    (when harness-ui--server-stopping
+      (setq harness-ui--server-restart-pending t)))
    ((not after-init-time)
     (add-hook 'emacs-startup-hook #'harness-ui--ensure-server))
    (t
     (remove-hook 'emacs-startup-hook #'harness-ui--ensure-server)
     (setq harness-ui--server-address nil
-          harness-ui--server-stopping nil)
+          harness-ui--server-stopping nil
+          harness-ui--server-restart-pending nil)
     (let (proc)
       (setq proc (harness-server-spawn
                   :on-address (lambda (address token)
                                 ;; One replaced before it listened is nobody to talk to.
-                                (when (eq proc harness-ui--server)
+                                (when (and (eq proc harness-ui--server)
+                                           (not harness-ui--server-stopping))
                                   (setq harness-ui--server-address (cons address token))
                                   (when (eq harness-ui-connection-address 'process)
                                     (harness-ui--open address token)
@@ -894,27 +900,36 @@ third."
 (defun harness-ui--on-current-server-exit (status)
   "React to the UI's harness process ending with STATUS: restart it unless stopped."
   (setq harness-ui--server nil harness-ui--server-address nil)
-  (unless harness-ui--server-stopping
-    (let* ((now (float-time))
-           (recent (cl-remove-if (lambda (time) (< time (- now 60))) harness-ui--server-restarts)))
-      (setq harness-ui--server-restarts (cons now recent))
-      (if (>= (length recent) 5)
-          (progn
-            (harness-log 'error "harness process keeps exiting (status %s); not restarting" status)
-            (message "Harness process exited (status %s) 5 times in a minute; see M-x harness-show-log, then M-x harness-restart"
-                     status))
-        (harness-log 'warn "harness process exited (status %s); restarting" status)
-        (message "Harness process exited (status %s); restarting" status)
-        (run-at-time (expt 2 (length recent)) nil
-                     (lambda ()
-                       (when (eq harness-ui-connection-address 'process)
-                         (harness-ui--ensure-server))))))))
+  (if (and harness-ui--server-restart-pending
+           (eq harness-ui-connection-address 'process))
+      (progn
+        (setq harness-ui--server-restart-pending nil)
+        (harness-ui-connect 'process))
+    (setq harness-ui--server-restart-pending nil)
+    (unless harness-ui--server-stopping
+      (let* ((now (float-time))
+             (recent (cl-remove-if (lambda (time) (< time (- now 60))) harness-ui--server-restarts)))
+        (setq harness-ui--server-restarts (cons now recent))
+        (if (>= (length recent) 5)
+            (progn
+              (harness-log 'error "harness process keeps exiting (status %s); not restarting" status)
+              (message "Harness process exited (status %s) 5 times in a minute; see M-x harness-show-log, then M-x harness-restart"
+                       status))
+          (harness-log 'warn "harness process exited (status %s); restarting" status)
+          (message "Harness process exited (status %s); restarting" status)
+          (run-at-time (expt 2 (length recent)) nil
+                       (lambda ()
+                         (when (eq harness-ui-connection-address 'process)
+                           (harness-ui--ensure-server)))))))))
 
 (defun harness-ui--stop-server ()
   "Stop the harness process cleanly."
-  (setq harness-ui--server-stopping t)
-  (when harness-ui--server (harness-server-stop harness-ui--server))
-  (setq harness-ui--server nil harness-ui--server-address nil))
+  (setq harness-ui--server-stopping t
+        harness-ui--server-restart-pending nil
+        harness-ui--server-address nil)
+  ;; The handle is the exclusion guard until the original sentinel reports
+  ;; exit.  Clearing it now allows reconnect/reload to spawn another writer.
+  (when harness-ui--server (harness-server-stop harness-ui--server)))
 
 ;;;###autoload
 (defun harness-restart ()
@@ -928,13 +943,11 @@ again with \\[harness-connect-remote] instead."
   (cond
    ((eq harness-ui-connection-address 'process)
     (setq harness-ui--server-restarts nil)
-    (let ((old harness-ui--server))
-      (harness-ui--stop-server)
-      (if (and old (process-live-p old))
-          (set-process-sentinel old (lambda (p _e)
-                                      (unless (process-live-p p)
-                                        (harness-ui-connect 'process))))
-        (harness-ui-connect 'process))))
+    (harness-ui--stop-server)
+    ;; Keep the original sentinel: it owns the shutdown watchdog cleanup
+    ;; as well as this deferred restart.  Reconnect queues behind the old
+    ;; child if it has not exited yet.
+    (harness-ui-connect 'process))
    ((stringp harness-ui-connection-address)
     (user-error "Remote harness: %s · Connection: %s"
                 harness-ui-connection-address

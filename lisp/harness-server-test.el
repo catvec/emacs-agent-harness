@@ -440,6 +440,21 @@ after TIMEOUT seconds."
               (cons status (buffer-string)))))
       (delete-file script))))
 
+(ert-deftest harness-server-configuration-errors-exit-instead-of-stranding-a-child ()
+  "The callback guard must not swallow an error loading startup configuration."
+  (let ((config (make-temp-file "harness-bad-startup-" nil ".el")))
+    (unwind-protect
+        (progn
+          (with-temp-file config (insert "(error \"test startup configuration failed\")\n"))
+          (let ((result (harness-server-test--run-child
+                         `((require 'harness-server)
+                           (setenv "HARNESS_SERVER_CONFIG" ,config)
+                           (harness-server-main)) 10)))
+            (should (integerp (car result)))
+            (should-not (memq (car result) '(0 124)))
+            (should (string-search "test startup configuration failed" (cdr result)))))
+      (delete-file config))))
+
 (ert-deftest harness-server-an-error-in-a-sentinel-is-not-fatal ()
   "The harness process logs an error that escapes a sentinel and carries on.
 Batch Emacs's own `command-error-function' exits with status 255 on one:
@@ -607,7 +622,7 @@ so settings made later in the init file are forwarded."
             (run-hooks 'emacs-startup-hook)
             (should (process-live-p harness-ui--server))
             (should (string-search "demo:later"
-                                   (harness-read-file (expand-file-name "server-config.el" harness-state-directory))))
+                                   (harness-read-file (process-get harness-ui--server 'harness-server--config))))
             (should (listp (harness-test-await (harness-ui-request "_harness/session/list") 30))))
         (harness-server-test--stop)))))
 
@@ -887,24 +902,55 @@ the module of its own; `harness-reload' reloads both sides."
       (should (listp (harness-test-await (harness-ui-request "_harness/session/list") 30))))))
 
 (ert-deftest harness-server-a-stopped-process-ending-late-changes-nothing ()
-  "A harness process stopped and started again at once: the old one,
-whose end is heard once the new one runs, neither takes the new one's
-place nor starts yet another."
+  "A replacement waits for the old backend; late exit reports cannot replace it."
   (harness-server-test-with-process
     (harness-test-await (harness-ui-request "_harness/session/list") 30)
-    (let ((old harness-ui--server)
-          (ended nil))
-      (add-function :after (process-sentinel old) (lambda (&rest _) (setq ended t)))
-      ;; Nothing in between reads the old process's end.
+    (harness-server-test--settle)
+    (let ((old harness-ui--server))
+      ;; The stop request is asynchronous.  A reconnect in this window
+      ;; must keep the old handle, rather than start another writer.
       (harness-ui--stop-server)
       (harness-ui--ensure-server)
+      (when (process-live-p old) (should (eq old harness-ui--server)))
+      (harness-test-wait (lambda () (and harness-ui--server
+                                         (not (eq old harness-ui--server))
+                                         harness-ui--server-address))
+                         30 "exclusive backend handoff")
       (let ((new harness-ui--server))
-        (should (process-live-p new))
-        (should-not (eq new old))
-        (harness-test-wait (lambda () ended) 10 "the old process's end to be heard")
+        (should-not (process-live-p old))
+        (harness-ui--on-server-exit 0 old)
         (should (eq new harness-ui--server))
         (should (listp (harness-test-await (harness-ui-request "_harness/session/list") 30)))
         (should (eq new harness-ui--server))))))
+
+(ert-deftest harness-server-refuses-a-second-state-owner ()
+  "A second backend cannot start, even on a different ACP port."
+  (harness-server-test-with-process
+    (harness-test-await (harness-ui-request "_harness/session/list") 30)
+    (let* ((first-config (process-get harness-ui--server 'harness-server--config))
+           (first-contents (harness-read-file first-config))
+           second second-config address)
+      (unwind-protect
+          (progn
+            (let ((harness-model "demo:second-launch"))
+              (setq second (harness-server-spawn
+                            :on-address (lambda (a _token) (setq address a)))))
+            (setq second-config (process-get second 'harness-server--config))
+            (should-not (equal first-config second-config))
+            (should (equal first-contents (harness-read-file first-config)))
+            (should (= #o600 (logand #o777 (file-modes first-config))))
+            (harness-test-wait (lambda () (or address (not (process-live-p second))))
+                               30 "duplicate backend rejection")
+            (should-not address)
+            (should-not (process-live-p second))
+            (should-not (zerop (process-exit-status second)))
+            (harness-test-wait (lambda () (not (file-exists-p second-config)))
+                               10 "rejected launch configuration cleanup")
+            (should (equal first-contents (harness-read-file first-config)))
+            (should (listp (harness-test-await (harness-ui-request "_harness/session/list") 30))))
+        (when (and second (process-live-p second))
+          (harness-server-stop second)
+          (harness-test-wait (lambda () (not (process-live-p second))) 30 "duplicate exit"))))))
 
 (ert-deftest harness-server-requires-the-token ()
   (harness-server-test-with-process

@@ -283,7 +283,8 @@ They define the macros modules expand, so a change to one recompiles
 every file (see `harness--compiled-fresh-p').")
 
 (defconst harness--library-files '("lisp/harness-policy.el" "lisp/harness-files.el"
-                                  "lisp/harness-instance.el" "lisp/harness-latency.el"
+                                  "lisp/harness-instance.el" "lisp/harness-state-lock.el"
+                                  "lisp/harness-latency.el"
                                   "lisp/harness-links.el" "lisp/harness-carry.el"
                                   "lisp/harness-prompts.el"
                                   "lisp/harness-redaction.el"
@@ -691,6 +692,7 @@ its source: what loads is a compiled copy elsewhere."
 (defvar harness-ui-connection-address)
 (declare-function harness-ui-reload-server "harness-ui")
 (declare-function harness-policy-load "harness-policy")
+(declare-function harness-state-lock-acquire "harness-state-lock" (directory))
 (declare-function harness-latency-install "harness-latency")
 (declare-function harness-latency-uninstall "harness-latency")
 (declare-function harness-policy-apply "harness-policy" (&optional final))
@@ -711,6 +713,11 @@ process of this Emacs starts in the latter case.
 Return non-nil when every module loaded and initialised."
   (interactive)
   (harness--setup-load-path)
+  ;; Fail before loading policy/modules or touching session state.  A
+  ;; different ACP or remote port is never permission for a second writer.
+  (unless harness-process
+    (require 'harness-state-lock)
+    (harness-state-lock-acquire harness-state-directory))
   (dolist (f (append harness--core-files harness--library-files))
     (condition-case err
         (harness-load-compiled (harness--path f))
