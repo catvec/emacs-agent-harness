@@ -1,0 +1,26 @@
+# bad: [b44451108a0366b06dd6dfbc878718981d0f13c0] Fix malformed permission judge responses
+# good: [45d67bb833b53b6f59a3a89230f0158070595d3a] update
+git bisect start 'b444511' '45d67bb'
+# bad: [bc2ed76aad61b16ead69c321f50254bc70972871] Merge branch 'task/after-a-permanent-permission-answer-t7nd7yta'
+git bisect bad bc2ed76aad61b16ead69c321f50254bc70972871
+# bad: [05178759223e1867a3cade2cfa159fe65095f1e7] Show the fallback entries' tiers and refresh the usage picture
+git bisect bad 05178759223e1867a3cade2cfa159fe65095f1e7
+# good: [eb429cfbcf95695dceb4ef590cafd3d58643469b] Merge branch 'task/make-it-so-in-task-88cvn02o'
+git bisect good eb429cfbcf95695dceb4ef590cafd3d58643469b
+# good: [6b6790403a5b2ce0fdb2d3e357ab38e86dfa1fa9] Merge branch 'task/make-a-plugin-which-notifies-p00p2g58'
+git bisect good 6b6790403a5b2ce0fdb2d3e357ab38e86dfa1fa9
+# good: [59c26a404d20e58ccacf40a3e5738d4be3e247b7] Merge branch 'task/if-an-image-file-or-yqsjanep'
+git bisect good 59c26a404d20e58ccacf40a3e5738d4be3e247b7
+# good: [32eb602cd64d92a3156c009b6bbed00a85df79f1] DeepSeek: offer and send its real low/high/max effort ladder
+git bisect good 32eb602cd64d92a3156c009b6bbed00a85df79f1
+# good: [119cce5730f4a7226cc78a8b498f8bc731c98872] Merge branch 'task/a-tool-call-was-denied-7sgil9vn'
+git bisect good 119cce5730f4a7226cc78a8b498f8bc731c98872
+# good: [9aec77066e5d87345d73b766e8a45ba0d75cd558] Merge branch 'task/if-there-is-help-text-1144l530'
+git bisect good 9aec77066e5d87345d73b766e8a45ba0d75cd558
+# good: [ba6ef6799790620aa918a2b1f1dac2aa00310329] Fallback: carry on with another provider when one runs out of quota or money
+git bisect good ba6ef6799790620aa918a2b1f1dac2aa00310329
+# bad: [6b3ef21768572ff25db2f485dd58ddcac01ec348] The usage dashboard shows and edits the fallback list
+git bisect bad 6b3ef21768572ff25db2f485dd58ddcac01ec348
+# bad: [4c2023caab9e5a1ff45a2c34fbdb43eb9bd0e6ae] Providers say why a call failed, so the fallback can act on it
+git bisect bad 4c2023caab9e5a1ff45a2c34fbdb43eb9bd0e6ae
+# first 'bad' commit: [4c2023caab9e5a1ff45a2c34fbdb43eb9bd0e6ae] Providers say why a call failed, so the fallback can act on it

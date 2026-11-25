@@ -1,0 +1,15 @@
+4c2023c^: exit 0
+failure=nil finished=t terminal-count=1 events=((:type done :stop-reason error :error 42))
+
+4c2023c: exit 1
+failure=(wrong-type-argument stringp 42) finished=t terminal-count=0 events=nil
+
+b444511: exit 1
+failure=(wrong-type-argument stringp 42) finished=t terminal-count=0 events=nil
+
+0bff057: exit 1
+failure=(wrong-type-argument stringp 42) finished=t terminal-count=0 events=nil
+
+c513531: exit 0
+failure=nil finished=t terminal-count=1 events=((:type done :stop-reason error :error-kind protocol :error "Provider completion failed: Wrong type argument: stringp, 42"))
+

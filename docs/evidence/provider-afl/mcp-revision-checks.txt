@@ -1,0 +1,5 @@
+0bff057: exit 1
+before-id=2 after-id=1 wire={"id":1,"method":"ping"}
+
+c513531: exit 0
+handled refusal: (json-parse-error "Duplicate JSON member: :id")

@@ -1,0 +1,10 @@
+
+Ran 6 tests, 1 results as expected, 5 unexpected (2026-11-24 20:51:30-0500, 5.349791 sec)
+
+5 unexpected results:
+   FAILED  harness-provider-openai-finish-claims-before-audit-reentry
+   FAILED  harness-provider-openai-malformed-sse-stops-its-transport
+   FAILED  harness-provider-openai-malformed-wire-error-still-ends
+   FAILED  harness-provider-openai-synchronous-protocol-failure-cancels-late-http-handle
+   FAILED  harness-provider-openai-terminal-work-cannot-suppress-done
+

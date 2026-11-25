@@ -43,6 +43,34 @@ git clone https://github.com/AFLplusplus/AFLplusplus && cd AFLplusplus && make s
 Point `harness-fuzz-afl-program` and `harness-fuzz-tmin-program` at
 them when they are not on `exec-path`.
 
+From this checkout, run a bounded campaign without starting a live harness:
+
+```sh
+# Target, seconds per target (1–60), seed, optional artifact directory.
+TMPDIR=/var/tmp .harness/plugins/fuzz/run.sh all 60 20261126
+TMPDIR=/var/tmp .harness/plugins/fuzz/run.sh openai-sse 60 42 /var/tmp/my-fuzz-runs
+```
+
+The runner allows four targets at a time and at most 10,000 executions per
+target. It saves the revision, dirty-tree status, report and inputs needed for
+replay. Exit 0 means no findings, 1 means findings, and 2 means the campaign
+could not run. Seeds are probed and findings may be minimized after fuzzing,
+so total time exceeds the per-target mutation budget. The default artifact
+directory is `scripts/.dev/fuzz/`; AFL's raw work directory is retained and
+named in `report.el`. Campaigns call no real provider and use no user sessions.
+
+To use the report's numbered replay calls in another Emacs, require
+`harness-fuzz` and restore the saved report (read as data, without evaluating it):
+
+```elisp
+(setq harness-fuzz--last-report
+      (with-temp-buffer
+        (insert-file-contents "/path/to/campaign/report.el")
+        (read (current-buffer))))
+;; Then use the target and crash number printed in summary.txt.
+(harness-fuzz-replay 'mcp-line :crash 1)
+```
+
 ## Tools
 
 - `fuzz_harness` — run a campaign.  Arguments: `target` (`all` or one
@@ -114,6 +142,7 @@ may segfault Emacs and the campaign survives it.
 | `search-query` | the session search query parser |
 | `http-headers` | HTTP headers, disposition and URL file names |
 | `provider-events` | raw event envelopes, terminal normalization and the exactly-once callback guard |
+| `openai-sse` | real SSE and OpenAI-compatible decoding, chunk invariance, mandatory terminal delivery and late-event fencing |
 
 Each target is a pure boundary: it touches no session, file, process or
 network.  A check must treat malformed input as handled (return non-nil)

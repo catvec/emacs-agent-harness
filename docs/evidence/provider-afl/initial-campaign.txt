@@ -1,0 +1,16 @@
+Fuzz run reliability-pass with AFL++ dumb mode (seed 20261124): 3238 inputs across 10 targets in 226.3s [stopped: seconds]
+  acp-lines: 321 inputs at 5.1/s, 0 crashes
+  acp-normalise: 330 inputs at 5.1/s, 0 crashes
+  acp-params: 329 inputs at 5.1/s, 0 crashes
+  http-headers: 325 inputs at 5.1/s, 0 crashes
+  links: 321 inputs at 5.0/s, 0 crashes
+  mcp-line: 315 inputs at 5.0/s, 1 crash
+  mcp-result: 319 inputs at 5.0/s, 0 crashes
+  mcp-serve: 318 inputs at 5.0/s, 0 crashes
+  provider-events: 336 inputs at 5.1/s, 0 crashes
+  search-query: 324 inputs at 5.1/s, 0 crashes
+  1. mcp-line: crash (exit 42)
+     mcp-line: error: MCP line round-trip changed (:js "2.0" :id 2 :resuutonrpc "2.0" :id 1 :method "ping") to (:js "2.0" :id 1 :resuutonrpc "2.0" :method "ping")
+     input: "{\"js\":\"2.0\",\"id\":2,\"resuutonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}"
+     replay: fuzz_replay target: mcp-line crash: 1
+A crash is a signal, a broken invariant or a hang at a boundary that must not break; afl-tmin minimised the ones marked so.

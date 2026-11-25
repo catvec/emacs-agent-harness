@@ -1,0 +1,72 @@
+running '/var/tmp/harness-sse-bisect.sh'
+failure=(wrong-type-argument stringp 42) finished=t terminal-count=0 events=nil
+Bisecting: 305 revisions left to test after this (roughly 8 steps)
+[05178759223e1867a3cade2cfa159fe65095f1e7] Show the fallback entries' tiers and refresh the usage picture
+running '/var/tmp/harness-sse-bisect.sh'
+failure=(wrong-type-argument stringp 42) finished=t terminal-count=0 events=nil
+Bisecting: 152 revisions left to test after this (roughly 7 steps)
+[eb429cfbcf95695dceb4ef590cafd3d58643469b] Merge branch 'task/make-it-so-in-task-88cvn02o'
+running '/var/tmp/harness-sse-bisect.sh'
+failure=nil finished=t terminal-count=1 events=((:type done :stop-reason error :error 42))
+Bisecting: 76 revisions left to test after this (roughly 6 steps)
+[6b6790403a5b2ce0fdb2d3e357ab38e86dfa1fa9] Merge branch 'task/make-a-plugin-which-notifies-p00p2g58'
+running '/var/tmp/harness-sse-bisect.sh'
+failure=nil finished=t terminal-count=1 events=((:type done :stop-reason error :error 42))
+Bisecting: 38 revisions left to test after this (roughly 5 steps)
+[59c26a404d20e58ccacf40a3e5738d4be3e247b7] Merge branch 'task/if-an-image-file-or-yqsjanep'
+running '/var/tmp/harness-sse-bisect.sh'
+failure=nil finished=t terminal-count=1 events=((:type done :stop-reason error :error 42))
+Bisecting: 19 revisions left to test after this (roughly 4 steps)
+[32eb602cd64d92a3156c009b6bbed00a85df79f1] DeepSeek: offer and send its real low/high/max effort ladder
+running '/var/tmp/harness-sse-bisect.sh'
+failure=nil finished=t terminal-count=1 events=((:type done :stop-reason error :error 42))
+Bisecting: 9 revisions left to test after this (roughly 3 steps)
+[119cce5730f4a7226cc78a8b498f8bc731c98872] Merge branch 'task/a-tool-call-was-denied-7sgil9vn'
+running '/var/tmp/harness-sse-bisect.sh'
+failure=nil finished=t terminal-count=1 events=((:type done :stop-reason error :error 42))
+Bisecting: 5 revisions left to test after this (roughly 2 steps)
+[9aec77066e5d87345d73b766e8a45ba0d75cd558] Merge branch 'task/if-there-is-help-text-1144l530'
+running '/var/tmp/harness-sse-bisect.sh'
+failure=nil finished=t terminal-count=1 events=((:type done :stop-reason error :error 42))
+Bisecting: 2 revisions left to test after this (roughly 2 steps)
+[ba6ef6799790620aa918a2b1f1dac2aa00310329] Fallback: carry on with another provider when one runs out of quota or money
+running '/var/tmp/harness-sse-bisect.sh'
+failure=nil finished=t terminal-count=1 events=((:type done :stop-reason error :error 42))
+Bisecting: 0 revisions left to test after this (roughly 1 step)
+[6b3ef21768572ff25db2f485dd58ddcac01ec348] The usage dashboard shows and edits the fallback list
+running '/var/tmp/harness-sse-bisect.sh'
+failure=(wrong-type-argument stringp 42) finished=t terminal-count=0 events=nil
+Bisecting: 0 revisions left to test after this (roughly 0 steps)
+[4c2023caab9e5a1ff45a2c34fbdb43eb9bd0e6ae] Providers say why a call failed, so the fallback can act on it
+running '/var/tmp/harness-sse-bisect.sh'
+failure=(wrong-type-argument stringp 42) finished=t terminal-count=0 events=nil
+4c2023caab9e5a1ff45a2c34fbdb43eb9bd0e6ae is the first 'bad' commit
+commit 4c2023caab9e5a1ff45a2c34fbdb43eb9bd0e6ae
+Author: Noah Huppert <contact@noahh.io>
+Date:   Sat Oct 3 13:57:19 2026 -0400
+
+    Providers say why a call failed, so the fallback can act on it
+    
+    A failed turn's done event now carries :error-kind (quota, billing,
+    rate-limit, auth) and, for a used-up quota, :resets, so the fallback
+    does not have to read the error's text when the provider knows better.
+    
+    Claude Code: the assistant error field (billing_error, account_on_hold,
+    authentication_failed, rate_limit), a rejected rate_limit_event with
+    its resetsAt, and the result's api_error_status (402, 429, 401/403).
+    OpenAI-compatible: HTTP 402, 401/403, and 429 (insufficient_quota is
+    billing, a plain rate limit is not).
+    Copilot: a session.error of type quota, or a 402.
+    
+    The fakes and the provider tests cover each.
+
+ lisp/modules/harness-provider-claude.el  | 102 ++++++++++++++++++++++++++++---
+ lisp/modules/harness-provider-copilot.el |  49 ++++++++++++++-
+ lisp/modules/harness-provider-openai.el  |  34 ++++++++++-
+ test/fixtures/fake-claude.py             |  57 +++++++++++++++--
+ test/fixtures/fake-copilot.py            |   8 +++
+ test/harness-provider-claude-test.el     |  47 ++++++++++++++
+ test/harness-provider-copilot-test.el    |  17 +++++-
+ test/harness-provider-openai-test.el     |  26 ++++++++
+ 8 files changed, 320 insertions(+), 20 deletions(-)
+bisect found first 'bad' commit

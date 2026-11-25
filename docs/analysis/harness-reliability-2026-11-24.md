@@ -184,3 +184,101 @@ writes work again. An unknown live dispatch is still refused rather than being
 silently replayed. These changes close the reproduced lifecycle and ownership
 holes; they are not evidence that every possible stall or provider failure has
 been eliminated.
+
+## AFL follow-up: the systemic problem is failure ownership
+
+The provider implementation is a trigger, not the only owner of the failure.
+The core must keep malformed data and adapter exceptions from destroying a
+session's ability to finish, cancel and accept another request. Several layers
+previously had local protections whose composition did not provide that
+guarantee:
+
+| Systemic weakness | Concrete failure | Protection added |
+| --- | --- | --- |
+| A local `finished` flag stood for successful downstream delivery | OpenAI marked a stream finished, then error classification threw before emitting `done` | Claim finish before reentry, but deliver its terminal event in unconditional cleanup |
+| Exception containment had no completion responsibility | HTTP and SSE logged callback errors while the agent still waited on another promise | The adapter owns protocol errors inside those callback boundaries; the agent owns internal failures inside its turn boundary |
+| Persistence and diagnostics sat on the critical completion path | A terminal write or usage/diagnostic exception suppressed the signal tasks needed | Independent bookkeeping cannot prevent registry cleanup, notification and promise settlement; adapter terminal failures become protocol errors |
+| Unvalidated data retained authority across requests | Bad tool inputs poisoned saved history; old callbacks and duplicate deliveries could affect new work | Safe history shapes, per-turn ownership checks, request-scoped cancellation and per-step tool-ID deduplication |
+| Two components interpreted the same wire value differently | Duplicate JSON `id` members used the first value in a plist and the last when re-encoded | Reject duplicate object members, including nested objects and escaped spellings, in both shared JSON readers |
+| Tests stopped before recovery or changed the timing model | Accepting fakes hid poisoned history; synchronous mocks let an outer `condition-case` catch real asynchronous failures | Real persisted sessions, strict next-request checks, cold reload, delayed wire callbacks and deliberate terminal-stage failures |
+
+This is why fixing ten similar triggers did not necessarily remove the eleventh:
+the invariant was not owned by an exception-safe lifecycle boundary. A healthy
+process, a caught exception, an in-memory flag and a persisted marker each
+described only part of the operation. None alone proved that its waiting caller
+had been released.
+
+### A new historical reproduction
+
+The raw SSE payload `{"error":{"message":42}}` reproduces a missing terminal
+event before this repair. The adapter sets `finished`, then calls
+`harness-openai--failure-kind`, which calls `downcase` on the non-string value.
+The HTTP layer contains that exception; a second finish attempt sees the flag
+and cannot emit anything. Cancellation used the same flag and could not repair
+the missing terminal event either.
+
+Git bisect identifies `4c2023c` (October 3), which introduced that classification
+call, as the first bad commit for **missing terminal delivery**. The parent emits
+one event; the child emits none and raises `wrong-type-argument`. The parent
+still emitted malformed error data: it is good only for this precise liveness
+reproduction. The defect already exists at the start of the requested two-week
+window, so it cannot be honestly attributed to a new change during that window.
+[The portable reproduction, bisect log and direct revision checks](../evidence/provider-afl/README.md)
+are saved. This does not attribute an unrecorded live incident to that payload.
+
+The repair handles parser and dialect callback errors before SSE can swallow
+them, emits a protocol error, and stops the captured HTTP producer, including a
+handle returned after a synchronous failure. Terminal processing claims finish
+before calling an audit hook and cannot lose its event to usage, tool-argument
+decoding or diagnostics failures. It does not retry an operation whose effects
+may already have happened.
+
+### What AFL found and what the oracle found
+
+The initial AFL++ campaign exercised 3,238 inputs across ten targets. It found a
+duplicate-member MCP round-trip failure after 92 executions of that target.
+That is a logical invariant failure (adapter exit 42), not an Emacs segfault.
+The retained original input and a manually reduced example reproduce it.
+
+Expanding coverage to the real OpenAI SSE lifecycle exposed the terminal defect
+above while checking the seed corpus. That finding came from the new oracle and
+regression, rather than claiming it was an AFL-discovered mutation. Five of six
+new targeted provider checks fail at `0bff057`; the consumer-redelivery check
+already passed there. A malformed-wire test also requires the real asynchronous
+agent/session path to finish, accept a new prompt and survive cold reload.
+
+The runner is `.harness/plugins/fuzz/run.sh`. It retains reports and replay
+inputs and fails its command when findings are present. The final campaign's
+exact counts are in [the retained report](../evidence/provider-afl/final-campaign.txt).
+Stock Emacs uses AFL's non-instrumented mode: these are mutation campaigns, not
+evidence of coverage saturation. A fresh Emacs per input contains failures but
+limits throughput, and mutations that fail parsing explore little deeper code.
+
+### Architectural limits still requiring attention
+
+This pass establishes tested failure boundaries; it does not establish a
+universal fault-isolation guarantee for every provider. In particular:
+
+- The resilience watchdog reports stalls; it is not a universal hard deadline
+  that settles every request. A provider that emits nothing still depends on
+  its transport timeout or cancellation. Cancellation now has core settlement
+  independent of the provider acknowledgement, but a notification alone is no
+  recovery policy.
+- Terminal ownership still exists at several layers. A longer-term simplification
+  is one request supervisor that owns its identity, completion, cancellation and
+  deadline, with adapters supplying data rather than controlling the caller's
+  lifecycle. Existing exact-token and per-turn checks are concrete protections
+  along that boundary, not a completed state-machine migration.
+- The shared plist JSON convention is not a complete wire type system: null,
+  empty arrays and empty objects can become indistinguishable without a schema.
+  Duplicate-member rejection removes the reproduced identity disagreement; it
+  does not make all decode/encode operations lossless. Its validator preserves
+  native array identity until member checking finishes, so arrays beginning with
+  JSON false cannot be mistaken for objects during that check.
+- Durable unknown effects cannot be fixed by clearing an in-flight flag and
+  replaying. Recovery needs operation-specific evidence or an explicit uncertain
+  outcome. No exactly-once guarantee across machine crashes is established here.
+- This campaign covers canonical events and one raw provider decoder. Equivalent
+  conformance/fault-injection checks are still needed for the other adapters and
+  their real incident traces. Every saved finding should become a deterministic
+  regression before broadening mutation budgets.

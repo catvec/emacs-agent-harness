@@ -86,14 +86,21 @@ improper envelopes before calling the guard. It now delivers those values to the
 actual guard and has seeds for malformed terminal fields and circular Lisp
 objects. Its regression verifies that all malformed inputs reach the boundary.
 The existing AFL adapter also provides saved crash inputs and `afl-tmin` shrinking;
-see [the plugin guide](../../.harness/plugins/fuzz/README.md). AFL++ is not
-installed in the development environment, so its adapter and seeds were checked
-without running an AFL mutation campaign.
+see [the plugin guide](../../.harness/plugins/fuzz/README.md). AFL++ was installed
+on November 24. The first campaign ran 3,238 inputs across ten targets and found
+duplicate JSON members changing meaning on MCP re-encoding. A subsequent
+campaign included a new raw `openai-sse` target. Saved inputs and campaign reports
+are in [the AFL evidence directory](../evidence/provider-afl/README.md).
 
-These tests start at the canonical event boundary after an adapter. They do not
-mutate every provider's JSON/SSE/CLI decoder or establish exactly-once execution
-across machine crashes. Sanitized incident recordings replayed through real
-adapter parsers, with truncated frames and varied chunk boundaries, are the next
-separate layer. A provider that ignores cancellation still depends on transport
-and process timeouts; the replacement-turn checks ensure its late events have
-lost authority over the session.
+The canonical-event campaign is complemented by malformed raw SSE regressions
+through the real OpenAI decoder and asynchronous turn lifecycle. These require
+an error result, another prompt and a cold load. The AFL target mutates raw SSE,
+compares whole and fragmented delivery, requires one terminal event and rejects
+events after completion. A separate test proves that the oracle fails when
+completion delivery is removed, even if parsing itself does not throw.
+
+This does not mutate every provider's JSON/SSE/CLI decoder or establish
+exactly-once execution across machine crashes. Sanitized incident recordings
+through the other real adapters are still valuable. A provider that ignores
+cancellation still depends on transport and process timeouts; replacement-turn
+checks ensure its late events have lost authority over the session.
