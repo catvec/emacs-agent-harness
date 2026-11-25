@@ -173,5 +173,11 @@ not turn a successful run into \"Process ... not running\"."
       (goto-char (point-min))
       (should (equal (harness-json-parse text) (harness-json-parse-buffer))))))
 
+(ert-deftest harness-json-duplicate-members-carry-structured-conflict-evidence ()
+  (let ((err (should-error (harness-json-parse "{\"decision\":1,\"decision\":2,\"decision\":3}")
+                           :type 'harness-json-duplicate-member)))
+    (should (eq :decision (nth 1 err)))
+    (should (= 3 (nth 2 err)))))
+
 (provide 'harness-util-test)
 ;;; harness-util-test.el ends here

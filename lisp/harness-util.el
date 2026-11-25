@@ -40,6 +40,8 @@
 
 ;;;; JSON
 
+(define-error 'harness-json-duplicate-member "Duplicate JSON member" 'json-parse-error)
+
 (defun harness--json-prepare (obj)
   "Convert OBJ from the harness plist convention into `json-serialize' input."
   (cond
@@ -183,7 +185,9 @@ be mistaken for an object with keyword keys."
       (cl-loop for tail on value by #'cddr
                for key = (car tail) do
                (when (gethash key seen)
-                 (signal 'json-parse-error (list (format "Duplicate JSON member: %s" key))))
+                 (signal 'harness-json-duplicate-member
+                         (list key (cl-loop for (member _value) on value by #'cddr
+                                            count (eq member key)))))
                (puthash key t seen)
                (setcar (cdr tail) (harness--json-check-members (cadr tail)))))
     value)

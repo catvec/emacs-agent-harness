@@ -1,0 +1,5 @@
+c513531: exit 1
+(:behavior allow :reason "allowed by the auto-mode judge")
+
+Repaired source: exit 0
+(:problem "a verdict beside 2 \"decision\" keys in one object")

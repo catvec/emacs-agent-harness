@@ -1047,6 +1047,12 @@ way the harness must not take permission from it."
                   ;; The key given twice, with different answers.
                   ("{\"decision\":\"allow\",\"decision\":\"deny\"}"
                    "2 \"decision\" keys in one object")
+                  ("{\"decision\":\"allow\"}\n{\"decision\":\"allow\",\"decision\":\"deny\"}"
+                   "a verdict beside 2 \"decision\" keys in one object")
+                  ("{\"decision\":\"allow\",\"reason\":\"one\",\"reason\":\"two\"}"
+                   "duplicate JSON member :reason")
+                  ("{\"decision\":\"allow\"}\n{\"note\":{\"x\":1,\"x\":2}}"
+                   "a verdict beside duplicate JSON member :x")
                   ;; Two objects that do not agree.
                   ("{\"decision\":\"allow\"}\n{\"decision\":\"deny\"}"
                    "a verdict beside another that disagrees")

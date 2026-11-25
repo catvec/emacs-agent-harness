@@ -26,6 +26,11 @@ inputs were local fixtures. No live model or user session was used.
 - `sse-revision-checks.txt`: direct parent/child, two-week-window start,
   previous repair HEAD and fixed-source checks. A parent that emits a malformed
   error event counts as good only for this missing-delivery reproduction.
+- `verdict-rejection-repro.el` and `verdict-revision-checks.txt`: the first
+  full integration run exposed a regression introduced by the stricter reader:
+  discarded rejection evidence could turn a conflicting reply into permission.
+  The repaired verdict reader retains that conflict, with the existing specific
+  diagnostic. This follow-up is not attributed to the original harness or AFL.
 
 Run a campaign from the checkout:
 

@@ -254,6 +254,16 @@ Stock Emacs uses AFL's non-instrumented mode: these are mutation campaigns, not
 evidence of coverage saturation. A fresh Emacs per input contains failures but
 limits throughput, and mutations that fail parsing explore little deeper code.
 
+The first full integration run caught a regression in the stricter JSON-reader
+change: the permission verdict reader caught parse rejection and treated the
+object as absent. That lost its existing duplicate-decision diagnostic and could
+accept a valid allow beside the rejected conflicting object. Duplicate-member
+errors now carry structured key/count evidence; the verdict reader preserves
+that evidence as an explicit conflict. The original diagnostic assertion stays,
+and additional cases reject valid verdicts mixed with duplicate decisions,
+duplicate reasons and nested duplicate members. This is another instance of the
+same ownership rule: a rejected input must not silently become missing data.
+
 ### Architectural limits still requiring attention
 
 This pass establishes tested failure boundaries; it does not establish a

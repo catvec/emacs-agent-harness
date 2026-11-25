@@ -3677,7 +3677,8 @@ Nested objects count as one, and a brace inside a string is no brace."
     end))
 
 (defun harness-perms--json-objects (text)
-  "Return the JSON objects TEXT holds, as plists, in the order they come.
+  "Return TEXT's JSON objects and explicit duplicate-member conflicts in order.
+Objects are plists; an invalid object's marker is [invalid-json WHY].
 An object is found by its braces (`harness-perms--json-object-end'), so
 prose around it is no object, and a reply of several is all of them.  A
 brace that opens no valid JSON object is skipped."
@@ -3687,10 +3688,18 @@ brace that opens no valid JSON object is skipped."
           (let ((end (harness-perms--json-object-end text i)))
             (if (null end)
                 (setq i (1+ i))
-              (let ((obj (condition-case nil
+              (let ((obj (condition-case err
                              (harness-json-parse (substring text i end))
+                           (harness-json-duplicate-member
+                            ;; Rejection is evidence, not an absent object.
+                            ;; Otherwise a valid verdict beside a rejected
+                            ;; duplicate could silently become permission.
+                            (vector 'invalid-json
+                                    (if (eq (nth 1 err) :decision)
+                                        (format "%d \"decision\" keys in one object" (nth 2 err))
+                                      (format "duplicate JSON member %S" (nth 1 err)))))
                            (error nil))))
-                (when (or (null obj) (and (consp obj) (keywordp (car obj))))
+                (when (or (vectorp obj) (null obj) (and (consp obj) (keywordp (car obj))))
                   (push obj objects)))
               (setq i end)))
         (setq i (1+ i))))
@@ -3720,27 +3729,29 @@ puts the call to the user, (:conflict WHY) when OBJECT talks about the
 decision without giving one plainly -- no \"decision\" where it names a
 verdict key, a decision that is neither word, or the key given twice --
 and nil for an object that says nothing of the decision at all."
-  (let ((values nil) (bare nil))
-    (cl-loop for (k v) on object by #'cddr
-             do (if (eq k :decision)
-                    (push v values)
-                  (when (memq k '(:allow :deny :allowed :denied))
-                    (push k bare))))
-    (cond
-     ;; A key repeated is no one decision: picking the first or the last
-     ;; would be reading a verdict the reply did not plainly give.
-     ((cdr values)
-      (list :conflict (format "%d \"decision\" keys in one object" (length values))))
-     ((null values)
-      (when bare
-        (list :conflict (format "the key \"%s\" where \"decision\" belongs"
-                                (string-remove-prefix ":" (symbol-name (car bare)))))))
-     (t
-      (let ((word (harness-perms--judge-word (car values))))
-        (cond ((member word '("allow" "deny")) (list :word word))
-              ((equal word "ask") (list :asked t))
-              (t (list :conflict (format "a \"decision\" of %S, which is neither allow nor deny"
-                                         (car values))))))))))
+  (if (and (vectorp object) (= 2 (length object)) (eq (aref object 0) 'invalid-json))
+      (list :conflict (aref object 1))
+    (let ((values nil) (bare nil))
+      (cl-loop for (k v) on object by #'cddr
+               do (if (eq k :decision)
+                      (push v values)
+                    (when (memq k '(:allow :deny :allowed :denied))
+                      (push k bare))))
+      (cond
+       ;; A key repeated is no one decision: picking the first or the last
+       ;; would be reading a verdict the reply did not plainly give.
+       ((cdr values)
+	(list :conflict (format "%d \"decision\" keys in one object" (length values))))
+       ((null values)
+	(when bare
+          (list :conflict (format "the key \"%s\" where \"decision\" belongs"
+                                  (string-remove-prefix ":" (symbol-name (car bare)))))))
+       (t
+	(let ((word (harness-perms--judge-word (car values))))
+          (cond ((member word '("allow" "deny")) (list :word word))
+		((equal word "ask") (list :asked t))
+		(t (list :conflict (format "a \"decision\" of %S, which is neither allow nor deny"
+                                           (car values)))))))))))
 
 (defun harness-perms--read-verdict (text)
   "Return what a judge's reply TEXT says, a verdict or why it is none.
