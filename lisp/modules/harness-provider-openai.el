@@ -1130,6 +1130,22 @@ shows a model writing a large input.  At most one report every
                      :chars (length (plist-get call :arguments)))))))
 
 (defun harness-openai--stream-chunk (stream data)
+  "Read DATA for STREAM or terminate this request on a protocol failure.
+The SSE transport contains callback errors; it cannot settle this
+adapter's request on our behalf.  Own the error before that boundary
+can reduce it to a log message."
+  (unless (harness-openai--stream-finished stream)
+    (condition-case err
+        (harness-openai--read-stream-chunk stream data)
+      (error
+       (setf (harness-openai--stream-error-kind stream) 'protocol)
+       (unwind-protect
+           (harness-openai--stream-finish
+            stream 'error (format "Malformed provider stream: %s" (harness-error-message err)))
+         (when-let* ((http (harness-openai--stream-http stream)))
+           (harness-http-cancel http)))))))
+
+(defun harness-openai--read-stream-chunk (stream data)
   "Handle one SSE DATA payload for STREAM.
 A dialect's `:chunk' hook (`harness-openai--dialect') sees the parsed
 payload first, as (HOOK JSON STREAM), and may read fields this
@@ -1356,7 +1372,7 @@ See `harness-openai--failure-kind', which asks a dialect first."
         (text (downcase (or error "")))
         (reported (harness-openai--stream-error-kind stream)))
     (cond
-     ((and (eq reported 'transport) 'transport))
+     ((memq reported '(transport protocol)) reported)
      ((and (integerp status) (or (= status 408) (<= 500 status 599))) 'transport)
      ((equal status 402) 'billing)
      ((member status '(401 403)) 'auth)
@@ -1388,72 +1404,90 @@ reply from an endpoint it did not choose."
       (and (stringp complaint) (not (string-empty-p complaint)) complaint))))
 
 (defun harness-openai--stream-finish (stream reason &optional error)
-  "End STREAM with stop REASON and optional ERROR text, emitting once."
+  "End STREAM once, even if terminal processing fails.
+The finished flag claims ownership before hooks or consumers can
+reenter.  A claim is not delivery: the terminal event is unconditional
+cleanup, independent of usage, tool decoding and diagnostics."
   (unless (harness-openai--stream-finished stream)
-    (when-let* ((complaint (and (null error) (not (eq reason 'cancelled))
-                                (harness-openai--stream-audit stream reason))))
-      ;; An answer that fails its audit is a failed answer, whatever it
-      ;; otherwise looked like: its tool calls are not run either.
-      (setq error complaint
-            reason 'error))
     (setf (harness-openai--stream-finished stream) t)
-    (let ((on-event (harness-openai--stream-on-event stream))
-          (calls (harness-openai--stream-calls stream))
-          (usage-event nil))
-      (when-let* ((usage (harness-openai--stream-usage stream)))
-        (unless (eq reason 'cancelled)
-          (setq usage-event (harness-openai--usage-event usage (harness-openai--stream-endpoint stream)))
-          (funcall on-event usage-event)))
-      (when (eq reason 'tool-use)
-        (dolist (slot calls)
-          (let ((call (cdr slot)))
-            (funcall on-event (list :type 'tool-call
-                                    :id (or (plist-get call :id) (concat "call_" (harness-short-id)))
-                                    :name (harness-openai--stream-tool-name stream (plist-get call :name))
-                                    :input (harness-openai--parse-arguments (plist-get call :arguments))
-                                    :respond nil)))))
-      (let ((done (if error
-                      (append (list :type 'done :stop-reason reason :error error)
-                              (when-let* ((kind (harness-openai--failure-kind stream error)))
-                                (list :error-kind kind))
-                              (when-let* ((after (harness-openai--stream-retry-after stream)))
-                                (list :retry-after after))
-                              ;; How far the limit reaches, when the
-                              ;; provider's own fields say: a pool
-                              ;; above the provider rests on it.
-                              (when-let* ((scope (and (eq (harness-openai--failure-kind stream error)
-                                                          'rate-limit)
-                                                      (harness-openai--dialect-limit-scope stream error))))
-                                (list :limit-scope scope)))
-                    (list :type 'done :stop-reason reason))))
-        ;; The diagnostic reads the attempt's own raw usage and the event
-        ;; emitted above; it never adds usage or sends a request.  The
-        ;; finish is once, so the response line is once.
-        (when-let* ((attempt (harness-openai--stream-diagnostics stream)))
-          (harness-provider-diagnostics-response
-           attempt
-           :status (harness-openai--stream-status stream)
-           :generation (harness-openai--stream-response-id stream)
-           :request-id (harness-openai--stream-request-id stream)
-           :provider (harness-openai--stream-served-provider stream)
-           :served-model (harness-openai--stream-served-model stream)
-           :usage (harness-openai--stream-usage stream)
-           :usage-event usage-event
-           ;; OpenRouter reports costs in dollars; a dialect that says it
-           ;; is OpenRouter's is priced in USD, and any other route leaves
-           ;; the currency unknown rather than assuming one.
-           :currency (and (eq (harness-openai--flavor (harness-openai--stream-endpoint stream))
-                              'openrouter)
-                          "USD")
-           :outcome (cond ((eq reason 'cancelled) 'cancelled)
-                          (error 'error)
-                          (t 'ok))
-           :stop reason
-           :error-kind (and error (harness-openai--failure-kind stream error))
-           :retry-after (harness-openai--stream-retry-after stream)
-           :http-retries (when-let* ((http (harness-openai--stream-http stream)))
-                           (harness-http-handle-retries http))))
-        (funcall on-event done)))))
+    (let ((done (list :type 'done :stop-reason 'error :error-kind 'protocol
+                      :error "Provider completion interrupted")))
+      (unwind-protect
+          (condition-case err
+              (setq done (harness-openai--stream-result stream reason error))
+            (error
+             (setq done (list :type 'done :stop-reason 'error :error-kind 'protocol
+                              :error (format "Provider completion failed: %s"
+                                             (harness-error-message err))))
+             (harness-log 'error "%s" (plist-get done :error))))
+        (funcall (harness-openai--stream-on-event stream) done)))))
+
+(defun harness-openai--stream-result (stream reason error)
+  "Process STREAM's terminal data and return its done event.
+Only `harness-openai--stream-finish' calls this, after claiming finish."
+  (when-let* ((complaint (and (null error) (not (eq reason 'cancelled))
+                              (harness-openai--stream-audit stream reason))))
+    ;; An answer that fails its audit is a failed answer, whatever it
+    ;; otherwise looked like: its tool calls are not run either.
+    (setq error complaint
+          reason 'error))
+  (let ((on-event (harness-openai--stream-on-event stream))
+        (calls (harness-openai--stream-calls stream))
+        (usage-event nil))
+    (when-let* ((usage (harness-openai--stream-usage stream)))
+      (unless (eq reason 'cancelled)
+        (setq usage-event (harness-openai--usage-event usage (harness-openai--stream-endpoint stream)))
+        (funcall on-event usage-event)))
+    (when (eq reason 'tool-use)
+      (dolist (slot calls)
+        (let ((call (cdr slot)))
+          (funcall on-event (list :type 'tool-call
+                                  :id (or (plist-get call :id) (concat "call_" (harness-short-id)))
+                                  :name (harness-openai--stream-tool-name stream (plist-get call :name))
+                                  :input (harness-openai--parse-arguments (plist-get call :arguments))
+                                  :respond nil)))))
+    (let ((done (if error
+                    (append (list :type 'done :stop-reason reason :error error)
+                            (when-let* ((kind (harness-openai--failure-kind stream error)))
+                              (list :error-kind kind))
+                            (when-let* ((after (harness-openai--stream-retry-after stream)))
+                              (list :retry-after after))
+                            ;; How far the limit reaches, when the
+                            ;; provider's own fields say: a pool
+                            ;; above the provider rests on it.
+                            (when-let* ((scope (and (eq (harness-openai--failure-kind stream error)
+                                                        'rate-limit)
+                                                    (harness-openai--dialect-limit-scope stream error))))
+                              (list :limit-scope scope)))
+                  (list :type 'done :stop-reason reason))))
+      ;; The diagnostic reads the attempt's own raw usage and the event
+      ;; emitted above; it never adds usage or sends a request.  The
+      ;; finish is once, so the response line is once.
+      (when-let* ((attempt (harness-openai--stream-diagnostics stream)))
+        (harness-provider-diagnostics-response
+         attempt
+         :status (harness-openai--stream-status stream)
+         :generation (harness-openai--stream-response-id stream)
+         :request-id (harness-openai--stream-request-id stream)
+         :provider (harness-openai--stream-served-provider stream)
+         :served-model (harness-openai--stream-served-model stream)
+         :usage (harness-openai--stream-usage stream)
+         :usage-event usage-event
+         ;; OpenRouter reports costs in dollars; a dialect that says it
+         ;; is OpenRouter's is priced in USD, and any other route leaves
+         ;; the currency unknown rather than assuming one.
+         :currency (and (eq (harness-openai--flavor (harness-openai--stream-endpoint stream))
+                            'openrouter)
+                        "USD")
+         :outcome (cond ((eq reason 'cancelled) 'cancelled)
+                        (error 'error)
+                        (t 'ok))
+         :stop reason
+         :error-kind (and error (harness-openai--failure-kind stream error))
+         :retry-after (harness-openai--stream-retry-after stream)
+         :http-retries (when-let* ((http (harness-openai--stream-http stream)))
+                         (harness-http-handle-retries http))))
+      done)))
 
 (defun harness-openai--stream-complete (stream)
   "Finish STREAM after a successful response, choosing the stop reason."
@@ -1598,6 +1632,11 @@ An ordinary request carries none, and its events are unchanged."
                                                 "")))))
                                 (t (harness-openai--stream-complete stream))))))))
         (error (harness-openai--stream-finish stream 'error (harness-error-message err)))))))
+    ;; A synchronous transport can report a bad payload before returning
+    ;; its handle.  Stop that exact late producer too.
+    (when (and (harness-openai--stream-finished stream)
+               (eq (harness-openai--stream-error-kind stream) 'protocol))
+      (harness-http-cancel (harness-openai--stream-http stream)))
     (list :cancel (lambda ()
                     (unless (harness-openai--stream-finished stream)
                       (when-let* ((h (harness-openai--stream-http stream)))

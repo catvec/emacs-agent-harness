@@ -85,6 +85,7 @@
 (require 'harness-http)
 (require 'harness-acp)
 (require 'harness-provider)
+(require 'harness-provider-openai)
 (require 'harness-session-search)
 
 (defgroup harness-fuzz nil
@@ -1393,6 +1394,43 @@ event once `done' has gone through."
               (error "The provider guard delivered events after done")))))))
   t)
 
+(defun harness-fuzz--openai-sse-events (chunks)
+  "Decode CHUNKS through the real SSE parser and OpenAI stream lifecycle."
+  (let* ((events nil)
+         (stream (make-harness-openai--stream
+                  :endpoint '(:id fuzz :base-url "https://invalid.example")
+                  :on-event (lambda (event) (push event events))))
+         (parser (harness-http-sse-parser
+                  (lambda (_name data) (harness-openai--stream-chunk stream data)))))
+    (dolist (chunk chunks) (funcall parser chunk))
+    (harness-openai--stream-complete stream)
+    (unless (and (= 1 (cl-count 'done events :key (lambda (event) (plist-get event :type))))
+                 (eq (plist-get (car events) :type) 'done)
+                 (memq (plist-get (car events) :stop-reason)
+                       '(end-turn tool-use max-tokens error cancelled)))
+      (error "OpenAI stream did not deliver exactly one usable terminal event: %S" events))
+    (let ((before (copy-tree events)))
+      (harness-openai--stream-complete stream)
+      (funcall parser "data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\n")
+      (unless (equal before events) (error "OpenAI stream emitted after completion")))
+    ;; Generated IDs differ between independent requests.  This oracle
+    ;; compares decoding and terminal behavior, not random identity.
+    (mapcar (lambda (event) (harness-plist-remove event :id)) (nreverse events))))
+
+(defun harness-fuzz--check-openai-sse (bytes)
+  "Require the same finished stream for whole and fragmented SSE BYTES."
+  (let ((position 0) (step 0) chunks)
+    (while (< position (length bytes))
+      (let ((end (min (length bytes)
+                      (+ position (aref harness-fuzz--chunk-sizes
+                                        (mod step (length harness-fuzz--chunk-sizes)))))))
+        (push (substring bytes position end) chunks)
+        (setq position end step (1+ step))))
+    (unless (equal (harness-fuzz--openai-sse-events (list bytes))
+                   (harness-fuzz--openai-sse-events (nreverse chunks)))
+      (error "OpenAI SSE decoding changed with chunk boundaries")))
+  t)
+
 ;;;; The built-in registry
 ;;
 ;; The seeds are samples of what the boundary really reads, one per
@@ -1423,6 +1461,7 @@ event once `done' has gone through."
  :description "The MCP stdio line framing round-trip."
  :seeds (list "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}"
               "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}"
+              "{\"id\":2,\"id\":1,\"method\":\"ping\"}"
               "{\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32603,\"message\":\"x\"}}")
  :check #'harness-fuzz--check-mcp-line)
 
@@ -1471,6 +1510,16 @@ event once `done' has gone through."
               "Content-Disposition: attachment; filename=\"a b.txt\"\r\n\r\n"
               "HTTP/1.1 200 OK\nContent-Disposition: attachment; filename*=UTF-8''a%20b.txt\n\n")
  :check #'harness-fuzz--check-http-headers)
+
+(harness-fuzz-define-target
+ 'openai-sse
+ :description "Raw OpenAI-compatible SSE, chunk invariance and terminal delivery."
+ :seeds '("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+          "data: {\"error\":{\"message\":42}}\n\n"
+          "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"function\":{\"name\":\"echo\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
+          "data: {\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\r\n\r\n"
+          "data: {\"choices\":42}\n\ndata: [DONE]\n\n")
+ :check #'harness-fuzz--check-openai-sse)
 
 (harness-fuzz-define-target
  'provider-events

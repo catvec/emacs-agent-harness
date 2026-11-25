@@ -169,18 +169,41 @@ raw-byte characters there (\"\\342\\234\\227\" for U+2717), which
   (let ((json (harness-json-encode obj)))
     (if (multibyte-string-p json) json (decode-coding-string json 'utf-8-unix))))
 
+(defun harness--json-check-members (value)
+  "Check native parsed VALUE's members and restore list-shaped arrays.
+`plist-get' uses the first occurrence, while encoding through a hash
+table uses the last.  Letting both survive would change identities or
+arguments between validation, execution and persistence.  Arrays must
+still be vectors here: a list starting with JSON false could otherwise
+be mistaken for an object with keyword keys."
+  (cond
+   ((vectorp value) (mapcar #'harness--json-check-members (append value nil)))
+   ((consp value)
+    (let ((seen (make-hash-table :test 'eq)))
+      (cl-loop for tail on value by #'cddr
+               for key = (car tail) do
+               (when (gethash key seen)
+                 (signal 'json-parse-error (list (format "Duplicate JSON member: %s" key))))
+               (puthash key t seen)
+               (setcar (cdr tail) (harness--json-check-members (cadr tail)))))
+    value)
+   (t value)))
+
 (defun harness-json-parse (string)
-  "Parse JSON STRING into the plist convention.  Return nil on empty input."
+  "Parse JSON STRING into the plist convention, rejecting duplicate members.
+Return nil on empty input."
   ;; Not `string-trim': its search for trailing whitespace takes time
   ;; quadratic in a long run of spaces inside STRING.
   (unless (or (null string) (string-blank-p string))
-    (json-parse-string string :object-type 'plist :array-type 'list
-                       :null-object nil :false-object :false)))
+    (harness--json-check-members
+     (json-parse-string string :object-type 'plist :array-type 'array
+                        :null-object nil :false-object :false))))
 
 (defun harness-json-parse-buffer ()
-  "Parse the JSON value after point in the current buffer, advancing point."
-  (json-parse-buffer :object-type 'plist :array-type 'list
-                     :null-object nil :false-object :false))
+  "Parse JSON after point, advancing point and rejecting duplicate members."
+  (harness--json-check-members
+   (json-parse-buffer :object-type 'plist :array-type 'array
+                      :null-object nil :false-object :false)))
 
 (defun harness-json-array (list)
   "Return LIST as a vector so it encodes as a JSON array even when empty."

@@ -1,6 +1,7 @@
 ;;; harness-provider-chaos-test.el --- Adversarial turns and recovery -*- lexical-binding: t; -*-
 
 (require 'harness-test-helpers)
+(require 'harness-provider-openai)
 
 (defmacro harness-provider-chaos-test-with (&rest body)
   "Run BODY with an isolated session and a real registered faulty provider."
@@ -13,7 +14,7 @@
      (clrhash harness-tools)
      (clrhash harness-agent--turns)
      (let ((default-directory dir)
-           (script nil) (hold-done nil) (cancel-fails-once nil)
+           (script nil) (wire nil) (hold-done nil) (cancel-fails-once nil)
            (requests 0) (executions 0) (ended 0) (cancels 0) callbacks)
        (harness-define-provider 'chaos
          :models (lambda () (harness-resolved '((:name "events" :context-window 8000))))
@@ -34,10 +35,22 @@
                  (events script))
              (push emit callbacks)
              (setq script nil)
-             (dolist (event events) (funcall emit event))
-             (unless hold-done
-               (funcall emit '(:type text :delta "healthy answer"))
-               (funcall emit '(:type done :stop-reason end-turn)))
+             (if wire
+                 (let* ((payload wire)
+                        (stream (make-harness-openai--stream
+                                 :on-event emit :endpoint '(:id chaos :base-url "https://invalid.example")))
+                        (parser (harness-http-sse-parser
+                                 (lambda (_name data) (harness-openai--stream-chunk stream data)))))
+                   (setq wire nil)
+                   ;; The real HTTP callback runs after complete returns.
+                   ;; A synchronous fake would let provider/complete catch
+                   ;; errors which actually escape through a timer/filter.
+                   (harness-run-soon
+                    (lambda () (funcall parser payload) (harness-openai--stream-complete stream))))
+               (dolist (event events) (funcall emit event))
+               (unless hold-done
+                 (funcall emit '(:type text :delta "healthy answer"))
+                 (funcall emit '(:type done :stop-reason end-turn))))
              (list :cancel (lambda ()
                              (cl-incf cancels)
                              (when cancel-fails-once
@@ -76,12 +89,13 @@
     (:type tool-call :id "echo" :name "chaos_echo" :input (:text "hi")))
   "A bounded corpus of valid events and mutations of their shapes and fields.")
 
-(defun harness-provider-chaos-test-check (events)
+(defun harness-provider-chaos-test-check (events &optional wire-data)
   "Drive EVENTS through the provider registry, turn, persistence and next prompt."
   (harness-provider-chaos-test-with
-    (setq script events)
+    (setq script events wire wire-data)
     (let ((result (harness-test-await (harness-call 'agent/prompt sid "adversarial turn") 2)))
       (should (memq (plist-get result :stop-reason) '(end-turn error max-tokens cancelled blocked)))
+      (when wire-data (should (eq 'error (plist-get result :stop-reason))))
       (should (= 1 ended))
       (should-not (harness-agent-running-p sid))
       (should-not (plist-get (harness-call 'session/get sid) :pending))
@@ -244,6 +258,15 @@
         (should (= 2 cancels)))
       (funcall (car callbacks) '(:type done :stop-reason cancelled))
       (should (eq 'cancelled (plist-get (harness-test-await promise 2) :stop-reason))))))
+
+(ert-deftest harness-provider-chaos-malformed-sse-recovers-through-next-prompt-and-cold-load ()
+  (dolist (wire-data '("data: {\"error\":{\"message\":42}}\n\n"
+                       "data: {\"choices\":42}\n\n"
+                       "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":42}]}}]}\n\n"
+                       "data: {bad json}\n\n"
+                       "data: {\"id\":1,\"id\":2}\n\n"))
+    (ert-info ((format "wire: %S" wire-data))
+      (harness-provider-chaos-test-check nil wire-data))))
 
 (provide 'harness-provider-chaos-test)
 ;;; harness-provider-chaos-test.el ends here

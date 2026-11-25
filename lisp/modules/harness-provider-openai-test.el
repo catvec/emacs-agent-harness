@@ -1900,5 +1900,93 @@ setting description, the one place prose belongs."
                      (plist-get (harness-test--widget-properties (car (cdr global))) :tag))))
     (should (plist-get props :doc))))
 
+(ert-deftest harness-provider-openai-malformed-wire-error-still-ends ()
+  (harness-openai-test-with-fake
+      '(("router.example" :chunks ("data: {\"error\":{\"message\":42}}\n\n")))
+    (let* ((result (harness-openai-test--complete
+                    harness-openai-test-endpoint '(:model "testrouter:m" :messages nil)))
+           (events (car result))
+           (done (car (last events))))
+      (should (= 1 (cl-count 'done (harness-openai-test--types events))))
+      (should (eq 'error (plist-get done :stop-reason)))
+      (should (eq 'protocol (plist-get done :error-kind)))
+      (should (stringp (plist-get done :error))))))
+
+(ert-deftest harness-provider-openai-terminal-work-cannot-suppress-done ()
+  (dolist (stage '(usage tools diagnostics))
+    (let* ((events nil)
+           (stream (make-harness-openai--stream
+                    :endpoint harness-openai-test-endpoint
+                    :usage (and (eq stage 'usage) '(:prompt_tokens 1))
+                    :calls (and (eq stage 'tools) '((0 :id "c" :name "echo" :arguments "{}")))
+                    :diagnostics (and (eq stage 'diagnostics) 'attempt)
+                    :on-event (lambda (event) (push event events)))))
+      (cl-letf (((symbol-function 'harness-openai--usage-event)
+                 (lambda (&rest _) (error "usage failure")))
+                ((symbol-function 'harness-openai--parse-arguments)
+                 (lambda (&rest _) (error "argument decoding failure")))
+                ((symbol-function 'harness-provider-diagnostics-response)
+                 (lambda (&rest _) (error "diagnostic failure"))))
+        (harness-openai--stream-finish stream (if (eq stage 'tools) 'tool-use 'end-turn)))
+      (should (harness-openai--stream-finished stream))
+      (should (= 1 (length events)))
+      (should (eq 'done (plist-get (car events) :type)))
+      (should (eq 'error (plist-get (car events) :stop-reason)))
+      (harness-openai--stream-finish stream 'end-turn)
+      (should (= 1 (length events))))))
+
+(ert-deftest harness-provider-openai-finish-claims-before-audit-reentry ()
+  (let* ((events nil)
+         (stream (make-harness-openai--stream
+                  :on-event (lambda (event) (push event events)))))
+    (cl-letf (((symbol-function 'harness-openai--stream-audit)
+               (lambda (current _reason)
+                 (harness-openai--stream-finish current 'cancelled)
+                 nil)))
+      (harness-openai--stream-finish stream 'end-turn))
+    (should (= 1 (length events)))
+    (should (eq 'end-turn (plist-get (car events) :stop-reason)))))
+
+(ert-deftest harness-provider-openai-terminal-consumer-failure-does-not-redeliver ()
+  (let* ((deliveries 0)
+         (stream (make-harness-openai--stream
+                  :on-event (lambda (_event) (cl-incf deliveries) (error "consumer failed")))))
+    (should-error (harness-openai--stream-finish stream 'end-turn))
+    (harness-openai--stream-finish stream 'end-turn)
+    (should (= 1 deliveries))))
+
+(ert-deftest harness-provider-openai-malformed-sse-stops-its-transport ()
+  (dolist (payload '("{bad json}" "{\"choices\":42}"
+                     "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":42}]}}]}"))
+    (harness-openai-test-with-fake
+        (list (list "router.example" :chunks (list (harness-openai-test--sse payload))))
+      (let ((cancel (symbol-function 'harness-http-cancel)) stopped)
+        (cl-letf (((symbol-function 'harness-http-cancel)
+                   (lambda (http) (push http stopped) (funcall cancel http))))
+          (let* ((result (harness-openai-test--complete
+                          harness-openai-test-endpoint '(:model "testrouter:m")))
+                 (done (car (last (car result)))))
+            (should (eq 'error (plist-get done :stop-reason)))
+            (should (eq 'protocol (plist-get done :error-kind)))
+            (should (= 1 (length stopped)))
+            (should (harness-http-handle-cancelled (car stopped)))))))))
+
+(ert-deftest harness-provider-openai-synchronous-protocol-failure-cancels-late-http-handle ()
+  (let (http events)
+    (cl-letf (((symbol-function 'harness-http-request)
+               (lambda (_url &rest args)
+                 (setq http (make-harness-http-handle :callback (plist-get args :callback)))
+                 (funcall (plist-get args :on-headers) 200 nil)
+                 (funcall (plist-get args :on-chunk) "data: {bad json}\n\n")
+                 http)))
+      (let ((handle (harness-openai--complete
+                     harness-openai-test-endpoint
+                     (list :model "testrouter:m" :on-event (lambda (event) (push event events))))))
+        (should (harness-http-handle-cancelled http))
+        (should (= 1 (cl-count 'done (harness-openai-test--types events))))
+        (should (eq 'error (plist-get (car events) :stop-reason)))
+        (funcall (plist-get handle :cancel))
+        (should (= 1 (cl-count 'done (harness-openai-test--types events))))))))
+
 (provide 'harness-provider-openai-test)
 ;;; harness-provider-openai-test.el ends here

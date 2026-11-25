@@ -48,7 +48,7 @@ FORM is inserted as the body of the top-level definition."
   (harness-fuzz-test-with
     (let ((names (mapcar #'harness-fuzz-target-name (harness-fuzz-targets))))
       (dolist (name '(mcp-serve mcp-result mcp-line acp-lines acp-params
-                      acp-normalise links search-query http-headers provider-events))
+                      acp-normalise links search-query http-headers provider-events openai-sse))
         (should (memq name names)))
       (dolist (target (harness-fuzz-targets t))
         (should (functionp (harness-fuzz-target-check target)))
@@ -89,6 +89,17 @@ FORM is inserted as the body of the top-level definition."
       (should (= 5 delivered)))
     (dolist (seed (harness-fuzz-target-seeds (harness-fuzz-target-get 'provider-events)))
       (should (harness-fuzz--check-provider-events seed)))))
+
+(ert-deftest harness-fuzz-openai-sse-checks-terminal-delivery-not-just-parser-survival ()
+  (harness-fuzz-test-with
+    (let* ((target (harness-fuzz-target-get 'openai-sse))
+           (seed (car (harness-fuzz-target-seeds target))))
+      (dolist (input (harness-fuzz-target-seeds target))
+        (should (funcall (harness-fuzz-target-check target) input)))
+      ;; Model a transport that logs a failed completion but never emits
+      ;; done.  A swallowed exception must still fail the recovery oracle.
+      (cl-letf (((symbol-function 'harness-openai--stream-complete) #'ignore))
+        (should-error (funcall (harness-fuzz-target-check target) seed))))))
 
 (ert-deftest harness-fuzz-the-adapter-runs-a-check-in-another-emacs ()
   "The adapter runs a target file's check on the exact bytes it was given."

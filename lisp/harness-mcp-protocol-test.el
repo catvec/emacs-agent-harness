@@ -225,5 +225,8 @@
     (should (equal "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}"
                    (string-trim-right (harness-mcp-encode-line response) "\n")))))
 
+(ert-deftest harness-mcp-ambiguous-wire-identities-are-rejected ()
+  (should-error (harness-mcp-decode-line "{\"id\":2,\"id\":1,\"method\":\"ping\"}")))
+
 (provide 'harness-mcp-protocol-test)
 ;;; harness-mcp-protocol-test.el ends here

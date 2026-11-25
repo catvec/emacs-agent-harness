@@ -149,5 +149,29 @@ not turn a successful run into \"Process ... not running\"."
           (should-not signalled))
       (when (process-live-p proc) (delete-process proc)))))
 
+(ert-deftest harness-json-duplicate-members-never-change-meaning-on-reencoding ()
+  (dolist (text '("{\"method\":\"ping\",\"id\":2,\"id\":1}"
+                  "{\"params\":{\"command\":\"first\",\"command\":\"second\"}}"
+                  "[{\"x\":1,\"x\":2}]"
+                  "{\"id\":null,\"id\":null}"
+                  "{\"id\":1,\"\\u0069d\":2}"))
+    (should-error (harness-json-parse text) :type 'json-parse-error)
+    (with-temp-buffer
+      (insert text)
+      (goto-char (point-min))
+      (should-error (harness-json-parse-buffer) :type 'json-parse-error)))
+  (should (equal '(:a ((:id 1) (:id 2)) :b :false)
+                 (harness-json-parse "{\"a\":[{\"id\":1},{\"id\":2}],\"b\":false}"))))
+
+(ert-deftest harness-json-member-validation-distinguishes-arrays-from-objects ()
+  (dolist (text '("[false,1,false,2]" "{\"items\":[false,1,false,2]}"))
+    (should (equal (json-parse-string text :object-type 'plist :array-type 'list
+                                    :null-object nil :false-object :false)
+                   (harness-json-parse text)))
+    (with-temp-buffer
+      (insert text)
+      (goto-char (point-min))
+      (should (equal (harness-json-parse text) (harness-json-parse-buffer))))))
+
 (provide 'harness-util-test)
 ;;; harness-util-test.el ends here
