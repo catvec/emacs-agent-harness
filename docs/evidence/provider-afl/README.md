@@ -14,9 +14,12 @@ inputs were local fixtures. No live model or user session was used.
   budget; this file is not attributed to the minimizer.
 - `mcp-identity-repro.el` and `mcp-revision-checks.txt`: direct checks of the
   original ID disagreement and the repaired parser's handled refusal.
-- `final-campaign.txt`: final full mutation campaign against source commit
+- `final-campaign.txt`: 60-second mutation campaign against source commit
   `c513531`, using the checked-in runner, seed `20261126`, eleven targets,
   60 seconds per target and at most 10,000 executions each.
+- `integration-confirmation.txt`: a further 772 executions across all eleven
+  targets, 10 seconds per target, seed `20261127`, after the verdict-reader
+  integration fix. `integration-source-revision.txt` records `de8a652`.
 - `baseline-test-summary.txt`: five new checks fail at `0bff057`; the sixth
   consumer-redelivery check already passed.
 - `sse-terminal-repro.el`: portable test of terminal delivery for a non-string

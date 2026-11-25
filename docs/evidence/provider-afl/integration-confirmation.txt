@@ -1,0 +1,13 @@
+Fuzz run local-stability with AFL++ dumb mode (seed 20261127): 772 inputs across 11 targets in 46.8s [stopped: seconds]
+  acp-lines: 64 inputs at 5.1/s, 0 crashes
+  acp-normalise: 72 inputs at 5.1/s, 0 crashes
+  acp-params: 72 inputs at 5.1/s, 0 crashes
+  http-headers: 68 inputs at 5.1/s, 0 crashes
+  links: 72 inputs at 5.1/s, 0 crashes
+  mcp-line: 68 inputs at 5.1/s, 0 crashes
+  mcp-result: 67 inputs at 5.0/s, 0 crashes
+  mcp-serve: 68 inputs at 5.1/s, 0 crashes
+  openai-sse: 72 inputs at 5.1/s, 0 crashes
+  provider-events: 80 inputs at 5.1/s, 0 crashes
+  search-query: 69 inputs at 5.1/s, 0 crashes
+No crashes: AFL++ ran 772 inputs through 11 targets and the harness handled every one.

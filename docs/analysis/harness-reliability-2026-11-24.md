@@ -248,7 +248,7 @@ already passed there. A malformed-wire test also requires the real asynchronous
 agent/session path to finish, accept a new prompt and survive cold reload.
 
 The runner is `.harness/plugins/fuzz/run.sh`. It retains reports and replay
-inputs and fails its command when findings are present. The final campaign's
+inputs and fails its command when findings are present. The 60-second campaign's
 exact counts are in [the retained report](../evidence/provider-afl/final-campaign.txt).
 Stock Emacs uses AFL's non-instrumented mode: these are mutation campaigns, not
 evidence of coverage saturation. A fresh Emacs per input contains failures but
@@ -263,6 +263,8 @@ that evidence as an explicit conflict. The original diagnostic assertion stays,
 and additional cases reject valid verdicts mixed with duplicate decisions,
 duplicate reasons and nested duplicate members. This is another instance of the
 same ownership rule: a rejected input must not silently become missing data.
+A further [eleven-target AFL confirmation](../evidence/provider-afl/integration-confirmation.txt)
+after this integration repair completed 772 executions without findings.
 
 ### Architectural limits still requiring attention
 
