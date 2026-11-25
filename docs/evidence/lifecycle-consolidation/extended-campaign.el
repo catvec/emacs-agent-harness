@@ -1,0 +1,16 @@
+;;; -*- lexical-binding: t; -*-
+(require 'harness-fuzz)
+(let* ((harness-fuzz-max-seconds 180)
+       (harness-fuzz-parallel-targets 1)
+       (harness-fuzz-keep-work-directory t)
+       (directory (getenv "HARNESS_ACP_REPORT"))
+       (seed (string-to-number (getenv "HARNESS_ACP_SEED")))
+       (report (harness-fuzz-run :targets 'acp-conversation :seconds 180 :executions 2000
+                                 :seed seed :shrink t :name "valid-acp-extended"))
+       (print-circle t) (print-level nil) (print-length nil))
+  (make-directory directory t)
+  (with-temp-file (expand-file-name "report.el" directory) (prin1 report (current-buffer)))
+  (with-temp-file (expand-file-name "summary.txt" directory)
+    (insert (harness-fuzz-describe-report report) "\n"))
+  (princ (harness-fuzz-describe-report report))
+  (kill-emacs (if (plist-get report :crashes) 1 0)))

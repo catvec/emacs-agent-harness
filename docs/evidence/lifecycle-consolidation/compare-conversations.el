@@ -1,0 +1,22 @@
+;;; -*- lexical-binding: t; -*-
+(defvar harness-compare-fixture-root
+  (or (getenv "HARNESS_FIXTURE_ROOT")
+      (expand-file-name "../../.." (file-name-directory load-file-name))))
+(setq harness-test-root (or (getenv "HARNESS_COMPARE_ROOT") harness-compare-fixture-root))
+(load (expand-file-name "test/harness-test-helpers.el" harness-test-root) nil t)
+(load (expand-file-name ".harness/plugins/fuzz/harness-fuzz.el" harness-compare-fixture-root) nil t)
+(let ((encode (symbol-function 'harness-json-encode)) replies)
+  (cl-letf (((symbol-function 'harness-json-encode)
+             (lambda (value)
+               (let ((result (and (listp value) (plist-get value :result))))
+                 (when (and (listp result) (plist-member result :stopReason))
+                   (push (list (plist-get value :id) (plist-get result :stopReason)
+                               (plist-get (plist-get result :_harness) :reason)) replies)))
+               (funcall encode value))))
+    (dotimes (seed 32)
+      (setq replies nil)
+      (let* ((bytes (apply #'unibyte-string
+                          (cl-loop for i below 32 collect (mod (+ (* seed 71) (* i 29)) 256))))
+             (summary (harness-fuzz-acp--check bytes)))
+        (prin1 (cons seed (append summary (list :prompt-replies (nreverse replies)))))
+        (terpri)))))

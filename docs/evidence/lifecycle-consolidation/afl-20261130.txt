@@ -1,0 +1,3 @@
+Fuzz run valid-acp-extended with AFL++ dumb mode (seed 20261130): 239 inputs across 1 target in 196.8s [stopped: seconds]
+  acp-conversation: 239 inputs at 1.2/s, 0 crashes
+No crashes: AFL++ ran 239 inputs through 1 target and the harness handled every one.

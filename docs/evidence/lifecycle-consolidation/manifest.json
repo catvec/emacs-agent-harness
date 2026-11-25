@@ -1,0 +1,19 @@
+{
+  "base_revision": "14780d1",
+  "source_revision": "49f17e99b3c0d93dfdea5836d691be22132203ab",
+  "mode": "dumb",
+  "seconds_per_campaign": 180,
+  "seeds": [
+    20261129,
+    20261130,
+    20261131
+  ],
+  "executions": [
+    238,
+    239,
+    239
+  ],
+  "findings": 0,
+  "comparison_scenarios": 32,
+  "comparison": "identical summaries and prompt completion replies"
+}

@@ -104,3 +104,68 @@ exactly-once execution across machine crashes. Sanitized incident recordings
 through the other real adapters are still valuable. A provider that ignores
 cancellation still depends on transport and process timeouts; replacement-turn
 checks ensure its late events have lost authority over the session.
+
+## Incremental lifecycle consolidation
+
+`lisp/harness-request-lifecycle.el` is a small shared implementation of terminal
+claim/delivery and producer cancellation. The provider entry point now keeps one
+control per request for both its event guard and cancellation handle. OpenAI's
+terminal processing uses the same finish primitive while retaining its existing
+stream flag, so an in-flight stream's representation and reentry checks survive
+reloads. Adapter preparation and caller-facing completion remain distinct
+boundaries; they use the same mechanics rather than sharing a flag that would
+prematurely suppress the outgoing terminal event.
+
+The contracts are deliberately narrow:
+
+- Claim finish before running fallible/reentrant preparation; attempt terminal
+  delivery once in cleanup, even if preparation or its error formatter fails.
+- Preserve valid result identity and the existing consumer-error behavior.
+- Remember cancellation before the producer handle arrives, stop that exact
+  producer once on success, and allow retry when cancellation signals.
+- Keep request controls independent; attaching another producer to an existing
+  control is an error.
+
+This extraction changes no retry budgets, timeout policy, cancellation grace
+period, session format or tool scheduling. Agent bookkeeping and provider-specific
+decoding stay in their existing implementations. Tests cover the primitive's
+reentry/failure matrix alongside the established provider, capability, OpenAI,
+agent-lifecycle and chaos suites. This is a first shared lifecycle boundary,
+not a migration of every adapter or a new universal deadline supervisor.
+
+## Grammar-driven ACP scenarios
+
+The AFL `acp-conversation` target exercises all nine standard methods implemented
+by the server. Its action grammar generates valid requests with known session
+IDs and typed parameters; it also emits cancellation notifications. The normal
+JSON codecs and real ACP dispatcher connect to actual sessions, turns, tools
+and a temporary store. A counting tool and scripted model replace external
+effects. No TCP listener or model service is started.
+
+Each pair of AFL bytes selects a command and arguments. Callback release order
+is controlled by those same bytes through a bounded single-threaded queue;
+no sleeps select the schedule. The target requires one reply per request ID,
+balanced turn starts/ends, no repeated tool effect, observable mode/model
+changes, correct listing and a clean terminal state. It then flushes, forgets
+and reloads the sessions and requires another successful prompt over ACP.
+
+An inconsistency signals an error and the adapter exits 42, so AFL retains the
+input just as it retains a native crash. Tests prove that the counting tool
+actually runs, cancellation can fence it, and corrupted RPC delivery fails the
+oracle. Another test compares the grammar's catalog to the standard-method
+registry, so newly added standard commands cannot silently go unmodeled.
+
+The target uses one server fixture rather than an adapter for every downstream
+module. It does not cover `_harness/` extensions, TCP transport, real providers,
+arbitrary tool effects or permission dialogs. Those are separate boundaries.
+The raw ACP targets remain available for syntax and framing failures. See
+[the plugin guide](../../.harness/plugins/fuzz/README.md#valid-acp-conversations)
+for commands and the byte grammar.
+
+The extraction was also checked against pre-consolidation commit `14780d1`:
+32 identical ACP scripts produced identical lifecycle/effect summaries and
+prompt completion replies. Three 180-second AFL campaigns on source `49f17e9`
+completed 716 valid conversations without findings, in addition to 92 in the
+initial development campaign. Reproduction scripts, source revisions and the
+finite-campaign limits are retained in
+[the consolidation evidence](../evidence/lifecycle-consolidation/README.md).
