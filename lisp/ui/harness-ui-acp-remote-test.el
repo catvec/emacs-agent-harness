@@ -340,6 +340,40 @@ stands for its socket, and what `authenticate' waits for is the promise."
          (when (process-live-p squatter) (delete-process squatter))
          (harness-acp-remote--resume-cancel)))))
 
+(defmacro harness-ui-acp-remote-test-with-unavailable-address (&rest body)
+  "Run BODY with an unavailable bind address and no retry within ten minutes.
+Set `unavailable' to nil to make the address available."
+  (declare (indent 0))
+  `(harness-ui-acp-remote-test-with
+     (let ((harness-acp-remote t)
+           (harness-acp-remote--resume-delays '(600))
+           (unavailable t)
+           (listen (symbol-function 'make-network-process)))
+       (cl-letf (((symbol-function 'make-network-process)
+                  (lambda (&rest args)
+                    (if (and unavailable (equal (plist-get args :name) "harness-acp-remote"))
+                        (signal 'file-error '("Cannot bind server socket" "Cannot assign requested address"))
+                      (apply listen args)))))
+         ,@body))))
+
+(ert-deftest harness-ui-acp-remote-occupied-port-shows-and-copies-the-actual-address ()
+  "An occupied preferred port serves on a free port and publishes that port."
+  (harness-ui-acp-remote-test-with-held-port
+    (harness-acp-remote--resume)
+    (harness-ui-acp-remote-test-open)
+    (let* ((port (harness-acp-remote--port))
+           (address (format "ws://127.0.0.1:%d/acp" port))
+           (text (harness-ui-acp-remote-test-text)))
+      (should (harness-acp-remote--running-p))
+      (should (process-live-p squatter))
+      (should-not (= port harness-acp-remote-port))
+      (should (string-search (format "served on port %d" port) text))
+      (should (string-search address text))
+      (should-not (string-search "[try now]" text))
+      (harness-ui-acp-remote-copy-address)
+      (should (equal address (car kill-ring)))
+      (should-not harness-acp-remote--resume-timer))))
+
 (defun harness-ui-acp-remote-test-header ()
   "Return the page's header line as text."
   (with-current-buffer harness-ui-acp-remote-buffer-name
@@ -347,12 +381,12 @@ stands for its socket, and what `authenticate' waits for is the promise."
 
 (ert-deftest harness-ui-acp-remote-says-why-serving-does-not-start ()
   "With serving on but the listener unable to start, the page says why, and turns it off."
-  (harness-ui-acp-remote-test-with-held-port
+  (harness-ui-acp-remote-test-with-unavailable-address
     (harness-acp-remote--resume)
     (harness-ui-acp-remote-test-open)
     (let ((text (harness-ui-acp-remote-test-text)))
       (should (string-search "not served yet, trying again" text))
-      (should (string-search "Address already in use" text))
+      (should (string-search "Cannot assign requested address" text))
       (should (string-search "[try now]" text))
       (should (string-search "[turn off]" text))
       (should-not (string-search "[start serving]" text))
@@ -367,7 +401,7 @@ stands for its socket, and what `authenticate' waits for is the promise."
       (should (string-search "not served" text))
       (should-not (string-search "not served yet" text))
       (should-not (string-search "[turn off]" text))
-      (should-not (string-search "Address already in use" text)))
+      (should-not (string-search "Cannot assign requested address" text)))
     (should (string-search "not serving other devices" (harness-ui-acp-remote-test-header)))
     (should-not harness-acp-remote)
     (should-not harness-acp-remote--resume-timer)))
@@ -387,13 +421,13 @@ stands for its socket, and what `authenticate' waits for is the promise."
                      (get-text-property (string-match (regexp-quote "[Retry]") (buffer-string))
                                         'help-echo (buffer-string)))))))
 
-(ert-deftest harness-ui-acp-remote-try-now-serves-once-the-port-is-free ()
+(ert-deftest harness-ui-acp-remote-try-now-serves-once-the-address-is-available ()
   "While the harness waits to serve, [try now] starts the listener and the page says it is kept."
-  (harness-ui-acp-remote-test-with-held-port
+  (harness-ui-acp-remote-test-with-unavailable-address
     (harness-acp-remote--resume)
     (harness-ui-acp-remote-test-open)
     (should (string-search "[try now]" (harness-ui-acp-remote-test-text)))
-    (delete-process squatter)
+    (setq unavailable nil)
     (harness-ui-acp-remote-toggle-serving)
     (harness-test-wait (lambda () (harness-ui-acp-remote--true :running)) 15 "serving")
     (let ((text (harness-ui-acp-remote-test-text)))

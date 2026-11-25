@@ -83,7 +83,7 @@ announcements/exits.
 
 Focused suites: `lisp/harness-server-test.el`,
 `lisp/harness-state-lock-test.el`, `lisp/modules/harness-acp-remote-test.el`,
-`lisp/ui/harness-ui-test.el`. Final verification uses the repository's full
+`lisp/ui/harness-ui-test.el`, and `lisp/ui/harness-ui-acp-remote-test.el`. Final verification uses the repository's full
 runner and its clean-commit `scripts/test.sh --status`, separately from lint.
 
 A live `scripts/dev.sh` instance, socket `harness-ownership-pass`, confirmed
@@ -94,3 +94,12 @@ connected UI. The remote control page reopened after the restart:
 instance, not a phone or emulator. It was stopped after verification. No UI
 labels, tooltips, headings, or status strings were added or changed; the
 rendered page's existing copy was inspected.
+
+The first full run on `3479da8` completed all 250 suites and failed the remote
+control UI suite: two old fixtures expected occupied-port waiting, whereas the
+new backend correctly served immediately on a free port. Those tests retain
+all waiting/error/turn-off/manual-retry assertions using an unavailable
+interface instead. An additional real occupied-port UI test asserts both the
+rendered listening port and the copied WebSocket address, while the unrelated
+listener stays alive. The complete UI suite is checked before the final full
+run; the failed full run is not represented as a pass.
